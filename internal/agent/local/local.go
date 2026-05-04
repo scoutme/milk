@@ -44,7 +44,7 @@ type toolCallFunction struct {
 
 type chatRequest struct {
 	Model       string      `json:"model"`
-	Messages    []Message   `json:"Messages"`
+	Messages    []Message   `json:"messages"`
 	Tools       []map[string]any `json:"tools,omitempty"`
 	Stream      bool        `json:"stream"`
 	Temperature float64     `json:"temperature"`
@@ -79,6 +79,9 @@ func New(baseURL, model string) *Agent {
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
 func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer) ([]Message, error) {
+	if history == nil {
+		history = []Message{}
+	}
 	msgs := append(history, Message{Role: "user", Content: userPrompt})
 	tools := schemas()
 
