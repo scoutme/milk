@@ -43,5 +43,5 @@ exec "$LLAMA_BIN" \
   --port         "$LLAMA_PORT" \
   --ctx-size     "$LLAMA_CTX_SIZE" \
   --n-gpu-layers "$LLAMA_GPU_LAYERS" \
-  --flash-attn \
+  --flash-attn   on \
   --jinja

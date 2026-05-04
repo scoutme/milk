@@ -68,10 +68,10 @@ The server binary is at `~/llama.cpp/build/bin/llama-server`.
 ## Step 4 — Download the model
 
 ```sh
-pip3 install huggingface_hub
+pip3 install hf-xet huggingface_hub[hf_xet,cli]
 
 # Recommended: Q4_K_M (~4.1 GB, fits in 4 GB VRAM)
-huggingface-cli download \
+hf download \
   bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
   Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   --local-dir ~/models/qwen2.5-coder-7b
@@ -80,7 +80,7 @@ huggingface-cli download \
 If VRAM is tight (OOM during inference), use Q3_K_M (~3.2 GB):
 
 ```sh
-huggingface-cli download \
+hf download \
   bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
   Qwen2.5-Coder-7B-Instruct-Q3_K_M.gguf \
   --local-dir ~/models/qwen2.5-coder-7b
