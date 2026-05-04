@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/scoutme/milk/internal/agent/claude"
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/escalation"
+	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -52,12 +58,6 @@ func init() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	_ = cfg // will be threaded through in subsequent steps
-
 	if flagList {
 		return runList(flagListAll)
 	}
@@ -68,6 +68,11 @@ func run(cmd *cobra.Command, args []string) error {
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 	if prompt == "" {
 		return fmt.Errorf("prompt required (interactive mode is not yet implemented)")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	cwd, err := os.Getwd()
@@ -85,9 +90,147 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading session: %w", err)
 	}
 
-	_ = sess // will be threaded through in feat/state-machine
-	fmt.Fprintf(os.Stderr, "milk: routing not yet implemented (session: %s, prompt: %q)\n", sess.ID, prompt)
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
+	claudeAgent := claude.New(cfg.ClaudeBin)
+
+	// Probe availability once per invocation
+	localAvail := localAgent.Ping(ctx) == nil
+	claudeAvail := claudeAgent.Ping() == nil
+
+	if !localAvail && !claudeAvail {
+		return fmt.Errorf("neither llama.cpp nor claude CLI is available")
+	}
+	if !localAvail {
+		fmt.Fprintln(os.Stderr, "[milk] warning: llama.cpp unreachable — routing all to Claude")
+	}
+	if !claudeAvail {
+		fmt.Fprintln(os.Stderr, "[milk] warning: claude CLI unavailable — local only")
+	}
+
+	// Router uses nil localAgent when llama.cpp is down (skips classifier)
+	var routeLocalAgent *local.Agent
+	if localAvail {
+		routeLocalAgent = localAgent
+	}
+	rtr := router.New(cfg, routeLocalAgent)
+
+	decision, err := rtr.Route(ctx, sess, prompt, flagEscalate, flagLocal)
+	if err != nil {
+		return fmt.Errorf("routing: %w", err)
+	}
+
+	// Override target when an agent is unavailable
+	target := decision.Target
+	if target == router.TargetLocal && !localAvail {
+		target = router.TargetClaude
+	}
+	if target == router.TargetClaude && !claudeAvail {
+		target = router.TargetLocal
+	}
+
+	switch target {
+	case router.TargetLocal:
+		return runLocal(ctx, sess, localAgent, prompt)
+	case router.TargetClaude:
+		return runClaude(ctx, sess, claudeAgent, prompt)
+	default:
+		return fmt.Errorf("unknown routing target: %s", target)
+	}
+}
+
+func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, prompt string) error {
+	// Convert session history to local agent message format
+	history := sessionToMessages(sess)
+
+	sess.ForceState(session.StateLocal)
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+
+	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout)
+	if err != nil {
+		if esc, ok := err.(*local.EscalationSignal); ok {
+			fmt.Fprintf(os.Stderr, "\n[milk] local model requested escalation: %s\n", esc.Reason)
+			sess.ForceState(session.StateRouting)
+			session.Save(sess) //nolint:errcheck
+			// Re-run via Claude with existing context
+			claudeAgent := claude.New("")
+			return runClaude(ctx, sess, claudeAgent, prompt)
+		}
+		return err
+	}
+
+	// Record assistant response
+	if len(updatedHistory) > 0 {
+		last := updatedHistory[len(updatedHistory)-1]
+		if last.Role == "assistant" {
+			sess.AddTurn(session.Turn{
+				Role:    session.RoleAssistant,
+				Agent:   session.AgentLocal,
+				Content: last.Content,
+			})
+		}
+	}
+
+	sess.ForceState(session.StateRouting)
+	return session.Save(sess)
+}
+
+func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
+
+	var res claude.ParseResult
+	var err error
+
+	if sess.ClaudeSessionID == "" {
+		// First escalation: build context from local history and start new session
+		sess.ForceState(session.StateClaude)
+		sysContext := escalation.BuildContext(sess)
+		var claudeSessionID string
+		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
+		if err != nil {
+			return err
+		}
+		sess.ClaudeSessionID = claudeSessionID
+	} else {
+		// Continuing an existing Claude session
+		sess.ForceState(session.StateClaude)
+		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+		if err != nil {
+			return err
+		}
+	}
+
+	sess.AddTurn(session.Turn{
+		Role:    session.RoleAssistant,
+		Agent:   session.AgentClaude,
+		Content: res.Text,
+	})
+
+	if res.EndsWithQ {
+		sess.ForceState(session.StateClaudeWaiting)
+	} else {
+		sess.ForceState(session.StateRouting)
+	}
+
+	return session.Save(sess)
+}
+
+// sessionToMessages converts session history to the local agent's Message slice format.
+func sessionToMessages(sess *session.Session) []local.Message {
+	var msgs []local.Message
+	for _, t := range sess.History {
+		switch t.Role {
+		case session.RoleUser:
+			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
+		case session.RoleAssistant:
+			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
+		case session.RoleToolResult:
+			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+		}
+	}
+	return msgs
 }
 
 func runList(all bool) error {
