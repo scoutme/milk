@@ -23,7 +23,7 @@ func (e *EscalationSignal) Error() string {
 	return "escalate: " + e.Reason
 }
 
-type message struct {
+type Message struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
@@ -44,7 +44,7 @@ type toolCallFunction struct {
 
 type chatRequest struct {
 	Model       string      `json:"model"`
-	Messages    []message   `json:"messages"`
+	Messages    []Message   `json:"Messages"`
 	Tools       []map[string]any `json:"tools,omitempty"`
 	Stream      bool        `json:"stream"`
 	Temperature float64     `json:"temperature"`
@@ -77,9 +77,9 @@ func New(baseURL, model string) *Agent {
 
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
-// history is the prior turns; userPrompt is the new user message.
-func (a *Agent) Run(ctx context.Context, history []message, userPrompt string, out io.Writer) ([]message, error) {
-	msgs := append(history, message{Role: "user", Content: userPrompt})
+// history is the prior turns; userPrompt is the new user Message.
+func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer) ([]Message, error) {
+	msgs := append(history, Message{Role: "user", Content: userPrompt})
 	tools := schemas()
 
 	for i := 0; i < maxToolIterations; i++ {
@@ -90,12 +90,12 @@ func (a *Agent) Run(ctx context.Context, history []message, userPrompt string, o
 
 		if len(toolCalls) == 0 {
 			// Final text response
-			msgs = append(msgs, message{Role: "assistant", Content: resp})
+			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}
 
-		// Accumulate assistant message with tool calls
-		msgs = append(msgs, message{Role: "assistant", ToolCalls: toolCalls})
+		// Accumulate assistant Message with tool calls
+		msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 
 		// Execute each tool call
 		for _, tc := range toolCalls {
@@ -107,7 +107,7 @@ func (a *Agent) Run(ctx context.Context, history []message, userPrompt string, o
 				json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
 				return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
 			}
-			msgs = append(msgs, message{
+			msgs = append(msgs, Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Content:    result,
@@ -120,7 +120,7 @@ func (a *Agent) Run(ctx context.Context, history []message, userPrompt string, o
 
 // streamCompletion sends a chat completion request and streams the response.
 // Returns the accumulated text content and any tool calls.
-func (a *Agent) streamCompletion(ctx context.Context, msgs []message, tools []map[string]any, out io.Writer) (string, []toolCall, error) {
+func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, []toolCall, error) {
 	req := chatRequest{
 		Model:       a.model,
 		Messages:    msgs,
@@ -225,7 +225,7 @@ Task: ` + prompt
 
 	req := chatRequest{
 		Model: a.model,
-		Messages: []message{
+		Messages: []Message{
 			{Role: "user", Content: classifyPrompt},
 		},
 		Stream:      false,
@@ -254,7 +254,7 @@ Task: ` + prompt
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
-			} `json:"message"`
+			} `json:"Message"`
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
