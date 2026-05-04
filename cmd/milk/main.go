@@ -217,10 +217,14 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 	return session.Save(sess)
 }
 
-// sessionToMessages converts session history to the local agent's Message slice format.
+// sessionToMessages converts local-agent session turns to the local agent's Message format.
+// Claude turns are excluded: the local model should only see its own prior conversation.
 func sessionToMessages(sess *session.Session) []local.Message {
-	var msgs []local.Message
+	msgs := []local.Message{}
 	for _, t := range sess.History {
+		if t.Agent != session.AgentLocal {
+			continue
+		}
 		switch t.Role {
 		case session.RoleUser:
 			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})

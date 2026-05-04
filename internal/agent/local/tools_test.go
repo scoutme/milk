@@ -2,11 +2,30 @@ package local
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestChatRequest_NilHistorySerializesAsArray(t *testing.T) {
+	// llama.cpp rejects {"messages":null}; must be {"messages":[...]}
+	req := chatRequest{
+		Model:    "test",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"messages":null`) {
+		t.Error("messages must not serialize as null")
+	}
+	if !strings.Contains(string(b), `"messages":[`) {
+		t.Errorf("messages must serialize as array, got: %s", b)
+	}
+}
 
 func TestRunBash_Success(t *testing.T) {
 	result, escalate := dispatchTool(context.Background(), "bash", `{"command":"echo hello"}`)
