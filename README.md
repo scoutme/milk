@@ -24,6 +24,8 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 
 llama.cpp must expose an OpenAI-compatible API (default `http://localhost:8080`) loaded with a Qwen2.5-Coder model.
 
+For full setup instructions, local model configuration, and testing procedure see [docs/setup.md](docs/setup.md).
+
 ## Install
 
 ```sh
@@ -116,6 +118,7 @@ Sessions persist under `~/.milk/sessions/`. By default, `milk` resumes the most 
 
 ## Documentation
 
+- [docs/setup.md](docs/setup.md) — full setup guide and local testing procedure
 - [docs/spec.md](docs/spec.md) — full architecture and design spec
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch and commit conventions

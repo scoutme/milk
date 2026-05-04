@@ -4,6 +4,7 @@ Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Qwen2.
 
 ## Quick orientation
 
+- [docs/setup.md](docs/setup.md) — llama.cpp setup, model download, local testing procedure
 - [docs/spec.md](docs/spec.md) — full product and architecture spec
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records (why things are the way they are)
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch naming, conventional commits, per-step branch plan
