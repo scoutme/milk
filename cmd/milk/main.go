@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/session"
 )
 
 var (
@@ -69,20 +70,69 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("prompt required (interactive mode is not yet implemented)")
 	}
 
-	// placeholder — state machine wired in feat/state-machine
-	fmt.Fprintf(os.Stderr, "milk: routing not yet implemented (prompt: %q)\n", prompt)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting cwd: %w", err)
+	}
+
+	var sess *session.Session
+	if flagNew {
+		sess, err = session.New(cwd, flagSession)
+	} else {
+		sess, err = session.Resume(cwd, flagSession)
+	}
+	if err != nil {
+		return fmt.Errorf("loading session: %w", err)
+	}
+
+	_ = sess // will be threaded through in feat/state-machine
+	fmt.Fprintf(os.Stderr, "milk: routing not yet implemented (session: %s, prompt: %q)\n", sess.ID, prompt)
 	return nil
 }
 
-func runList(_ bool) error {
-	// implemented in feat/session-store
-	fmt.Fprintln(os.Stderr, "milk: --list not yet implemented")
+func runList(all bool) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting cwd: %w", err)
+	}
+	target := cwd
+	if all {
+		target = ""
+	}
+	entries, err := session.List(target)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Println("no sessions found")
+		return nil
+	}
+	for dir, list := range entries {
+		fmt.Printf("%s\n", dir)
+		for _, e := range list {
+			name := e.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Printf("  %s  %-20s  %s\n", e.ID[:8], name, e.LastUsed.Format("2006-01-02 15:04"))
+		}
+	}
 	return nil
 }
 
 func runDrop() error {
-	// implemented in feat/session-store
-	fmt.Fprintln(os.Stderr, "milk: --drop not yet implemented")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting cwd: %w", err)
+	}
+	sess, err := session.Resume(cwd, flagSession)
+	if err != nil {
+		return fmt.Errorf("loading session: %w", err)
+	}
+	if err := session.Drop(sess.ID, cwd); err != nil {
+		return err
+	}
+	fmt.Printf("dropped session %s\n", sess.ID[:8])
 	return nil
 }
 
