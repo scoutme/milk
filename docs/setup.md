@@ -1,19 +1,31 @@
 # Setup and local testing
 
+> **Scenario note:** This guide covers a specific reference setup: NVIDIA GPU on Ubuntu/WSL2, llama.cpp built from source, Qwen2.5-Coder 7B. The parameters (CUDA architecture, quant size, GPU layer count, context size) will differ for other hardware. For a general llama.cpp installation reference see the [official llama.cpp documentation](https://github.com/ggml-org/llama.cpp).
+
 ## Prerequisites
 
 | Dependency | Required | Notes |
 |---|---|---|
 | Go 1.21+ | yes | build only |
-| NVIDIA driver | for GPU | WSL2: check with `nvidia-smi` |
-| CUDA toolkit 12.x | for GPU | see step 1 |
-| cmake + build-essential | yes | build llama.cpp |
-| llama.cpp | yes | built from source |
+| llama.cpp server | no | any OpenAI-compatible local inference server works; degrades to Claude-only if absent |
 | claude CLI | no | degrades to local-only if absent |
 
 ---
 
-## Step 1 — CUDA toolkit (skip if CPU-only)
+## Local inference backend
+
+milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any server that exposes this interface can be used. llama.cpp is the reference option, but alternatives such as [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [vLLM](https://github.com/vllm-project/vllm) work as long as:
+
+- the endpoint matches `llama_url` in `~/.milk/config.json`
+- the loaded model supports function/tool calling (Qwen2.5-Coder recommended)
+
+For general llama.cpp installation instructions see the [official llama.cpp README](https://github.com/ggml-org/llama.cpp). The steps below document the reference setup.
+
+---
+
+## Reference setup: NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source
+
+### Step 1 — CUDA toolkit (skip if CPU-only)
 
 ```sh
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
@@ -33,7 +45,7 @@ Verify: `nvcc --version`
 
 ---
 
-## Step 2 — Build dependencies
+### Step 2 — Build dependencies
 
 ```sh
 sudo apt install -y cmake build-essential git
@@ -41,13 +53,16 @@ sudo apt install -y cmake build-essential git
 
 ---
 
-## Step 3 — Build llama.cpp
+### Step 3 — Build llama.cpp
 
 ```sh
 git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
 cd ~/llama.cpp
 
-# GPU build (Ada Lovelace = sm_89)
+# GPU build — adjust -DCMAKE_CUDA_ARCHITECTURES for your GPU:
+#   Ada Lovelace (RTX 40xx, RTX 500/1000 Ada): 89
+#   Ampere (RTX 30xx): 86
+#   Turing (RTX 20xx): 75
 cmake -B build \
   -DGGML_CUDA=ON \
   -DCMAKE_CUDA_ARCHITECTURES=89
@@ -65,12 +80,22 @@ The server binary is at `~/llama.cpp/build/bin/llama-server`.
 
 ---
 
-## Step 4 — Download the model
+### Step 4 — Download the model
+
+The reference model is **Qwen2.5-Coder-7B-Instruct**, chosen for its reliable function/tool calling support. Quant size depends on available VRAM:
+
+| Quant | Size | Fits in |
+|---|---|---|
+| Q4_K_M | ~4.1 GB | 4 GB VRAM (tight) |
+| Q3_K_M | ~3.2 GB | 4 GB VRAM (with headroom) |
+| Q8_0 | ~7.2 GB | 8 GB VRAM |
+
+Larger VRAM or a different GPU architecture may accommodate the 14B variant. Any Qwen2.5-Coder GGUF with tool calling support can be substituted by adjusting `llama_model` in `~/.milk/config.json`.
 
 ```sh
 pip3 install hf-xet huggingface_hub[hf_xet,cli]
 
-# Recommended: Q4_K_M (~4.1 GB, fits in 4 GB VRAM)
+# Reference: Q4_K_M (~4.1 GB, fits in 4 GB VRAM)
 hf download \
   bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
   Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
@@ -88,7 +113,7 @@ hf download \
 
 ---
 
-## Step 5 — Start the server
+### Step 5 — Start the server
 
 ```sh
 ./scripts/llama-serve.sh
@@ -128,7 +153,7 @@ Expected: a `tool_calls` array with `"name": "bash"`. If you see the call inside
 
 ---
 
-## Step 6 — Build and verify milk
+### Step 6 — Build and verify milk
 
 ```sh
 go build -o milk ./cmd/milk

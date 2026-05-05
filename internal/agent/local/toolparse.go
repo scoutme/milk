@@ -8,12 +8,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// reToolCall matches <tool_call>...</tool_call> blocks, including when
-// wrapped in markdown fences (```xml ... ``` or ``` ... ```).
+// reToolCall matches <tool_call>...</tool_call> blocks.
 var reToolCall = regexp.MustCompile(`(?s)<tool_call>\s*(.*?)\s*</tool_call>`)
 
 // reFenced matches content inside markdown code fences.
-var reFenced = regexp.MustCompile("(?s)```(?:xml|json)?\\s*(.*?)\\s*```")
+// The closing fence is optional: the model sometimes omits it at end-of-stream.
+var reFenced = regexp.MustCompile("(?s)```(?:xml|json)?\\s*(.*?)(?:\\s*```|$)")
 
 // extractToolCalls parses tool calls from a raw content string emitted by the
 // model when llama.cpp fails to translate them into the tool_calls field.

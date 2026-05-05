@@ -22,9 +22,9 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 | [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
 | Go 1.21+ | build only | yes |
 
-llama.cpp must expose an OpenAI-compatible API (default `http://localhost:8080`) loaded with a Qwen2.5-Coder model.
+milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any compatible server works — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or similar — as long as the loaded model supports function/tool calling. Qwen2.5-Coder is the reference model.
 
-For full setup instructions, local model configuration, and testing procedure see [docs/setup.md](docs/setup.md).
+For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md).
 
 ## Install
 

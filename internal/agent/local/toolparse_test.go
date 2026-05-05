@@ -19,11 +19,22 @@ func TestExtractToolCalls_ToolCallTag(t *testing.T) {
 }
 
 func TestExtractToolCalls_FencedXML(t *testing.T) {
-	// What Qwen2.5 actually emits via llama.cpp without tool_calls field
 	content := "```xml\n{\"name\": \"bash\", \"arguments\": {\"command\": \"ls *.go\"}}\n```"
 	calls := extractToolCalls(content)
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "bash" {
+		t.Errorf("expected name bash, got %q", calls[0].Function.Name)
+	}
+}
+
+func TestExtractToolCalls_FencedXMLUnclosed(t *testing.T) {
+	// Qwen2.5 via llama.cpp omits the closing ``` at end-of-stream
+	content := "```xml\n{\"name\": \"bash\", \"arguments\": {\"command\": \"find . -name '*.go'\"}}"
+	calls := extractToolCalls(content)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call from unclosed fence, got %d", len(calls))
 	}
 	if calls[0].Function.Name != "bash" {
 		t.Errorf("expected name bash, got %q", calls[0].Function.Name)

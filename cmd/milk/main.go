@@ -178,14 +178,25 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 }
 
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
+	// Capture state before we mutate it: only resume an existing Claude session
+	// when we were explicitly waiting for user input mid-conversation.
+	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
+
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
+	sess.ForceState(session.StateClaude)
 
 	var res claude.ParseResult
 	var err error
 
-	if sess.ClaudeSessionID == "" {
-		// First escalation: build context from local history and start new session
-		sess.ForceState(session.StateClaude)
+	if resuming {
+		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+		if err != nil {
+			return err
+		}
+	} else {
+		// New escalation: build context from full session history and start a new Claude session.
+		// Always opens a new Claude session even if ClaudeSessionID is already set
+		// (the old one may belong to a previous escalation chain).
 		sysContext := escalation.BuildContext(sess)
 		var claudeSessionID string
 		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
@@ -193,13 +204,6 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 			return err
 		}
 		sess.ClaudeSessionID = claudeSessionID
-	} else {
-		// Continuing an existing Claude session
-		sess.ForceState(session.StateClaude)
-		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
-		if err != nil {
-			return err
-		}
 	}
 
 	sess.AddTurn(session.Turn{
