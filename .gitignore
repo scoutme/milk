@@ -1,0 +1,20 @@
+# Build output
+/milk
+/dist/
+
+# Go toolchain
+*.test
+*.out
+coverage.txt
+
+# Environment and local config overrides
+.env
+*.local
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
