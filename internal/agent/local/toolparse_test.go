@@ -85,6 +85,18 @@ func TestExtractToolCalls_OpenAIStringArguments(t *testing.T) {
 	}
 }
 
+func TestExtractToolCalls_ToolsBlock(t *testing.T) {
+	// Gemma 4 via llama.cpp sometimes emits <tools> instead of <tool_call>
+	content := "<tools>\n{\"name\": \"list_dir\", \"arguments\": {\"path\": \"/tmp\"}}\n</tools>"
+	calls := extractToolCalls(content)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call from <tools> block, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "list_dir" {
+		t.Errorf("expected name list_dir, got %q", calls[0].Function.Name)
+	}
+}
+
 func TestExtractToolCalls_NoToolCall(t *testing.T) {
 	content := "Here are the Go files: main.go, config.go"
 	calls := extractToolCalls(content)

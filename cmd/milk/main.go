@@ -146,31 +146,38 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 	history := sessionToMessages(sess)
 
 	sess.ForceState(session.StateLocal)
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 
 	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout)
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			fmt.Fprintf(os.Stderr, "\n[milk] local model requested escalation: %s\n", esc.Reason)
+			// Commit the user turn before escalating so Claude has context
+			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			// Re-run via Claude with existing context
 			claudeAgent := claude.New("")
 			return runClaude(ctx, sess, claudeAgent, prompt)
 		}
 		return err
 	}
 
-	// Record assistant response
+	// Only commit user+assistant turns when we have a real response.
+	// Saving an orphaned user turn (empty assistant) causes two consecutive user
+	// messages on the next resume, which breaks Gemma 4's chat template.
+	assistantContent := ""
 	if len(updatedHistory) > 0 {
 		last := updatedHistory[len(updatedHistory)-1]
 		if last.Role == "assistant" {
-			sess.AddTurn(session.Turn{
-				Role:    session.RoleAssistant,
-				Agent:   session.AgentLocal,
-				Content: last.Content,
-			})
+			assistantContent = last.Content
 		}
+	}
+	if assistantContent != "" {
+		sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+		sess.AddTurn(session.Turn{
+			Role:    session.RoleAssistant,
+			Agent:   session.AgentLocal,
+			Content: assistantContent,
+		})
 	}
 
 	sess.ForceState(session.StateRouting)
@@ -233,6 +240,9 @@ func sessionToMessages(sess *session.Session) []local.Message {
 		case session.RoleUser:
 			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
 		case session.RoleAssistant:
+			if t.Content == "" {
+				continue
+			}
 			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
 		case session.RoleToolResult:
 			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
@@ -300,7 +310,18 @@ var configCmd = &cobra.Command{
 		fmt.Printf("claude_bin:     %s\n", cfg.ClaudeBin)
 		fmt.Printf("default_route:  %s\n", cfg.DefaultRoute)
 		fmt.Printf("escalate_above_tokens: %d\n", cfg.Rules.EscalateAboveTokens)
+		fmt.Printf("local_below_tokens:    %d\n", cfg.Rules.LocalBelowTokens)
 		fmt.Printf("escalate_keywords:     %v\n", cfg.Rules.EscalateKeywords)
+		fmt.Printf("local_verbs:           %v\n", cfg.Rules.LocalVerbs)
+		fmt.Printf("escalate_verbs:        %v\n", cfg.Rules.EscalateVerbs)
+		fmt.Printf("escalate_threshold:    %d\n", cfg.Rules.EscalateThreshold)
+		fmt.Printf("local_threshold:       %d\n", cfg.Rules.LocalThreshold)
+		fmt.Printf("local_verb_weight:     %d\n", cfg.Rules.LocalVerbWeight)
+		fmt.Printf("escalate_verb_weight:  %d\n", cfg.Rules.EscalateVerbWeight)
+		fmt.Printf("path_ref_weight:       %d\n", cfg.Rules.PathRefWeight)
+		fmt.Printf("code_block_weight:     %d\n", cfg.Rules.CodeBlockWeight)
+		fmt.Printf("open_question_weight:  %d\n", cfg.Rules.OpenQuestionWeight)
+		fmt.Printf("classifier_fallback:   %s\n", cfg.Rules.ClassifierFallback)
 		return nil
 	},
 }

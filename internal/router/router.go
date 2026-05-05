@@ -53,14 +53,18 @@ func (r *Router) Route(ctx context.Context, sess *session.Session, prompt string
 		return d, nil
 	}
 
-	// 4. Local model classifier (best-effort; fall back to local on error)
-	if r.localAgent != nil {
-		escalate, err := r.localAgent.Classify(ctx, prompt)
-		if err != nil {
-			// classifier unavailable — log and default to local
-			fmt.Printf("[router] classifier error: %v — defaulting to local\n", err)
-		} else if escalate {
-			return Decision{Target: TargetClaude, Conclusive: true, Reason: "model classifier"}, nil
+	// 4. Configurable fallback: local LLM classifier or direct Claude escalation
+	switch r.cfg.Rules.ClassifierFallback {
+	case "claude":
+		return Decision{Target: TargetClaude, Conclusive: true, Reason: "classifier-fallback=claude"}, nil
+	default: // "local" or unset
+		if r.localAgent != nil {
+			escalate, err := r.localAgent.Classify(ctx, prompt)
+			if err != nil {
+				fmt.Printf("[router] classifier error: %v — defaulting to local\n", err)
+			} else if escalate {
+				return Decision{Target: TargetClaude, Conclusive: true, Reason: "model classifier"}, nil
+			}
 		}
 	}
 

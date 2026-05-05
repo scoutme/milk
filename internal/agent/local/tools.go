@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +77,66 @@ func schemas() []map[string]any {
 		{
 			"type": "function",
 			"function": map[string]any{
+				"name":        "write_file",
+				"description": "Write content to a file, creating it or overwriting it. Use this to save code, configs, or any text to disk.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string", "description": "Absolute or relative file path"},
+						"content": map[string]any{"type": "string", "description": "Full file content to write"},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "edit_file",
+				"description": "Replace an exact string in a file with new content. Fails if old_string is not found or is ambiguous (appears more than once).",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":       map[string]any{"type": "string", "description": "Absolute or relative file path"},
+						"old_string": map[string]any{"type": "string", "description": "Exact string to replace (must be unique in the file)"},
+						"new_string": map[string]any{"type": "string", "description": "Replacement string"},
+					},
+					"required": []string{"path", "old_string", "new_string"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "list_dir",
+				"description": "List the contents of a directory with file types and sizes.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Directory path to list (default: current directory)"},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "http_get",
+				"description": "Fetch the body of a URL via HTTP GET. Useful for checking APIs or downloading text content.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url":          map[string]any{"type": "string", "description": "URL to fetch"},
+						"max_bytes":    map[string]any{"type": "integer", "description": "Maximum response bytes to return (default 8192)"},
+					},
+					"required": []string{"url"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
 				"name":        "escalate_to_claude",
 				"description": "Signal that this task exceeds local model capabilities and should be handled by Claude.",
 				"parameters": map[string]any{
@@ -102,6 +164,14 @@ func dispatchTool(ctx context.Context, name, argsJSON string) (string, bool) {
 		return runGrep(ctx, args)
 	case "read_file":
 		return runReadFile(args)
+	case "write_file":
+		return runWriteFile(args)
+	case "edit_file":
+		return runEditFile(args)
+	case "list_dir":
+		return runListDir(args)
+	case "http_get":
+		return runHTTPGet(ctx, args)
 	case "escalate_to_claude":
 		return "", true // caller checks the bool
 	default:
@@ -162,6 +232,20 @@ func runGrep(ctx context.Context, args map[string]any) (string, bool) {
 	}.String(), false
 }
 
+func runWriteFile(args map[string]any) (string, bool) {
+	path, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+	path = filepath.Clean(path)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{Output: "wrote " + path}.String(), false
+}
+
 func runReadFile(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	path = filepath.Clean(path)
@@ -205,4 +289,90 @@ func runReadFile(args map[string]any) (string, bool) {
 		numbered = append(numbered, fmt.Sprintf("%d\t%s", offset+i+1, l))
 	}
 	return toolResult{Output: strings.Join(numbered, "\n")}.String(), false
+}
+
+func runEditFile(args map[string]any) (string, bool) {
+	path, _ := args["path"].(string)
+	oldStr, _ := args["old_string"].(string)
+	newStr, _ := args["new_string"].(string)
+	path = filepath.Clean(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	content := string(data)
+
+	count := strings.Count(content, oldStr)
+	if count == 0 {
+		return toolResult{Error: "old_string not found in " + path}.String(), false
+	}
+	if count > 1 {
+		return toolResult{Error: fmt.Sprintf("old_string is ambiguous: found %d occurrences in %s", count, path)}.String(), false
+	}
+
+	updated := strings.Replace(content, oldStr, newStr, 1)
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{Output: "edited " + path}.String(), false
+}
+
+func runListDir(args map[string]any) (string, bool) {
+	path, _ := args["path"].(string)
+	if path == "" {
+		path = "."
+	}
+	path = filepath.Clean(path)
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+
+	var lines []string
+	for _, e := range entries {
+		var size int64
+		kind := "dir"
+		if !e.IsDir() {
+			kind = "file"
+			if info, err := e.Info(); err == nil {
+				size = info.Size()
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%-6s  %8d  %s", kind, size, e.Name()))
+	}
+	return toolResult{Output: strings.Join(lines, "\n")}.String(), false
+}
+
+func runHTTPGet(ctx context.Context, args map[string]any) (string, bool) {
+	url, _ := args["url"].(string)
+	maxBytes := 8192
+	if v, ok := args["max_bytes"]; ok {
+		switch n := v.(type) {
+		case float64:
+			maxBytes = int(n)
+		case string:
+			maxBytes, _ = strconv.Atoi(n)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{
+		Output:   string(body),
+		ExitCode: resp.StatusCode,
+	}.String(), false
 }
