@@ -7,8 +7,32 @@ import (
 )
 
 type Rules struct {
+	// Hard thresholds (conclusive)
 	EscalateAboveTokens int      `json:"escalate_above_tokens"`
 	EscalateKeywords    []string `json:"escalate_keywords"`
+	LocalBelowTokens    int      `json:"local_below_tokens"`
+
+	// Weighted scoring (soft signals)
+	// Score >= EscalateThreshold → conclusive Claude
+	// Score <= LocalThreshold    → conclusive local
+	// Otherwise                  → inconclusive (LLM classifier)
+	EscalateThreshold int `json:"escalate_threshold"`
+	LocalThreshold    int `json:"local_threshold"`
+
+	// Per-signal weights (positive = escalate, negative = local)
+	LocalVerbWeight    int `json:"local_verb_weight"`
+	EscalateVerbWeight int `json:"escalate_verb_weight"`
+	PathRefWeight      int `json:"path_ref_weight"`
+	CodeBlockWeight    int `json:"code_block_weight"`
+	OpenQuestionWeight int `json:"open_question_weight"`
+
+	// Configurable fallback when rules are inconclusive
+	// "local" = call local LLM classifier; "claude" = escalate directly
+	ClassifierFallback string `json:"classifier_fallback"`
+
+	// Keyword lists (overridable)
+	LocalVerbs    []string `json:"local_verbs"`
+	EscalateVerbs []string `json:"escalate_verbs"`
 }
 
 type Config struct {
@@ -28,6 +52,21 @@ func defaults() Config {
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
 			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why"},
+			LocalBelowTokens:    30,
+
+			EscalateThreshold: 6,
+			LocalThreshold:    -4,
+
+			LocalVerbWeight:    -3,
+			EscalateVerbWeight: 4,
+			PathRefWeight:      -2,
+			CodeBlockWeight:    -2,
+			OpenQuestionWeight: 3,
+
+			ClassifierFallback: "local",
+
+			LocalVerbs:    []string{"grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls", "check", "print", "count", "search"},
+			EscalateVerbs: []string{"architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"},
 		},
 	}
 }

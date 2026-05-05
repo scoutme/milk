@@ -11,6 +11,9 @@ import (
 // reToolCall matches <tool_call>...</tool_call> blocks.
 var reToolCall = regexp.MustCompile(`(?s)<tool_call>\s*(.*?)\s*</tool_call>`)
 
+// reToolsBlock matches <tools>...</tools> blocks (Gemma 4 via llama.cpp).
+var reToolsBlock = regexp.MustCompile(`(?s)<tools>\s*(.*?)\s*</tools>`)
+
 // reFenced matches content inside markdown code fences.
 // The closing fence is optional: the model sometimes omits it at end-of-stream.
 var reFenced = regexp.MustCompile("(?s)```(?:xml|json)?\\s*(.*?)(?:\\s*```|$)")
@@ -19,6 +22,7 @@ var reFenced = regexp.MustCompile("(?s)```(?:xml|json)?\\s*(.*?)(?:\\s*```|$)")
 // model when llama.cpp fails to translate them into the tool_calls field.
 // Handles:
 //   - <tool_call>{"name":..., "arguments":{...}}</tool_call>
+//   - <tools>{"name":..., "arguments":{...}}</tools>  (Gemma 4)
 //   - ```xml\n{"name":..., "arguments":{...}}\n```
 //   - bare JSON: {"name":..., "arguments":{...}}
 //
@@ -32,14 +36,21 @@ func extractToolCalls(content string) []toolCall {
 		candidates = append(candidates, strings.TrimSpace(m[1]))
 	}
 
-	// 2. Fenced blocks without <tool_call> wrapper
+	// 2. <tools> blocks (Gemma 4 format via llama.cpp content fallback)
+	if len(candidates) == 0 {
+		for _, m := range reToolsBlock.FindAllStringSubmatch(content, -1) {
+			candidates = append(candidates, strings.TrimSpace(m[1]))
+		}
+	}
+
+	// 3. Fenced blocks without <tool_call> wrapper
 	if len(candidates) == 0 {
 		for _, m := range reFenced.FindAllStringSubmatch(content, -1) {
 			candidates = append(candidates, strings.TrimSpace(m[1]))
 		}
 	}
 
-	// 3. Bare content if it looks like a JSON object
+	// 4. Bare content if it looks like a JSON object
 	if len(candidates) == 0 {
 		trimmed := strings.TrimSpace(content)
 		if strings.HasPrefix(trimmed, "{") {

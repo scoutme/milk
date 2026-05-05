@@ -32,7 +32,7 @@ type Message struct {
 
 type toolCall struct {
 	ID       string           `json:"id"`
-	Index    int              `json:"index"`
+	Index    int              `json:"index,omitempty"` // streaming-only; omitted when serialising history
 	Type     string           `json:"type"`
 	Function toolCallFunction `json:"function"`
 }
@@ -43,11 +43,12 @@ type toolCallFunction struct {
 }
 
 type chatRequest struct {
-	Model       string      `json:"model"`
-	Messages    []Message   `json:"messages"`
+	Model       string           `json:"model"`
+	Messages    []Message        `json:"messages"`
 	Tools       []map[string]any `json:"tools,omitempty"`
-	Stream      bool        `json:"stream"`
-	Temperature float64     `json:"temperature"`
+	Stream      bool             `json:"stream"`
+	Temperature float64          `json:"temperature"`
+	Seed        int64            `json:"seed"`
 }
 
 type streamChunk struct {
@@ -71,14 +72,15 @@ func New(baseURL, model string) *Agent {
 	return &Agent{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
-const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, escalate_to_claude.
+const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, escalate_to_claude.
 
 Rules:
-- When you need to run a command or read a file, call the tool. Never guess or hallucinate the result.
+- When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
+- To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
 - Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
 
@@ -95,7 +97,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	tools := schemas()
 
 	for i := 0; i < maxToolIterations; i++ {
-		resp, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
+		// Only send tool schemas on the first turn. Gemma 4's chat template with
+		// schemas present after a tool result triggers another tool-selection pass
+		// and emits EOS when no further call is needed, producing empty output.
+		// Without schemas the model uses the plain text branch and responds normally.
+		iterTools := tools
+		if i > 0 {
+			iterTools = nil
+		}
+		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, iterTools, out)
 		if err != nil {
 			return msgs, err
 		}
@@ -106,8 +116,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			return msgs, nil
 		}
 
-		// Accumulate assistant Message with tool calls
-		msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+		// When tool calls came from the content fallback (raw markup), record the
+		// assistant message as plain content so the model sees its own exact output
+		// on the next turn. When they came from the native tool_calls field, use the
+		// structured form so the server can match tool_call_ids correctly.
+		if fallbackRaw != "" {
+			msgs = append(msgs, Message{Role: "assistant", Content: fallbackRaw})
+		} else {
+			msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+		}
 
 		// Execute each tool call
 		for _, tc := range toolCalls {
@@ -119,11 +136,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 				json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
 				return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
 			}
-			msgs = append(msgs, Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    result,
-			})
+			toolMsg := Message{Role: "tool", Content: result}
+			if fallbackRaw == "" {
+				toolMsg.ToolCallID = tc.ID
+			}
+			msgs = append(msgs, toolMsg)
 		}
 	}
 
@@ -131,37 +148,39 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 }
 
 // streamCompletion sends a chat completion request and streams the response.
-// Returns the accumulated text content and any tool calls.
-func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, []toolCall, error) {
+// Returns the accumulated text content, the raw fallback markup (non-empty only when
+// tool calls were extracted from content rather than the tool_calls field), and any tool calls.
+func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, error) {
 	req := chatRequest{
 		Model:       a.model,
 		Messages:    msgs,
 		Tools:       tools,
 		Stream:      true,
 		Temperature: 0.2,
+		Seed:        time.Now().UnixNano(),
 	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.baseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
-		return "", nil, fmt.Errorf("llama.cpp unreachable: %w", err)
+		return "", "", nil, fmt.Errorf("llama.cpp unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(httpResp.Body)
-		return "", nil, fmt.Errorf("llama.cpp error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, fmt.Errorf("llama.cpp error %d: %s", httpResp.StatusCode, b)
 	}
 
 	var (
@@ -173,6 +192,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	partialTools := map[int]*toolCall{}
 
 	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB — SSE lines can be large
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -210,7 +230,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	// Flush newline after streamed text
@@ -224,12 +244,16 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		}
 	}
 
-	// Fallback: model emitted tool calls as raw text (e.g. <tool_call> XML or
+	rawText := textBuf.String()
+
+	// Fallback: model emitted tool calls as raw text (e.g. <tool_call>/<tools> XML or
 	// fenced JSON) instead of populating the tool_calls field.
-	if len(toolCalls) == 0 && textBuf.Len() > 0 {
-		if parsed := extractToolCalls(textBuf.String()); len(parsed) > 0 {
+	var fallbackRaw string
+	if len(toolCalls) == 0 && len(rawText) > 0 {
+		if parsed := extractToolCalls(rawText); len(parsed) > 0 {
 			toolCalls = parsed
-			textBuf.Reset() // suppress raw markup from user output
+			fallbackRaw = rawText // preserve original markup for history
+			textBuf.Reset()
 		}
 	}
 
@@ -240,7 +264,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		fmt.Fprintln(out)
 	}
 
-	return text, toolCalls, nil
+	return text, fallbackRaw, toolCalls, nil
 }
 
 // Classify asks the model to classify whether a prompt should be handled locally
