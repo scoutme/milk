@@ -214,6 +214,16 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		}
 	}
 
+	// Fallback: model emitted tool calls as raw text (e.g. <tool_call> XML or
+	// fenced JSON) instead of populating the tool_calls field.
+	if len(toolCalls) == 0 && textBuf.Len() > 0 {
+		if parsed := extractToolCalls(textBuf.String()); len(parsed) > 0 {
+			toolCalls = parsed
+			// Don't relay the raw tool call markup to the user
+			textBuf.Reset()
+		}
+	}
+
 	return textBuf.String(), toolCalls, nil
 }
 
