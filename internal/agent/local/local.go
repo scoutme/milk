@@ -75,6 +75,13 @@ func New(baseURL, model string) *Agent {
 	}
 }
 
+const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, escalate_to_claude.
+
+Rules:
+- When you need to run a command or read a file, call the tool. Never guess or hallucinate the result.
+- After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
+- Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
+
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
@@ -82,7 +89,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if history == nil {
 		history = []Message{}
 	}
-	msgs := append(history, Message{Role: "user", Content: userPrompt})
+	msgs := []Message{{Role: "system", Content: systemPrompt}}
+	msgs = append(msgs, history...)
+	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas()
 
 	for i := 0; i < maxToolIterations; i++ {
@@ -182,7 +191,8 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		for _, choice := range chunk.Choices {
 			if t := choice.Delta.Content; t != "" {
 				textBuf.WriteString(t)
-				fmt.Fprint(out, t)
+				// Defer writing to out — tool calls are suppressed after the full
+				// response is available; only flush plain text responses.
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				pt, ok := partialTools[tc.Index]
@@ -219,12 +229,18 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if len(toolCalls) == 0 && textBuf.Len() > 0 {
 		if parsed := extractToolCalls(textBuf.String()); len(parsed) > 0 {
 			toolCalls = parsed
-			// Don't relay the raw tool call markup to the user
-			textBuf.Reset()
+			textBuf.Reset() // suppress raw markup from user output
 		}
 	}
 
-	return textBuf.String(), toolCalls, nil
+	// Only flush text to out if this is a plain text response (no tool calls).
+	text := textBuf.String()
+	if len(toolCalls) == 0 && text != "" {
+		fmt.Fprint(out, text)
+		fmt.Fprintln(out)
+	}
+
+	return text, toolCalls, nil
 }
 
 // Classify asks the model to classify whether a prompt should be handled locally
