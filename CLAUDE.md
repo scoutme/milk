@@ -1,6 +1,6 @@
 # milk
 
-Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Qwen2.5 via llama.cpp) and Claude Code CLI, with session-aware state management and real-time streaming.
+Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Gemma 4 via llama.cpp) and Claude Code CLI, with session-aware state management and real-time streaming.
 
 ## Quick orientation
 
@@ -12,10 +12,12 @@ Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Qwen2.
 ## Project structure
 
 ```
-cmd/milk/main.go              # Cobra root command
+cmd/milk/main.go              # Cobra root command, single-prompt mode
+cmd/milk/interactive.go       # REPL loop (readline, slash commands, completion)
+cmd/milk/ansi.go              # ANSI color helpers
 internal/config/              # config loading (~/.milk/config.json)
 internal/session/             # session state + store (~/.milk/sessions/)
-internal/router/              # routing logic (rules + local model)
+internal/router/              # routing logic (rules + weighted scorer + local model)
 internal/agent/local/         # llama.cpp OpenAI-compat client + tool loop
 internal/agent/claude/        # claude CLI subprocess + stream-json parser
 internal/escalation/          # context builder (local transcript → Claude prompt)
@@ -23,11 +25,12 @@ internal/escalation/          # context builder (local transcript → Claude pro
 
 ## Key design decisions
 
-- **One llama.cpp instance**: Qwen2.5-Coder serves as both router classifier and local agent
+- **One llama.cpp instance**: Gemma 4 E4B serves as both router classifier and local agent
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API
 - **Context handoff**: local transcript passed via `--append-system-prompt`; Claude orients itself
 - **CLAUDE_WAITING state**: once Claude asks a follow-up, next turn bypasses router → `--resume`
 - **Self-escalation**: local model can call `escalate_to_claude(reason)` as a function call
+- **Interactive mode**: `milk` with no args enters a readline REPL with colored prompt, slash commands, and Tab completion
 
 ## Session states
 
@@ -43,8 +46,8 @@ CLAUDE_WAITING → CLAUDE (default: next turn goes via --resume)
 
 1. Explicit flags (`--escalate`, `--local`)
 2. Session state (`CLAUDE_WAITING` → bypass)
-3. Rules layer (heuristics)
-4. Local model (Qwen2.5 classification call)
+3. Rules layer (hard thresholds → short-prompt shortcut → weighted signal scorer)
+4. Local model (Gemma 4 classification call, when scorer is inconclusive)
 5. Default: local
 
 ## Session storage
@@ -83,7 +86,6 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 
 ## Backlog
 
-- Interactive (REPL) mode
 - Planning mode (offline)
 - Demotion from Claude back to local mid-session
 - MCP server integration for local tools

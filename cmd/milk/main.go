@@ -18,15 +18,17 @@ import (
 )
 
 var (
-	flagEscalate   bool
-	flagLocal      bool
-	flagNew        bool
-	flagSession    string
-	flagContinue   bool
-	flagList       bool
-	flagListAll    bool
-	flagDrop       bool
+	flagEscalate bool
+	flagLocal    bool
+	flagNew      bool
+	flagSession  string
+	flagContinue bool
+	flagList     bool
+	flagListAll  bool
+	flagDrop     bool
 )
+
+const errGettingCWD = "getting cwd: %w"
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
@@ -66,9 +68,6 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	prompt := strings.TrimSpace(strings.Join(args, " "))
-	if prompt == "" {
-		return fmt.Errorf("prompt required (interactive mode is not yet implemented)")
-	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -77,15 +76,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("getting cwd: %w", err)
+		return fmt.Errorf(errGettingCWD, err)
 	}
 
-	var sess *session.Session
-	if flagNew {
-		sess, err = session.New(cwd, flagSession)
-	} else {
-		sess, err = session.Resume(cwd, flagSession)
+	if prompt == "" {
+		return runInteractive(cfg, cwd, flagNew, flagSession)
 	}
+
+	sess, err := loadSessionForRun(cwd)
 	if err != nil {
 		return fmt.Errorf("loading session: %w", err)
 	}
@@ -96,18 +94,9 @@ func run(cmd *cobra.Command, args []string) error {
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
 	claudeAgent := claude.New(cfg.ClaudeBin)
 
-	// Probe availability once per invocation
-	localAvail := localAgent.Ping(ctx) == nil
-	claudeAvail := claudeAgent.Ping() == nil
-
-	if !localAvail && !claudeAvail {
-		return fmt.Errorf("neither llama.cpp nor claude CLI is available")
-	}
-	if !localAvail {
-		fmt.Fprintln(os.Stderr, "[milk] warning: llama.cpp unreachable — routing all to Claude")
-	}
-	if !claudeAvail {
-		fmt.Fprintln(os.Stderr, "[milk] warning: claude CLI unavailable — local only")
+	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
+	if err != nil {
+		return err
 	}
 
 	// Router uses nil localAgent when llama.cpp is down (skips classifier)
@@ -122,14 +111,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("routing: %w", err)
 	}
 
-	// Override target when an agent is unavailable
-	target := decision.Target
-	if target == router.TargetLocal && !localAvail {
-		target = router.TargetClaude
-	}
-	if target == router.TargetClaude && !claudeAvail {
-		target = router.TargetLocal
-	}
+	target := resolveTarget(decision.Target, localAvail, claudeAvail)
 
 	switch target {
 	case router.TargetLocal:
@@ -141,8 +123,42 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 }
 
+func loadSessionForRun(cwd string) (*session.Session, error) {
+	if flagNew {
+		return session.New(cwd, flagSession)
+	}
+	return session.Resume(cwd, flagSession)
+}
+
+func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, claudeAgent *claude.Agent) (bool, bool, error) {
+	localAvail := localAgent.Ping(ctx) == nil
+	claudeAvail := claudeAgent.Ping() == nil
+
+	if !localAvail && !claudeAvail {
+		return false, false, fmt.Errorf("neither llama.cpp nor claude CLI is available")
+	}
+	if !localAvail {
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: llama.cpp unreachable — routing all to Claude")
+	}
+	if !claudeAvail {
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: claude CLI unavailable — local only")
+	}
+
+	return localAvail, claudeAvail, nil
+}
+
+func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Target {
+	if target == router.TargetLocal && !localAvail {
+		return router.TargetClaude
+	}
+	if target == router.TargetClaude && !claudeAvail {
+		return router.TargetLocal
+	}
+	return target
+}
+
 func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, prompt string) error {
-	// Convert session history to local agent message format
+	fmt.Fprint(os.Stdout, bold(green("local:"))+" ")
 	history := sessionToMessages(sess)
 
 	sess.ForceState(session.StateLocal)
@@ -150,7 +166,7 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout)
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
-			fmt.Fprintf(os.Stderr, "\n[milk] local model requested escalation: %s\n", esc.Reason)
+			fmt.Fprintf(os.Stderr, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
 			// Commit the user turn before escalating so Claude has context
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
@@ -185,6 +201,7 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 }
 
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
+	fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
 	// Capture state before we mutate it: only resume an existing Claude session
 	// when we were explicitly waiting for user input mid-conversation.
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
@@ -254,7 +271,7 @@ func sessionToMessages(sess *session.Session) []local.Message {
 func runList(all bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("getting cwd: %w", err)
+		return fmt.Errorf(errGettingCWD, err)
 	}
 	target := cwd
 	if all {
@@ -284,7 +301,7 @@ func runList(all bool) error {
 func runDrop() error {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("getting cwd: %w", err)
+		return fmt.Errorf(errGettingCWD, err)
 	}
 	sess, err := session.Resume(cwd, flagSession)
 	if err != nil {
