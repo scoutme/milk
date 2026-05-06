@@ -4,19 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/google/uuid"
-	"golang.org/x/term"
 )
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin                string // path to claude binary, e.g. "claude"
-	skipPermissions    bool   // pass --dangerously-skip-permissions to the CLI
+	bin             string // path to claude binary, e.g. "claude"
+	skipPermissions bool   // pass --dangerously-skip-permissions to the CLI
 }
 
 func New(bin string) *Agent {
@@ -58,11 +55,6 @@ func (a *Agent) RunResume(ctx context.Context, claudeSessionID, prompt string, o
 	return a.run(ctx, args, out)
 }
 
-// IsPTYMode returns true when the agent will use the PTY path (stdout is a TTY).
-func (a *Agent) IsPTYMode() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
-}
-
 // Ping checks whether the claude binary is available.
 func (a *Agent) Ping() error {
 	cmd := exec.Command(a.bin, "--version")
@@ -72,19 +64,16 @@ func (a *Agent) Ping() error {
 	return nil
 }
 
-// run dispatches to runPTY when stdout is a TTY, otherwise uses the pipe path.
+// run builds the pipe args and delegates to runPipe.
 func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	if a.skipPermissions {
 		args = append([]string{"--dangerously-skip-permissions"}, args...)
 	}
 	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose"}, args...)
-	if term.IsTerminal(int(os.Stdout.Fd())) {
-		return a.runPTY(ctx, args)
-	}
 	return a.runPipe(ctx, pipeArgs, out)
 }
 
-// runPipe is the non-interactive implementation used when stdout is not a TTY.
+// runPipe runs the claude CLI and streams structured JSON output.
 func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	cmd := newCmd(ctx, a.bin, args)
 
@@ -121,10 +110,4 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 // newCmd builds an exec.Cmd for the given binary and args.
 func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
-}
-
-// setsidSysProcAttr starts the child in a new session so the PTY slave
-// becomes its controlling terminal.
-func setsidSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setsid: true}
 }

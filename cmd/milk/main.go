@@ -201,9 +201,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 }
 
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
-	if !agent.IsPTYMode() {
-		fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
-	}
+	fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
 	// Capture state before we mutate it: only resume an existing Claude session
 	// when we were explicitly waiting for user input mid-conversation.
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
