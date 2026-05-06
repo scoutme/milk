@@ -36,11 +36,12 @@ type Rules struct {
 }
 
 type Config struct {
-	LlamaURL     string `json:"llama_url"`
-	LlamaModel   string `json:"llama_model"`
-	ClaudeBin    string `json:"claude_bin"`
-	DefaultRoute string `json:"default_route"`
-	Rules        Rules  `json:"rules"`
+	LlamaURL                  string `json:"llama_url"`
+	LlamaModel                string `json:"llama_model"`
+	ClaudeBin                 string `json:"claude_bin"`
+	DefaultRoute              string `json:"default_route"`
+	DangerouslySkipPermissions bool  `json:"dangerously_skip_permissions"`
+	Rules                     Rules  `json:"rules"`
 }
 
 func defaults() Config {

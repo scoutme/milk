@@ -18,54 +18,98 @@ var reToolsBlock = regexp.MustCompile(`(?s)<tools>\s*(.*?)\s*</tools>`)
 // The closing fence is optional: the model sometimes omits it at end-of-stream.
 var reFenced = regexp.MustCompile("(?s)```(?:xml|json)?\\s*(.*?)(?:\\s*```|$)")
 
+// reGemmaSpecial matches Gemma 4's special-token tool call format:
+//
+//	<|tool_call>call:<name>{...}<tool_call|>
+//
+// <|"|> inside the body is a special-token quote for string values.
+var reGemmaSpecial = regexp.MustCompile(`(?s)<\|tool_call>call:(\w+)(\{.*?\})<tool_call\|>`)
+
+// reUnquotedKey quotes unquoted JSON keys produced after special-token substitution.
+// Matches a key at the start of the object or after a comma, e.g. {path:"x"} → {"path":"x"}.
+var reUnquotedKey = regexp.MustCompile(`([{,]\s*)(\w+)(\s*:)`)
+
 // extractToolCalls parses tool calls from a raw content string emitted by the
 // model when llama.cpp fails to translate them into the tool_calls field.
 // Handles:
+//   - <|tool_call>call:<name>{...}<tool_call|>  (Gemma 4 special tokens)
 //   - <tool_call>{"name":..., "arguments":{...}}</tool_call>
-//   - <tools>{"name":..., "arguments":{...}}</tools>  (Gemma 4)
+//   - <tools>{"name":..., "arguments":{...}}</tools>
 //   - ```xml\n{"name":..., "arguments":{...}}\n```
 //   - bare JSON: {"name":..., "arguments":{...}}
-//
-// The "arguments" value may be a JSON object (Qwen native) or a JSON string
-// (OpenAI format); both are normalised to a JSON string for toolCall.Function.Arguments.
 func extractToolCalls(content string) []toolCall {
-	var candidates []string
-
-	// 1. <tool_call> blocks (may themselves be inside fences)
-	for _, m := range reToolCall.FindAllStringSubmatch(content, -1) {
-		candidates = append(candidates, strings.TrimSpace(m[1]))
+	if calls := extractGemmaSpecial(content); len(calls) > 0 {
+		return calls
 	}
+	return extractJSONCandidates(content)
+}
 
-	// 2. <tools> blocks (Gemma 4 format via llama.cpp content fallback)
-	if len(candidates) == 0 {
-		for _, m := range reToolsBlock.FindAllStringSubmatch(content, -1) {
-			candidates = append(candidates, strings.TrimSpace(m[1]))
-		}
+func extractGemmaSpecial(content string) []toolCall {
+	matches := reGemmaSpecial.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
 	}
-
-	// 3. Fenced blocks without <tool_call> wrapper
-	if len(candidates) == 0 {
-		for _, m := range reFenced.FindAllStringSubmatch(content, -1) {
-			candidates = append(candidates, strings.TrimSpace(m[1]))
-		}
-	}
-
-	// 4. Bare content if it looks like a JSON object
-	if len(candidates) == 0 {
-		trimmed := strings.TrimSpace(content)
-		if strings.HasPrefix(trimmed, "{") {
-			candidates = append(candidates, trimmed)
-		}
-	}
-
 	var calls []toolCall
-	for _, raw := range candidates {
-		tc, ok := parseToolCallJSON(raw)
-		if ok {
+	for _, m := range matches {
+		if tc, ok := parseGemmaMatch(m[1], m[2]); ok {
 			calls = append(calls, tc)
 		}
 	}
 	return calls
+}
+
+func parseGemmaMatch(name, rawArgs string) (toolCall, bool) {
+	rawArgs = strings.ReplaceAll(rawArgs, `<|"|>`, `"`)
+	rawArgs = reUnquotedKey.ReplaceAllString(rawArgs, `$1"$2"$3`)
+	var args map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		return toolCall{}, false
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return toolCall{}, false
+	}
+	return toolCall{
+		ID:   uuid.New().String(),
+		Type: "function",
+		Function: toolCallFunction{Name: name, Arguments: string(argsJSON)},
+	}, true
+}
+
+func extractJSONCandidates(content string) []toolCall {
+	candidates := collectCandidates(content)
+	var calls []toolCall
+	for _, raw := range candidates {
+		if tc, ok := parseToolCallJSON(raw); ok {
+			calls = append(calls, tc)
+		}
+	}
+	return calls
+}
+
+func collectCandidates(content string) []string {
+	if m := submatchAll(reToolCall, content); len(m) > 0 {
+		return m
+	}
+	if m := submatchAll(reToolsBlock, content); len(m) > 0 {
+		return m
+	}
+	if m := submatchAll(reFenced, content); len(m) > 0 {
+		return m
+	}
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "{") {
+		return []string{trimmed}
+	}
+	return nil
+}
+
+func submatchAll(re *regexp.Regexp, s string) []string {
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		out = append(out, strings.TrimSpace(m[1]))
+	}
+	return out
 }
 
 // nativeToolCall represents Qwen's native format where arguments is an object.

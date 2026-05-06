@@ -143,6 +143,7 @@ type interactiveState struct {
 	forceEscalate bool
 	forceLocal    bool
 	cwd           string
+	cfg           config.Config
 }
 
 // handleSlashCommand processes a /command input. Returns (exit, err).
@@ -207,8 +208,10 @@ type dispatchAgents struct {
 }
 
 // dispatchTurn routes a regular prompt to the appropriate agent.
+// rl is used to suspend/restore readline around Claude PTY calls.
 func dispatchTurn(
 	ctx context.Context,
+	rl *readline.Instance,
 	st *interactiveState,
 	rtr *router.Router,
 	agents dispatchAgents,
@@ -239,13 +242,17 @@ func dispatchTurn(
 
 	switch target {
 	case router.TargetLocal:
-		if err := runLocal(turnCtx, st.sess, localAgent, input); err != nil {
+		if err := runLocal(turnCtx, st.cfg, st.sess, localAgent, input); err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
 	case router.TargetClaude:
+		// Suspend readline so Claude's PTY can own the terminal.
+		rl.Clean()
 		if err := runClaude(turnCtx, st.sess, claudeAgent, input); err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
+		// Restore readline's terminal state after Claude exits.
+		rl.Refresh()
 	}
 	fmt.Println()
 }
@@ -280,7 +287,7 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 	}
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.New(cfg.ClaudeBin)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
 
 	ctx := context.Background()
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
@@ -295,8 +302,11 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 	rtr := router.New(cfg, routeLocalAgent)
 
 	fmt.Printf("%s interactive mode — session %s  (type /help for commands)\n", milkTag(), sess.ID[:8])
+	if cfg.DangerouslySkipPermissions {
+		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — Claude will auto-approve all tool uses without prompting"))
+	}
 
-	st := &interactiveState{sess: sess, cwd: cwd}
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	rl, err := readline.NewEx(&readline.Config{
@@ -343,6 +353,6 @@ func runInteractiveStep(ctx context.Context, rl *readline.Instance, st *interact
 		return exit
 	}
 
-	dispatchTurn(ctx, st, rtr, agents, input)
+	dispatchTurn(ctx, rl, st, rtr, agents, input)
 	return false
 }
