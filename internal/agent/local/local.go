@@ -97,21 +97,14 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	tools := schemas()
 
 	for i := 0; i < maxToolIterations; i++ {
-		// Only send tool schemas on the first turn. Gemma 4's chat template with
-		// schemas present after a tool result triggers another tool-selection pass
-		// and emits EOS when no further call is needed, producing empty output.
-		// Without schemas the model uses the plain text branch and responds normally.
-		iterTools := tools
-		if i > 0 {
-			iterTools = nil
-		}
-		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, iterTools, out)
+		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
 			return msgs, err
 		}
 
 		if len(toolCalls) == 0 {
-			// Final text response
+			// No tool calls: either a final text response, or Gemma 4 emitting EOS
+			// after completing its tool loop (empty response). Both are terminal.
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}

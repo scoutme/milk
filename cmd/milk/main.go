@@ -92,7 +92,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.New(cfg.ClaudeBin)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
 
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
 	if err != nil {
@@ -115,7 +115,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	switch target {
 	case router.TargetLocal:
-		return runLocal(ctx, sess, localAgent, prompt)
+		return runLocal(ctx, cfg, sess, localAgent, prompt)
 	case router.TargetClaude:
 		return runClaude(ctx, sess, claudeAgent, prompt)
 	default:
@@ -157,7 +157,7 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 	return target
 }
 
-func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, prompt string) error {
+func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string) error {
 	fmt.Fprint(os.Stdout, bold(green("local:"))+" ")
 	history := sessionToMessages(sess)
 
@@ -171,7 +171,7 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			claudeAgent := claude.New("")
+			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
 			return runClaude(ctx, sess, claudeAgent, prompt)
 		}
 		return err
@@ -201,7 +201,9 @@ func runLocal(ctx context.Context, sess *session.Session, agent *local.Agent, pr
 }
 
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
-	fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
+	if !agent.IsPTYMode() {
+		fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
+	}
 	// Capture state before we mutate it: only resume an existing Claude session
 	// when we were explicitly waiting for user input mid-conversation.
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""

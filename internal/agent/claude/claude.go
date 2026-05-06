@@ -4,15 +4,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/google/uuid"
+	"golang.org/x/term"
 )
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin string // path to claude binary, e.g. "claude"
+	bin                string // path to claude binary, e.g. "claude"
+	skipPermissions    bool   // pass --dangerously-skip-permissions to the CLI
 }
 
 func New(bin string) *Agent {
@@ -22,12 +26,19 @@ func New(bin string) *Agent {
 	return &Agent{bin: bin}
 }
 
+func NewWithOpts(bin string, skipPermissions bool) *Agent {
+	if bin == "" {
+		bin = "claude"
+	}
+	return &Agent{bin: bin, skipPermissions: skipPermissions}
+}
+
 // RunFirst runs the first turn of a new Claude escalation session.
 // systemContext is the formatted local transcript passed via --append-system-prompt.
 // Returns the session ID emitted by the subprocess and a ParseResult.
 func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out io.Writer) (string, ParseResult, error) {
 	sessionID := uuid.New().String()
-	args := a.baseArgs()
+	var args []string
 	args = append(args, "--session-id", sessionID)
 	if systemContext != "" {
 		args = append(args, "--append-system-prompt", systemContext)
@@ -35,7 +46,6 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 	args = append(args, prompt)
 
 	res, err := a.run(ctx, args, out)
-	// Use session_id from the stream if available (Claude may canonicalize it)
 	if res.SessionID != "" {
 		sessionID = res.SessionID
 	}
@@ -44,10 +54,13 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 
 // RunResume continues an existing Claude session.
 func (a *Agent) RunResume(ctx context.Context, claudeSessionID, prompt string, out io.Writer) (ParseResult, error) {
-	args := a.baseArgs()
-	args = append(args, "--resume", claudeSessionID)
-	args = append(args, prompt)
+	args := []string{"--resume", claudeSessionID, prompt}
 	return a.run(ctx, args, out)
+}
+
+// IsPTYMode returns true when the agent will use the PTY path (stdout is a TTY).
+func (a *Agent) IsPTYMode() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // Ping checks whether the claude binary is available.
@@ -59,16 +72,21 @@ func (a *Agent) Ping() error {
 	return nil
 }
 
-func (a *Agent) baseArgs() []string {
-	return []string{
-		"--print",
-		"--output-format", "stream-json",
-		"--verbose",
+// run dispatches to runPTY when stdout is a TTY, otherwise uses the pipe path.
+func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
+	if a.skipPermissions {
+		args = append([]string{"--dangerously-skip-permissions"}, args...)
 	}
+	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose"}, args...)
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		return a.runPTY(ctx, args)
+	}
+	return a.runPipe(ctx, pipeArgs, out)
 }
 
-func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
-	cmd := exec.CommandContext(ctx, a.bin, args...)
+// runPipe is the non-interactive implementation used when stdout is not a TTY.
+func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
+	cmd := newCmd(ctx, a.bin, args)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -98,4 +116,15 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 	}
 
 	return res, nil
+}
+
+// newCmd builds an exec.Cmd for the given binary and args.
+func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
+	return exec.CommandContext(ctx, bin, args...)
+}
+
+// setsidSysProcAttr starts the child in a new session so the PTY slave
+// becomes its controlling terminal.
+func setsidSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }
