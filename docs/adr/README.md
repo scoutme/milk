@@ -9,3 +9,4 @@
 * [7. Local Model Self-Escalation via Function Call](0007-self-escalation-via-function-call.md)
 * [8. Branching Strategy and Conventional Commits](0008-branching-strategy.md)
 * [9. Router Signal Extractor and Weighted Scorer](0009-router-signal-scorer.md)
+* [10. Interactive REPL Mode](0010-interactive-repl-mode.md)

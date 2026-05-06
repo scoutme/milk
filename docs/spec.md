@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk is a local-first agentic orchestrator CLI. It routes user prompts between a local LLM agent (Qwen2.5 via llama.cpp) and a rich cloud agent (Claude Code CLI), maintaining session state across turns and supporting context promotion from local to cloud.
+milk is a local-first agentic orchestrator CLI. It routes user prompts between a local LLM agent (Gemma 4 via llama.cpp) and a rich cloud agent (Claude Code CLI), maintaining session state across turns and supporting context promotion from local to cloud.
 
 The primary use case is code assistance and shell automation for a single user.
 
@@ -26,8 +26,8 @@ milk [prompt | flags]
 │  Router                  │
 │  1. Explicit flags       │  --escalate, --local
 │  2. Session state check  │  CLAUDE_WAITING → bypass
-│  3. Rules layer          │  heuristics
-│  4. Local model          │  Qwen2.5 self-classification
+│  3. Rules layer          │  heuristics + weighted scorer
+│  4. Local model          │  Gemma 4 self-classification
 │  5. Default: try local   │
 └────────┬─────────────────┘
          │
@@ -60,23 +60,30 @@ Decision order per turn:
 
 1. **Explicit flags** — `--escalate` forces Claude; `--local` forces local (always wins)
 2. **Session state** — if `CLAUDE_WAITING`, bypass router, send directly to `claude --resume`
-3. **Rules layer** — heuristics: prompt length, complexity markers, keyword patterns
-4. **Local model classification** — ask Qwen2.5 with minimal prompt, expect `route: local | escalate`
+3. **Rules layer** — layered scorer:
+   - Hard rules: token length above `escalate_above_tokens` → Claude; keyword match → Claude
+   - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
+   - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open questions each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`
+4. **Local model classification** — when scorer is inconclusive, ask Gemma 4 with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
 5. **Default** — attempt local; escalate if local returns `escalate_to_claude(reason)`
 
-The classifier uses the same Qwen2.5 model instance as the local coding agent. No second model or second llama.cpp instance.
+The classifier uses the same Gemma 4 model instance as the local coding agent. No second model or second llama.cpp instance.
 
 ---
 
 ## Local Agent
 
 - Backend: llama.cpp OpenAI-compatible server, default `http://localhost:8080`
-- Model: Qwen2.5-Coder (7B or 14B; user-configured)
+- Model: Gemma 4 E4B (user-configured; any tool-calling-capable model works)
 - Tool loop: standard agentic loop — call → check tool calls → execute → feed result → repeat until final answer
 - Built-in tools (implemented in Go, exposed as OpenAI function schemas):
   - `bash(command string) → stdout, stderr, exit_code`
   - `grep(pattern string, path string, recursive bool) → matches`
   - `read_file(path string, offset int, limit int) → content`
+  - `write_file(path string, content string) → ok` — creates parent directories
+  - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches
+  - `list_dir(path string) → entries` — names, types, sizes
+  - `http_get(url string, max_bytes int) → body` — bounded HTTP fetch
 - Self-escalation: local model may return `escalate_to_claude(reason string)` as a tool call to trigger promotion
 
 ---
@@ -177,9 +184,19 @@ Names are cwd-scoped. Same name can exist in different projects.
 ### Usage
 
 ```
-milk [flags] <prompt>
-milk [flags]                  # enters interactive mode (backlog)
+milk                          # interactive REPL mode
+milk [flags] <prompt>         # single-prompt mode
 ```
+
+### Interactive mode
+
+`milk` with no prompt argument starts a REPL. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) reflects the current routing state and is updated after each turn.
+
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/help`, `/exit`
+
+**Tab completion:** `/` completes slash commands; `@` completes file paths from cwd (e.g. `@src/main.go`).
+
+**Keyboard:** Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
 
 ### Flags
 
@@ -203,12 +220,23 @@ milk [flags]                  # enters interactive mode (backlog)
 ```json
 {
   "llama_url": "http://localhost:8080",
-  "llama_model": "qwen2.5-coder",
+  "llama_model": "gemma-4-e4b",
   "claude_bin": "claude",
   "default_route": "local",
   "rules": {
     "escalate_above_tokens": 2000,
-    "escalate_keywords": ["architect", "refactor entire", "design", "explain why"]
+    "local_below_tokens": 30,
+    "escalate_keywords": ["architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"],
+    "escalate_threshold": 6,
+    "local_threshold": -4,
+    "local_verb_weight": -3,
+    "escalate_verb_weight": 4,
+    "path_ref_weight": -2,
+    "code_block_weight": -2,
+    "open_question_weight": 3,
+    "classifier_fallback": "local",
+    "local_verbs": ["grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls", "check", "print", "count", "search"],
+    "escalate_verbs": ["architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"]
   }
 }
 ```
@@ -238,7 +266,6 @@ milk relays tokens to stdout as they arrive.
 
 ## Backlog
 
-- Interactive (REPL) mode without prompt argument
 - Planning mode (offline, no LLM execution)
 - Demotion from Claude back to local mid-session
 - Web UI / TUI

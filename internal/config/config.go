@@ -51,7 +51,7 @@ func defaults() Config {
 		DefaultRoute: "local",
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
-			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why"},
+			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"},
 			LocalBelowTokens:    30,
 
 			EscalateThreshold: 6,
