@@ -76,6 +76,7 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 // runPipe runs the claude CLI and streams structured JSON output.
 func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	cmd := newCmd(ctx, a.bin, args)
+	cmd.Stdin = nil // disconnect TTY stdin so Claude doesn't launch its interactive TUI
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
