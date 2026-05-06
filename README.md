@@ -55,7 +55,7 @@ Starts a REPL session with colored prompt, Tab completion, and command history.
 [claude] > design an alternative approach
 ```
 
-The prompt label reflects the current routing state (`[local]`, `[claude]`, `[claude:waiting]`).
+The prompt label reflects the current routing state: `[local]` (local model), `[claude]` (Claude), `[claude:waiting]` (Claude asked a follow-up — next turn goes directly back to Claude via `--resume`).
 
 **Slash commands:**
 
@@ -88,7 +88,8 @@ milk [flags] <prompt>
 | `--new` | Start a fresh session for the current directory |
 | `--session <name>` | Resume or create a named session |
 | `--list` | List sessions for the current directory |
-| `--list --all` | List all sessions across all directories |
+| `--list --all` | List all sessions across all directories (use with `--list`) |
+| `--all` | Modifier for `--list`: show sessions for all directories |
 | `--drop` | Delete the current session |
 
 ### Examples
@@ -142,11 +143,7 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 }
 ```
 
-Print the effective configuration:
-
-```sh
-milk config
-```
+**`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 
 ### Session storage
 
@@ -164,7 +161,7 @@ The local model has access to these built-in tools:
 | `write_file` | Write content to a file (creates parent directories) |
 | `edit_file` | Exact-string replacement within a file |
 | `list_dir` | List directory contents with type and size |
-| `http_get` | Fetch a URL, returns body up to a configurable byte limit |
+| `http_get` | Fetch a URL, returns body as text |
 
 ## Graceful degradation
 
