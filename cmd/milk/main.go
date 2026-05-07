@@ -92,7 +92,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
 	if err != nil {
@@ -157,8 +157,11 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 	return target
 }
 
+const claudeLabel = "claude:"
+const localLabel = "local:"
+
 func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string) error {
-	fmt.Fprint(os.Stdout, bold(green("local:"))+" ")
+	fmt.Fprint(os.Stdout, bold(green(localLabel))+" ")
 	history := sessionToMessages(sess)
 
 	sess.ForceState(session.StateLocal)
@@ -171,7 +174,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
+			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 			return runClaude(ctx, sess, claudeAgent, prompt)
 		}
 		return err
@@ -201,48 +204,113 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 }
 
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
-	fmt.Fprint(os.Stdout, bold(blue("claude:"))+" ")
-	// Capture state before we mutate it: only resume an existing Claude session
-	// when we were explicitly waiting for user input mid-conversation.
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
-
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
 
-	var res claude.ParseResult
-	var err error
-
-	if resuming {
-		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
-		if err != nil {
-			return err
-		}
-	} else {
-		// New escalation: build context from full session history and start a new Claude session.
-		// Always opens a new Claude session even if ClaudeSessionID is already set
-		// (the old one may belong to a previous escalation chain).
-		sysContext := escalation.BuildContext(sess)
-		var claudeSessionID string
-		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
-		if err != nil {
-			return err
-		}
-		sess.ClaudeSessionID = claudeSessionID
+	res, err := dispatchClaudeRun(ctx, sess, agent, prompt, resuming)
+	if err != nil {
+		return err
 	}
 
-	sess.AddTurn(session.Turn{
-		Role:    session.RoleAssistant,
-		Agent:   session.AgentClaude,
-		Content: res.Text,
-	})
+	res, err = handleClaudeRetry(ctx, sess, agent, res)
+	if err != nil {
+		return err
+	}
 
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
 	if res.EndsWithQ {
 		sess.ForceState(session.StateClaudeWaiting)
 	} else {
 		sess.ForceState(session.StateRouting)
 	}
-
 	return session.Save(sess)
+}
+
+// dispatchClaudeRun runs the first or resume turn depending on session state.
+func dispatchClaudeRun(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, resuming bool) (claude.ParseResult, error) {
+	if resuming {
+		return agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+	}
+	sysContext := escalation.BuildContext(sess)
+	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
+	if err != nil {
+		return res, err
+	}
+	sess.ClaudeSessionID = claudeSessionID
+	return res, nil
+}
+
+// handleClaudeRetry checks for tool/dir permission signals and retries once if the user approves.
+func handleClaudeRetry(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult) (claude.ParseResult, error) {
+	if sess.ClaudeSessionID == "" {
+		return res, nil
+	}
+	if res.PermissionDenied {
+		return retryWithTool(ctx, sess, agent, res.DeniedTool)
+	}
+	if res.DirRestricted {
+		return retryWithDir(ctx, sess, agent)
+	}
+	return res, nil
+}
+
+func retryWithTool(ctx context.Context, sess *session.Session, agent *claude.Agent, tool string) (claude.ParseResult, error) {
+	if !askYN(toolPermissionPrompt(tool)) {
+		return claude.ParseResult{}, nil
+	}
+	retryAgent := agent
+	if tool != "" {
+		retryAgent = agent.WithExtraTools(tool)
+	}
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	return retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", os.Stdout)
+}
+
+func retryWithDir(ctx context.Context, sess *session.Session, agent *claude.Agent) (claude.ParseResult, error) {
+	dir := askInput(fmt.Sprintf("%s Claude needs directory access. Enter path to allow (empty to skip): ", milkTag()))
+	if dir == "" {
+		return claude.ParseResult{}, nil
+	}
+	retryAgent := agent.WithExtraDirs(dir)
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	return retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), os.Stdout)
+}
+
+func toolPermissionPrompt(tool string) string {
+	if tool != "" {
+		return fmt.Sprintf("%s Claude needs permission to use %s. Allow? [y/n] ", milkTag(), bold(tool))
+	}
+	return fmt.Sprintf("%s Claude needs a tool permission. Allow? [y/n] ", milkTag())
+}
+
+// askYN reads a single y/n byte from stdin. Returns true for y/Y.
+func askYN(prompt string) bool {
+	fmt.Fprint(os.Stdout, "\n"+prompt)
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil || n == 0 {
+			return false
+		}
+		switch buf[0] {
+		case 'y', 'Y':
+			fmt.Println("y")
+			return true
+		case 'n', 'N':
+			fmt.Println("n")
+			return false
+		}
+	}
+}
+
+// askInput reads a line of text from stdin.
+func askInput(prompt string) string {
+	fmt.Fprint(os.Stdout, "\n"+prompt)
+	var line string
+	fmt.Fscanln(os.Stdin, &line)
+	return strings.TrimSpace(line)
 }
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.

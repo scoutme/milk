@@ -287,7 +287,7 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 	}
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 
 	ctx := context.Background()
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)

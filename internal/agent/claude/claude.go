@@ -12,8 +12,10 @@ import (
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin             string // path to claude binary, e.g. "claude"
-	skipPermissions bool   // pass --dangerously-skip-permissions to the CLI
+	bin             string   // path to claude binary, e.g. "claude"
+	skipPermissions bool     // pass --dangerously-skip-permissions to the CLI
+	allowedTools    []string // tools pre-approved via --allowedTools
+	addDirs         []string // extra directories granted via --add-dir
 }
 
 func New(bin string) *Agent {
@@ -23,11 +25,47 @@ func New(bin string) *Agent {
 	return &Agent{bin: bin}
 }
 
-func NewWithOpts(bin string, skipPermissions bool) *Agent {
+func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []string) *Agent {
 	if bin == "" {
 		bin = "claude"
 	}
-	return &Agent{bin: bin, skipPermissions: skipPermissions}
+	return &Agent{bin: bin, skipPermissions: skipPermissions, allowedTools: allowedTools, addDirs: addDirs}
+}
+
+// WithExtraTools returns a copy of the agent with additional tools appended to
+// the allowed list. Used by the reactive permission retry path.
+func (a *Agent) WithExtraTools(extra ...string) *Agent {
+	return &Agent{
+		bin: a.bin, skipPermissions: a.skipPermissions, addDirs: a.addDirs,
+		allowedTools: mergeUniq(a.allowedTools, extra),
+	}
+}
+
+// WithExtraDirs returns a copy of the agent with additional directories added.
+// Used by the reactive directory-restriction retry path.
+func (a *Agent) WithExtraDirs(extra ...string) *Agent {
+	return &Agent{
+		bin: a.bin, skipPermissions: a.skipPermissions, allowedTools: a.allowedTools,
+		addDirs: mergeUniq(a.addDirs, extra),
+	}
+}
+
+func mergeUniq(base, extra []string) []string {
+	out := make([]string, len(base), len(base)+len(extra))
+	copy(out, base)
+	for _, v := range extra {
+		found := false
+		for _, e := range out {
+			if e == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // RunFirst runs the first turn of a new Claude escalation session.
@@ -66,9 +104,17 @@ func (a *Agent) Ping() error {
 
 // run builds the pipe args and delegates to runPipe.
 func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
+	var prefix []string
 	if a.skipPermissions {
-		args = append([]string{"--dangerously-skip-permissions"}, args...)
+		prefix = append(prefix, "--dangerously-skip-permissions")
 	}
+	if len(a.allowedTools) > 0 {
+		prefix = append(prefix, "--allowedTools", strings.Join(a.allowedTools, ","))
+	}
+	for _, dir := range a.addDirs {
+		prefix = append(prefix, "--add-dir", dir)
+	}
+	args = append(prefix, args...)
 	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose"}, args...)
 	return a.runPipe(ctx, pipeArgs, out)
 }
@@ -89,7 +135,7 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		return ParseResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 
-	res, parseErr := Stream(stdout, out)
+	res, parseErr := Stream(stdout, out, a.allowedTools)
 
 	if err := cmd.Wait(); err != nil {
 		if stderrBuf.Len() > 0 {
