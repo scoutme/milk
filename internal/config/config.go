@@ -45,7 +45,11 @@ type Config struct {
 	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
 	AllowedTools               []string `json:"allowed_tools"`
 	AddDirs                    []string `json:"add_dirs"`
-	Rules                      Rules    `json:"rules"`
+	// PermissionPhrases and DirRestrictionPhrases are merged with built-in
+	// defaults (EN + IT). Add extra phrases here for other languages.
+	PermissionPhrases    []string `json:"permission_phrases"`
+	DirRestrictionPhrases []string `json:"dir_restriction_phrases"`
+	Rules                Rules    `json:"rules"`
 }
 
 func defaults() Config {
@@ -74,6 +78,67 @@ func defaults() Config {
 			EscalateVerbs: []string{"architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"},
 		},
 	}
+}
+
+// builtinPermissionPhrases are language-specific substrings that appear when
+// Claude explains it cannot proceed due to a tool permission restriction.
+var builtinPermissionPhrases = []string{
+	// English
+	"approve the", "approve this", "need permission",
+	"require permission", "waiting for approval",
+	"permission to", "grant permission", "allow me to",
+	"tool was blocked", "tool call was blocked",
+	"blocked by", "is blocked", "being blocked",
+	// Italian
+	"viene bloccato", "è bloccato", "è stata bloccata",
+	"bloccato dalle", "bloccata dalle",
+	"di permesso", "impostazioni di permesso",
+	"autorizzazione necessaria", "richiede autorizzazione",
+	"non autorizzato", "non ho i permessi",
+	"permesso negato", "accesso negato allo strumento",
+}
+
+// builtinDirRestrictionPhrases are language-specific substrings that appear
+// when Claude refuses due to directory access restrictions.
+var builtinDirRestrictionPhrases = []string{
+	// English
+	"is restricted", "outside the allowed", "not within the allowed",
+	"only list files within", "cannot access",
+	"outside of the", "not allowed to access", "directory is not",
+	// Italian
+	"accesso limitato", "fuori dalla directory",
+	"non posso accedere alla directory", "non posso accedere a",
+	"directory non consentita", "percorso non autorizzato",
+	"non è consentito accedere", "directory limitata",
+	"cartella non accessibile",
+}
+
+// EffectivePermissionPhrases merges built-in phrases with any user-supplied extras.
+func (c Config) EffectivePermissionPhrases() []string {
+	return mergeStrings(builtinPermissionPhrases, c.PermissionPhrases)
+}
+
+// EffectiveDirRestrictionPhrases merges built-in phrases with any user-supplied extras.
+func (c Config) EffectiveDirRestrictionPhrases() []string {
+	return mergeStrings(builtinDirRestrictionPhrases, c.DirRestrictionPhrases)
+}
+
+func mergeStrings(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]bool, len(base))
+	for _, s := range base {
+		seen[s] = true
+	}
+	out := make([]string, len(base), len(base)+len(extra))
+	copy(out, base)
+	for _, s := range extra {
+		if !seen[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func Dir() (string, error) {

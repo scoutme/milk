@@ -300,15 +300,26 @@ func dispatchTurn(
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
 	case router.TargetClaude:
-		// Suspend readline so Claude's PTY can own the terminal.
 		rl.Clean()
-		if err := runClaude(turnCtx, st.sess, claudeAgent, input); err != nil {
+		if err := runClaudeWith(turnCtx, st.sess, claudeAgent, input, &readlineInputReader{rl: rl}); err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
-		// Restore readline's terminal state after Claude exits.
 		rl.Refresh()
 	}
 	fmt.Println()
+}
+
+// readlineInputReader implements inputReader using a readline instance.
+// Prompts are printed directly; readline.Readline() reads a full line so
+// there's no leftover bytes in the buffer to confuse the next prompt cycle.
+type readlineInputReader struct {
+	rl *readline.Instance
+}
+
+func (r *readlineInputReader) readLine(prompt string) (string, error) {
+	r.rl.SetPrompt(prompt)
+	line, err := r.rl.Readline()
+	return strings.TrimSpace(line), err
 }
 
 func loadSession(cwd string, flagNew bool, flagSession string) (*session.Session, error) {
@@ -341,7 +352,7 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 	}
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
 
 	ctx := context.Background()
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)

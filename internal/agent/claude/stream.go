@@ -53,14 +53,15 @@ type ControlRequest struct {
 type PermissionHandler func(req ControlRequest, stdinW io.Writer)
 
 type streamEvent struct {
-	Type      msgType            `json:"type"`
-	Subtype   string             `json:"subtype"`
-	SessionID string             `json:"session_id"`
-	Message   assistantMessage   `json:"message"`
-	Result    string             `json:"result"`
-	IsError   bool               `json:"is_error"`
-	RequestID string             `json:"request_id"`
-	Request   controlRequestBody `json:"request"`
+	Type              msgType                  `json:"type"`
+	Subtype           string                   `json:"subtype"`
+	SessionID         string                   `json:"session_id"`
+	Message           assistantMessage         `json:"message"`
+	Result            string                   `json:"result"`
+	IsError           bool                     `json:"is_error"`
+	RequestID         string                   `json:"request_id"`
+	Request           controlRequestBody       `json:"request"`
+	PermissionDenials []PermissionDenialRecord `json:"permission_denials"`
 }
 
 // PermissionDenialRecord records a tool that was blocked in the final result event.
@@ -70,24 +71,59 @@ type PermissionDenialRecord struct {
 	ToolInput map[string]any `json:"tool_input"`
 }
 
-type resultEvent struct {
-	PermissionDenials []PermissionDenialRecord `json:"permission_denials"`
-}
-
 // ParseResult holds the parsed output of a claude subprocess run.
 type ParseResult struct {
 	SessionID         string
 	Text              string
-	EndsWithQ         bool // true if the final text ends with a question mark
+	EndsWithQ         bool   // true if the final text ends with a question mark
 	IsError           bool
-	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc)
+	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
+	// Reactive phrase detection — populated when control_request is not available.
+	PermissionDenied bool
+	DeniedTool       string
+	DirRestricted    bool
+}
+
+// detectPermissionDenied scans text for permission-request phrases.
+// phrases and toolNames come from config so detection is language-configurable.
+func detectPermissionDenied(text string, phrases, toolNames []string) (bool, string) {
+	lower := strings.ToLower(text)
+	for _, phrase := range phrases {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			for _, tool := range toolNames {
+				if strings.Contains(text, tool) {
+					return true, tool
+				}
+			}
+			return true, ""
+		}
+	}
+	return false, ""
+}
+
+// detectDirRestricted scans text for directory-restriction phrases.
+func detectDirRestricted(text string, phrases []string) bool {
+	lower := strings.ToLower(text)
+	for _, phrase := range phrases {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			return true
+		}
+	}
+	return false
+}
+
+// StreamOpts holds optional phrase lists for reactive permission detection.
+type StreamOpts struct {
+	PermissionPhrases     []string
+	DirRestrictionPhrases []string
+	AllowedTools          []string // used to match tool names in permission phrases
+	OnPermission          PermissionHandler
 }
 
 // Stream parses NDJSON lines from the claude subprocess, writes text tokens
 // to out as they arrive, and returns a ParseResult when the stream ends.
-// onPermission is called synchronously for each control_request event;
-// pass nil to use the default deny-all handler.
-func Stream(r io.Reader, out io.Writer, stdinW io.Writer, onPermission PermissionHandler) (ParseResult, error) {
+func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (ParseResult, error) {
+	onPermission := opts.OnPermission
 	if onPermission == nil {
 		onPermission = denyAllHandler
 	}
@@ -117,6 +153,15 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, onPermission Permissio
 	text := strings.TrimSpace(textBuf.String())
 	res.Text = text
 	res.EndsWithQ = strings.HasSuffix(text, "?")
+
+	// Reactive phrase detection — fallback for when control_request is not emitted.
+	if !res.PermissionDenied && len(opts.PermissionPhrases) > 0 {
+		res.PermissionDenied, res.DeniedTool = detectPermissionDenied(text, opts.PermissionPhrases, opts.AllowedTools)
+	}
+	if !res.DirRestricted && !res.PermissionDenied && len(opts.DirRestrictionPhrases) > 0 {
+		res.DirRestricted = detectDirRestricted(text, opts.DirRestrictionPhrases)
+	}
+
 	if text != "" {
 		io.WriteString(out, "\n") //nolint:errcheck
 	}
@@ -142,13 +187,7 @@ func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev st
 			res.SessionID = ev.SessionID
 		}
 		res.IsError = ev.IsError
-		// Parse permission_denials from the raw result event
-		var re resultEvent
-		// re-marshal and re-unmarshal via the dedicated type to pick up the field
-		if b, err := json.Marshal(ev); err == nil {
-			json.Unmarshal(b, &re) //nolint:errcheck
-		}
-		res.PermissionDenials = re.PermissionDenials
+		res.PermissionDenials = ev.PermissionDenials
 	case msgTypeControlRequest:
 		req := ControlRequest{RequestID: ev.RequestID, Body: ev.Request}
 		onPermission(req, stdinW)
