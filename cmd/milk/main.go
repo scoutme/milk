@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -209,12 +210,22 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
 
-	res, err := dispatchClaudeRun(ctx, sess, agent, prompt, resuming)
-	if err != nil {
-		return err
-	}
+	agent = agent.WithPermissionHandler(makePermissionHandler())
 
-	res, err = handleClaudeRetry(ctx, sess, agent, res)
+	var (
+		res claude.ParseResult
+		err error
+	)
+	if resuming {
+		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+	} else {
+		sysContext := escalation.BuildContext(sess)
+		var claudeSessionID string
+		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
+		if err == nil {
+			sess.ClaudeSessionID = claudeSessionID
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -228,66 +239,39 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 	return session.Save(sess)
 }
 
-// dispatchClaudeRun runs the first or resume turn depending on session state.
-func dispatchClaudeRun(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, resuming bool) (claude.ParseResult, error) {
-	if resuming {
-		return agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+// makePermissionHandler returns a PermissionHandler that asks the user
+// interactively via stdin for each control_request Claude emits.
+func makePermissionHandler() claude.PermissionHandler {
+	return func(req claude.ControlRequest, stdinW io.Writer) {
+		fmt.Fprintln(os.Stdout) // newline after streaming output
+		printPermissionRequest(req)
+		if askYN(fmt.Sprintf("%s Allow? [y/n] ", milkTag())) {
+			claude.Allow(req.RequestID, stdinW)
+		} else {
+			claude.Deny(req.RequestID, stdinW)
+		}
 	}
-	sysContext := escalation.BuildContext(sess)
-	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
-	if err != nil {
-		return res, err
-	}
-	sess.ClaudeSessionID = claudeSessionID
-	return res, nil
 }
 
-// handleClaudeRetry checks for tool/dir permission signals and retries once if the user approves.
-func handleClaudeRetry(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult) (claude.ParseResult, error) {
-	if sess.ClaudeSessionID == "" {
-		return res, nil
+// printPermissionRequest shows the user what Claude is asking permission for.
+func printPermissionRequest(req claude.ControlRequest) {
+	b := req.Body
+	fmt.Fprintf(os.Stdout, "%s permission request — tool: %s", milkTag(), bold(b.ToolName))
+	if b.BlockedPath != "" {
+		fmt.Fprintf(os.Stdout, "  path: %s", dim(b.BlockedPath))
 	}
-	if res.PermissionDenied {
-		return retryWithTool(ctx, sess, agent, res.DeniedTool)
+	if b.DecisionReasonType != "" {
+		fmt.Fprintf(os.Stdout, "  reason: %s", b.DecisionReasonType)
 	}
-	if res.DirRestricted {
-		return retryWithDir(ctx, sess, agent)
+	fmt.Fprintln(os.Stdout)
+	if b.Description != "" {
+		fmt.Fprintf(os.Stdout, "  %s\n", b.Description)
 	}
-	return res, nil
-}
-
-func retryWithTool(ctx context.Context, sess *session.Session, agent *claude.Agent, tool string) (claude.ParseResult, error) {
-	if !askYN(toolPermissionPrompt(tool)) {
-		return claude.ParseResult{}, nil
-	}
-	retryAgent := agent
-	if tool != "" {
-		retryAgent = agent.WithExtraTools(tool)
-	}
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	return retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", os.Stdout)
-}
-
-func retryWithDir(ctx context.Context, sess *session.Session, agent *claude.Agent) (claude.ParseResult, error) {
-	dir := askInput(fmt.Sprintf("%s Claude needs directory access. Enter path to allow (empty to skip): ", milkTag()))
-	if dir == "" {
-		return claude.ParseResult{}, nil
-	}
-	retryAgent := agent.WithExtraDirs(dir)
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	return retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), os.Stdout)
-}
-
-func toolPermissionPrompt(tool string) string {
-	if tool != "" {
-		return fmt.Sprintf("%s Claude needs permission to use %s. Allow? [y/n] ", milkTag(), bold(tool))
-	}
-	return fmt.Sprintf("%s Claude needs a tool permission. Allow? [y/n] ", milkTag())
 }
 
 // askYN reads a single y/n byte from stdin. Returns true for y/Y.
 func askYN(prompt string) bool {
-	fmt.Fprint(os.Stdout, "\n"+prompt)
+	fmt.Fprint(os.Stdout, prompt)
 	buf := make([]byte, 1)
 	for {
 		n, err := os.Stdin.Read(buf)
@@ -303,14 +287,6 @@ func askYN(prompt string) bool {
 			return false
 		}
 	}
-}
-
-// askInput reads a line of text from stdin.
-func askInput(prompt string) string {
-	fmt.Fprint(os.Stdout, "\n"+prompt)
-	var line string
-	fmt.Fscanln(os.Stdin, &line)
-	return strings.TrimSpace(line)
 }
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
