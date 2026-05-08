@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -93,7 +94,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
 
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
 	if err != nil {
@@ -175,7 +176,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
+			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
 			return runClaude(ctx, sess, claudeAgent, prompt)
 		}
 		return err
@@ -204,13 +205,40 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	return session.Save(sess)
 }
 
+// inputReader abstracts user input for permission prompts.
+// In interactive mode it delegates to readline; in single-shot mode it reads os.Stdin directly.
+type inputReader interface {
+	readLine(prompt string) (string, error)
+}
+
+// stdinInputReader reads from os.Stdin using a bufio.Scanner (line-buffered).
+type stdinInputReader struct {
+	s *bufio.Scanner
+}
+
+func newStdinInputReader() *stdinInputReader {
+	return &stdinInputReader{s: bufio.NewScanner(os.Stdin)}
+}
+
+func (r *stdinInputReader) readLine(prompt string) (string, error) {
+	fmt.Fprint(os.Stdout, prompt)
+	if r.s.Scan() {
+		return strings.TrimSpace(r.s.Text()), nil
+	}
+	return "", io.EOF
+}
+
 func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string) error {
+	return runClaudeWith(ctx, sess, agent, prompt, newStdinInputReader())
+}
+
+func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader) error {
 	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
 
-	agent = agent.WithPermissionHandler(makePermissionHandler())
+	agent = agent.WithPermissionHandler(makePermissionHandler(input))
 
 	var (
 		res claude.ParseResult
@@ -230,6 +258,17 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 		return err
 	}
 
+	// Structured signal: permission_denials in the result event is language-neutral.
+	// Takes priority over phrase detection.
+	if len(res.PermissionDenials) > 0 && sess.ClaudeSessionID != "" {
+		res = handleStructuredDenials(ctx, sess, agent, res, input)
+	} else if res.PermissionDenied && sess.ClaudeSessionID != "" {
+		// Phrase-based fallback for when permission_denials is empty but text matches.
+		res = handlePhrasePermission(ctx, sess, agent, res, input)
+	} else if res.DirRestricted && sess.ClaudeSessionID != "" {
+		res = handlePhraseDir(ctx, sess, agent, input)
+	}
+
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
 	if res.EndsWithQ {
 		sess.ForceState(session.StateClaudeWaiting)
@@ -239,13 +278,101 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 	return session.Save(sess)
 }
 
+// handleStructuredDenials handles permission_denials from the result event —
+// language-neutral, fires regardless of Claude's response language.
+// For each denied tool it shows the attempted command/input, then asks:
+//  1. allow the tool (adds to --allowedTools)
+//  2. allow a directory (adds to --add-dir, shown for Bash or file tools)
+func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader) claude.ParseResult {
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintf(os.Stdout, "%s Claude was blocked from using:\n", milkTag())
+
+	retryAgent := agent
+	changed := false
+
+	for _, d := range res.PermissionDenials {
+		fmt.Fprintf(os.Stdout, "  • %s", bold(d.ToolName))
+		if cmd, ok := d.ToolInput["command"].(string); ok {
+			fmt.Fprintf(os.Stdout, " → %s", dim(cmd))
+		} else if path, ok := d.ToolInput["path"].(string); ok {
+			fmt.Fprintf(os.Stdout, " → %s", dim(path))
+		}
+		fmt.Fprintln(os.Stdout)
+
+		yn, _ := input.readLine(fmt.Sprintf("    allow tool %s? [y/n] ", bold(d.ToolName)))
+		if strings.EqualFold(yn, "y") {
+			retryAgent = retryAgent.WithExtraAllowedTool(d.ToolName)
+			changed = true
+		}
+
+		dir, _ := input.readLine("    add directory access? (enter path or leave empty to skip): ")
+		if dir != "" {
+			retryAgent = retryAgent.WithExtraDir(dir)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return res
+	}
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permissions.", os.Stdout)
+	if err != nil {
+		return res
+	}
+	return retried
+}
+
+// handlePhrasePermission handles a tool permission denial detected via phrase scanning.
+// Asks the user y/n and retries via --resume with the tool added to allowed list.
+func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader) claude.ParseResult {
+	tool := res.DeniedTool
+	var prompt string
+	if tool != "" {
+		prompt = fmt.Sprintf("%s Claude needs permission to use %s. Allow? [y/n] ", milkTag(), bold(tool))
+	} else {
+		prompt = fmt.Sprintf("%s Claude needs a tool permission. Allow? [y/n] ", milkTag())
+	}
+	yn, _ := input.readLine(prompt)
+	if !strings.EqualFold(yn, "y") {
+		return res
+	}
+	var retryAgent *claude.Agent
+	if tool != "" {
+		retryAgent = agent.WithExtraAllowedTool(tool)
+	} else {
+		retryAgent = agent
+	}
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", os.Stdout)
+	if err != nil {
+		return res
+	}
+	return retried
+}
+
+func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader) claude.ParseResult {
+	dir, _ := input.readLine(fmt.Sprintf("%s Claude needs directory access. Enter path to allow (empty to skip): ", milkTag()))
+	if dir == "" {
+		return claude.ParseResult{}
+	}
+	retryAgent := agent.WithExtraDir(dir)
+	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), os.Stdout)
+	if err != nil {
+		return claude.ParseResult{}
+	}
+	return retried
+}
+
 // makePermissionHandler returns a PermissionHandler that asks the user
 // interactively via stdin for each control_request Claude emits.
-func makePermissionHandler() claude.PermissionHandler {
+func makePermissionHandler(input inputReader) claude.PermissionHandler {
 	return func(req claude.ControlRequest, stdinW io.Writer) {
-		fmt.Fprintln(os.Stdout) // newline after streaming output
+		fmt.Fprintln(os.Stdout)
 		printPermissionRequest(req)
-		if askYN(fmt.Sprintf("%s Allow? [y/n] ", milkTag())) {
+		yn, _ := input.readLine(fmt.Sprintf("%s Allow? [y/n] ", milkTag()))
+		if strings.EqualFold(yn, "y") {
 			claude.Allow(req.RequestID, stdinW)
 		} else {
 			claude.Deny(req.RequestID, stdinW)
@@ -269,25 +396,6 @@ func printPermissionRequest(req claude.ControlRequest) {
 	}
 }
 
-// askYN reads a single y/n byte from stdin. Returns true for y/Y.
-func askYN(prompt string) bool {
-	fmt.Fprint(os.Stdout, prompt)
-	buf := make([]byte, 1)
-	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
-			return false
-		}
-		switch buf[0] {
-		case 'y', 'Y':
-			fmt.Println("y")
-			return true
-		case 'n', 'N':
-			fmt.Println("n")
-			return false
-		}
-	}
-}
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
 // Claude turns are excluded: the local model should only see its own prior conversation.

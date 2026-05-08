@@ -15,7 +15,7 @@ func TestStream_ExtractsSessionID(t *testing.T) {
 		`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-abc123","result":"hi"}`,
 	)
 	var out strings.Builder
-	res, err := Stream(strings.NewReader(input), &out, nil, nil)
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestStream_WritesTextToOut(t *testing.T) {
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, err := Stream(strings.NewReader(input), &out, nil, nil)
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestStream_EndsWithQuestion(t *testing.T) {
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, _ := Stream(strings.NewReader(input), &out, nil, nil)
+	res, _ := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if !res.EndsWithQ {
 		t.Error("expected EndsWithQ=true for response ending with '?'")
 	}
@@ -67,7 +67,7 @@ func TestStream_NotEndsWithQuestion(t *testing.T) {
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, _ := Stream(strings.NewReader(input), &out, nil, nil)
+	res, _ := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if res.EndsWithQ {
 		t.Error("expected EndsWithQ=false for response not ending with '?'")
 	}
@@ -79,7 +79,7 @@ func TestStream_ErrorResult(t *testing.T) {
 		`{"type":"result","is_error":true,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, _ := Stream(strings.NewReader(input), &out, nil, nil)
+	res, _ := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if !res.IsError {
 		t.Error("expected IsError=true")
 	}
@@ -93,7 +93,7 @@ func TestStream_IgnoresMalformedLines(t *testing.T) {
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, err := Stream(strings.NewReader(input), &out, nil, nil)
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestStream_SkipsNonTextContentBlocks(t *testing.T) {
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
-	res, _ := Stream(strings.NewReader(input), &out, nil, nil)
+	res, _ := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
 	if strings.Contains(res.Text, "internal") {
 		t.Error("thinking block should not appear in text output")
 	}

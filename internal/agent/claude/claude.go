@@ -12,11 +12,13 @@ import (
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin               string          // path to claude binary, e.g. "claude"
-	skipPermissions   bool            // pass --dangerously-skip-permissions to the CLI
-	allowedTools      []string        // tools pre-approved via --allowedTools
-	addDirs           []string        // extra directories granted via --add-dir
-	permissionHandler PermissionHandler // nil → denyAllHandler
+	bin                   string            // path to claude binary, e.g. "claude"
+	skipPermissions       bool              // pass --dangerously-skip-permissions to the CLI
+	allowedTools          []string          // tools pre-approved via --allowedTools
+	addDirs               []string          // extra directories granted via --add-dir
+	permissionPhrases     []string          // phrases indicating tool permission denial
+	dirRestrictionPhrases []string          // phrases indicating directory restriction
+	permissionHandler     PermissionHandler // nil → denyAllHandler
 }
 
 func New(bin string) *Agent {
@@ -26,17 +28,35 @@ func New(bin string) *Agent {
 	return &Agent{bin: bin}
 }
 
-func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []string) *Agent {
+func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs, permissionPhrases, dirRestrictionPhrases []string) *Agent {
 	if bin == "" {
 		bin = "claude"
 	}
-	return &Agent{bin: bin, skipPermissions: skipPermissions, allowedTools: allowedTools, addDirs: addDirs}
+	return &Agent{
+		bin: bin, skipPermissions: skipPermissions,
+		allowedTools: allowedTools, addDirs: addDirs,
+		permissionPhrases: permissionPhrases, dirRestrictionPhrases: dirRestrictionPhrases,
+	}
 }
 
 // WithPermissionHandler returns a copy of the agent with the given handler.
 func (a *Agent) WithPermissionHandler(h PermissionHandler) *Agent {
 	c := *a
 	c.permissionHandler = h
+	return &c
+}
+
+// WithExtraAllowedTool returns a copy of the agent with the tool appended to the allowed list.
+func (a *Agent) WithExtraAllowedTool(tool string) *Agent {
+	c := *a
+	c.allowedTools = mergeUniq(a.allowedTools, []string{tool})
+	return &c
+}
+
+// WithExtraDir returns a copy of the agent with the directory appended to the add-dirs list.
+func (a *Agent) WithExtraDir(dir string) *Agent {
+	c := *a
+	c.addDirs = mergeUniq(a.addDirs, []string{dir})
 	return &c
 }
 
@@ -114,7 +134,12 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		return ParseResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 
-	res, parseErr := Stream(stdout, out, stdinPipe, a.permissionHandler)
+	res, parseErr := Stream(stdout, out, stdinPipe, StreamOpts{
+		PermissionPhrases:     a.permissionPhrases,
+		DirRestrictionPhrases: a.dirRestrictionPhrases,
+		AllowedTools:          a.allowedTools,
+		OnPermission:          a.permissionHandler,
+	})
 
 	// Close stdin after stream ends so Claude can exit cleanly.
 	stdinPipe.Close() //nolint:errcheck
