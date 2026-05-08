@@ -18,8 +18,11 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+const cmdEscalate = "/escalate"
+const cmdLocal = "/local"
+
 var slashCommands = []string{
-	"/escalate", "/local", "/new", "/drop", "/list", "/help", "/exit", "/quit",
+	cmdEscalate, cmdLocal, "/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
 func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
@@ -146,19 +149,81 @@ type interactiveState struct {
 	cfg           config.Config
 }
 
-// handleSlashCommand processes a /command input. Returns (exit, err).
-func handleSlashCommand(input string, st *interactiveState) (exit bool, err error) {
-	cmd, _, _ := strings.Cut(input, " ")
+// promptFriendly is the set of slash commands that can be combined with a prompt.
+var promptFriendly = map[string]bool{
+	cmdEscalate: true,
+	cmdLocal:    true,
+}
+
+// extractSlashCommand scans input for a known slash command token anywhere in
+// the line. Returns the command, the remaining text with the token stripped,
+// and whether a command was found.
+func extractSlashCommand(input string) (cmd, rest string, found bool) {
+	words := strings.Fields(input)
+	var keep []string
+	for _, w := range words {
+		if !found && strings.HasPrefix(w, "/") {
+			for _, known := range slashCommands {
+				if w == known {
+					cmd = w
+					found = true
+					break
+				}
+			}
+			if !found {
+				keep = append(keep, w)
+			}
+		} else {
+			keep = append(keep, w)
+		}
+	}
+	return cmd, strings.Join(keep, " "), found
+}
+
+// handleSlashCommand processes a slash command with optional surrounding prompt text.
+// Returns (exit, prompt-to-dispatch): exit=true means quit the loop,
+// prompt is non-empty when the command should be followed by an immediate dispatch.
+func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, dispatch string) {
 	switch cmd {
 	case "/exit", "/quit":
-		return true, nil
+		return true, ""
+	case "/help", "/new", "/drop", "/list":
+		execNonPromptCmd(cmd, prompt, st)
+	case cmdEscalate:
+		st.forceEscalate = true
+		st.forceLocal = false
+		if prompt == "" {
+			fmt.Println(milkTag() + " next turn: " + blue("Claude"))
+		}
+		return false, prompt
+	case cmdLocal:
+		st.forceLocal = true
+		st.forceEscalate = false
+		if prompt == "" {
+			fmt.Println(milkTag() + " next turn: " + green("local model"))
+		}
+		return false, prompt
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q — type /help\n", cmd)
+	}
+	return false, ""
+}
+
+// execNonPromptCmd runs a command that has no prompt semantics.
+// Warns if the user included extra text alongside the command.
+func execNonPromptCmd(cmd, prompt string, st *interactiveState) {
+	if prompt != "" {
+		fmt.Fprintf(os.Stderr, "%s %s does not accept a prompt — text ignored\n", milkTag(), cmd)
+	}
+	switch cmd {
 	case "/help":
 		fmt.Println(interactiveHelp)
 	case "/new":
+		var err error
 		st.sess, err = session.New(st.cwd, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
-			return false, nil
+			return
 		}
 		fmt.Printf("%s new session %s\n", milkTag(), st.sess.ID[:8])
 	case "/drop":
@@ -169,18 +234,7 @@ func handleSlashCommand(input string, st *interactiveState) (exit bool, err erro
 		if err := runList(false); err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
-	case "/escalate":
-		st.forceEscalate = true
-		st.forceLocal = false
-		fmt.Println(milkTag() + " next turn: " + blue("Claude"))
-	case "/local":
-		st.forceLocal = true
-		st.forceEscalate = false
-		fmt.Println(milkTag() + " next turn: " + green("local model"))
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q — type /help\n", cmd)
 	}
-	return false, nil
 }
 
 // dropAndNewSession drops the current session and creates a fresh one.
@@ -309,6 +363,8 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
+	histPath, _ := config.HistoryPath(cwd) // best-effort; empty string disables persistence
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          promptLabel(sess, false, false),
 		AutoComplete:    &milkCompleter{cwd: cwd},
@@ -316,6 +372,7 @@ func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialF
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
 		HistoryLimit:    500,
+		HistoryFile:     histPath,
 	})
 	if err != nil {
 		return fmt.Errorf("readline init: %w", err)
@@ -348,9 +405,15 @@ func runInteractiveStep(ctx context.Context, rl *readline.Instance, st *interact
 		return false
 	}
 
-	if strings.HasPrefix(input, "/") {
-		exit, _ := handleSlashCommand(input, st)
-		return exit
+	if cmd, rest, found := extractSlashCommand(input); found {
+		exit, prompt := handleSlashCommand(cmd, rest, st)
+		if exit {
+			return true
+		}
+		if prompt != "" {
+			dispatchTurn(ctx, rl, st, rtr, agents, prompt)
+		}
+		return false
 	}
 
 	dispatchTurn(ctx, rl, st, rtr, agents, input)

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -80,6 +82,21 @@ func Dir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".milk"), nil
+}
+
+// HistoryPath returns the readline history file path for the given cwd.
+// Each working directory gets its own file so prompts don't mix across projects.
+func HistoryPath(cwd string) (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	histDir := filepath.Join(dir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		return "", err
+	}
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(cwd))) //nolint:gosec
+	return filepath.Join(histDir, hash+".txt"), nil
 }
 
 func Load() (Config, error) {
