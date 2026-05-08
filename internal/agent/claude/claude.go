@@ -12,10 +12,11 @@ import (
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin             string   // path to claude binary, e.g. "claude"
-	skipPermissions bool     // pass --dangerously-skip-permissions to the CLI
-	allowedTools    []string // tools pre-approved via --allowedTools
-	addDirs         []string // extra directories granted via --add-dir
+	bin               string          // path to claude binary, e.g. "claude"
+	skipPermissions   bool            // pass --dangerously-skip-permissions to the CLI
+	allowedTools      []string        // tools pre-approved via --allowedTools
+	addDirs           []string        // extra directories granted via --add-dir
+	permissionHandler PermissionHandler // nil → denyAllHandler
 }
 
 func New(bin string) *Agent {
@@ -32,40 +33,20 @@ func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []strin
 	return &Agent{bin: bin, skipPermissions: skipPermissions, allowedTools: allowedTools, addDirs: addDirs}
 }
 
-// WithExtraTools returns a copy of the agent with additional tools appended to
-// the allowed list. Used by the reactive permission retry path.
-func (a *Agent) WithExtraTools(extra ...string) *Agent {
-	return &Agent{
-		bin: a.bin, skipPermissions: a.skipPermissions, addDirs: a.addDirs,
-		allowedTools: mergeUniq(a.allowedTools, extra),
-	}
+// WithPermissionHandler returns a copy of the agent with the given handler.
+func (a *Agent) WithPermissionHandler(h PermissionHandler) *Agent {
+	c := *a
+	c.permissionHandler = h
+	return &c
 }
 
-// WithExtraDirs returns a copy of the agent with additional directories added.
-// Used by the reactive directory-restriction retry path.
-func (a *Agent) WithExtraDirs(extra ...string) *Agent {
-	return &Agent{
-		bin: a.bin, skipPermissions: a.skipPermissions, allowedTools: a.allowedTools,
-		addDirs: mergeUniq(a.addDirs, extra),
+// Ping checks whether the claude binary is available.
+func (a *Agent) Ping() error {
+	cmd := exec.Command(a.bin, "--version")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude binary %q not available: %w", a.bin, err)
 	}
-}
-
-func mergeUniq(base, extra []string) []string {
-	out := make([]string, len(base), len(base)+len(extra))
-	copy(out, base)
-	for _, v := range extra {
-		found := false
-		for _, e := range out {
-			if e == v {
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, v)
-		}
-	}
-	return out
+	return nil
 }
 
 // RunFirst runs the first turn of a new Claude escalation session.
@@ -93,20 +74,13 @@ func (a *Agent) RunResume(ctx context.Context, claudeSessionID, prompt string, o
 	return a.run(ctx, args, out)
 }
 
-// Ping checks whether the claude binary is available.
-func (a *Agent) Ping() error {
-	cmd := exec.Command(a.bin, "--version")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("claude binary %q not available: %w", a.bin, err)
-	}
-	return nil
-}
-
-// run builds the pipe args and delegates to runPipe.
+// run builds the full arg list and delegates to runPipe.
 func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	var prefix []string
 	if a.skipPermissions {
 		prefix = append(prefix, "--dangerously-skip-permissions")
+	} else {
+		prefix = append(prefix, "--permission-prompt-tool", "stdio")
 	}
 	if len(a.allowedTools) > 0 {
 		prefix = append(prefix, "--allowedTools", strings.Join(a.allowedTools, ","))
@@ -120,9 +94,14 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 }
 
 // runPipe runs the claude CLI and streams structured JSON output.
+// Claude's stdin is connected to a pipe so control_response messages can be sent.
 func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	cmd := newCmd(ctx, a.bin, args)
-	cmd.Stdin = nil // disconnect TTY stdin so Claude doesn't launch its interactive TUI
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return ParseResult{}, fmt.Errorf("creating stdin pipe: %w", err)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -135,7 +114,10 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		return ParseResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 
-	res, parseErr := Stream(stdout, out, a.allowedTools)
+	res, parseErr := Stream(stdout, out, stdinPipe, a.permissionHandler)
+
+	// Close stdin after stream ends so Claude can exit cleanly.
+	stdinPipe.Close() //nolint:errcheck
 
 	if err := cmd.Wait(); err != nil {
 		if stderrBuf.Len() > 0 {
@@ -157,4 +139,22 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 // newCmd builds an exec.Cmd for the given binary and args.
 func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
+}
+
+func mergeUniq(base, extra []string) []string {
+	out := make([]string, len(base), len(base)+len(extra))
+	copy(out, base)
+	for _, v := range extra {
+		found := false
+		for _, e := range out {
+			if e == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, v)
+		}
+	}
+	return out
 }

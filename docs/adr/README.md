@@ -12,3 +12,4 @@
 * [10. Interactive REPL Mode](0010-interactive-repl-mode.md)
 * [11. Claude Pipe-Only Mode with Stdin Disconnect](0011-claude-pipe-only-mode.md)
 * [12. Claude Tool and Directory Permission Handling](0012-claude-permission-handling.md)
+* [13. Structured Permission Prompts via --permission-prompt-tool stdio](0013-structured-permission-prompts.md)
