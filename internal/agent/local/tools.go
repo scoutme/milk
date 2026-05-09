@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/scoutme/milk/internal/session"
 )
 
 type toolResult struct {
@@ -137,6 +139,18 @@ func schemas() []map[string]any {
 		{
 			"type": "function",
 			"function": map[string]any{
+				"name":        "get_session_context",
+				"description": "Return the shared conversation history for this session, including turns handled by both the local model and Claude. Call this when the user refers to something from a previous turn without enough context (e.g. 'that file', 'the error we saw', 'what you said before').",
+				"parameters": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+					"required":   []string{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
 				"name":        "escalate_to_claude",
 				"description": "Signal that this task exceeds local model capabilities and should be handled by Claude.",
 				"parameters": map[string]any{
@@ -151,7 +165,7 @@ func schemas() []map[string]any {
 	}
 }
 
-func dispatchTool(ctx context.Context, name, argsJSON string) (string, bool) {
+func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Session) (string, bool) {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return toolResult{Error: "invalid arguments: " + err.Error()}.String(), false
@@ -172,10 +186,50 @@ func dispatchTool(ctx context.Context, name, argsJSON string) (string, bool) {
 		return runListDir(args)
 	case "http_get":
 		return runHTTPGet(ctx, args)
+	case "get_session_context":
+		return runGetSessionContext(sess), false
 	case "escalate_to_claude":
 		return "", true // caller checks the bool
 	default:
 		return toolResult{Error: "unknown tool: " + name}.String(), false
+	}
+}
+
+// runGetSessionContext formats the full session history (both agents) as a
+// readable summary. Truncates long tool results to keep the output compact.
+func runGetSessionContext(sess *session.Session) string {
+	if sess == nil || len(sess.History) == 0 {
+		return toolResult{Output: "(no session history yet)"}.String()
+	}
+	var b strings.Builder
+	for _, t := range sess.History {
+		appendTurn(&b, t)
+	}
+	return toolResult{Output: b.String()}.String()
+}
+
+func appendTurn(b *strings.Builder, t session.Turn) {
+	switch t.Role {
+	case session.RoleUser:
+		fmt.Fprintf(b, "User: %s\n", t.Content)
+	case session.RoleAssistant:
+		appendAssistantTurn(b, t)
+	case session.RoleToolResult:
+		content := t.Content
+		if len(content) > 300 {
+			content = content[:300] + "... (truncated)"
+		}
+		fmt.Fprintf(b, "[tool result] %s\n", content)
+	}
+}
+
+func appendAssistantTurn(b *strings.Builder, t session.Turn) {
+	if len(t.ToolCalls) > 0 {
+		for _, tc := range t.ToolCalls {
+			fmt.Fprintf(b, "[%s tool call: %s] %s\n", t.Agent, tc.Name, tc.Arguments)
+		}
+	} else {
+		fmt.Fprintf(b, "%s: %s\n", t.Agent, t.Content)
 	}
 }
 

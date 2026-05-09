@@ -1,28 +1,20 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/chzyer/readline"
-
-	"github.com/scoutme/milk/internal/agent/claude"
-	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
-	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
 
 const cmdEscalate = "/escalate"
 const cmdLocal = "/local"
+const cmdPaste = "/paste"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, "/new", "/drop", "/list", "/help", "/exit", "/quit",
+	cmdEscalate, cmdLocal, cmdPaste, "/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
 func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
@@ -42,90 +34,6 @@ func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
 	}
 }
 
-// milkPainter colorizes /commands and @paths as the user types.
-type milkPainter struct{}
-
-func (p *milkPainter) Paint(line []rune, _ int) []rune {
-	if !isTTY {
-		return line
-	}
-	s := string(line)
-	var out strings.Builder
-	for _, token := range strings.Fields(s) {
-		switch {
-		case strings.HasPrefix(token, "/"):
-			out.WriteString(ansiYellow + token + ansiReset)
-		case strings.HasPrefix(token, "@"):
-			out.WriteString(ansiDim + token + ansiReset)
-		default:
-			out.WriteString(token)
-		}
-		out.WriteByte(' ')
-	}
-	result := strings.TrimRight(out.String(), " ")
-	// Preserve trailing space if the original line had one
-	if len(s) > 0 && s[len(s)-1] == ' ' {
-		result += " "
-	}
-	return []rune(result)
-}
-
-// milkCompleter implements readline.AutoCompleter for / commands and @ file paths.
-type milkCompleter struct {
-	cwd string
-}
-
-func (c *milkCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	word := lastWord(string(line[:pos]))
-	switch {
-	case strings.HasPrefix(word, "/"):
-		return completeSlash(word), len([]rune(word))
-	case strings.HasPrefix(word, "@"):
-		return c.completePath(word), len([]rune(word))
-	}
-	return nil, 0
-}
-
-func completeSlash(word string) [][]rune {
-	var out [][]rune
-	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd, word) {
-			out = append(out, []rune(cmd[len(word):]))
-		}
-	}
-	return out
-}
-
-func (c *milkCompleter) completePath(word string) [][]rune {
-	partial := word[1:]
-	dir, prefix := filepath.Split(partial)
-	entries, err := os.ReadDir(filepath.Join(c.cwd, dir))
-	if err != nil {
-		return nil
-	}
-	var out [][]rune
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		candidate := "@" + dir + name
-		if e.IsDir() {
-			candidate += "/"
-		}
-		out = append(out, []rune(candidate[len(word):]))
-	}
-	return out
-}
-
-// lastWord returns the last whitespace-delimited token in s.
-func lastWord(s string) string {
-	if i := strings.LastIndexAny(s, " \t"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
-}
-
 const interactiveHelp = `Slash commands:
   /escalate   force next turn to Claude
   /local      force next turn to local model
@@ -135,8 +43,12 @@ const interactiveHelp = `Slash commands:
   /help       show this help
   /exit       quit
 
+Multi-line input:
+  Shift+Enter   insert a newline (compose multi-line prompts)
+  Paste         multi-line pastes are sent as a single block automatically
+
 @ prefix:
-  @path       reference a file path (Tab-completes from cwd)`
+  @path       reference a file path`
 
 const errFmt = "error: %v\n"
 
@@ -147,12 +59,6 @@ type interactiveState struct {
 	forceLocal    bool
 	cwd           string
 	cfg           config.Config
-}
-
-// promptFriendly is the set of slash commands that can be combined with a prompt.
-var promptFriendly = map[string]bool{
-	cmdEscalate: true,
-	cmdLocal:    true,
 }
 
 // extractSlashCommand scans input for a known slash command token anywhere in
@@ -180,6 +86,12 @@ func extractSlashCommand(input string) (cmd, rest string, found bool) {
 	return cmd, strings.Join(keep, " "), found
 }
 
+// promptFriendly is the set of slash commands that can be combined with a prompt.
+var promptFriendly = map[string]bool{
+	cmdEscalate: true,
+	cmdLocal:    true,
+}
+
 // handleSlashCommand processes a slash command with optional surrounding prompt text.
 // Returns (exit, prompt-to-dispatch): exit=true means quit the loop,
 // prompt is non-empty when the command should be followed by an immediate dispatch.
@@ -187,7 +99,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	switch cmd {
 	case "/exit", "/quit":
 		return true, ""
-	case "/help", "/new", "/drop", "/list":
+	case "/help", "/new", "/drop", "/list", cmdPaste:
 		execNonPromptCmd(cmd, prompt, st)
 	case cmdEscalate:
 		st.forceEscalate = true
@@ -212,7 +124,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 // execNonPromptCmd runs a command that has no prompt semantics.
 // Warns if the user included extra text alongside the command.
 func execNonPromptCmd(cmd, prompt string, st *interactiveState) {
-	if prompt != "" {
+	if prompt != "" && !promptFriendly[cmd] {
 		fmt.Fprintf(os.Stderr, "%s %s does not accept a prompt — text ignored\n", milkTag(), cmd)
 	}
 	switch cmd {
@@ -234,6 +146,8 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) {
 		if err := runList(false); err != nil {
 			fmt.Fprintf(os.Stderr, errFmt, err)
 		}
+	case cmdPaste:
+		fmt.Println(milkTag() + " hint: paste multi-line text directly, or use Shift+Enter to compose multi-line input")
 	}
 }
 
@@ -253,180 +167,9 @@ func dropAndNewSession(st *interactiveState) error {
 	return nil
 }
 
-// dispatchAgents holds the agents and their availability for dispatchTurn.
-type dispatchAgents struct {
-	local       *local.Agent
-	claude      *claude.Agent
-	localAvail  bool
-	claudeAvail bool
-}
-
-// dispatchTurn routes a regular prompt to the appropriate agent.
-// rl is used to suspend/restore readline around Claude PTY calls.
-func dispatchTurn(
-	ctx context.Context,
-	rl *readline.Instance,
-	st *interactiveState,
-	rtr *router.Router,
-	agents dispatchAgents,
-	input string,
-) {
-	localAgent := agents.local
-	claudeAgent := agents.claude
-	localAvail := agents.localAvail
-	claudeAvail := agents.claudeAvail
-	turnCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	decision, routeErr := rtr.Route(turnCtx, st.sess, input, st.forceEscalate, st.forceLocal)
-	if routeErr != nil {
-		fmt.Fprintf(os.Stderr, "routing error: %v\n", routeErr)
-		return
-	}
-	st.forceEscalate = false
-	st.forceLocal = false
-
-	target := decision.Target
-	if target == router.TargetLocal && !localAvail {
-		target = router.TargetClaude
-	}
-	if target == router.TargetClaude && !claudeAvail {
-		target = router.TargetLocal
-	}
-
-	switch target {
-	case router.TargetLocal:
-		if err := runLocal(turnCtx, st.cfg, st.sess, localAgent, input); err != nil {
-			fmt.Fprintf(os.Stderr, errFmt, err)
-		}
-	case router.TargetClaude:
-		rl.Clean()
-		if err := runClaudeWith(turnCtx, st.sess, claudeAgent, input, &readlineInputReader{rl: rl}); err != nil {
-			fmt.Fprintf(os.Stderr, errFmt, err)
-		}
-		rl.Refresh()
-	}
-	fmt.Println()
-}
-
-// readlineInputReader implements inputReader using a readline instance.
-// Prompts are printed directly; readline.Readline() reads a full line so
-// there's no leftover bytes in the buffer to confuse the next prompt cycle.
-type readlineInputReader struct {
-	rl *readline.Instance
-}
-
-func (r *readlineInputReader) readLine(prompt string) (string, error) {
-	r.rl.SetPrompt(prompt)
-	line, err := r.rl.Readline()
-	return strings.TrimSpace(line), err
-}
-
 func loadSession(cwd string, flagNew bool, flagSession string) (*session.Session, error) {
 	if flagNew {
 		return session.New(cwd, flagSession)
 	}
 	return session.Resume(cwd, flagSession)
-}
-
-func handlePromptError(err error, st *interactiveState) (stop bool) {
-	if err == readline.ErrInterrupt {
-		if st.forceEscalate || st.forceLocal {
-			st.forceEscalate = false
-			st.forceLocal = false
-			fmt.Println(milkTag() + " mode cleared")
-			return false
-		}
-		fmt.Println()
-		return true
-	}
-	// io.EOF = Ctrl-D, or any other error: exit cleanly
-	fmt.Println()
-	return true
-}
-
-func runInteractive(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string) error {
-	sess, err := loadSession(cwd, initialFlagNew, initialFlagSession)
-	if err != nil {
-		return fmt.Errorf("loading session: %w", err)
-	}
-
-	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
-
-	ctx := context.Background()
-	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
-	if err != nil {
-		return err
-	}
-
-	var routeLocalAgent *local.Agent
-	if localAvail {
-		routeLocalAgent = localAgent
-	}
-	rtr := router.New(cfg, routeLocalAgent)
-
-	fmt.Printf("%s interactive mode — session %s  (type /help for commands)\n", milkTag(), sess.ID[:8])
-	if cfg.DangerouslySkipPermissions {
-		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — Claude will auto-approve all tool uses without prompting"))
-	}
-
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg}
-	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
-
-	histPath, _ := config.HistoryPath(cwd) // best-effort; empty string disables persistence
-
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          promptLabel(sess, false, false),
-		AutoComplete:    &milkCompleter{cwd: cwd},
-		Painter:         &milkPainter{},
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		HistoryLimit:    500,
-		HistoryFile:     histPath,
-	})
-	if err != nil {
-		return fmt.Errorf("readline init: %w", err)
-	}
-	defer rl.Close()
-
-	for {
-		if stop := runInteractiveStep(ctx, rl, st, rtr, agents); stop {
-			return nil
-		}
-	}
-}
-
-// runInteractiveStep handles a single prompt/response cycle.
-// Returns true if the interactive loop should stop.
-func runInteractiveStep(ctx context.Context, rl *readline.Instance, st *interactiveState, rtr *router.Router, agents dispatchAgents) bool {
-	rl.SetPrompt(promptLabel(st.sess, st.forceEscalate, st.forceLocal))
-	input, err := rl.Readline()
-	fmt.Println()
-	if err != nil {
-		if err == io.EOF {
-			fmt.Println()
-			return true
-		}
-		return handlePromptError(err, st)
-	}
-
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return false
-	}
-
-	if cmd, rest, found := extractSlashCommand(input); found {
-		exit, prompt := handleSlashCommand(cmd, rest, st)
-		if exit {
-			return true
-		}
-		if prompt != "" {
-			dispatchTurn(ctx, rl, st, rtr, agents, prompt)
-		}
-		return false
-	}
-
-	dispatchTurn(ctx, rl, st, rtr, agents, input)
-	return false
 }

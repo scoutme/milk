@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/scoutme/milk/internal/session"
 )
 
 const maxToolIterations = 10
@@ -76,18 +78,19 @@ func New(baseURL, model string) *Agent {
 	}
 }
 
-const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, escalate_to_claude.
+const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, escalate_to_claude.
 
 Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
+- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context first to retrieve the shared conversation history before responding.
 - Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
 
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
-func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer) ([]Message, error) {
+func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer, sess *session.Session) ([]Message, error) {
 	if history == nil {
 		history = []Message{}
 	}
@@ -121,7 +124,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 		// Execute each tool call
 		for _, tc := range toolCalls {
-			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments)
+			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess)
 			if escalate {
 				var escalateArgs struct {
 					Reason string `json:"reason"`
