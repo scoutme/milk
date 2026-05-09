@@ -396,7 +396,6 @@ func printPermissionRequest(req claude.ControlRequest) {
 	}
 }
 
-
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
 // Claude turns are excluded: the local model should only see its own prior conversation.
 func sessionToMessages(sess *session.Session) []local.Message {

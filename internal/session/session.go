@@ -27,8 +27,8 @@ const (
 )
 
 type ToolCall struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
 
@@ -41,14 +41,14 @@ type Turn struct {
 }
 
 type Session struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name,omitempty"`
-	CWD            string    `json:"cwd"`
-	CreatedAt      time.Time `json:"created_at"`
-	LastUsed       time.Time `json:"last_used"`
-	State          State     `json:"state"`
-	ClaudeSessionID string   `json:"claude_session_id,omitempty"`
-	History        []Turn    `json:"history"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name,omitempty"`
+	CWD             string    `json:"cwd"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastUsed        time.Time `json:"last_used"`
+	State           State     `json:"state"`
+	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
+	History         []Turn    `json:"history"`
 }
 
 func (s *Session) AddTurn(t Turn) {

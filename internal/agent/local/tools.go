@@ -129,8 +129,8 @@ func schemas() []map[string]any {
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"url":          map[string]any{"type": "string", "description": "URL to fetch"},
-						"max_bytes":    map[string]any{"type": "integer", "description": "Maximum response bytes to return (default 8192)"},
+						"url":       map[string]any{"type": "string", "description": "URL to fetch"},
+						"max_bytes": map[string]any{"type": "integer", "description": "Maximum response bytes to return (default 8192)"},
 					},
 					"required": []string{"url"},
 				},

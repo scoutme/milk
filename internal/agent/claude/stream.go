@@ -28,16 +28,16 @@ type assistantMessage struct {
 
 // controlRequestBody is the inner "request" object in a control_request event.
 type controlRequestBody struct {
-	Subtype            string         `json:"subtype"`
-	ToolName           string         `json:"tool_name"`
-	ToolUseID          string         `json:"tool_use_id"`
-	Input              map[string]any `json:"input"`
-	DisplayName        string         `json:"display_name"`
-	Title              string         `json:"title"`
-	Description        string         `json:"description"`
-	BlockedPath        string         `json:"blocked_path"`
-	DecisionReasonType string         `json:"decision_reason_type"`
-	ClassifierApprovable *bool        `json:"classifier_approvable"`
+	Subtype              string         `json:"subtype"`
+	ToolName             string         `json:"tool_name"`
+	ToolUseID            string         `json:"tool_use_id"`
+	Input                map[string]any `json:"input"`
+	DisplayName          string         `json:"display_name"`
+	Title                string         `json:"title"`
+	Description          string         `json:"description"`
+	BlockedPath          string         `json:"blocked_path"`
+	DecisionReasonType   string         `json:"decision_reason_type"`
+	ClassifierApprovable *bool          `json:"classifier_approvable"`
 }
 
 // ControlRequest is the structured permission request emitted by Claude when
@@ -75,7 +75,7 @@ type PermissionDenialRecord struct {
 type ParseResult struct {
 	SessionID         string
 	Text              string
-	EndsWithQ         bool   // true if the final text ends with a question mark
+	EndsWithQ         bool // true if the final text ends with a question mark
 	IsError           bool
 	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
 	// Reactive phrase detection — populated when control_request is not available.

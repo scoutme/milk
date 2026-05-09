@@ -70,8 +70,8 @@ func parseGemmaMatch(name, rawArgs string) (toolCall, bool) {
 		return toolCall{}, false
 	}
 	return toolCall{
-		ID:   uuid.New().String(),
-		Type: "function",
+		ID:       uuid.New().String(),
+		Type:     "function",
 		Function: toolCallFunction{Name: name, Arguments: string(argsJSON)},
 	}, true
 }

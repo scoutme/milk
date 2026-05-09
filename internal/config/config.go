@@ -47,9 +47,9 @@ type Config struct {
 	AddDirs                    []string `json:"add_dirs"`
 	// PermissionPhrases and DirRestrictionPhrases are merged with built-in
 	// defaults (EN + IT). Add extra phrases here for other languages.
-	PermissionPhrases    []string `json:"permission_phrases"`
+	PermissionPhrases     []string `json:"permission_phrases"`
 	DirRestrictionPhrases []string `json:"dir_restriction_phrases"`
-	Rules                Rules    `json:"rules"`
+	Rules                 Rules    `json:"rules"`
 }
 
 func defaults() Config {
