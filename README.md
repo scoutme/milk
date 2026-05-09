@@ -2,6 +2,20 @@
 
 Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Gemma 4 via llama.cpp) and Claude Code, maintaining session state across turns and promoting context on escalation.
 
+## Installation
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+```
+
+Requires Go 1.21+ and Git. Installs the `milk` binary to `~/.local/bin/milk`.
+
+To install a specific version:
+
+```sh
+MILK_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+```
+
 ## How it works
 
 Each prompt is routed through a decision chain:
