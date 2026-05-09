@@ -1,0 +1,51 @@
+---
+version: '3'
+
+vars:
+  BIN: ~/.local/bin/milk
+  CMD: ./cmd/milk
+
+tasks:
+  default:
+    cmds:
+      - task -l
+    silent: true
+
+  fmt:
+    desc: Format source code
+    cmds:
+      - find . -name '*.go' | grep -v vendor | xargs gofmt -s -w
+
+  build:
+    desc: Compile and install binary to {{.BIN}}
+    cmds:
+      - go build -o {{.BIN}} {{.CMD}}
+    deps:
+      - fmt
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+    deps:
+      - fmt
+
+  run:
+    desc: Build and start milk in interactive mode
+    cmds:
+      - '{{.BIN}}'
+    deps:
+      - build
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  ci:
+    desc: fmt + vet + test + build
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: test
+      - task: build
