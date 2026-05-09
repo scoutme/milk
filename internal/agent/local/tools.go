@@ -140,11 +140,15 @@ func schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "get_session_context",
-				"description": "Return the shared conversation history for this session, including turns handled by both the local model and Claude. Call this when the user refers to something from a previous turn without enough context (e.g. 'that file', 'the error we saw', 'what you said before').",
+				"description": "Return shared conversation history for this session (both agents). Use filters to avoid retrieving more than needed. Prefer last_n: 5 for recent context, pattern for a specific fact, agent to scope to one agent's turns.",
 				"parameters": map[string]any{
-					"type":       "object",
-					"properties": map[string]any{},
-					"required":   []string{},
+					"type": "object",
+					"properties": map[string]any{
+						"last_n":  map[string]any{"type": "integer", "description": "Return only the last N turns. Omit to return all."},
+						"pattern": map[string]any{"type": "string", "description": "Case-insensitive substring filter — only turns whose content contains this string are returned."},
+						"agent":   map[string]any{"type": "string", "enum": []string{"local", "claude"}, "description": "Restrict to turns from a specific agent. Omit for both."},
+					},
+					"required": []string{},
 				},
 			},
 		},
@@ -187,7 +191,7 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 	case "http_get":
 		return runHTTPGet(ctx, args)
 	case "get_session_context":
-		return runGetSessionContext(sess), false
+		return runGetSessionContext(sess, args), false
 	case "escalate_to_claude":
 		return "", true // caller checks the bool
 	default:
@@ -195,17 +199,65 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 	}
 }
 
-// runGetSessionContext formats the full session history (both agents) as a
-// readable summary. Truncates long tool results to keep the output compact.
-func runGetSessionContext(sess *session.Session) string {
+// runGetSessionContext formats session history with optional filters:
+// last_n, pattern (substring), agent ("local"|"claude").
+func runGetSessionContext(sess *session.Session, args map[string]any) string {
 	if sess == nil || len(sess.History) == 0 {
 		return toolResult{Output: "(no session history yet)"}.String()
 	}
+	turns := applySessionFilters(sess.History, args)
+	if len(turns) == 0 {
+		return toolResult{Output: "(no matching turns)"}.String()
+	}
 	var b strings.Builder
-	for _, t := range sess.History {
+	for _, t := range turns {
 		appendTurn(&b, t)
 	}
 	return toolResult{Output: b.String()}.String()
+}
+
+func applySessionFilters(turns []session.Turn, args map[string]any) []session.Turn {
+	if agent, _ := args["agent"].(string); agent != "" {
+		turns = filterByAgent(turns, agent)
+	}
+	if lastN := intArg(args, "last_n"); lastN > 0 && lastN < len(turns) {
+		turns = turns[len(turns)-lastN:]
+	}
+	if pattern, _ := args["pattern"].(string); pattern != "" {
+		turns = filterByPattern(turns, strings.ToLower(pattern))
+	}
+	return turns
+}
+
+func filterByAgent(turns []session.Turn, agent string) []session.Turn {
+	out := turns[:0:0]
+	for _, t := range turns {
+		if string(t.Agent) == agent || t.Role == session.RoleUser {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func filterByPattern(turns []session.Turn, patternLower string) []session.Turn {
+	out := turns[:0:0]
+	for _, t := range turns {
+		if strings.Contains(strings.ToLower(t.Content), patternLower) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func intArg(args map[string]any, key string) int {
+	v, ok := args[key]
+	if !ok {
+		return 0
+	}
+	if n, ok := v.(float64); ok {
+		return int(n)
+	}
+	return 0
 }
 
 func appendTurn(b *strings.Builder, t session.Turn) {

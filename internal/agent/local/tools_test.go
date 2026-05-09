@@ -160,6 +160,60 @@ func TestGetSessionContext_WithHistory(t *testing.T) {
 	}
 }
 
+func TestGetSessionContext_LastN(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "first"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "second"})
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "third"})
+
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"last_n":1}`, sess)
+	if strings.Contains(result, "first") {
+		t.Error("last_n:1 should exclude earlier turns")
+	}
+	if !strings.Contains(result, "third") {
+		t.Errorf("expected last turn in result, got %q", result)
+	}
+}
+
+func TestGetSessionContext_Pattern(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "needle in a haystack"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "unrelated response"})
+
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"pattern":"needle"}`, sess)
+	if !strings.Contains(result, "needle") {
+		t.Errorf("expected matching turn, got %q", result)
+	}
+	if strings.Contains(result, "unrelated") {
+		t.Error("non-matching turn should be excluded")
+	}
+}
+
+func TestGetSessionContext_AgentFilter(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "question"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "local answer"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: "claude answer"})
+
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"agent":"claude"}`, sess)
+	if !strings.Contains(result, "claude answer") {
+		t.Errorf("expected claude turn, got %q", result)
+	}
+	if strings.Contains(result, "local answer") {
+		t.Error("local turn should be excluded when agent=claude")
+	}
+}
+
+func TestGetSessionContext_NoMatch(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "something"})
+
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"pattern":"xyzzy"}`, sess)
+	if !strings.Contains(result, "no matching turns") {
+		t.Errorf("expected no-match message, got %q", result)
+	}
+}
+
 func TestUnknownTool(t *testing.T) {
 	result, escalate := dispatchTool(context.Background(), "nonexistent", `{}`, nil)
 	if escalate {

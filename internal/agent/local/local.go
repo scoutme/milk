@@ -84,7 +84,7 @@ Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
-- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context first to retrieve the shared conversation history before responding.
+- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "claude" to see only Claude's prior turns. Only omit all filters when you genuinely need the full history.
 - Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
 
 // Run executes a prompt with the given conversation history, streaming tokens
