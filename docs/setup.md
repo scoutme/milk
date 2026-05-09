@@ -156,8 +156,20 @@ Expected: a `tool_calls` array with `"name": "bash"`. If you see the call inside
 ### Step 6 — Build and verify milk
 
 ```sh
-go build -o milk ./cmd/milk
+task build:local   # builds ./milk in the current directory
 ./milk config
+```
+
+Or to install directly to `~/.local/bin`:
+
+```sh
+task build
+```
+
+A custom destination is also supported:
+
+```sh
+task build DEST=/usr/local/bin/milk
 ```
 
 Expected output:
@@ -178,7 +190,7 @@ escalate_keywords:     [architect refactor entire design explain why]
 ### Automated tests (no dependencies)
 
 ```sh
-go test ./...
+task test
 ```
 
 All tests run without llama.cpp or claude. They use temp directories and mock readers.

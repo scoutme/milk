@@ -17,11 +17,20 @@ tasks:
       - find . -name '*.go' | grep -v vendor | xargs gofmt -s -w
 
   build:
-    desc: Compile and install binary to {{.BIN}}
+    desc: Compile and install binary to DEST (default {{.BIN}})
+    vars:
+      DEST: '{{default .BIN .DEST}}'
     cmds:
-      - go build -o {{.BIN}} {{.CMD}}
+      - go build -o {{.DEST}} {{.CMD}}
     deps:
       - fmt
+
+  build:local:
+    desc: Compile binary into current directory
+    cmds:
+      - task: build
+        vars:
+          DEST: ./milk
 
   test:
     desc: Run all tests
