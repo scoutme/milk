@@ -82,7 +82,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	if prompt == "" {
-		return runInteractive(cfg, cwd, flagNew, flagSession)
+		return runREPL(cfg, cwd, flagNew, flagSession)
 	}
 
 	sess, err := loadSessionForRun(cwd)
@@ -168,7 +168,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 
 	sess.ForceState(session.StateLocal)
 
-	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout)
+	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout, sess)
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			fmt.Fprintf(os.Stderr, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
@@ -206,7 +206,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 }
 
 // inputReader abstracts user input for permission prompts.
-// In interactive mode it delegates to readline; in single-shot mode it reads os.Stdin directly.
+// In single-shot mode it reads os.Stdin directly.
 type inputReader interface {
 	readLine(prompt string) (string, error)
 }

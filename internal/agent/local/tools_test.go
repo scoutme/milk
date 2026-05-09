@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scoutme/milk/internal/session"
 )
 
 func TestChatRequest_NilHistorySerializesAsArray(t *testing.T) {
@@ -28,7 +30,7 @@ func TestChatRequest_NilHistorySerializesAsArray(t *testing.T) {
 }
 
 func TestRunBash_Success(t *testing.T) {
-	result, escalate := dispatchTool(context.Background(), "bash", `{"command":"echo hello"}`)
+	result, escalate := dispatchTool(context.Background(), "bash", `{"command":"echo hello"}`, nil)
 	if escalate {
 		t.Fatal("unexpected escalation signal")
 	}
@@ -38,14 +40,14 @@ func TestRunBash_Success(t *testing.T) {
 }
 
 func TestRunBash_NonZeroExit(t *testing.T) {
-	result, _ := dispatchTool(context.Background(), "bash", `{"command":"exit 42"}`)
+	result, _ := dispatchTool(context.Background(), "bash", `{"command":"exit 42"}`, nil)
 	if !strings.Contains(result, "42") {
 		t.Errorf("expected exit code 42 in result, got %q", result)
 	}
 }
 
 func TestRunBash_InvalidJSON(t *testing.T) {
-	result, _ := dispatchTool(context.Background(), "bash", `not json`)
+	result, _ := dispatchTool(context.Background(), "bash", `not json`, nil)
 	if !strings.Contains(result, "invalid arguments") {
 		t.Errorf("expected error message, got %q", result)
 	}
@@ -56,7 +58,7 @@ func TestRunGrep_FindsMatch(t *testing.T) {
 	f := filepath.Join(dir, "test.txt")
 	os.WriteFile(f, []byte("hello world\ngoodbye world\n"), 0o600)
 
-	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"hello","path":"`+f+`"}`)
+	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"hello","path":"`+f+`"}`, nil)
 	if !strings.Contains(result, "hello") {
 		t.Errorf("expected match in output, got %q", result)
 	}
@@ -68,7 +70,7 @@ func TestRunGrep_Recursive(t *testing.T) {
 	os.MkdirAll(sub, 0o700)
 	os.WriteFile(filepath.Join(sub, "a.txt"), []byte("needle\n"), 0o600)
 
-	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"needle","path":"`+dir+`","recursive":true}`)
+	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"needle","path":"`+dir+`","recursive":true}`, nil)
 	if !strings.Contains(result, "needle") {
 		t.Errorf("expected recursive match, got %q", result)
 	}
@@ -79,7 +81,7 @@ func TestRunGrep_NoMatch(t *testing.T) {
 	f := filepath.Join(dir, "test.txt")
 	os.WriteFile(f, []byte("nothing here\n"), 0o600)
 
-	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"xyzzy","path":"`+f+`"}`)
+	result, _ := dispatchTool(context.Background(), "grep", `{"pattern":"xyzzy","path":"`+f+`"}`, nil)
 	// grep exit code 1 = no match; should get a result, not an error from dispatchTool
 	if strings.Contains(result, "invalid") {
 		t.Errorf("unexpected error for no-match grep: %q", result)
@@ -91,7 +93,7 @@ func TestReadFile_ReturnsNumberedLines(t *testing.T) {
 	f := filepath.Join(dir, "sample.txt")
 	os.WriteFile(f, []byte("line1\nline2\nline3\n"), 0o600)
 
-	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"`+f+`"}`)
+	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"`+f+`"}`, nil)
 	// result is JSON: {"output":"1\tline1\n..."}
 	if !strings.Contains(result, `1\tline1`) {
 		t.Errorf("expected numbered lines, got %q", result)
@@ -108,7 +110,7 @@ func TestReadFile_OffsetAndLimit(t *testing.T) {
 
 	// offset=1 skips line index 0 ("a"); limit=2 returns lines at index 1,2 ("b","c")
 	// line numbers are 1-based from offset: index 1 → number 2, index 2 → number 3
-	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"`+f+`","offset":1,"limit":2}`)
+	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"`+f+`","offset":1,"limit":2}`, nil)
 	if strings.Contains(result, `1\ta`) {
 		t.Error("offset=1 should skip first line")
 	}
@@ -121,21 +123,45 @@ func TestReadFile_OffsetAndLimit(t *testing.T) {
 }
 
 func TestReadFile_MissingFile(t *testing.T) {
-	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"/nonexistent/file.txt"}`)
+	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"/nonexistent/file.txt"}`, nil)
 	if !strings.Contains(result, "error") && !strings.Contains(result, "no such file") {
 		t.Errorf("expected error for missing file, got %q", result)
 	}
 }
 
 func TestEscalateToClaudeReturnsSignal(t *testing.T) {
-	_, escalate := dispatchTool(context.Background(), "escalate_to_claude", `{"reason":"too complex"}`)
+	_, escalate := dispatchTool(context.Background(), "escalate_to_claude", `{"reason":"too complex"}`, nil)
 	if !escalate {
 		t.Error("expected escalation signal")
 	}
 }
 
+func TestGetSessionContext_Empty(t *testing.T) {
+	result, escalate := dispatchTool(context.Background(), "get_session_context", `{}`, nil)
+	if escalate {
+		t.Error("unexpected escalation signal")
+	}
+	if !strings.Contains(result, "no session history") {
+		t.Errorf("expected empty-history message, got %q", result)
+	}
+}
+
+func TestGetSessionContext_WithHistory(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "hello"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "world"})
+
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{}`, sess)
+	if !strings.Contains(result, "hello") {
+		t.Errorf("expected user turn in context, got %q", result)
+	}
+	if !strings.Contains(result, "world") {
+		t.Errorf("expected assistant turn in context, got %q", result)
+	}
+}
+
 func TestUnknownTool(t *testing.T) {
-	result, escalate := dispatchTool(context.Background(), "nonexistent", `{}`)
+	result, escalate := dispatchTool(context.Background(), "nonexistent", `{}`, nil)
 	if escalate {
 		t.Error("unexpected escalation signal")
 	}
