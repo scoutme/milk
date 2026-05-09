@@ -84,6 +84,7 @@ The classifier uses the same Gemma 4 model instance as the local coding agent. N
   - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches
   - `list_dir(path string) → entries` — names, types, sizes
   - `http_get(url string, max_bytes int) → body` — bounded HTTP fetch
+  - `get_session_context() → history` — returns the full shared session history (both agents) so the local model can see prior Claude turns
 - Self-escalation: local model may return `escalate_to_claude(reason string)` as a tool call to trigger promotion
 
 ---
@@ -190,13 +191,13 @@ milk [flags] <prompt>         # single-prompt mode
 
 ### Interactive mode
 
-`milk` with no prompt argument starts a REPL. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) reflects the current routing state and is updated after each turn.
+`milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) is embedded in the textarea and reflects the current routing state, updated after each turn.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/help`, `/exit`
 
-**Tab completion:** `/` completes slash commands; `@` completes file paths from cwd (e.g. `@src/main.go`).
+**Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
-**Keyboard:** Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
+**Keyboard:** Up/Down navigates input history (single-line mode only); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
 
 ### Flags
 
