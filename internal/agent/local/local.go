@@ -95,6 +95,11 @@ func buildSystemPrompt(cwd string) string {
 	return systemPromptBase + "\n\nWorking directory: " + cwd
 }
 
+func cwdContext(cwd string) string {
+	result, _ := runListDir(map[string]any{"path": cwd})
+	return "Working directory listing (" + cwd + "):\n" + result
+}
+
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
@@ -104,6 +109,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD)}}
 	msgs = append(msgs, history...)
+	if sess.CWD != "" {
+		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
+	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas()
 
