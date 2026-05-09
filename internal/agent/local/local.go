@@ -78,14 +78,22 @@ func New(baseURL, model string) *Agent {
 	}
 }
 
-const systemPrompt = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, escalate_to_claude.
+const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, escalate_to_claude.
 
 Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
 - If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "claude" to see only Claude's prior turns. Only omit all filters when you genuinely need the full history.
+- The working directory is provided below. When the user says "this project", "here", "the code", or makes any ambiguous reference to a project or codebase without naming one, assume they mean the working directory. Explore it with list_dir or read_file before asking for clarification.
 - Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
+
+func buildSystemPrompt(cwd string) string {
+	if cwd == "" {
+		return systemPromptBase
+	}
+	return systemPromptBase + "\n\nWorking directory: " + cwd
+}
 
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
@@ -94,7 +102,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if history == nil {
 		history = []Message{}
 	}
-	msgs := []Message{{Role: "system", Content: systemPrompt}}
+	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD)}}
 	msgs = append(msgs, history...)
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas()
