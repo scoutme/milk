@@ -164,11 +164,13 @@ const localLabel = "local:"
 
 func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string) error {
 	fmt.Fprint(os.Stdout, bold(green(localLabel))+" ")
+	aw := newActivityWriter(os.Stdout)
 	history := sessionToMessages(sess)
 
 	sess.ForceState(session.StateLocal)
 
-	updatedHistory, err := agent.Run(ctx, history, prompt, os.Stdout, sess)
+	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess)
+	aw.Done()
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			fmt.Fprintf(os.Stderr, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
@@ -234,6 +236,7 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 
 func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader) error {
 	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
+	aw := newActivityWriter(os.Stdout)
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
@@ -245,15 +248,16 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 		err error
 	)
 	if resuming {
-		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, os.Stdout)
+		res, err = agent.RunResume(ctx, sess.ClaudeSessionID, prompt, aw)
 	} else {
 		sysContext := escalation.BuildContext(sess)
 		var claudeSessionID string
-		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, os.Stdout)
+		claudeSessionID, res, err = agent.RunFirst(ctx, sysContext, prompt, aw)
 		if err == nil {
 			sess.ClaudeSessionID = claudeSessionID
 		}
 	}
+	aw.Done()
 	if err != nil {
 		return err
 	}

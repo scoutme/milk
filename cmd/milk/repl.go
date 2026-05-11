@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,6 +44,10 @@ type replModel struct {
 	histIdx    int      // -1 = live buffer; 0..len-1 = browsing history
 	saved      string   // saved live buffer while browsing history
 	width      int
+
+	// tab completion state
+	tabMatches []string // current candidate list
+	tabIdx     int      // index into tabMatches (-1 = not cycling)
 
 	// injected dependencies
 	ctx    context.Context
@@ -167,7 +172,12 @@ func (m replModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ta.LineCount() == 1 {
 			return m.historyForward(), nil
 		}
+	case "tab":
+		return m.handleTab(), nil
 	}
+	// Any non-Tab key resets tab cycling.
+	m.tabMatches = nil
+	m.tabIdx = -1
 	// Pre-grow height before inserting a newline so the viewport never scrolls.
 	if msg.String() == "shift+enter" || msg.String() == "alt+enter" {
 		m.ta.SetHeight(m.ta.LineCount() + 1)
@@ -183,8 +193,7 @@ func (m replModel) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.st.forceEscalate = false
 		m.st.forceLocal = false
 		m.updatePrompt()
-		fmt.Println(milkTag() + " mode cleared")
-		return m, nil
+		return m, tea.Println(milkTag() + " mode cleared")
 	}
 	return m, tea.Quit
 }
@@ -199,6 +208,109 @@ func (m replModel) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, func() tea.Msg { return submitMsg{text: input} }
+}
+
+func (m replModel) handleTab() replModel {
+	input := m.ta.Value()
+	if len(m.tabMatches) == 0 {
+		m.tabMatches, m.tabIdx = buildTabMatches(input, m.st.cwd)
+		if len(m.tabMatches) == 0 {
+			return m
+		}
+	} else {
+		m.tabIdx = (m.tabIdx + 1) % len(m.tabMatches)
+	}
+	completed := m.tabMatches[m.tabIdx]
+	m.ta.SetValue(applyTabCompletion(input, completed))
+	m.ta.CursorEnd()
+	return m
+}
+
+// applyTabCompletion replaces the relevant token in input with completed.
+// For @path completions it swaps the last @token; for slash commands it replaces the whole value.
+func applyTabCompletion(input, completed string) string {
+	if !strings.HasPrefix(completed, "@") {
+		return completed
+	}
+	words := strings.Fields(input)
+	for i := len(words) - 1; i >= 0; i-- {
+		if strings.HasPrefix(words[i], "@") {
+			words[i] = completed
+			return strings.Join(words, " ")
+		}
+	}
+	return input
+}
+
+func buildTabMatches(input, cwd string) ([]string, int) {
+	words := strings.Fields(input)
+	// Check for trailing @token (path completion)
+	for i := len(words) - 1; i >= 0; i-- {
+		if strings.HasPrefix(words[i], "@") {
+			pathPrefix := words[i][1:] // strip @
+			matches := expandPath(pathPrefix, cwd)
+			atMatches := make([]string, len(matches))
+			for j, m := range matches {
+				atMatches[j] = "@" + m
+			}
+			return atMatches, 0
+		}
+	}
+	// Slash command completion: find slash-prefixed token
+	prefix := ""
+	for _, w := range words {
+		if strings.HasPrefix(w, "/") {
+			prefix = w
+			break
+		}
+	}
+	if prefix == "" {
+		stripped := strings.TrimLeft(input, " ")
+		if strings.HasPrefix(stripped, "/") {
+			prefix = stripped
+		}
+	}
+	if prefix == "" {
+		return nil, 0
+	}
+	var matches []string
+	for _, cmd := range slashCommands {
+		if strings.HasPrefix(cmd, prefix) {
+			matches = append(matches, cmd)
+		}
+	}
+	return matches, 0
+}
+
+func expandPath(prefix, cwd string) []string {
+	base := prefix
+	if !strings.HasPrefix(base, "/") {
+		base = cwd + "/" + base
+	}
+	dir := filepath.Dir(base)
+	namePrefix := filepath.Base(base)
+	if strings.HasSuffix(prefix, "/") {
+		dir = base
+		namePrefix = ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var matches []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), namePrefix) {
+			rel := filepath.Join(dir, e.Name())
+			if !strings.HasPrefix(prefix, "/") {
+				rel, _ = filepath.Rel(cwd, rel)
+			}
+			if e.IsDir() {
+				rel += "/"
+			}
+			matches = append(matches, rel)
+		}
+	}
+	return matches
 }
 
 func (m *replModel) syncHeight() {
@@ -248,30 +360,49 @@ func (m replModel) handleSubmit(input string) (tea.Model, tea.Cmd) {
 	}
 
 	if input == cmdPaste {
-		fmt.Println(milkTag() + " hint: paste multi-line text directly, or use Alt+Enter to compose multi-line input")
-		return m, nil
+		return m, tea.Println(milkTag() + " hint: paste multi-line text directly, or use Alt+Enter to compose multi-line input")
 	}
 
 	if cmd, rest, found := extractSlashCommand(input); found {
-		exit, prompt := handleSlashCommand(cmd, rest, m.st)
+		echoLine := m.promptText + input // capture label before mode change
+		exit, prompt, output := handleSlashCommand(cmd, rest, m.st)
 		m.updatePrompt()
 		if exit {
 			return m, tea.Quit
 		}
 		if prompt != "" {
-			return m, func() tea.Msg { return submitMsg{text: prompt} }
+			// Echo must print before agent output — do it synchronously in Run().
+			var cmds []tea.Cmd
+			if output != "" {
+				cmds = append(cmds, tea.Println(output))
+			}
+			cmds = append(cmds, m.execCmdWithEcho(prompt, echoLine))
+			return m, tea.Batch(cmds...)
 		}
-		return m, nil
+		// Slash-only command: no exec, tea.Println ordering is fine.
+		cmds := []tea.Cmd{tea.Println(echoLine)}
+		if output != "" {
+			cmds = append(cmds, tea.Println(output))
+		}
+		return m, tea.Batch(cmds...)
 	}
 
-	return m, tea.Exec(
+	return m, m.execCmd(input)
+}
+
+func (m replModel) execCmd(input string) tea.Cmd {
+	return m.execCmdWithEcho(input, m.promptText+input)
+}
+
+func (m replModel) execCmdWithEcho(input, echoLine string) tea.Cmd {
+	return tea.Exec(
 		&replExec{
-			ctx:        m.ctx,
-			st:         m.st,
-			rtr:        m.rtr,
-			agents:     m.agents,
-			input:      input,
-			promptText: m.promptText,
+			ctx:      m.ctx,
+			st:       m.st,
+			rtr:      m.rtr,
+			agents:   m.agents,
+			input:    input,
+			echoLine: echoLine,
 		},
 		func(err error) tea.Msg {
 			if err != nil {
@@ -283,23 +414,77 @@ func (m replModel) handleSubmit(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m replModel) View() string {
-	return m.ta.View()
+	return colorizeInput(m.ta.View())
+}
+
+// colorizeInput colorizes /commands and @paths in the textarea view output.
+// It only touches the last line (the live input area); prior lines rendered by
+// the textarea (continuation lines) are left as-is to avoid double-coloring.
+func colorizeInput(view string) string {
+	if !isTTY {
+		return view
+	}
+	lastNL := strings.LastIndex(view, "\n")
+	var prefix, line string
+	if lastNL >= 0 {
+		prefix = view[:lastNL+1]
+		line = view[lastNL+1:]
+	} else {
+		line = view
+	}
+	// Split on ANSI sequences so we only process plain-text tokens.
+	// Strategy: find the last occurrence of the prompt text (which contains ANSI),
+	// colorize only the content after it.
+	promptEnd := strings.LastIndex(line, "> ")
+	if promptEnd < 0 {
+		return view
+	}
+	promptPart := line[:promptEnd+2]
+	inputPart := line[promptEnd+2:]
+	return prefix + promptPart + colorizeTokens(inputPart)
+}
+
+func colorizeTokens(s string) string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return s
+	}
+	var out strings.Builder
+	for i, w := range words {
+		if i > 0 {
+			out.WriteByte(' ')
+		}
+		switch {
+		case strings.HasPrefix(w, "/"):
+			out.WriteString(yellow(w))
+		case strings.HasPrefix(w, "@"):
+			out.WriteString(dim(w))
+		default:
+			out.WriteString(w)
+		}
+	}
+	// Preserve trailing space if original had one
+	if len(s) > 0 && s[len(s)-1] == ' ' {
+		out.WriteByte(' ')
+	}
+	return out.String()
 }
 
 // --- replExec: suspends TUI and runs an agent turn ---
 
 type replExec struct {
-	ctx        context.Context
-	st         *interactiveState
-	rtr        *router.Router
-	agents     dispatchAgents
-	input      string
-	promptText string
+	ctx      context.Context
+	st       *interactiveState
+	rtr      *router.Router
+	agents   dispatchAgents
+	input    string
+	echoLine string // full line to echo before agent output (prompt label + raw input)
 }
 
 func (e *replExec) Run() error {
-	// Echo the submitted prompt (with mode label) before agent output.
-	fmt.Println(e.promptText + e.input)
+	if e.echoLine != "" {
+		fmt.Println(e.echoLine)
+	}
 	dispatchTurnDirect(e.ctx, e.st, e.rtr, e.agents, e.input)
 	return nil
 }

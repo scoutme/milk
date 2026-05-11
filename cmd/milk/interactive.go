@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/scoutme/milk/internal/config"
@@ -93,77 +92,103 @@ var promptFriendly = map[string]bool{
 }
 
 // handleSlashCommand processes a slash command with optional surrounding prompt text.
-// Returns (exit, prompt-to-dispatch): exit=true means quit the loop,
-// prompt is non-empty when the command should be followed by an immediate dispatch.
-func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, dispatch string) {
+// Returns (exit, prompt-to-dispatch, output): exit=true means quit the loop,
+// prompt is non-empty when the command should be followed by an immediate dispatch,
+// output is text to print via tea.Println.
+func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, dispatch, output string) {
 	switch cmd {
 	case "/exit", "/quit":
-		return true, ""
+		return true, "", ""
 	case "/help", "/new", "/drop", "/list", cmdPaste:
-		execNonPromptCmd(cmd, prompt, st)
+		output = execNonPromptCmd(cmd, prompt, st)
 	case cmdEscalate:
 		st.forceEscalate = true
 		st.forceLocal = false
 		if prompt == "" {
-			fmt.Println(milkTag() + " next turn: " + blue("Claude"))
+			output = milkTag() + " next turn: " + blue("Claude")
 		}
-		return false, prompt
+		return false, prompt, output
 	case cmdLocal:
 		st.forceLocal = true
 		st.forceEscalate = false
 		if prompt == "" {
-			fmt.Println(milkTag() + " next turn: " + green("local model"))
+			output = milkTag() + " next turn: " + green("local model")
 		}
-		return false, prompt
+		return false, prompt, output
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q — type /help\n", cmd)
+		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
-	return false, ""
+	return false, "", output
 }
 
 // execNonPromptCmd runs a command that has no prompt semantics.
-// Warns if the user included extra text alongside the command.
-func execNonPromptCmd(cmd, prompt string, st *interactiveState) {
+// Returns any output to be printed. Warns if the user included extra text.
+func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
+	var out strings.Builder
 	if prompt != "" && !promptFriendly[cmd] {
-		fmt.Fprintf(os.Stderr, "%s %s does not accept a prompt — text ignored\n", milkTag(), cmd)
+		fmt.Fprintf(&out, "%s %s does not accept a prompt — text ignored\n", milkTag(), cmd)
 	}
 	switch cmd {
 	case "/help":
-		fmt.Println(interactiveHelp)
+		fmt.Fprint(&out, interactiveHelp)
 	case "/new":
 		var err error
 		st.sess, err = session.New(st.cwd, "")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, errFmt, err)
-			return
+			fmt.Fprintf(&out, errFmt, err)
+			return out.String()
 		}
-		fmt.Printf("%s new session %s\n", milkTag(), st.sess.ID[:8])
+		fmt.Fprintf(&out, "%s new session %s", milkTag(), st.sess.ID[:8])
 	case "/drop":
-		if err := dropAndNewSession(st); err != nil {
-			fmt.Fprintf(os.Stderr, red("error: ")+"%v\n", err)
+		if err := dropAndNewSession(st, &out); err != nil {
+			fmt.Fprintf(&out, red("error: ")+"%v", err)
 		}
 	case "/list":
-		if err := runList(false); err != nil {
-			fmt.Fprintf(os.Stderr, errFmt, err)
+		if err := listSessions(st.cwd, &out); err != nil {
+			fmt.Fprintf(&out, errFmt, err)
 		}
 	case cmdPaste:
-		fmt.Println(milkTag() + " hint: paste multi-line text directly, or use Shift+Enter to compose multi-line input")
+		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Shift+Enter to compose multi-line input")
 	}
+	return out.String()
 }
 
-// dropAndNewSession drops the current session and creates a fresh one.
-func dropAndNewSession(st *interactiveState) error {
+// dropAndNewSession drops the current session, creates a fresh one, and writes output to w.
+func dropAndNewSession(st *interactiveState, w *strings.Builder) error {
 	id := st.sess.ID
 	if err := session.Drop(id, st.cwd); err != nil {
 		return err
 	}
-	fmt.Printf("%s dropped session %s\n", milkTag(), id[:8])
+	fmt.Fprintf(w, "%s dropped session %s\n", milkTag(), id[:8])
 	var err error
 	st.sess, err = session.New(st.cwd, "")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s new session %s\n", milkTag(), st.sess.ID[:8])
+	fmt.Fprintf(w, "%s new session %s", milkTag(), st.sess.ID[:8])
+	return nil
+}
+
+// listSessions writes the session list for cwd to w.
+func listSessions(cwd string, w *strings.Builder) error {
+	entries, err := session.List(cwd)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Fprint(w, "no sessions found")
+		return nil
+	}
+	for dir, list := range entries {
+		fmt.Fprintf(w, "%s\n", dir)
+		for _, e := range list {
+			name := e.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Fprintf(w, "  %s  %-20s  %s", e.ID[:8], name, e.LastUsed.Format("2006-01-02 15:04"))
+		}
+	}
 	return nil
 }
 
