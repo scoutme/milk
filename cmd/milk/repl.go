@@ -188,6 +188,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		answer := strings.TrimSpace(m.ta.Value())
 		m.ta.Reset()
 		m.ta.SetHeight(1)
+		m.syncLayout()
 		m.appendTranscript(answer + "\n")
 		m.pendingPerm.respCh <- answer
 		m.pendingPerm = nil
@@ -196,15 +197,28 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	syncHeight(&m.ta)
+	m.syncLayout()
 	return m, cmd
 }
 
-// appendTranscript adds text to the viewport transcript.
+// setViewportContent rebuilds the full viewport content:
+// transcript + separator + input area. The input area scrolls with the transcript.
+func (m *model) setViewportContent() {
+	sep := styleBorder.Width(m.width).Render("")
+	content := m.wrappedTranscript() + "\n" + sep + "\n" + colorizeInput(m.ta.View())
+	m.vp.SetContent(content)
+}
+
+// appendTranscript adds text to the transcript.
+// Sticky-bottom: only auto-scrolls when already at the bottom.
 func (m *model) appendTranscript(text string) {
 	m.transcript.WriteString(text)
 	if m.ready {
-		m.vp.SetContent(m.wrappedTranscript())
-		m.vp.GotoBottom()
+		atBottom := m.vp.AtBottom()
+		m.setViewportContent()
+		if atBottom {
+			m.vp.GotoBottom()
+		}
 	}
 }
 
@@ -216,20 +230,30 @@ func (m *model) wrappedTranscript() string {
 	return ansi.Wrap(m.transcript.String(), m.width, "")
 }
 
-// viewportHeight calculates the available height for the viewport.
-// Layout: viewport | status bar (1 line) | separator (1 line) | textarea (dynamic)
+// viewportHeight is the full terminal height minus the status bar line.
 func (m *model) viewportHeight() int {
-	taLines := m.ta.LineCount()
-	if taLines < 1 {
-		taLines = 1
-	}
-	// status bar (1) + separator border (1) + textarea lines + padding (1)
-	reserved := 1 + 1 + taLines + 1
-	h := m.height - reserved
+	h := m.height - 1
 	if h < 3 {
 		h = 3
 	}
 	return h
+}
+
+// syncLayout rebuilds viewport content after textarea size changes.
+// Sticky-bottom: scrolls to bottom only when already there.
+func (m *model) syncLayout() {
+	if !m.ready {
+		return
+	}
+	vpH := m.viewportHeight()
+	atBottom := m.vp.AtBottom()
+	if m.vp.Height != vpH {
+		m.vp.Height = vpH
+	}
+	m.setViewportContent()
+	if atBottom {
+		m.vp.GotoBottom()
+	}
 }
 
 // statusBar renders the one-line status bar.
@@ -305,6 +329,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " " + msg.prompt)
 		m.ta.Reset()
 		m.ta.SetHeight(1)
+		m.syncLayout()
 		return m, nil
 
 	case chunkMsg:
@@ -318,6 +343,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.appendTranscript("\n")
 		m.refreshPrompt()
+		m.syncLayout()
 		return m, nil
 
 	case spinnerTickMsg:
@@ -327,15 +353,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		switch tea.MouseEvent(msg).Button {
+		case tea.MouseButtonWheelUp:
+			m.vp.LineUp(3)
+		case tea.MouseButtonWheelDown:
+			m.vp.LineDown(3)
+		}
+		return m, nil
+
 	}
 
-	// Pass remaining messages to viewport and textarea
+	// Pass remaining messages to viewport and textarea.
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	cmds = append(cmds, cmd)
 	m.ta, cmd = m.ta.Update(msg)
 	syncHeight(&m.ta)
+	if _, isMouseMsg := msg.(tea.MouseMsg); !isMouseMsg {
+		m.syncLayout()
+	}
 	cmds = append(cmds, cmd)
 	return m, tea.Batch(cmds...)
 }
@@ -344,21 +382,22 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	label := promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
-	promptWidth := len(stripANSI(label))
-	m.ta.SetWidth(m.width - promptWidth)
-
 	vpH := m.viewportHeight()
 	if !m.ready {
 		m.vp = viewport.New(m.width, vpH)
-		m.vp.SetContent(m.wrappedTranscript())
-		m.vp.GotoBottom()
 		m.ready = true
 		m.refreshPrompt()
+		m.setViewportContent()
+		m.vp.GotoBottom()
 	} else {
+		atBottom := m.vp.AtBottom()
 		m.vp.Width = m.width
 		m.vp.Height = vpH
-		m.vp.SetContent(m.wrappedTranscript())
+		m.refreshPrompt()
+		m.setViewportContent()
+		if atBottom {
+			m.vp.GotoBottom()
+		}
 	}
 	return m, nil
 }
@@ -369,6 +408,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		syncHeight(&m.ta)
+		m.syncLayout()
 		return m, cmd
 	}
 
@@ -384,17 +424,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up":
 		if m.ta.LineCount() == 1 {
 			m = m.historyBack()
+			m.syncLayout()
 			return m, nil
 		}
 	case "down":
 		if m.ta.LineCount() == 1 {
 			m = m.historyForward()
+			m.syncLayout()
 			return m, nil
 		}
+	case "ctrl+up":
+		m = m.historyBack()
+		m.syncLayout()
+		return m, nil
+	case "ctrl+down":
+		m = m.historyForward()
+		m.syncLayout()
+		return m, nil
 	case "tab":
 		m = m.handleTab()
 		return m, nil
-	// Viewport scrolling (works any time input is empty or these are scroll keys)
 	case "pgup", "ctrl+u":
 		m.vp.HalfViewUp()
 		return m, nil
@@ -410,10 +459,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "shift+enter", "alt+enter", "ctrl+n":
 		m.ta.SetHeight(m.ta.LineCount() + 1)
+		m.syncLayout()
 	}
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	syncHeight(&m.ta)
+	m.syncLayout()
 	return m, cmd
 }
 
@@ -423,6 +474,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.ta.SetHeight(1)
 		m.tabMatches = nil
 		m.tabIdx = -1
+		m.syncLayout()
 		return m, nil
 	}
 	if m.st.forceEscalate || m.st.forceLocal {
@@ -439,6 +491,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(m.ta.Value())
 	m.ta.Reset()
 	m.ta.SetHeight(1)
+	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
 	if input == "" {
@@ -511,15 +564,7 @@ func (m model) View() string {
 	if !m.ready {
 		return ""
 	}
-
-	vpH := m.viewportHeight()
-	if m.vp.Height != vpH {
-		m.vp.Height = vpH
-	}
-
-	sep := styleBorder.Width(m.width).Render("")
-	status := m.statusBar()
-	return m.vp.View() + "\n" + status + "\n" + sep + "\n" + colorizeInput(m.ta.View())
+	return m.vp.View() + "\n" + m.statusBar()
 }
 
 // --- Spinner ---
@@ -666,12 +711,28 @@ func expandPath(prefix, cwd string) []string {
 
 // --- Textarea helpers ---
 
-func syncHeight(ta *textarea.Model) {
-	lines := ta.LineCount()
-	if lines < 1 {
-		lines = 1
+// visualRows returns the number of visual rows the textarea content occupies,
+// accounting for soft-wrapping of long logical lines. Sizes the textarea so it
+// always shows all content without internal scrolling.
+func visualRows(ta *textarea.Model) int {
+	w := ta.Width()
+	if w <= 0 {
+		w = 80
 	}
-	ta.SetHeight(lines)
+	total := 0
+	for _, line := range strings.Split(ta.Value(), "\n") {
+		cols := len([]rune(line))
+		total += cols/w + 1
+	}
+	if total < 1 {
+		total = 1
+	}
+	return total
+}
+
+func syncHeight(ta *textarea.Model) {
+	h := visualRows(ta)
+	ta.SetHeight(h)
 }
 
 // --- Input colorizer ---
@@ -827,6 +888,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Mode 1000+1006: X10 basic mouse + SGR extension.
+	// Reports scroll wheel and clicks as tea.MouseMsg without capturing drag,
+	// so native terminal selection and middle-click paste work without Shift.
+	os.Stdout.WriteString("\x1b[?1000h\x1b[?1006h") //nolint:errcheck
 	_, err = p.Run()
+	os.Stdout.WriteString("\x1b[?1006l\x1b[?1000l") //nolint:errcheck
 	return err
 }

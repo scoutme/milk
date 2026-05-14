@@ -89,3 +89,4 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 - Planning mode (offline)
 - Demotion from Claude back to local mid-session
 - MCP server integration for local tools
+- TUI: app-managed drag selection (currently terminal-native; selection highlight sticks to screen coords during scroll — Claude Code works around this with non-native selection)

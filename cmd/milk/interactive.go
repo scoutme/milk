@@ -44,11 +44,20 @@ const interactiveHelp = `Slash commands:
   /help       show this help
   /exit       quit
 
+Scrolling:
+  Mouse wheel       scroll transcript
+  PgUp/PgDn         scroll transcript half page
+  Ctrl+U/Ctrl+F     scroll transcript half page
+
+History:
+  Up/Down (single-line)   navigate input history
+  Ctrl+Up/Ctrl+Down       navigate input history
+
 Multi-line input:
   Ctrl+N              insert a newline (most reliable)
   Shift+Alt+Enter     insert a newline
-  Alt+Enter           insert a newline (Windows Terminal may capture this)
   AltGr+Enter         insert a newline
+  Alt+Enter           insert a newline (Windows Terminal may capture this)
   Paste               multi-line pastes are sent as a single block automatically
 
 @ prefix:
