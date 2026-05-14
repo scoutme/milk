@@ -458,7 +458,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	if input == cmdPaste {
-		m.appendTranscript(dim("[milk]") + " hint: paste multi-line text directly, or use Shift+Enter to compose multi-line input\n")
+		m.appendTranscript(dim("[milk]") + " hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline\n")
 		return m, nil
 	}
 

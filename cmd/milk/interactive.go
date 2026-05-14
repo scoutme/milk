@@ -45,8 +45,10 @@ const interactiveHelp = `Slash commands:
   /exit       quit
 
 Multi-line input:
-  Shift+Enter   insert a newline (compose multi-line prompts)
-  Paste         multi-line pastes are sent as a single block automatically
+  Ctrl+N          insert a newline (most reliable)
+  Shift+Alt+Enter insert a newline
+  Alt+Enter       insert a newline (Windows Terminal may capture this)
+  Paste           multi-line pastes are sent as a single block automatically
 
 @ prefix:
   @path       reference a file path`
@@ -151,7 +153,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 			fmt.Fprintf(&out, errFmt, err)
 		}
 	case cmdPaste:
-		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Shift+Enter to compose multi-line input")
+		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
 	}
 	return out.String()
 }
