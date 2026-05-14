@@ -176,6 +176,15 @@ func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev st
 			res.SessionID = ev.SessionID
 		}
 	case msgTypeAssistant:
+		// Each assistant event is a distinct response turn; separate with a
+		// newline when previous output didn't already end with one.
+		if textBuf.Len() > 0 {
+			prev := textBuf.String()
+			if prev[len(prev)-1] != '\n' {
+				textBuf.WriteByte('\n')
+				io.WriteString(out, "\n") //nolint:errcheck
+			}
+		}
 		for _, block := range ev.Message.Content {
 			if block.Type == "text" && block.Text != "" {
 				textBuf.WriteString(block.Text)
