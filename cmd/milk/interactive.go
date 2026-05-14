@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -58,6 +60,7 @@ type interactiveState struct {
 	forceLocal    bool
 	cwd           string
 	cfg           config.Config
+	program       *tea.Program // set after tea.NewProgram, before Run
 }
 
 // extractSlashCommand scans input for a known slash command token anywhere in

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,9 +163,13 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 const claudeLabel = "claude:"
 const localLabel = "local:"
 
-func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string) error {
-	fmt.Fprint(os.Stdout, bold(green(localLabel))+" ")
-	aw := newActivityWriter(os.Stdout)
+func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string, outs ...io.Writer) error {
+	out := io.Writer(os.Stdout)
+	if len(outs) > 0 && outs[0] != nil {
+		out = outs[0]
+	}
+	fmt.Fprint(out, bold(green(localLabel))+" ")
+	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
 
 	sess.ForceState(session.StateLocal)
@@ -173,13 +178,13 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	aw.Done()
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
-			fmt.Fprintf(os.Stderr, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
+			fmt.Fprintf(out, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
 			// Commit the user turn before escalating so Claude has context
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
 			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
-			return runClaude(ctx, sess, claudeAgent, prompt)
+			return runClaudeWith(ctx, sess, claudeAgent, prompt, newStdinInputReader(), out)
 		}
 		return err
 	}
@@ -234,9 +239,13 @@ func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, 
 	return runClaudeWith(ctx, sess, agent, prompt, newStdinInputReader())
 }
 
-func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader) error {
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	aw := newActivityWriter(os.Stdout)
+func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, outs ...io.Writer) error {
+	out := io.Writer(os.Stdout)
+	if len(outs) > 0 && outs[0] != nil {
+		out = outs[0]
+	}
+	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	aw := newActivityWriter(out)
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
@@ -265,12 +274,11 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 	// Structured signal: permission_denials in the result event is language-neutral.
 	// Takes priority over phrase detection.
 	if len(res.PermissionDenials) > 0 && sess.ClaudeSessionID != "" {
-		res = handleStructuredDenials(ctx, sess, agent, res, input)
+		res = handleStructuredDenials(ctx, sess, agent, res, input, out)
 	} else if res.PermissionDenied && sess.ClaudeSessionID != "" {
-		// Phrase-based fallback for when permission_denials is empty but text matches.
-		res = handlePhrasePermission(ctx, sess, agent, res, input)
+		res = handlePhrasePermission(ctx, sess, agent, res, input, out)
 	} else if res.DirRestricted && sess.ClaudeSessionID != "" {
-		res = handlePhraseDir(ctx, sess, agent, input)
+		res = handlePhraseDir(ctx, sess, agent, input, out)
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
@@ -287,21 +295,31 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 // For each denied tool it shows the attempted command/input, then asks:
 //  1. allow the tool (adds to --allowedTools)
 //  2. allow a directory (adds to --add-dir, shown for Bash or file tools)
-func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader) claude.ParseResult {
-	fmt.Fprintln(os.Stdout)
-	fmt.Fprintf(os.Stdout, "%s Claude was blocked from using:\n", milkTag())
+func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer) claude.ParseResult {
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "%s Claude was blocked from using:\n", milkTag())
 
 	retryAgent := agent
 	changed := false
 
+	// Deduplicate by tool name — Claude may report the same tool blocked multiple times.
+	seen := map[string]bool{}
+	var denials []claude.PermissionDenialRecord
 	for _, d := range res.PermissionDenials {
-		fmt.Fprintf(os.Stdout, "  • %s", bold(d.ToolName))
-		if cmd, ok := d.ToolInput["command"].(string); ok {
-			fmt.Fprintf(os.Stdout, " → %s", dim(cmd))
-		} else if path, ok := d.ToolInput["path"].(string); ok {
-			fmt.Fprintf(os.Stdout, " → %s", dim(path))
+		if !seen[d.ToolName] {
+			seen[d.ToolName] = true
+			denials = append(denials, d)
 		}
-		fmt.Fprintln(os.Stdout)
+	}
+
+	for _, d := range denials {
+		fmt.Fprintf(out, "  • %s", bold(d.ToolName))
+		if cmd, ok := d.ToolInput["command"].(string); ok {
+			fmt.Fprintf(out, " → %s", dim(cmd))
+		} else if path, ok := d.ToolInput["path"].(string); ok {
+			fmt.Fprintf(out, " → %s", dim(path))
+		}
+		fmt.Fprintln(out)
 
 		yn, _ := input.readLine(fmt.Sprintf("    allow tool %s? [y/n] ", bold(d.ToolName)))
 		if strings.EqualFold(yn, "y") {
@@ -309,8 +327,7 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 			changed = true
 		}
 
-		dir, _ := input.readLine("    add directory access? (enter path or leave empty to skip): ")
-		if dir != "" {
+		if dir := askDir(input, out, suggestDir(d.ToolInput)); dir != "" {
 			retryAgent = retryAgent.WithExtraDir(dir)
 			changed = true
 		}
@@ -319,8 +336,8 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 	if !changed {
 		return res
 	}
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permissions.", os.Stdout)
+	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
 	}
@@ -329,7 +346,7 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 
 // handlePhrasePermission handles a tool permission denial detected via phrase scanning.
 // Asks the user y/n and retries via --resume with the tool added to allowed list.
-func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader) claude.ParseResult {
+func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer) claude.ParseResult {
 	tool := res.DeniedTool
 	var prompt string
 	if tool != "" {
@@ -347,22 +364,54 @@ func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *c
 	} else {
 		retryAgent = agent
 	}
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", os.Stdout)
+	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", out)
 	if err != nil {
 		return res
 	}
 	return retried
 }
 
-func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader) claude.ParseResult {
-	dir, _ := input.readLine(fmt.Sprintf("%s Claude needs directory access. Enter path to allow (empty to skip): ", milkTag()))
+// suggestDir extracts a suggested directory from a tool input map.
+// Checks common path keys ("path", "file_path"), then scans "command" for the
+// first absolute path token.
+func suggestDir(input map[string]any) string {
+	for _, key := range []string{"path", "file_path", "filepath"} {
+		if path, ok := input[key].(string); ok && path != "" {
+			return filepath.Dir(path)
+		}
+	}
+	if cmd, ok := input["command"].(string); ok {
+		for _, token := range strings.Fields(cmd) {
+			if strings.HasPrefix(token, "/") {
+				return filepath.Dir(token)
+			}
+		}
+	}
+	return ""
+}
+
+// askDir proposes a suggested directory (if any) and asks y/n; if declined or
+// none suggested, prompts for a free-form path. Returns "" to skip.
+func askDir(input inputReader, out io.Writer, suggested string) string {
+	if suggested != "" {
+		yn, _ := input.readLine(fmt.Sprintf("    allow directory %s? [y/n] ", bold(suggested)))
+		if strings.EqualFold(yn, "y") {
+			return suggested
+		}
+	}
+	dir, _ := input.readLine("    enter directory path to allow (empty to skip): ")
+	return strings.TrimSpace(dir)
+}
+
+func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader, out io.Writer) claude.ParseResult {
+	dir := askDir(input, out, "")
 	if dir == "" {
 		return claude.ParseResult{}
 	}
 	retryAgent := agent.WithExtraDir(dir)
-	fmt.Fprint(os.Stdout, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), os.Stdout)
+	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), out)
 	if err != nil {
 		return claude.ParseResult{}
 	}
@@ -375,11 +424,16 @@ func makePermissionHandler(input inputReader) claude.PermissionHandler {
 	return func(req claude.ControlRequest, stdinW io.Writer) {
 		fmt.Fprintln(os.Stdout)
 		printPermissionRequest(req)
-		yn, _ := input.readLine(fmt.Sprintf("%s Allow? [y/n] ", milkTag()))
+		yn, _ := input.readLine(fmt.Sprintf("%s Allow tool? [y/n] ", milkTag()))
 		if strings.EqualFold(yn, "y") {
 			claude.Allow(req.RequestID, stdinW)
 		} else {
 			claude.Deny(req.RequestID, stdinW)
+		}
+		// Offer directory access if a blocked path is known
+		if req.Body.BlockedPath != "" {
+			suggested := filepath.Dir(req.Body.BlockedPath)
+			askDir(input, os.Stdout, suggested) // result unused here; handled by retry in runClaudeWith
 		}
 	}
 }
