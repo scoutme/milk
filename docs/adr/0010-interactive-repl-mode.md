@@ -1,7 +1,7 @@
 # ADR-0010: Interactive REPL mode
 
 ## Status
-Accepted
+Superseded by [ADR-0014](0014-full-tui-bubbletea.md)
 
 ## Context
 

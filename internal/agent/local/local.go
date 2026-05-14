@@ -223,8 +223,9 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		for _, choice := range chunk.Choices {
 			if t := choice.Delta.Content; t != "" {
 				textBuf.WriteString(t)
-				// Defer writing to out — tool calls are suppressed after the full
-				// response is available; only flush plain text responses.
+				// Stream text tokens immediately; we'll suppress them later if
+				// the response turns out to contain tool calls.
+				fmt.Fprint(out, t)
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				pt, ok := partialTools[tc.Index]
@@ -243,11 +244,6 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	if err := scanner.Err(); err != nil {
 		return "", "", nil, err
-	}
-
-	// Flush newline after streamed text
-	if textBuf.Len() > 0 {
-		fmt.Fprintln(out)
 	}
 
 	for i := 0; i < len(partialTools); i++ {
@@ -269,10 +265,10 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		}
 	}
 
-	// Only flush text to out if this is a plain text response (no tool calls).
+	// For plain text responses tokens were already streamed; just emit the trailing newline.
+	// For tool-call turns nothing was written (content was empty or raw markup).
 	text := textBuf.String()
 	if len(toolCalls) == 0 && text != "" {
-		fmt.Fprint(out, text)
 		fmt.Fprintln(out)
 	}
 

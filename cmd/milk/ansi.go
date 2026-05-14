@@ -72,7 +72,9 @@ func newActivityWriter(w io.Writer) *activityWriter {
 		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
-	if isTTY {
+	// Only run the spinner goroutine when writing to a real terminal.
+	f, isFile := w.(*os.File)
+	if isFile && term.IsTerminal(int(f.Fd())) {
 		go a.run()
 	} else {
 		close(a.stopped)
