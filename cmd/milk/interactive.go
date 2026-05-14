@@ -45,10 +45,11 @@ const interactiveHelp = `Slash commands:
   /exit       quit
 
 Multi-line input:
-  Ctrl+N          insert a newline (most reliable)
-  Shift+Alt+Enter insert a newline
-  Alt+Enter       insert a newline (Windows Terminal may capture this)
-  Paste           multi-line pastes are sent as a single block automatically
+  Ctrl+N              insert a newline (most reliable)
+  Shift+Alt+Enter     insert a newline
+  Alt+Enter           insert a newline (Windows Terminal may capture this)
+  AltGr+Enter         insert a newline
+  Paste               multi-line pastes are sent as a single block automatically
 
 @ prefix:
   @path       reference a file path`

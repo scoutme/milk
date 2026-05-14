@@ -56,7 +56,7 @@ Application-level mouse capture (bubbletea `WithMouseCellMotion`) was tried and 
 
 ### Multi-line input
 
-`ctrl+n` is the most reliable binding — works across all WSL terminals. `shift+alt+enter` and `alt+enter` also work; `shift+enter` alone is unreliable in WSL (arrives as plain `\r`). All three are wired via `textarea.KeyMap.InsertNewline.SetKeys`.
+`ctrl+n` is the most reliable binding — works across all WSL terminals. `shift+alt+enter`, `alt+enter`, and `altgr+enter` also work; `shift+enter` alone is unreliable in WSL (arrives as plain `\r`). All are wired via `textarea.KeyMap.InsertNewline.SetKeys`.
 
 ### Input locking
 
