@@ -1,21 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
 
 const cmdEscalate = "/escalate"
 const cmdLocal = "/local"
 const cmdPaste = "/paste"
+const cmdLearn = "/learn"
+const cmdOtel = "/otel"
+const cmdMetrics = "/metrics"
+const cmdMemory = "/memory"
+const cmdExport = "/export"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, "/new", "/drop", "/list", "/help", "/exit", "/quit",
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport,
+	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
 func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
@@ -36,13 +46,26 @@ func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
 }
 
 const interactiveHelp = `Slash commands:
-  /escalate   force next turn to Claude
-  /local      force next turn to local model
-  /new        start a fresh session
-  /drop       delete current session
-  /list       list sessions for current directory
-  /help       show this help
-  /exit       quit
+  /escalate        force next turn to Claude
+  /local           force next turn to local model
+  /learn <fact>    store a persistent memory (e.g. /learn prefer JSON output)
+  /metrics         show most recent metric values (memory stats, otel sizes)
+  /otel            show observability file sizes and record counts
+  /export          print current session transcript (text)
+  /export json     print session as JSON
+  /export <path>   write session transcript to file
+  /memory          list all percepts (global + session)
+  /memory global   list only global percepts
+  /memory session  list only session percepts
+  /memory <pat>    list percepts whose content contains <pat>
+  /otel trim       archive current otel files and start fresh
+  /otel off        disable OTel for this session
+  /otel on         re-enable OTel for this session
+  /new             start a fresh session
+  /drop            delete current session
+  /list            list sessions for current directory
+  /help            show this help
+  /exit            quit
 
 Scrolling:
   Mouse wheel       scroll transcript
@@ -72,6 +95,7 @@ type interactiveState struct {
 	forceLocal    bool
 	cwd           string
 	cfg           config.Config
+	mem           *memory.Store
 	program       *tea.Program // set after tea.NewProgram, before Run
 }
 
@@ -104,6 +128,8 @@ func extractSlashCommand(input string) (cmd, rest string, found bool) {
 var promptFriendly = map[string]bool{
 	cmdEscalate: true,
 	cmdLocal:    true,
+	cmdLearn:    true,
+	cmdOtel:     true,
 }
 
 // handleSlashCommand processes a slash command with optional surrounding prompt text.
@@ -116,6 +142,16 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		return true, "", ""
 	case "/help", "/new", "/drop", "/list", cmdPaste:
 		output = execNonPromptCmd(cmd, prompt, st)
+	case cmdLearn:
+		output = execLearn(prompt, st)
+	case cmdOtel:
+		output = execOtel(prompt, st)
+	case cmdMetrics:
+		output = execMetrics()
+	case cmdMemory:
+		output = execMemory(prompt, st)
+	case cmdExport:
+		output = execExport(prompt, st)
 	case cmdEscalate:
 		st.forceEscalate = true
 		st.forceLocal = false
@@ -166,6 +202,109 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
 	}
 	return out.String()
+}
+
+// execMetrics prints the most recent metric values from the otel metrics file.
+func execMetrics() string {
+	otelDir, err := config.OtelDir()
+	if err != nil {
+		return fmt.Sprintf("%s error: %v", milkTag(), err)
+	}
+	return milkTag() + " " + obs.FormatMetrics(otelDir)
+}
+
+// execOtel handles /otel [trim|off|on] commands.
+func execOtel(sub string, st *interactiveState) string {
+	otelDir, err := config.OtelDir()
+	if err != nil {
+		return fmt.Sprintf("%s error: %v", milkTag(), err)
+	}
+	switch strings.TrimSpace(sub) {
+	case "trim":
+		if err := obs.Trim(otelDir); err != nil {
+			return fmt.Sprintf("%s trim failed: %v", milkTag(), err)
+		}
+		return milkTag() + " otel files archived — starting fresh"
+	case "off":
+		st.cfg.Otel.Enabled = false
+		return milkTag() + " OTel disabled for this session"
+	case "on":
+		st.cfg.Otel.Enabled = true
+		return milkTag() + " OTel re-enabled for this session"
+	default:
+		return milkTag() + " " + obs.FormatStats(otelDir)
+	}
+}
+
+// execExport dumps the current session as text or JSON, optionally to a file.
+// sub may be "json", a file path, or empty (text to stdout).
+func execExport(sub string, st *interactiveState) string {
+	sub = strings.TrimSpace(sub)
+	format := "text"
+	outputPath := ""
+	if sub == "json" {
+		format = "json"
+	} else if sub != "" {
+		outputPath = sub
+	}
+
+	var content string
+	switch format {
+	case "json":
+		data, err := session.ExportJSON(st.sess)
+		if err != nil {
+			return fmt.Sprintf("%s export error: %v", milkTag(), err)
+		}
+		content = string(data)
+	default:
+		content = session.ExportText(st.sess)
+	}
+
+	if outputPath != "" {
+		if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
+			return fmt.Sprintf("%s export error: %v", milkTag(), err)
+		}
+		return fmt.Sprintf("%s session exported to %s (%d bytes)", milkTag(), outputPath, len(content))
+	}
+	return content
+}
+
+// execMemory lists percepts from the memory store with optional filters.
+// sub may be "global", "session", or a free-form content pattern.
+func execMemory(sub string, st *interactiveState) string {
+	if st.mem == nil {
+		return milkTag() + " memory store not available"
+	}
+	sub = strings.TrimSpace(sub)
+	opts := memory.ListOpts{}
+	switch sub {
+	case "global":
+		opts.Scope = "global"
+	case "session":
+		opts.Scope = "session"
+	default:
+		opts.Pattern = sub
+	}
+	percepts := st.mem.List(opts)
+	if len(percepts) == 0 {
+		return milkTag() + " (no percepts found)"
+	}
+	return milkTag() + "\n" + memory.FormatList(percepts)
+}
+
+// execLearn stores a user fact in the global memory store.
+func execLearn(fact string, st *interactiveState) string {
+	if strings.TrimSpace(fact) == "" {
+		return milkTag() + " usage: /learn <fact to remember>"
+	}
+	if st.mem == nil {
+		return milkTag() + " memory store not available"
+	}
+	id, err := st.mem.RecordGlobal(context.Background(), fact, memory.ProducerUser, memory.Roles{})
+	if err != nil {
+		return fmt.Sprintf("%s error storing memory: %v", milkTag(), err)
+	}
+	return fmt.Sprintf("%s learned: %q (id %s)", milkTag(), fact, id[:8])
 }
 
 // dropAndNewSession drops the current session, creates a fresh one, and writes output to w.

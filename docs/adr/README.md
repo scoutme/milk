@@ -15,3 +15,5 @@
 * [13. Structured Permission Prompts via --permission-prompt-tool stdio](0013-structured-permission-prompts.md)
 * [14. Full TUI with bubbletea viewport+textarea](0014-full-tui-bubbletea.md)
 * [15. TUI-native permission prompts via blocking goroutine + channel](0015-tui-permission-prompts.md)
+* [16. Memory System: Percept Store with NREM Consolidation](0016-memory-system-percept-store.md)
+* [17. OpenTelemetry-native Observability with File Exporters](0017-opentelemetry-observability.md)

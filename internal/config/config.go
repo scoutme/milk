@@ -37,6 +37,17 @@ type Rules struct {
 	EscalateVerbs []string `json:"escalate_verbs"`
 }
 
+// OtelConfig controls OpenTelemetry signal collection and file management.
+type OtelConfig struct {
+	Enabled             bool   `json:"enabled"`
+	LogLevel            string `json:"log_level"` // DEBUG | INFO | ERROR (default INFO)
+	Traces              bool   `json:"traces"`
+	Metrics             bool   `json:"metrics"`
+	WarnMB              int    `json:"warn_mb"`               // warn when any otel file exceeds this (0 = off)
+	MaxMB               int    `json:"max_mb"`                // hard cap, disable otel when exceeded (0 = off)
+	MetricsFlushMinutes int    `json:"metrics_flush_minutes"` // periodic flush interval (0 = session-end only)
+}
+
 type Config struct {
 	LlamaURL                   string   `json:"llama_url"`
 	LlamaModel                 string   `json:"llama_model"`
@@ -47,9 +58,10 @@ type Config struct {
 	AddDirs                    []string `json:"add_dirs"`
 	// PermissionPhrases and DirRestrictionPhrases are merged with built-in
 	// defaults (EN + IT). Add extra phrases here for other languages.
-	PermissionPhrases     []string `json:"permission_phrases"`
-	DirRestrictionPhrases []string `json:"dir_restriction_phrases"`
-	Rules                 Rules    `json:"rules"`
+	PermissionPhrases     []string   `json:"permission_phrases"`
+	DirRestrictionPhrases []string   `json:"dir_restriction_phrases"`
+	Rules                 Rules      `json:"rules"`
+	Otel                  OtelConfig `json:"otel"`
 }
 
 func defaults() Config {
@@ -58,6 +70,15 @@ func defaults() Config {
 		LlamaModel:   "qwen2.5-coder",
 		ClaudeBin:    "claude",
 		DefaultRoute: "local",
+		Otel: OtelConfig{
+			Enabled:             true,
+			LogLevel:            "INFO",
+			Traces:              true,
+			Metrics:             true,
+			WarnMB:              50,
+			MaxMB:               0,
+			MetricsFlushMinutes: 5,
+		},
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
 			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"},
@@ -147,6 +168,15 @@ func Dir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".milk"), nil
+}
+
+// OtelDir returns the directory for OTel signal files (~/.milk/otel).
+func OtelDir() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "otel"), nil
 }
 
 // HistoryPath returns the readline history file path for the given cwd.

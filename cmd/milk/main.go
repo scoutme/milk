@@ -16,6 +16,8 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
+	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -91,10 +93,25 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading session: %w", err)
 	}
 
+	obsShutdown := initObs(cfg)
+	defer func() { obsShutdown(context.Background()) }() //nolint:errcheck
+
+	memDir, err := memoryDir()
+	if err != nil {
+		return err
+	}
+	mem, err := memory.NewStore(memDir, sess.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: memory store unavailable: %v\n", milkTag(), err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
+	if od, err := config.OtelDir(); err == nil {
+		localAgent.WithOtelDir(od)
+	}
 	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
 
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
@@ -118,12 +135,47 @@ func run(cmd *cobra.Command, args []string) error {
 
 	switch target {
 	case router.TargetLocal:
-		return runLocal(ctx, cfg, sess, localAgent, prompt)
+		if mem != nil {
+			defer mem.Consolidate() //nolint:errcheck
+		}
+		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
 	case router.TargetClaude:
 		return runClaude(ctx, sess, claudeAgent, prompt)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+}
+
+func memoryDir() (string, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return "", fmt.Errorf("memory dir: %w", err)
+	}
+	return dir + "/memory", nil
+}
+
+// initObs bootstraps OTel, prints any file-size warning, and returns a
+// shutdown function. It never returns an error — OTel failures are non-fatal.
+func initObs(cfg config.Config) (shutdown func(context.Context) error) {
+	otelDir, err := config.OtelDir()
+	if err != nil {
+		return func(context.Context) error { return nil }
+	}
+
+	if warn, exceeded := obs.CheckFileSizes(cfg.Otel, otelDir); exceeded {
+		fmt.Fprintln(os.Stderr, milkTag()+" "+warn)
+		// Hard cap exceeded — skip OTel for this session.
+		return func(context.Context) error { return nil }
+	} else if warn != "" {
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: "+warn)
+	}
+
+	shutdown, err = obs.Init(cfg.Otel, otelDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: OTel init failed: %v\n", milkTag(), err)
+		return func(context.Context) error { return nil }
+	}
+	return shutdown
 }
 
 func loadSessionForRun(cwd string) (*session.Session, error) {
@@ -163,7 +215,7 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 const claudeLabel = "claude:"
 const localLabel = "local:"
 
-func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, prompt string, outs ...io.Writer) error {
+func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, mem *memory.Store, prompt string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
@@ -174,7 +226,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 
 	sess.ForceState(session.StateLocal)
 
-	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess)
+	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess, mem)
 	aw.Done()
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {

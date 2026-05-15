@@ -18,6 +18,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -840,7 +841,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 
 	switch target {
 	case router.TargetLocal:
-		return runLocal(turnCtx, st.cfg, st.sess, localAgent, input, out)
+		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetClaude:
 		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, out)
 	}
@@ -855,7 +856,20 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		return fmt.Errorf("loading session: %w", err)
 	}
 
+	obsShutdown := initObs(cfg)
+	defer func() { obsShutdown(context.Background()) }() //nolint:errcheck
+
+	var mem *memory.Store
+	if dir, err := memoryDir(); err == nil {
+		if m, err := memory.NewStore(dir, sess.ID); err == nil {
+			mem = m
+		}
+	}
+
 	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
+	if od, err := config.OtelDir(); err == nil {
+		localAgent.WithOtelDir(od)
+	}
 	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
 
 	ctx := context.Background()
@@ -874,7 +888,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — Claude will auto-approve all tool uses without prompting"))
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg}
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	m := newModel(ctx, st, rtr, agents)
@@ -895,5 +909,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	os.Stdout.WriteString("\x1b[?1000h\x1b[?1006h") //nolint:errcheck
 	_, err = p.Run()
 	os.Stdout.WriteString("\x1b[?1006l\x1b[?1000l") //nolint:errcheck
+
+	if mem != nil {
+		mem.Consolidate() //nolint:errcheck
+	}
 	return err
 }

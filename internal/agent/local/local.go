@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -67,6 +68,7 @@ type streamChunk struct {
 type Agent struct {
 	baseURL string
 	model   string
+	otelDir string
 	client  *http.Client
 }
 
@@ -78,13 +80,21 @@ func New(baseURL, model string) *Agent {
 	}
 }
 
-const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, escalate_to_claude.
+// WithOtelDir sets the otel directory so the agent can offer get_metrics.
+func (a *Agent) WithOtelDir(dir string) *Agent {
+	a.otelDir = dir
+	return a
+}
+
+const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, get_metrics, escalate_to_claude.
 
 Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
 - If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "claude" to see only Claude's prior turns. Only omit all filters when you genuinely need the full history.
+- Call get_memory before answering questions that reference past context or stated preferences. Call record_memory when the user states a preference, makes a decision, or shares a fact worth remembering across sessions.
+- Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 - The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without naming one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
 - Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
 
@@ -103,7 +113,7 @@ func cwdContext(cwd string) string {
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
-func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer, sess *session.Session) ([]Message, error) {
+func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, error) {
 	if history == nil {
 		history = []Message{}
 	}
@@ -113,7 +123,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
-	tools := schemas()
+	tools := schemas(mem, a.otelDir, sess)
 
 	for i := 0; i < maxToolIterations; i++ {
 		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
@@ -140,7 +150,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 		// Execute each tool call
 		for _, tc := range toolCalls {
-			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess)
+			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 			if escalate {
 				var escalateArgs struct {
 					Reason string `json:"reason"`

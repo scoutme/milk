@@ -13,8 +13,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
+
+const errMemUnavailable = "memory store not available"
 
 type toolResult struct {
 	Output   string `json:"output,omitempty"`
@@ -28,8 +32,8 @@ func (r toolResult) String() string {
 }
 
 // schemas returns the OpenAI function schemas for all built-in tools.
-func schemas() []map[string]any {
-	return []map[string]any{
+func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[string]any {
+	base := []map[string]any{
 		{
 			"type": "function",
 			"function": map[string]any{
@@ -167,9 +171,44 @@ func schemas() []map[string]any {
 			},
 		},
 	}
+	if mem != nil {
+		base = append(base, memory.Schemas()...)
+	}
+	if otelDir != "" {
+		base = append(base, obs.ToolSchemas()...)
+	}
+	if sess != nil {
+		base = append(base, exportSessionSchema())
+	}
+	return base
 }
 
-func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Session) (string, bool) {
+func exportSessionSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "export_session",
+			"description": "Export the current session (metadata + full conversation history). Returns a structured transcript. Optionally write it to a file.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"format": map[string]any{
+						"type":        "string",
+						"enum":        []string{"text", "json"},
+						"description": "Output format: 'text' for readable transcript (default), 'json' for raw session JSON.",
+					},
+					"output_path": map[string]any{
+						"type":        "string",
+						"description": "Optional file path to write the export to. If omitted, the export is returned inline.",
+					},
+				},
+				"required": []string{},
+			},
+		},
+	}
+}
+
+func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Session, mem *memory.Store, otelDir string) (string, bool) {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return toolResult{Error: "invalid arguments: " + err.Error()}.String(), false
@@ -192,11 +231,78 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return runHTTPGet(ctx, args)
 	case "get_session_context":
 		return runGetSessionContext(sess, args), false
+	case "record_memory":
+		if mem != nil {
+			return memory.DispatchRecordMemory(ctx, mem, argsJSON), false
+		}
+		return toolResult{Error: errMemUnavailable}.String(), false
+	case "get_memory":
+		if mem != nil {
+			return memory.DispatchGetMemory(ctx, mem, argsJSON), false
+		}
+		return toolResult{Error: errMemUnavailable}.String(), false
+	case "list_memory":
+		if mem != nil {
+			return memory.DispatchListMemory(ctx, mem, argsJSON), false
+		}
+		return toolResult{Error: errMemUnavailable}.String(), false
+	case "get_metrics":
+		if otelDir != "" {
+			return obs.DispatchGetMetrics(otelDir), false
+		}
+		return toolResult{Error: "observability not available"}.String(), false
+	case "search_signals":
+		if otelDir != "" {
+			return obs.DispatchSearchSignals(otelDir, argsJSON), false
+		}
+		return toolResult{Error: "observability not available"}.String(), false
+	case "export_session":
+		return dispatchExportSession(sess, argsJSON), false
 	case "escalate_to_claude":
 		return "", true // caller checks the bool
 	default:
 		return toolResult{Error: "unknown tool: " + name}.String(), false
 	}
+}
+
+func dispatchExportSession(sess *session.Session, argsJSON string) string {
+	if sess == nil {
+		return toolResult{Error: "no active session"}.String()
+	}
+	var args struct {
+		Format     string `json:"format"`
+		OutputPath string `json:"output_path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return toolResult{Error: "invalid arguments: " + err.Error()}.String()
+	}
+	if args.Format == "" {
+		args.Format = "text"
+	}
+
+	var content string
+	switch args.Format {
+	case "json":
+		data, err := session.ExportJSON(sess)
+		if err != nil {
+			return toolResult{Error: "export failed: " + err.Error()}.String()
+		}
+		content = string(data)
+	default:
+		content = session.ExportText(sess)
+	}
+
+	if args.OutputPath != "" {
+		path := filepath.Clean(args.OutputPath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return toolResult{Error: "mkdir failed: " + err.Error()}.String()
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return toolResult{Error: "write failed: " + err.Error()}.String()
+		}
+		return toolResult{Output: fmt.Sprintf("session exported to %s (%d bytes)", path, len(content))}.String()
+	}
+	return toolResult{Output: content}.String()
 }
 
 // runGetSessionContext formats session history with optional filters:
