@@ -27,8 +27,7 @@ func TestStream_ExtractsSessionID(t *testing.T) {
 func TestStream_WritesTextToOut(t *testing.T) {
 	input := ndjson(
 		`{"type":"system","session_id":"s1"}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, "}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"world"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, world"}]}}`,
 		`{"type":"result","is_error":false,"session_id":"s1"}`,
 	)
 	var out strings.Builder
@@ -36,14 +35,28 @@ func TestStream_WritesTextToOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Hello, ") {
-		t.Errorf("output missing first chunk, got %q", out.String())
-	}
-	if !strings.Contains(out.String(), "world") {
-		t.Errorf("output missing second chunk, got %q", out.String())
+	if !strings.Contains(out.String(), "Hello, world") {
+		t.Errorf("output missing text, got %q", out.String())
 	}
 	if res.Text != "Hello, world" {
 		t.Errorf("want text %q, got %q", "Hello, world", res.Text)
+	}
+}
+
+func TestStream_SeparatesConsecutiveAssistantEvents(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"First turn"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Second turn"}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "First turn\nSecond turn" {
+		t.Errorf("want newline between assistant events, got %q", res.Text)
 	}
 }
 
