@@ -17,3 +17,4 @@
 * [15. TUI-native permission prompts via blocking goroutine + channel](0015-tui-permission-prompts.md)
 * [16. Memory System: Percept Store with NREM Consolidation](0016-memory-system-percept-store.md)
 * [17. OpenTelemetry-native Observability with File Exporters](0017-opentelemetry-observability.md)
+* [18. Streaming Tool-Format Detector for Multi-Model Compatibility](0018-streaming-tool-format-detector.md)
