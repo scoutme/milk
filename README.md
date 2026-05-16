@@ -31,7 +31,7 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 ## Prerequisites
 
 | Dependency | Purpose | Required |
-|---|---|---|
+| --- | --- | --- |
 | [llama.cpp server](https://github.com/ggml-org/llama.cpp) | local LLM inference | no (degrades to Claude-only) |
 | [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
 | Go 1.21+ | build only | yes |
@@ -64,7 +64,7 @@ milk
 
 Starts a REPL session with colored prompt, Tab completion, and command history.
 
-```
+```text
 [local] > fix the off-by-one in parser.go
 [claude] > design an alternative approach
 ```
@@ -74,9 +74,21 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 **Slash commands:**
 
 | Command | Description |
-|---|---|
+| --- | --- |
 | `/escalate` | Force next turn to Claude |
 | `/local` | Force next turn to local model |
+| `/learn <fact>` | Store a persistent memory (`Core=true`, W=1.0, global scope) |
+| `/memory` | List all Percepts (global + session), sorted by confidence weight |
+| `/memory global` | List only global Percepts |
+| `/memory session` | List only session-scoped Percepts |
+| `/memory <pattern>` | List Percepts whose content matches a substring |
+| `/export` | Print the current session transcript |
+| `/export json` | Print the current session as raw JSON |
+| `/export <path>` | Write the session transcript to a file |
+| `/metrics` | Show the most recent values of all observability metrics |
+| `/otel` | Show OTel signal file sizes and record counts |
+| `/otel trim` | Archive current OTel files and start fresh |
+| `/otel off` / `/otel on` | Disable / re-enable OTel for this session |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
@@ -96,7 +108,7 @@ milk [flags] <prompt>
 ### Flags
 
 | Flag | Description |
-|---|---|
+| --- | --- |
 | `--escalate` | Force this turn to Claude |
 | `--local` | Force this turn to the local model; breaks a CLAUDE_WAITING session |
 | `--new` | Start a fresh session for the current directory |
@@ -141,6 +153,14 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
   "llama_model": "gemma-4-e4b",
   "claude_bin": "claude",
   "default_route": "local",
+  "otel": {
+    "enabled": true,
+    "traces": true,
+    "metrics": true,
+    "warn_mb": 50,
+    "max_mb": 200,
+    "metrics_flush_minutes": 5
+  },
   "rules": {
     "escalate_above_tokens": 2000,
     "local_below_tokens": 30,
@@ -163,12 +183,28 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 
 Sessions persist under `~/.milk/sessions/`. By default, `milk` resumes the most recent session for the current directory. Multiple named sessions can coexist in the same directory.
 
+### Memory
+
+milk maintains a persistent Percept store at `~/.milk/memory/`. Percepts are atomic natural-language assertions with a confidence weight that decays each session and rises when reinforced. At session end, NREM consolidation runs: decay → prune → promote high-weight Percepts to the global store.
+
+### Observability
+
+OTel signal files are written to `~/.milk/otel/`:
+
+| File | Contents |
+| --- | --- |
+| `logs.jsonl` | Structured event logs (Percept records, consolidation runs, recalls) |
+| `traces.jsonl` | Span traces per memory operation |
+| `metrics.jsonl` | Counters and gauges (Percept counts, decay/prune/promote totals, file sizes) |
+
+Use `/otel` to inspect sizes and `/otel trim` to archive and reset. Use `/metrics` to see the latest metric values inline.
+
 ## Local agent tools
 
 The local model has access to these built-in tools:
 
 | Tool | Description |
-|---|---|
+| --- | --- |
 | `bash` | Run a shell command, returns stdout/stderr/exit code |
 | `grep` | Search file contents by pattern |
 | `read_file` | Read a file with optional offset and line limit |
@@ -176,11 +212,19 @@ The local model has access to these built-in tools:
 | `edit_file` | Exact-string replacement within a file |
 | `list_dir` | List directory contents with type and size |
 | `http_get` | Fetch a URL, returns body as text |
+| `get_session_context` | Read the shared session history (filterable by agent, pattern, recency) |
+| `record_memory` | Store a Percept in the memory store |
+| `get_memory` | Retrieve Percepts matching a keyword query |
+| `list_memory` | List all Percepts with optional scope/producer/pattern filters |
+| `export_session` | Export the current session transcript as text or JSON |
+| `get_metrics` | Show the latest observability metric values |
+| `search_signals` | Search OTel signal files (logs/traces/metrics) for a pattern |
+| `escalate_to_claude` | Hand off the current task to Claude with a reason |
 
 ## Graceful degradation
 
 | llama.cpp | claude CLI | behaviour |
-|---|---|---|
+| --- | --- | --- |
 | running | installed | normal routing |
 | down | installed | warns once, routes all turns to Claude |
 | running | not installed | warns once, stays local-only |
@@ -190,5 +234,7 @@ The local model has access to these built-in tools:
 
 - [docs/setup.md](docs/setup.md) — full setup guide and local testing procedure
 - [docs/spec.md](docs/spec.md) — full architecture and design spec
+- [docs/memory-design.md](docs/memory-design.md) — memory system design and phases
+- [docs/observability-design.md](docs/observability-design.md) — OTel observability strategy
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch and commit conventions
