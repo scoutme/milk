@@ -66,11 +66,11 @@ type streamChunk struct {
 
 // Agent is a local LLM agent backed by a llama.cpp OpenAI-compatible server.
 type Agent struct {
-	baseURL         string
-	model           string
-	otelDir         string
-	client          *http.Client
-	detectedFormat  ToolFormat // confirmed format from last tool-bearing turn
+	baseURL        string
+	model          string
+	otelDir        string
+	client         *http.Client
+	detectedFormat ToolFormat // confirmed format from last tool-bearing turn
 }
 
 func New(baseURL, model string) *Agent {
@@ -151,6 +151,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 		// Execute each tool call
 		for _, tc := range toolCalls {
+			printToolLine(out, tc)
 			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 			if escalate {
 				var escalateArgs struct {
@@ -168,6 +169,34 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 
 	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxToolIterations)
+}
+
+// printToolLine writes a one-line dim tool-usage hint to out before a tool is
+// dispatched, mirroring what Claude shows for permission requests.
+// Format:  ⚙ <name>: <short summary of key argument>
+func printToolLine(out io.Writer, tc toolCall) {
+	var args map[string]any
+	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+
+	summary := toolArgSummary(args)
+	if summary != "" {
+		fmt.Fprintf(out, "\n\033[2m⚙ %s: %s\033[0m\n", tc.Function.Name, summary)
+	} else {
+		fmt.Fprintf(out, "\n\033[2m⚙ %s\033[0m\n", tc.Function.Name)
+	}
+}
+
+// toolArgSummary extracts the most informative single argument value for display.
+func toolArgSummary(args map[string]any) string {
+	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			if len(v) > 60 {
+				return v[:57] + "..."
+			}
+			return v
+		}
+	}
+	return ""
 }
 
 // streamCompletion sends a chat completion request and streams the response.
