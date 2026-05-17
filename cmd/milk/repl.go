@@ -169,7 +169,16 @@ func buildTextarea() textarea.Model {
 
 // refreshPrompt updates the textarea prompt label and width to match the current mode.
 func (m *model) refreshPrompt() {
-	label := promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
+	var label string
+	if m.searching {
+		dir := "r"
+		if m.searchForward {
+			dir = "f"
+		}
+		label = yellow("("+dir+"-search)") + " > "
+	} else {
+		label = promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
+	}
 	plain := stripANSI(label)
 	promptWidth := len(plain)
 
@@ -230,7 +239,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // transcript + separator + input area. The input area scrolls with the transcript.
 func (m *model) setViewportContent() {
 	sep := styleBorder.Width(m.width).Render("")
-	content := m.wrappedTranscript() + "\n" + sep + "\n" + colorizeInput(m.ta.View())
+	content := m.wrappedTranscript() + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
 	m.vp.SetContent(content)
 }
 
@@ -462,6 +471,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchForward = false
 		m.searchQuery.Reset()
 		m.searchIdx = -1
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "ctrl+s":
@@ -469,6 +479,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchForward = true
 		m.searchQuery.Reset()
 		m.searchIdx = -1
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "enter":
@@ -596,11 +607,13 @@ func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+r":
 		m.searchForward = false
 		m = m.historySearchBack()
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "ctrl+s":
 		m.searchForward = true
 		m = m.historySearchForward()
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "ctrl+c", "esc":
@@ -609,12 +622,14 @@ func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchQuery.Reset()
 		m.ta.SetValue(m.saved)
 		m.ta.SetHeight(m.ta.LineCount())
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "enter":
 		// Accept current match
 		m.searching = false
 		m.searchQuery.Reset()
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	case "backspace", "ctrl+h":
@@ -947,7 +962,7 @@ func syncHeight(ta *textarea.Model) {
 
 // --- Input colorizer ---
 
-func colorizeInput(view string) string {
+func (m *model) colorizeInput(view string) string {
 	if !isTTY {
 		return view
 	}
@@ -965,7 +980,19 @@ func colorizeInput(view string) string {
 	}
 	promptPart := line[:promptEnd+2]
 	inputPart := line[promptEnd+2:]
+	if m.searching && m.searchQuery.Len() > 0 {
+		return prefix + promptPart + highlightMatch(inputPart, m.searchQuery.String())
+	}
 	return prefix + promptPart + colorizeTokens(inputPart)
+}
+
+// highlightMatch bolds and yellows the first occurrence of query inside s.
+func highlightMatch(s, query string) string {
+	idx := strings.Index(strings.ToLower(s), strings.ToLower(query))
+	if idx < 0 {
+		return s
+	}
+	return s[:idx] + colorize(s[idx:idx+len(query)], "\033[1;33m") + s[idx+len(query):]
 }
 
 func colorizeTokens(s string) string {
