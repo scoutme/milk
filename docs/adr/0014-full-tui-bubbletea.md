@@ -3,7 +3,8 @@
 Date: 2026-05-14
 
 ## Status
-Accepted
+
+Accepted — partially superseded by [ADR-0019](0019-tui-input-history-and-turn-cancellation.md) (input locking and history)
 
 ## Context
 
@@ -22,7 +23,7 @@ Replace the readline REPL entirely with a persistent bubbletea alt-screen TUI:
 
 ### Layout
 
-```
+```text
 ┌──────────────────────────────────────────┐
 │  transcript viewport  (scrollable)       │
 ├──────────────────────────────────────────┤

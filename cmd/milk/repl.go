@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -104,9 +105,17 @@ type model struct {
 	spinnerFrame int
 
 	// history navigation
-	history []string
-	histIdx int
-	saved   string
+	sessionHistory   []string // entries for this session only (default navigation)
+	globalHistory    []string // entries across all sessions
+	useGlobalHistory bool     // when true, navigate globalHistory instead
+	histIdx          int
+	saved            string
+
+	// ctrl+r / ctrl+s incremental search state
+	searching     bool
+	searchForward bool // false = reverse (ctrl+r), true = forward (ctrl+s)
+	searchQuery   strings.Builder
+	searchIdx     int // position in activeHistory() we last matched
 
 	// tab completion
 	tabMatches []string
@@ -114,6 +123,10 @@ type model struct {
 
 	// pending permission request (non-nil while waiting for user y/n)
 	pendingPerm *permRequestMsg
+
+	// cancelTurn cancels the context of the running agent turn; nil when idle.
+	cancelTurn  context.CancelFunc
+	interrupted bool // set when user cancels a turn via ctrl+c
 
 	// injected dependencies
 	ctx    context.Context
@@ -174,6 +187,17 @@ func (m *model) refreshPrompt() {
 
 // inputLocked returns true when agent is running.
 func (m *model) inputLocked() bool { return m.busy }
+
+// handleBusyKey handles key events while an agent turn is running.
+// Only ctrl+c is acted upon (cancels the turn); all other keys are ignored.
+func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" && m.cancelTurn != nil {
+		m.cancelTurn()
+		m.cancelTurn = nil
+		m.interrupted = true
+	}
+	return m, nil
+}
 
 // handlePermKey routes key events while a permission prompt is pending.
 // Only enter submits; anything else is passed to the textarea normally.
@@ -282,6 +306,13 @@ func (m *model) statusBar() string {
 		frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 		agent = dim(frame) + " " + agent
 	}
+	if m.searching {
+		label := "reverse-i-search"
+		if m.searchForward {
+			label = "forward-i-search"
+		}
+		agent = dim("(" + label + ")`" + m.searchQuery.String() + "'")
+	}
 	left := fmt.Sprintf(" session:%s  agent:%s", sessID, agent)
 	right := cwd + " "
 	gap := m.width - len(stripANSI(left)) - len(right)
@@ -317,10 +348,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePermKey(msg)
 		}
 		if m.inputLocked() {
-			if msg.String() == "ctrl+c" {
-				return m, tea.Quit
-			}
-			return m, nil
+			return m.handleBusyKey(msg)
 		}
 		return m.handleKey(msg)
 
@@ -339,7 +367,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		m.busy = false
-		if msg.err != nil {
+		m.cancelTurn = nil
+		if m.interrupted {
+			m.interrupted = false
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		} else if msg.err != nil {
 			m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 		}
 		m.appendTranscript("\n")
@@ -413,6 +445,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// ctrl+r search mode: intercept most keys.
+	if m.searching {
+		return m.handleSearchKey(msg)
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		return m.handleCtrlC()
@@ -420,6 +457,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ta.Value() == "" {
 			return m, tea.Quit
 		}
+	case "ctrl+r":
+		m.searching = true
+		m.searchForward = false
+		m.searchQuery.Reset()
+		m.searchIdx = -1
+		m.syncLayout()
+		return m, nil
+	case "ctrl+s":
+		m.searching = true
+		m.searchForward = true
+		m.searchQuery.Reset()
+		m.searchIdx = -1
+		m.syncLayout()
+		return m, nil
 	case "enter":
 		return m.handleEnter()
 	case "up":
@@ -503,13 +554,9 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	label := promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
 	m.appendTranscript(label + colorizeTokens(input) + "\n")
 
-	// Dedupe history
-	if len(m.history) == 0 || m.history[len(m.history)-1] != input {
-		m.history = append(m.history, input)
-		if len(m.history) > 500 {
-			m.history = m.history[1:]
-		}
-	}
+	// Append to both histories (deduped)
+	m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
+	m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
 
 	if input == cmdPaste {
 		m.appendTranscript(dim("[milk]") + " hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline\n")
@@ -524,6 +571,9 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSlashInput(cmd, rest, rawInput string) (tea.Model, tea.Cmd) {
+	if cmd == cmdHistory {
+		return m.handleHistoryCmd(strings.TrimSpace(rest)), nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -538,11 +588,89 @@ func (m model) handleSlashInput(cmd, rest, rawInput string) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// handleSearchKey handles keypresses while ctrl+r search is active.
+// Printable chars extend the query; ctrl+r searches again (older);
+// backspace shrinks the query; enter/esc/ctrl+c accept and exit search.
+func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+r":
+		m.searchForward = false
+		m = m.historySearchBack()
+		m.syncLayout()
+		return m, nil
+	case "ctrl+s":
+		m.searchForward = true
+		m = m.historySearchForward()
+		m.syncLayout()
+		return m, nil
+	case "ctrl+c", "esc":
+		// Cancel search — restore saved text
+		m.searching = false
+		m.searchQuery.Reset()
+		m.ta.SetValue(m.saved)
+		m.ta.SetHeight(m.ta.LineCount())
+		m.syncLayout()
+		return m, nil
+	case "enter":
+		// Accept current match
+		m.searching = false
+		m.searchQuery.Reset()
+		m.syncLayout()
+		return m, nil
+	case "backspace", "ctrl+h":
+		s := m.searchQuery.String()
+		if len(s) > 0 {
+			m.searchQuery.Reset()
+			m.searchQuery.WriteString(s[:len(s)-1])
+			m.searchIdx = -1
+			m = m.historySearchBack()
+		}
+		m.syncLayout()
+		return m, nil
+	default:
+		// Accept printable single-rune input
+		if r := msg.String(); len(r) == 1 {
+			if m.searchQuery.Len() == 0 {
+				m.saved = m.ta.Value()
+				m.searchIdx = -1
+			}
+			m.searchQuery.WriteString(r)
+			m.searchIdx = -1
+			m = m.historySearchBack()
+			m.syncLayout()
+		}
+		return m, nil
+	}
+}
+
+func (m model) handleHistoryCmd(sub string) model {
+	switch sub {
+	case "global":
+		m.useGlobalHistory = true
+		m.histIdx = -1
+		m.appendTranscript(milkTag() + " history navigation: global\n")
+	case "session":
+		m.useGlobalHistory = false
+		m.histIdx = -1
+		m.appendTranscript(milkTag() + " history navigation: session\n")
+	default:
+		mode := "session"
+		if m.useGlobalHistory {
+			mode = "global"
+		}
+		m.appendTranscript(fmt.Sprintf("%s history mode: %s  (session: %d entries, global: %d entries)\n",
+			milkTag(), mode, len(m.sessionHistory), len(m.globalHistory)))
+	}
+	return m
+}
+
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
 
-	ctx := m.ctx
+	turnCtx, cancel := context.WithCancel(m.ctx)
+	m.cancelTurn = cancel
+
 	st := m.st
 	rtr := m.rtr
 	agents := m.agents
@@ -551,9 +679,10 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		spinnerTick(),
 		func() tea.Msg {
+			defer cancel()
 			sw := &sendWriter{send: send}
 			ir := &tuiInputReader{send: send}
-			err := runTurn(ctx, st, rtr, agents, input, sw, ir)
+			err := runTurn(turnCtx, st, rtr, agents, input, sw, ir)
 			return agentDoneMsg{err: err}
 		},
 	)
@@ -578,33 +707,113 @@ func spinnerTick() tea.Cmd {
 
 // --- History ---
 
+// activeHistory returns the slice used for navigation (session or global).
+func (m *model) activeHistory() []string {
+	if m.useGlobalHistory {
+		return m.globalHistory
+	}
+	return m.sessionHistory
+}
+
+func appendDeduped(h []string, entry string, max int) []string {
+	if len(h) > 0 && h[len(h)-1] == entry {
+		return h
+	}
+	h = append(h, entry)
+	if len(h) > max {
+		h = h[1:]
+	}
+	return h
+}
+
 func (m model) historyBack() model {
-	if len(m.history) == 0 {
+	h := m.activeHistory()
+	if len(h) == 0 {
 		return m
 	}
 	if m.histIdx == -1 {
 		m.saved = m.ta.Value()
-		m.histIdx = len(m.history) - 1
+		m.histIdx = len(h) - 1
 	} else if m.histIdx > 0 {
 		m.histIdx--
 	}
-	m.ta.SetValue(m.history[m.histIdx])
+	m.ta.SetValue(h[m.histIdx])
 	m.ta.SetHeight(m.ta.LineCount())
 	return m
 }
 
 func (m model) historyForward() model {
+	h := m.activeHistory()
 	if m.histIdx == -1 {
 		return m
 	}
 	m.histIdx++
-	if m.histIdx >= len(m.history) {
+	if m.histIdx >= len(h) {
 		m.histIdx = -1
 		m.ta.SetValue(m.saved)
 	} else {
-		m.ta.SetValue(m.history[m.histIdx])
+		m.ta.SetValue(h[m.histIdx])
 	}
 	m.ta.SetHeight(m.ta.LineCount())
+	return m
+}
+
+// searchBack returns the index of the nearest match for q in h, searching
+// backwards from start (exclusive). Returns -1 if no match found.
+func searchBack(h []string, q string, start int) int {
+	if start < 0 {
+		start = len(h)
+	}
+	for i := start - 1; i >= 0; i-- {
+		if strings.Contains(h[i], q) {
+			return i
+		}
+	}
+	return -1
+}
+
+// searchForward returns the index of the nearest match for q in h, searching
+// forwards from start (exclusive). Returns -1 if no match found.
+func searchForward(h []string, q string, start int) int {
+	from := start + 1
+	if start < 0 {
+		from = 0
+	}
+	for i := from; i < len(h); i++ {
+		if strings.Contains(h[i], q) {
+			return i
+		}
+	}
+	return -1
+}
+
+// historySearchBack finds the most recent entry in activeHistory() that contains
+// searchQuery, starting from searchIdx-1 (or end if searchIdx==-1).
+func (m model) historySearchBack() model {
+	h := m.activeHistory()
+	if len(h) == 0 || m.searchQuery.Len() == 0 {
+		return m
+	}
+	if idx := searchBack(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
+		m.searchIdx = idx
+		m.ta.SetValue(h[idx])
+		m.ta.SetHeight(m.ta.LineCount())
+	}
+	return m
+}
+
+// historySearchForward finds the next (newer) entry in activeHistory() that
+// contains searchQuery, starting from searchIdx+1.
+func (m model) historySearchForward() model {
+	h := m.activeHistory()
+	if len(h) == 0 || m.searchQuery.Len() == 0 {
+		return m
+	}
+	if idx := searchForward(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
+		m.searchIdx = idx
+		m.ta.SetValue(h[idx])
+		m.ta.SetHeight(m.ta.LineCount())
+	}
 	return m
 }
 
@@ -848,6 +1057,63 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	return nil
 }
 
+// --- Input history persistence ---
+
+const maxPersistedHistory = 500
+
+func globalHistoryPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".milk", "input_history"), nil
+}
+
+func sessionHistoryPath(sessID string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".milk", "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sessID+".history"), nil
+}
+
+func readHistoryFile(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if line := sc.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func writeHistoryFile(path string, history []string) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	start := 0
+	if len(history) > maxPersistedHistory {
+		start = len(history) - maxPersistedHistory
+	}
+	for _, line := range history[start:] {
+		fmt.Fprintln(w, line)
+	}
+	w.Flush() //nolint:errcheck
+}
+
 // --- runREPL entry point ---
 
 func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string) error {
@@ -892,6 +1158,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	m := newModel(ctx, st, rtr, agents)
+	if gp, err := globalHistoryPath(); err == nil {
+		m.globalHistory = readHistoryFile(gp)
+	}
+	if sp, err := sessionHistoryPath(sess.ID); err == nil {
+		m.sessionHistory = readHistoryFile(sp)
+	}
 
 	// Prime transcript with welcome line
 	welcome := fmt.Sprintf("%s interactive mode — session %s  (type /help for commands)\n",
@@ -907,9 +1179,17 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Reports scroll wheel and clicks as tea.MouseMsg without capturing drag,
 	// so native terminal selection and middle-click paste work without Shift.
 	os.Stdout.WriteString("\x1b[?1000h\x1b[?1006h") //nolint:errcheck
-	_, err = p.Run()
+	finalModel, err := p.Run()
 	os.Stdout.WriteString("\x1b[?1006l\x1b[?1000l") //nolint:errcheck
 
+	if fm, ok := finalModel.(model); ok {
+		if gp, err := globalHistoryPath(); err == nil {
+			writeHistoryFile(gp, fm.globalHistory)
+		}
+		if sp, err := sessionHistoryPath(sess.ID); err == nil {
+			writeHistoryFile(sp, fm.sessionHistory)
+		}
+	}
 	if mem != nil {
 		mem.Consolidate() //nolint:errcheck
 	}

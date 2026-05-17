@@ -143,12 +143,14 @@ at turn end. This handles live model swaps.
 ### Streaming behaviour change
 
 Current flow:
-```
+
+```plain
 token → print to out → accumulate in textBuf → post-hoc parse
 ```
 
 New flow:
-```
+
+```plain
 token → detector.Feed(token)
            ├─ not in tool block, no trigger prefix → print to out, accumulate text
            ├─ trigger prefix detected → suppress print, set inToolBlock, accumulate to buf
@@ -190,6 +192,7 @@ first tool-bearing turn.
 ## Consequences
 
 **Good:**
+
 - Raw tool-call markup never leaks to `out` regardless of model or template.
 - Per-format parsers are small, focused, and independently testable.
 - Live model switching is handled transparently.
@@ -198,6 +201,7 @@ first tool-bearing turn.
 - No llama.cpp server changes needed; no `--chat-template` requirement for Qwen.
 
 **Bad / Trade-offs:**
+
 - The detector adds per-token branching to the hot path; negligible in practice
   (string prefix checks on short tokens).
 - Detecting `bare_json` requires tracking brace depth, which adds state.
@@ -209,14 +213,17 @@ first tool-bearing turn.
 ## Alternatives considered
 
 ### A — Post-hoc only (current)
+
 Keep scanning `textBuf` at end-of-stream. Simple, but tokens leak to `out` and
 there is no format memory between turns.
 
 ### B — Require correct `--chat-template`
+
 Mandate that llama.cpp is always started with the right flag. Pushes the problem
 to the operator; breaks for ad-hoc model switches and cold-starts without docs.
 
 ### C — Per-model config in `~/.milk/config.json`
+
 Let the user declare `"tool_format": "qwen"`. Workable but requires manual
 setup and breaks on model hot-swap.
 
@@ -228,27 +235,32 @@ auto-detection is strictly better UX.
 ## Implementation plan
 
 ### Step 1 — `detect.go`: `ToolFormat` constants + `StreamDetector`
+
 - `Feed(token string) (print bool, complete bool)`
 - `Extract() []toolCall` — delegates to per-format extractors
 - `Reset()` — clear buffer, keep format
 - Unit tests covering each format's open/close cycle and the fallback path
 
 ### Step 2 — `local.go`: wire detector into `streamCompletion`
+
 - Replace the bare `textBuf` / immediate-print loop with `detector.Feed`
 - Store `detectedFormat` on `Agent`; seed and update per turn
 - Preserve `fallbackRaw` logic for history
 
 ### Step 3 — `local.go`: model-name pre-seeding in `Ping` / startup
+
 - Call `GET /v1/models` (graceful if absent)
 - Match model name against the seed table
 - Store result in `a.detectedFormat`
 
 ### Step 4 — tests
+
 - Table-driven tests for every format in `toolparse_test.go` / new `detect_test.go`
 - Integration smoke test: send a fenced-JSON tool call through `streamCompletion`
   and verify no markup reaches `out`
 
 ### Step 5 — `docs/memory-design.md` / `README.md`
+
 - Document `--chat-template` as optional (recommended for performance, not
   required for correctness)
 - Add a note on supported model families

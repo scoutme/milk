@@ -3,6 +3,7 @@
 Date: 2026-05-08
 
 ## Status
+
 Accepted
 
 ## Context
@@ -33,6 +34,7 @@ Implement both proactive (2) and reactive (3) together. `--dangerously-skip-perm
 - `DirRestricted`: directory access refused.
 
 On detection, `runClaude` asks the user interactively:
+
 - Tool: `y/n` prompt; on approval, `WithExtraTools(tool)` clones the agent with the tool appended to the allowed list and retries via `--resume`.
 - Directory: free-text path prompt; on input, `WithExtraDirs(dir)` clones the agent and retries via `--resume` with the granted path in the resume message so Claude operates on the correct target.
 

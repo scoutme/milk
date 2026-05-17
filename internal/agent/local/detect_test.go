@@ -217,8 +217,8 @@ func TestGuessFormatFromModel(t *testing.T) {
 	}{
 		{"gemma-4-e4b", ToolFormatGemmaSpecial},
 		{"Gemma-2-9B-IT", ToolFormatGemmaSpecial},
-		{"Qwen2.5-Coder-7B-Instruct", ToolFormatToolCallTag},
-		{"qwen2.5-7b", ToolFormatToolCallTag},
+		{"Qwen2.5-Coder-7B-Instruct", ToolFormatUnknown},
+		{"qwen2.5-7b", ToolFormatUnknown},
 		{"mistral-7b-instruct", ToolFormatBracketCalls},
 		{"llama-3-8b", ToolFormatBracketCalls},
 		{"unknown-model-xyz", ToolFormatUnknown},
@@ -228,6 +228,45 @@ func TestGuessFormatFromModel(t *testing.T) {
 		if got != c.want {
 			t.Errorf("GuessFormatFromModel(%q) = %q, want %q", c.model, got, c.want)
 		}
+	}
+}
+
+// --- bare_json format ---
+
+func TestDetector_BareJSON_Detected(t *testing.T) {
+	d := NewStreamDetector(ToolFormatBareJSON)
+	input := `{"name": "read_file", "arguments": {"path": "/tmp/foo"}}` + "\n"
+	_, complete := feedAll(d, input)
+	if !d.InBlock() && !complete {
+		t.Fatal("expected detector to capture bare JSON block")
+	}
+	calls := d.Extract()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("expected read_file, got %q", calls[0].Function.Name)
+	}
+}
+
+func TestDetector_BareJSON_NoLeak(t *testing.T) {
+	d := NewStreamDetector(ToolFormatBareJSON)
+	input := `{"name": "bash", "arguments": {"command": "ls"}}` + "\n"
+	flushed, _ := feedAll(d, input)
+	if flushed != "" {
+		t.Errorf("bare JSON should not be flushed to out, got %q", flushed)
+	}
+}
+
+func TestDetector_BareJSON_PlainTextPassThrough(t *testing.T) {
+	d := NewStreamDetector(ToolFormatBareJSON)
+	input := "Hello, world!"
+	flushed, complete := feedAll(d, input)
+	if complete {
+		t.Error("plain text should not complete")
+	}
+	if flushed != input {
+		t.Errorf("plain text should pass through, got %q", flushed)
 	}
 }
 

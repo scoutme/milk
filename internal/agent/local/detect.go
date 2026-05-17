@@ -7,12 +7,13 @@ type ToolFormat string
 
 const (
 	ToolFormatUnknown      ToolFormat = ""
-	ToolFormatNative       ToolFormat = "native"            // delta tool_calls field
-	ToolFormatGemmaSpecial ToolFormat = "gemma_special"     // <|tool_call>...</tool_call|>
-	ToolFormatToolCallTag  ToolFormat = "tool_call_tag"     // <tool_call>...</tool_call>
-	ToolFormatToolsTag     ToolFormat = "tools_tag"         // <tools>...</tools>
-	ToolFormatFencedJSON   ToolFormat = "fenced_json"       // ```json\n...\n```
+	ToolFormatNative       ToolFormat = "native"             // delta tool_calls field
+	ToolFormatGemmaSpecial ToolFormat = "gemma_special"      // <|tool_call>...</tool_call|>
+	ToolFormatToolCallTag  ToolFormat = "tool_call_tag"      // <tool_call>...</tool_call>
+	ToolFormatToolsTag     ToolFormat = "tools_tag"          // <tools>...</tools>
+	ToolFormatFencedJSON   ToolFormat = "fenced_json"        // ```json\n...\n```
 	ToolFormatBracketCalls ToolFormat = "bracket_tool_calls" // [TOOL_CALLS][...]
+	ToolFormatBareJSON     ToolFormat = "bare_json"          // {"name":...} bare object
 )
 
 // delim pairs an opening prefix with its closing string and the format it identifies.
@@ -25,11 +26,12 @@ type delim struct {
 
 var knownDelims = []delim{
 	{open: "<|tool_call>", close: "<tool_call|>", format: ToolFormatGemmaSpecial},
-	{open: "<tool_call>",  close: "</tool_call>", format: ToolFormatToolCallTag},
-	{open: "<tools>",      close: "</tools>",     format: ToolFormatToolsTag},
-	{open: "```json\n",    close: "```",          format: ToolFormatFencedJSON},
-	{open: "```xml\n",     close: "```",          format: ToolFormatFencedJSON},
-	{open: "[TOOL_CALLS]", close: "]",            format: ToolFormatBracketCalls},
+	{open: "<tool_call>", close: "</tool_call>", format: ToolFormatToolCallTag},
+	{open: "<tools>", close: "</tools>", format: ToolFormatToolsTag},
+	{open: "```json\n", close: "```", format: ToolFormatFencedJSON},
+	{open: "```xml\n", close: "```", format: ToolFormatFencedJSON},
+	{open: "[TOOL_CALLS]", close: "]", format: ToolFormatBracketCalls},
+	{open: `{"name":`, close: "\n", format: ToolFormatBareJSON},
 }
 
 // modelFormatHints maps lower-case model-name substrings to a likely format.
@@ -38,7 +40,6 @@ var modelFormatHints = []struct {
 	format ToolFormat
 }{
 	{"gemma", ToolFormatGemmaSpecial},
-	{"qwen", ToolFormatToolCallTag},
 	{"mistral", ToolFormatBracketCalls},
 	{"llama", ToolFormatBracketCalls},
 }
@@ -76,9 +77,9 @@ type StreamDetector struct {
 	// calls so subsequent turns skip cold detection.
 	Format ToolFormat
 
-	state      detectorState
-	pendingBuf strings.Builder // held during stateMatchingPrefix
-	blockBuf   strings.Builder // accumulated tool-call content in stateInBlock
+	state       detectorState
+	pendingBuf  strings.Builder // held during stateMatchingPrefix
+	blockBuf    strings.Builder // accumulated tool-call content in stateInBlock
 	activeDelim *delim          // delimiter being matched/closed
 }
 
@@ -196,6 +197,11 @@ func (d *StreamDetector) Extract() []toolCall {
 			raw = raw[:idx]
 		}
 		raw = strings.TrimSpace(raw)
+		// For bare JSON format the open delimiter is the start of the JSON object
+		// itself — prepend it back so the parser receives a complete object.
+		if d.Format == ToolFormatBareJSON {
+			raw = d.activeDelim.open + raw
+		}
 	}
 	calls := extractToolCalls(raw)
 	if len(calls) == 0 {
@@ -207,6 +213,14 @@ func (d *StreamDetector) Extract() []toolCall {
 // RawBlock returns the raw accumulated block content (including closing delimiter).
 func (d *StreamDetector) RawBlock() string {
 	return d.blockBuf.String()
+}
+
+// ActiveOpen returns the open delimiter string of the current or last active block.
+func (d *StreamDetector) ActiveOpen() string {
+	if d.activeDelim != nil {
+		return d.activeDelim.open
+	}
+	return ""
 }
 
 // InBlock reports whether the detector is currently accumulating a tool block.

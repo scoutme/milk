@@ -1,6 +1,7 @@
 # ADR-0009: Router signal extractor and weighted scorer
 
 ## Status
+
 Accepted
 
 ## Context
@@ -14,18 +15,21 @@ The goal is to make a conclusive routing decision — without calling the LLM �
 Replace the two-rule function with a layered system:
 
 ### Layer 1 — Hard conclusive rules (unchanged)
+
 - Prompt exceeds `escalate_above_tokens` → Claude
 - Prompt matches `escalate_keywords` → Claude
 
 ### Layer 2 — Short-prompt shortcut (new)
+
 - Prompt is ≤ `local_below_tokens` tokens → conclusive local.  
   Very short prompts are almost always shell one-liners or quick task requests.
 
 ### Layer 3 — Weighted signal scorer (new)
+
 Each detected signal contributes a signed score:
 
 | Signal | Default weight | Rationale |
-|---|---|---|
+| --- | --- | --- |
 | local verb (grep, find, list, run, read, fix…) | −3 | imperative shell/task verb → local |
 | escalate verb (architect, design, evaluate…) | +4 | conceptual/planning verb → Claude |
 | path reference (token looks like a path, resolves on disk) | −2 | file-specific task → local |
@@ -37,7 +41,9 @@ If score ≤ `local_threshold` → conclusive local.
 Otherwise → inconclusive → proceed to LLM classifier.
 
 ### Configurable classifier fallback
+
 When the scorer is inconclusive, the fallback is configurable via `classifier_fallback`:
+
 - `"local"` (default) — call the local LLM classifier (Qwen2.5/Gemma 4)
 - `"claude"` — escalate directly, skipping the local classifier entirely
 

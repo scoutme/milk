@@ -87,7 +87,7 @@ func (a *Agent) WithOtelDir(dir string) *Agent {
 	return a
 }
 
-const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, get_metrics, escalate_to_claude.
+const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, get_metrics, escalate_to_claude.
 
 Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
@@ -126,6 +126,8 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess)
 
+	executedKeys := map[string]bool{}
+
 	for i := 0; i < maxToolIterations; i++ {
 		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
@@ -139,36 +141,53 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			return msgs, nil
 		}
 
-		// When tool calls came from the content fallback (raw markup), record the
-		// assistant message as plain content so the model sees its own exact output
-		// on the next turn. When they came from the native tool_calls field, use the
-		// structured form so the server can match tool_call_ids correctly.
-		if fallbackRaw != "" {
-			msgs = append(msgs, Message{Role: "assistant", Content: fallbackRaw})
-		} else {
-			msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+		// Deduplicate: if every tool call in this turn was already executed with
+		// the same arguments, the model is stuck in a loop — treat as terminal.
+		allSeen := true
+		for _, tc := range toolCalls {
+			key := tc.Function.Name + "\x00" + tc.Function.Arguments
+			if !executedKeys[key] {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			msgs = append(msgs, Message{Role: "assistant", Content: resp})
+			return msgs, nil
+		}
+		for _, tc := range toolCalls {
+			executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
 		}
 
-		// Execute each tool call
-		for _, tc := range toolCalls {
-			printToolLine(out, tc)
-			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
-			if escalate {
-				var escalateArgs struct {
-					Reason string `json:"reason"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
-				return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
-			}
-			toolMsg := Message{Role: "tool", Content: result}
-			if fallbackRaw == "" {
-				toolMsg.ToolCallID = tc.ID
-			}
-			msgs = append(msgs, toolMsg)
+		var esc *EscalationSignal
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, out, sess, mem)
+		if esc != nil {
+			return msgs, esc
 		}
 	}
 
 	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxToolIterations)
+}
+
+// executeToolCalls dispatches all tool calls and appends the results to msgs.
+// Always uses the structured OpenAI tool_calls wire format — the llama.cpp chat
+// template renders it into the model-specific markup (<tool_call>, etc.) and
+// wraps tool results in <tool_response> automatically.
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
+	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+	for _, tc := range toolCalls {
+		printToolLine(out, tc)
+		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
+		if escalate {
+			var escalateArgs struct {
+				Reason string `json:"reason"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
+			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
+		}
+		msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
+	}
+	return msgs, nil
 }
 
 // printToolLine writes a one-line dim tool-usage hint to out before a tool is
@@ -269,6 +288,14 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 		if calls := det.Extract(); len(calls) > 0 {
 			a.detectedFormat = det.Format
 			return "", det.RawBlock(), calls, nil
+		}
+		// Block was captured but contains no tool call (e.g. a code example in a
+		// text response). Flush its content so it appears in the output.
+		if raw := det.RawBlock(); raw != "" {
+			block := det.ActiveOpen() + raw
+			fmt.Fprint(out, block)
+			fmt.Fprintln(out)
+			return rawText + block, "", nil, nil
 		}
 	}
 
