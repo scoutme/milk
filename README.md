@@ -89,6 +89,9 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 | `/otel` | Show OTel signal file sizes and record counts |
 | `/otel trim` | Archive current OTel files and start fresh |
 | `/otel off` / `/otel on` | Disable / re-enable OTel for this session |
+| `/history` | Show current history mode and entry counts |
+| `/history global` | Switch input navigation to global history (all sessions) |
+| `/history session` | Switch input navigation to session history (default) |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
@@ -97,7 +100,21 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 
 **Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory (e.g. `@src/main.go`).
 
-**Keyboard shortcuts:** Ctrl-C clears a pending `/escalate` or `/local` flag (or exits if none is set); Ctrl-D exits.
+**Keyboard shortcuts:**
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+C` | Cancel running turn (if busy); clear `/escalate`/`/local` flag; or exit |
+| `Ctrl+D` | Exit (on empty input) |
+| `Ctrl+R` | Reverse incremental search through input history |
+| `Ctrl+S` | Forward incremental search through input history |
+| `Up` / `Down` | Navigate input history (single-line input only) |
+| `Ctrl+Up` / `Ctrl+Down` | Navigate input history (any input height) |
+| `Ctrl+N` / `Shift+Alt+Enter` | Insert newline (multi-line input) |
+| `PgUp` / `Ctrl+U` | Scroll transcript up |
+| `PgDn` / `Ctrl+F` | Scroll transcript down |
+
+**Input history** is persisted per session (`~/.milk/sessions/<id>.history`) and globally (`~/.milk/input_history`). Navigation defaults to session history; use `/history global` to switch.
 
 ### Single-prompt mode
 

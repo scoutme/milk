@@ -66,10 +66,11 @@ type streamChunk struct {
 
 // Agent is a local LLM agent backed by a llama.cpp OpenAI-compatible server.
 type Agent struct {
-	baseURL string
-	model   string
-	otelDir string
-	client  *http.Client
+	baseURL        string
+	model          string
+	otelDir        string
+	client         *http.Client
+	detectedFormat ToolFormat // confirmed format from last tool-bearing turn
 }
 
 func New(baseURL, model string) *Agent {
@@ -86,7 +87,7 @@ func (a *Agent) WithOtelDir(dir string) *Agent {
 	return a
 }
 
-const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, get_metrics, escalate_to_claude.
+const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, get_metrics, escalate_to_claude.
 
 Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
@@ -125,6 +126,8 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess)
 
+	executedKeys := map[string]bool{}
+
 	for i := 0; i < maxToolIterations; i++ {
 		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
@@ -138,35 +141,81 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			return msgs, nil
 		}
 
-		// When tool calls came from the content fallback (raw markup), record the
-		// assistant message as plain content so the model sees its own exact output
-		// on the next turn. When they came from the native tool_calls field, use the
-		// structured form so the server can match tool_call_ids correctly.
-		if fallbackRaw != "" {
-			msgs = append(msgs, Message{Role: "assistant", Content: fallbackRaw})
-		} else {
-			msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+		// Deduplicate: if every tool call in this turn was already executed with
+		// the same arguments, the model is stuck in a loop — treat as terminal.
+		allSeen := true
+		for _, tc := range toolCalls {
+			key := tc.Function.Name + "\x00" + tc.Function.Arguments
+			if !executedKeys[key] {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			msgs = append(msgs, Message{Role: "assistant", Content: resp})
+			return msgs, nil
+		}
+		for _, tc := range toolCalls {
+			executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
 		}
 
-		// Execute each tool call
-		for _, tc := range toolCalls {
-			result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
-			if escalate {
-				var escalateArgs struct {
-					Reason string `json:"reason"`
-				}
-				json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
-				return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
-			}
-			toolMsg := Message{Role: "tool", Content: result}
-			if fallbackRaw == "" {
-				toolMsg.ToolCallID = tc.ID
-			}
-			msgs = append(msgs, toolMsg)
+		var esc *EscalationSignal
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, out, sess, mem)
+		if esc != nil {
+			return msgs, esc
 		}
 	}
 
 	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxToolIterations)
+}
+
+// executeToolCalls dispatches all tool calls and appends the results to msgs.
+// Always uses the structured OpenAI tool_calls wire format — the llama.cpp chat
+// template renders it into the model-specific markup (<tool_call>, etc.) and
+// wraps tool results in <tool_response> automatically.
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
+	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+	for _, tc := range toolCalls {
+		printToolLine(out, tc)
+		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
+		if escalate {
+			var escalateArgs struct {
+				Reason string `json:"reason"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
+			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
+		}
+		msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
+	}
+	return msgs, nil
+}
+
+// printToolLine writes a one-line dim tool-usage hint to out before a tool is
+// dispatched, mirroring what Claude shows for permission requests.
+// Format:  ⚙ <name>: <short summary of key argument>
+func printToolLine(out io.Writer, tc toolCall) {
+	var args map[string]any
+	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+
+	summary := toolArgSummary(args)
+	if summary != "" {
+		fmt.Fprintf(out, "\n\033[2m⚙ %s: %s\033[0m\n", tc.Function.Name, summary)
+	} else {
+		fmt.Fprintf(out, "\n\033[2m⚙ %s\033[0m\n", tc.Function.Name)
+	}
+}
+
+// toolArgSummary extracts the most informative single argument value for display.
+func toolArgSummary(args map[string]any) string {
+	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			if len(v) > 60 {
+				return v[:57] + "..."
+			}
+			return v
+		}
+	}
+	return ""
 }
 
 // streamCompletion sends a chat completion request and streams the response.
@@ -205,16 +254,74 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		return "", "", nil, fmt.Errorf("llama.cpp error %d: %s", httpResp.StatusCode, b)
 	}
 
-	var (
-		textBuf   strings.Builder
-		toolCalls []toolCall
-	)
-
-	// Partial tool call accumulator indexed by tool call index
+	det := NewStreamDetector(a.detectedFormat)
 	partialTools := map[int]*toolCall{}
+	var textBuf strings.Builder
 
 	scanner := bufio.NewScanner(httpResp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB — SSE lines can be large
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	toolCalls, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	if det.Format != ToolFormatUnknown {
+		a.detectedFormat = det.Format
+	}
+	return a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+}
+
+// classifyStreamResult interprets what the stream produced and returns the
+// canonical (text, fallbackRaw, toolCalls, error) tuple.
+func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall, rawText string, out io.Writer) (string, string, []toolCall, error) {
+	// Native tool calls (delta field) take priority.
+	if len(nativeCalls) > 0 {
+		if rawText != "" {
+			fmt.Fprintln(out)
+		}
+		return rawText, "", nativeCalls, nil
+	}
+
+	// Detector-extracted tool calls (in-stream block).
+	if det.InBlock() || det.RawBlock() != "" {
+		if calls := det.Extract(); len(calls) > 0 {
+			a.detectedFormat = det.Format
+			return "", det.RawBlock(), calls, nil
+		}
+		// Block was captured but contains no tool call (e.g. a code example in a
+		// text response). Flush its content so it appears in the output.
+		if raw := det.RawBlock(); raw != "" {
+			block := det.ActiveOpen() + raw
+			fmt.Fprint(out, block)
+			fmt.Fprintln(out)
+			return rawText + block, "", nil, nil
+		}
+	}
+
+	// Fallback: post-hoc scan of accumulated text (handles partial/unclosed fences).
+	if rawText != "" {
+		if parsed := extractToolCalls(rawText); len(parsed) > 0 {
+			return "", rawText, parsed, nil
+		}
+	}
+
+	// Plain text response.
+	if rawText != "" {
+		fmt.Fprintln(out)
+	}
+	return rawText, "", nil, nil
+}
+
+// scanSSE reads SSE lines from the scanner, feeding content tokens through the
+// detector and accumulating native tool-call deltas in partialTools.
+func (a *Agent) scanSSE(
+	scanner *bufio.Scanner,
+	det *StreamDetector,
+	partialTools map[int]*toolCall,
+	textBuf *strings.Builder,
+	out io.Writer,
+) ([]toolCall, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -224,65 +331,55 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		if data == "[DONE]" {
 			break
 		}
-
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-
 		for _, choice := range chunk.Choices {
-			if t := choice.Delta.Content; t != "" {
-				textBuf.WriteString(t)
-				// Stream text tokens immediately; we'll suppress them later if
-				// the response turns out to contain tool calls.
-				fmt.Fprint(out, t)
-			}
-			for _, tc := range choice.Delta.ToolCalls {
-				pt, ok := partialTools[tc.Index]
-				if !ok {
-					pt = &toolCall{Type: "function"}
-					partialTools[tc.Index] = pt
-				}
-				if tc.ID != "" {
-					pt.ID = tc.ID
-				}
-				pt.Function.Name += tc.Function.Name
-				pt.Function.Arguments += tc.Function.Arguments
-			}
+			processContentToken(choice.Delta.Content, det, textBuf, out)
+			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
-		return "", "", nil, err
+		return nil, err
 	}
+	return collectNativeToolCalls(partialTools), nil
+}
 
+func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {
+	if token == "" {
+		return
+	}
+	flush, _ := det.Feed(token)
+	if len(flush) > 0 {
+		textBuf.Write(flush)
+		fmt.Fprint(out, string(flush))
+	}
+}
+
+func accumulateNativeToolCalls(tcs []toolCall, partialTools map[int]*toolCall) {
+	for _, tc := range tcs {
+		pt, ok := partialTools[tc.Index]
+		if !ok {
+			pt = &toolCall{Type: "function"}
+			partialTools[tc.Index] = pt
+		}
+		if tc.ID != "" {
+			pt.ID = tc.ID
+		}
+		pt.Function.Name += tc.Function.Name
+		pt.Function.Arguments += tc.Function.Arguments
+	}
+}
+
+func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
+	var out []toolCall
 	for i := 0; i < len(partialTools); i++ {
 		if tc := partialTools[i]; tc != nil && tc.Function.Name != "" {
-			toolCalls = append(toolCalls, *tc)
+			out = append(out, *tc)
 		}
 	}
-
-	rawText := textBuf.String()
-
-	// Fallback: model emitted tool calls as raw text (e.g. <tool_call>/<tools> XML or
-	// fenced JSON) instead of populating the tool_calls field.
-	var fallbackRaw string
-	if len(toolCalls) == 0 && len(rawText) > 0 {
-		if parsed := extractToolCalls(rawText); len(parsed) > 0 {
-			toolCalls = parsed
-			fallbackRaw = rawText // preserve original markup for history
-			textBuf.Reset()
-		}
-	}
-
-	// For plain text responses tokens were already streamed; just emit the trailing newline.
-	// For tool-call turns nothing was written (content was empty or raw markup).
-	text := textBuf.String()
-	if len(toolCalls) == 0 && text != "" {
-		fmt.Fprintln(out)
-	}
-
-	return text, fallbackRaw, toolCalls, nil
+	return out
 }
 
 // Classify asks the model to classify whether a prompt should be handled locally
@@ -339,7 +436,8 @@ Task: ` + prompt
 	return strings.HasPrefix(answer, "escalate"), nil
 }
 
-// Ping checks whether the llama.cpp server is reachable.
+// Ping checks whether the llama.cpp server is reachable and pre-seeds the
+// tool-format detector from the loaded model name when possible.
 func (a *Agent) Ping(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/health", nil)
 	if err != nil {
@@ -350,5 +448,38 @@ func (a *Agent) Ping(ctx context.Context) error {
 		return fmt.Errorf("llama.cpp unreachable at %s: %w", a.baseURL, err)
 	}
 	resp.Body.Close()
+
+	// Best-effort: query /v1/models to pre-seed the format detector.
+	// Errors are silently ignored — detection still works on the first tool turn.
+	a.seedFormatFromModels(ctx)
 	return nil
+}
+
+// seedFormatFromModels calls GET /v1/models and, if successful, uses the first
+// model's ID to pre-seed detectedFormat via GuessFormatFromModel.
+func (a *Agent) seedFormatFromModels(ctx context.Context) {
+	if a.detectedFormat != ToolFormatUnknown {
+		return // already confirmed, no need to guess
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", nil)
+	if err != nil {
+		return
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || len(body.Data) == 0 {
+		return
+	}
+	if f := GuessFormatFromModel(body.Data[0].ID); f != ToolFormatUnknown {
+		a.detectedFormat = f
+	}
 }

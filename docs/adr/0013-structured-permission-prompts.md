@@ -3,6 +3,7 @@
 Date: 2026-05-08
 
 ## Status
+
 Accepted
 
 ## Context
@@ -22,6 +23,7 @@ When `--permission-prompt-tool stdio` is passed, Claude does not emit English pr
 2. Waits for a `control_response` written to its stdin before continuing
 
 The `control_request` schema includes:
+
 - `request.subtype: "can_use_tool"` — always this value for permission checks
 - `request.tool_name` — the tool Claude wants to use (e.g. `"Bash"`, `"Read"`)
 - `request.input` — the tool arguments
@@ -31,9 +33,11 @@ The `control_request` schema includes:
 - `request.classifier_approvable` — false when a safety check requires explicit human approval
 
 The response milk sends back:
+
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"<same uuid>","response":{"behavior":"allow","updatedInput":{}}}}
 ```
+
 or `"behavior":"deny"` to refuse.
 
 Additionally, the final `result` event includes a `permission_denials` array listing all tools that were silently blocked (when `--dangerously-skip-permissions` is not set and `--permission-prompt-tool` is not used). This is used for post-hoc diagnostics only.

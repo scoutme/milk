@@ -13,7 +13,9 @@
 * [11. Claude Pipe-Only Mode with Stdin Disconnect](0011-claude-pipe-only-mode.md)
 * [12. Claude Tool and Directory Permission Handling](0012-claude-permission-handling.md)
 * [13. Structured Permission Prompts via --permission-prompt-tool stdio](0013-structured-permission-prompts.md)
-* [14. Full TUI with bubbletea viewport+textarea](0014-full-tui-bubbletea.md)
+* [14. Full TUI with bubbletea viewport+textarea](0014-full-tui-bubbletea.md) *(partially superseded by 19)*
 * [15. TUI-native permission prompts via blocking goroutine + channel](0015-tui-permission-prompts.md)
 * [16. Memory System: Percept Store with NREM Consolidation](0016-memory-system-percept-store.md)
 * [17. OpenTelemetry-native Observability with File Exporters](0017-opentelemetry-observability.md)
+* [18. Streaming Tool-Format Detector for Multi-Model Compatibility](0018-streaming-tool-format-detector.md)
+* [19. TUI Input History Persistence and Turn Cancellation](0019-tui-input-history-and-turn-cancellation.md)

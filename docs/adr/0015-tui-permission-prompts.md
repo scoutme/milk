@@ -3,6 +3,7 @@
 Date: 2026-05-14
 
 ## Status
+
 Accepted
 
 ## Context

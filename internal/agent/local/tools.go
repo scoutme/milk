@@ -51,8 +51,23 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 		{
 			"type": "function",
 			"function": map[string]any{
+				"name":        "find_files",
+				"description": "Find files by name pattern (glob) under a directory. Use this to locate files by filename, e.g. '*_test.go', '*.md'. For searching file contents use grep.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string", "description": "Root directory to search under"},
+						"pattern": map[string]any{"type": "string", "description": "Glob filename pattern, e.g. '*_test.go'"},
+					},
+					"required": []string{"path", "pattern"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
 				"name":        "grep",
-				"description": "Search for a pattern in files. Returns matching lines.",
+				"description": "Search for a pattern inside file contents. Returns matching lines with line numbers. Use find_files to locate files by name instead.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -217,6 +232,8 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 	switch name {
 	case "bash":
 		return runBash(ctx, args)
+	case "find_files":
+		return runFindFiles(ctx, args)
 	case "grep":
 		return runGrep(ctx, args)
 	case "read_file":
@@ -413,14 +430,45 @@ func runBash(ctx context.Context, args map[string]any) (string, bool) {
 	}.String(), false
 }
 
+func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
+	path, _ := args["path"].(string)
+	pattern, _ := args["pattern"].(string)
+	cmd := exec.CommandContext(ctx, "find", path,
+		"-not", "-path", "*/.git/*",
+		"-not", "-path", "*/.claude/*",
+		"-name", pattern,
+		"-type", "f")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else {
+			return toolResult{Error: err.Error()}.String(), false
+		}
+	}
+	return toolResult{Output: stdout.String(), Error: stderr.String(), ExitCode: code}.String(), false
+}
+
 func runGrep(ctx context.Context, args map[string]any) (string, bool) {
 	pattern, _ := args["pattern"].(string)
 	path, _ := args["path"].(string)
 	recursive, _ := args["recursive"].(bool)
 
-	gargs := []string{"-n", "--color=never"}
+	// Always exclude hidden/binary directories and skip binary files.
+	// -r is forced when path is a directory, regardless of the recursive flag.
+	gargs := []string{"-n", "--color=never", "--binary-files=without-match",
+		"--exclude-dir=.git", "--exclude-dir=.claude"}
 	if recursive {
 		gargs = append(gargs, "-r")
+	} else {
+		// If path is a directory, force recursive to avoid grep opening binary index files.
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			gargs = append(gargs, "-r")
+		}
 	}
 	gargs = append(gargs, pattern, path)
 

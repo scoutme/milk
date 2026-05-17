@@ -129,8 +129,8 @@ func TestQuery_SortedByWeightDesc(t *testing.T) {
 
 func TestList_ScopeFilter(t *testing.T) {
 	s := newTestStore(t, true)
-	s.RecordGlobal(context.Background(), "global fact", ProducerUser, Roles{})              //nolint:errcheck
-	s.Record(context.Background(), "session fact", ProducerLocal, Roles{}, false)           //nolint:errcheck
+	s.RecordGlobal(context.Background(), "global fact", ProducerUser, Roles{})    //nolint:errcheck
+	s.Record(context.Background(), "session fact", ProducerLocal, Roles{}, false) //nolint:errcheck
 
 	global := s.List(ListOpts{Scope: "global"})
 	if len(global) != 1 || global[0].Content != "global fact" {

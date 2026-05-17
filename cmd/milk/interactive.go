@@ -22,9 +22,10 @@ const cmdOtel = "/otel"
 const cmdMetrics = "/metrics"
 const cmdMemory = "/memory"
 const cmdExport = "/export"
+const cmdHistory = "/history"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -61,6 +62,9 @@ const interactiveHelp = `Slash commands:
   /otel trim       archive current otel files and start fresh
   /otel off        disable OTel for this session
   /otel on         re-enable OTel for this session
+  /history         show current history mode (session or global)
+  /history global  switch input navigation to global history
+  /history session switch input navigation to session history (default)
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -75,6 +79,8 @@ Scrolling:
 History:
   Up/Down (single-line)   navigate input history
   Ctrl+Up/Ctrl+Down       navigate input history
+  Ctrl+R                  reverse search through input history (type to filter, Ctrl+R again for older, Ctrl+S for newer, Enter to accept, Esc to cancel)
+  Ctrl+S                  forward search through input history
 
 Multi-line input:
   Ctrl+N              insert a newline (most reliable)
