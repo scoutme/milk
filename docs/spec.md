@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk is a local-first agentic orchestrator CLI. It routes user prompts between a local LLM agent (Gemma 4 via llama.cpp) and a rich cloud agent (Claude Code CLI), maintaining session state across turns and supporting context promotion from local to cloud.
+milk is a local-first agentic orchestrator CLI. It routes user prompts between a local LLM agent (any OpenAI-compatible inference server) and a rich cloud agent (Claude Code CLI), maintaining session state across turns and supporting context promotion from local to cloud.
 
 The primary use case is code assistance and shell automation for a single user.
 
@@ -27,7 +27,7 @@ milk [prompt | flags]
 │  1. Explicit flags       │  --escalate, --local
 │  2. Session state check  │  CLAUDE_WAITING → bypass
 │  3. Rules layer          │  heuristics + weighted scorer
-│  4. Local model          │  Gemma 4 self-classification
+│  4. Local model          │  local model self-classification
 │  5. Default: try local   │
 └────────┬─────────────────┘
          │
@@ -35,7 +35,7 @@ milk [prompt | flags]
     ▼           ▼
 LOCAL           CLAUDE
 agent           agent
-llama.cpp       claude --print
+OpenAI API      claude --print
 OpenAI API      --output-format stream-json
 tool loop       --session-id / --resume
 ```
@@ -64,17 +64,17 @@ Decision order per turn:
    - Hard rules: token length above `escalate_above_tokens` → Claude; keyword match → Claude
    - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
    - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open questions each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`
-4. **Local model classification** — when scorer is inconclusive, ask Gemma 4 with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
+4. **Local model classification** — when scorer is inconclusive, ask the local model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
 5. **Default** — attempt local; escalate if local returns `escalate_to_claude(reason)`
 
-The classifier uses the same Gemma 4 model instance as the local coding agent. No second model or second llama.cpp instance.
+The classifier uses the same model instance as the local coding agent. No second model or second inference server instance.
 
 ---
 
 ## Local Agent
 
-- Backend: llama.cpp OpenAI-compatible server, default `http://localhost:8080`
-- Model: Gemma 4 E4B (user-configured; any tool-calling-capable model works)
+- Backend: any OpenAI-compatible inference server, default `http://localhost:8080` (llama.cpp reference; also works with Ollama, LM Studio, vLLM, remote endpoints)
+- Model: user-configured via `llama_model`; any tool-calling-capable model works. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
 - Tool loop: standard agentic loop — call → check tool calls → execute → feed result → repeat until final answer
 - Built-in tools (implemented in Go, exposed as OpenAI function schemas):
   - `bash(command string) → stdout, stderr, exit_code`
@@ -221,7 +221,7 @@ milk [flags] <prompt>         # single-prompt mode
 ```json
 {
   "llama_url": "http://localhost:8080",
-  "llama_model": "gemma-4-e4b",
+  "llama_model": "qwen2.5-coder",
   "claude_bin": "claude",
   "default_route": "local",
   "rules": {
@@ -246,8 +246,8 @@ milk [flags] <prompt>         # single-prompt mode
 
 ## Graceful Degradation
 
-| llama.cpp | claude CLI | behavior |
-|-----------|-----------|----------|
+| Inference server | claude CLI | behavior |
+| --- | --- | --- |
 | up | available | normal routing |
 | down | available | warn once per session, route all to Claude |
 | up | unavailable/not installed | warn once per session, stay local-only |
@@ -258,7 +258,8 @@ milk [flags] <prompt>         # single-prompt mode
 ## Streaming
 
 Both agents stream output in real time:
-- **Local agent**: SSE from llama.cpp OpenAI-compat API (`stream: true`)
+
+- **Local agent**: SSE from OpenAI-compat API (`stream: true`)
 - **Claude agent**: NDJSON from `--output-format stream-json`, parsed line by line
 
 milk relays tokens to stdout as they arrive.

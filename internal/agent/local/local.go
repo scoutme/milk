@@ -135,7 +135,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 
 		if len(toolCalls) == 0 {
-			// No tool calls: either a final text response, or Gemma 4 emitting EOS
+			// No tool calls: either a final text response, or the model emitting EOS
 			// after completing its tool loop (empty response). Both are terminal.
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
