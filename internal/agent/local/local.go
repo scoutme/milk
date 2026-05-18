@@ -113,6 +113,31 @@ func cwdContext(cwd string) string {
 	return "Working directory listing (" + cwd + "):\n" + result
 }
 
+// normalizePrompt lowercases and collapses whitespace for repetition comparison.
+func normalizePrompt(s string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(s), " ")))
+}
+
+// isRepeatedPrompt returns true if userPrompt already appears in history as a
+// user message, meaning the user is asking the same question a second time.
+//
+// This check lives here rather than in the router because it requires []Message
+// history — the local agent's internal wire format. The router only sees the
+// raw prompt string and session metadata; it has no per-model turn history to
+// compare against.
+func isRepeatedPrompt(history []Message, userPrompt string) bool {
+	norm := normalizePrompt(userPrompt)
+	if norm == "" {
+		return false
+	}
+	for _, m := range history {
+		if m.Role == "user" && normalizePrompt(m.Content) == norm {
+			return true
+		}
+	}
+	return false
+}
+
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns; userPrompt is the new user Message.
@@ -120,6 +145,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if history == nil {
 		history = []Message{}
 	}
+
+	// Escalate immediately if the user is repeating the same question.
+	if isRepeatedPrompt(history, userPrompt) {
+		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
+	}
+
 	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD)}}
 	msgs = append(msgs, history...)
 	if sess.CWD != "" {

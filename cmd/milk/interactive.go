@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
@@ -31,14 +32,15 @@ var slashCommands = []string{
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
-func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
-	if forceEscalate {
+func promptLabel(st *interactiveState) string {
+	// Sticky overrides take priority over per-turn flags.
+	if st.stickyEscalate || st.forceEscalate {
 		return blue("[claude]") + " > "
 	}
-	if forceLocal {
+	if st.stickyLocal || st.forceLocal {
 		return green("[local]") + " > "
 	}
-	switch sess.State {
+	switch st.sess.State {
 	case session.StateClaudeWaiting:
 		return yellow("[claude:waiting]") + " > "
 	case session.StateClaude:
@@ -49,8 +51,10 @@ func promptLabel(sess *session.Session, forceEscalate, forceLocal bool) string {
 }
 
 const interactiveHelp = `Slash commands:
-  /escalate        force next turn to Claude
-  /local           force next turn to local model
+  /escalate        pin all subsequent turns to Claude (until /local or Ctrl+C clears it)
+  /escalate <msg>  force this single turn to Claude, then return to normal routing
+  /local           pin all subsequent turns to local model (until /escalate or Ctrl+C)
+  /local <msg>     force this single turn to local model, then return to normal routing
   /learn <fact>    store a persistent memory (e.g. /learn prefer JSON output)
   /metrics         show most recent metric values (memory stats, otel sizes)
   /otel            show observability file sizes and record counts
@@ -104,10 +108,24 @@ type interactiveState struct {
 	sess          *session.Session
 	forceEscalate bool
 	forceLocal    bool
-	cwd           string
-	cfg           config.Config
-	mem           *memory.Store
-	program       *tea.Program // set after tea.NewProgram, before Run
+	// stickyEscalate is set when the user explicitly calls /escalate with no
+	// prompt. It causes every subsequent turn to route to Claude until the user
+	// calls /local or closes the session. forceEscalate is reset after each
+	// turn; stickyEscalate persists across turns.
+	stickyEscalate bool
+	// stickyLocal mirrors stickyEscalate for the local model.
+	stickyLocal bool
+	cwd         string
+	cfg         config.Config
+	mem         *memory.Store
+	cs          *claudesettings.Store // Claude project settings (permissions persistence)
+	program     *tea.Program          // set after tea.NewProgram, before Run
+
+	// toolFutures caches per-tool answer channels created by OnToolUse as soon
+	// as each tool call is detected in the stream. The user is asked immediately
+	// via the TUI; handleStructuredDenials reads the answer (blocking briefly if
+	// the user hasn't responded yet). Keyed by tool name.
+	toolFutures map[string]chan string
 }
 
 // extractSlashCommand scans input for a known slash command token anywhere in
@@ -164,17 +182,29 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdExport:
 		output = execExport(prompt, st)
 	case cmdEscalate:
-		st.forceEscalate = true
 		st.forceLocal = false
+		st.stickyLocal = false
 		if prompt == "" {
-			output = milkTag() + " next turn: " + blue("Claude")
+			// No inline prompt: pin all subsequent turns to Claude.
+			st.stickyEscalate = true
+			st.forceEscalate = false
+			output = milkTag() + " pinned to " + blue("Claude") + " (use /local to unpin)"
+		} else {
+			// Inline prompt: single-turn override only.
+			st.forceEscalate = true
 		}
 		return false, prompt, output
 	case cmdLocal:
-		st.forceLocal = true
 		st.forceEscalate = false
+		st.stickyEscalate = false
 		if prompt == "" {
-			output = milkTag() + " next turn: " + green("local model")
+			// No inline prompt: pin all subsequent turns to local.
+			st.stickyLocal = true
+			st.forceLocal = false
+			output = milkTag() + " pinned to " + green("local model") + " (use /escalate to unpin)"
+		} else {
+			// Inline prompt: single-turn override only.
+			st.forceLocal = true
 		}
 		return false, prompt, output
 	default:

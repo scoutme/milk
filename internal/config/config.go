@@ -62,6 +62,9 @@ type Config struct {
 	DirRestrictionPhrases []string   `json:"dir_restriction_phrases"`
 	Rules                 Rules      `json:"rules"`
 	Otel                  OtelConfig `json:"otel"`
+	// DebugClaudeCode writes every raw NDJSON line from the claude subprocess to
+	// ~/.milk/claude_debug.ndjson — useful for understanding stream protocol issues.
+	DebugClaudeCode bool `json:"debug_claude_code"`
 }
 
 func defaults() Config {
@@ -160,6 +163,15 @@ func mergeStrings(base, extra []string) []string {
 		}
 	}
 	return out
+}
+
+// ClaudeDebugLogPath returns the path for the Claude raw NDJSON debug log.
+func ClaudeDebugLogPath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "claude_debug.ndjson"), nil
 }
 
 func Dir() (string, error) {

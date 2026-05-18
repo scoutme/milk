@@ -50,6 +50,16 @@ CLAUDE_WAITING → ROUTING (on --local)
 CLAUDE_WAITING → CLAUDE (default: next turn goes via --resume)
 ```
 
+### Sticky mode (`/escalate` / `/local` without a prompt)
+
+Typing `/escalate` alone (no inline prompt) sets `stickyEscalate = true`: every subsequent turn is routed to Claude, bypassing the router, until the user types `/local` or presses Ctrl+C. The prompt label switches to `[claude]` immediately.
+
+Symmetrically, `/local` alone sets `stickyLocal = true`: every turn goes to the local model until `/escalate` or Ctrl+C.
+
+Typing `/escalate <prompt>` or `/local <prompt>` is a **single-turn override** (`forceEscalate` / `forceLocal`): the flag is reset to false after the turn completes, and normal routing resumes.
+
+Ctrl+C on an empty input clears both sticky and force flags before quitting — so it acts as a "reset mode" shortcut.
+
 ## Routing order (per turn)
 
 1. Explicit flags (`--escalate`, `--local`)

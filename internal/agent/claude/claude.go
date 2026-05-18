@@ -19,6 +19,9 @@ type Agent struct {
 	permissionPhrases     []string          // phrases indicating tool permission denial
 	dirRestrictionPhrases []string          // phrases indicating directory restriction
 	permissionHandler     PermissionHandler // nil → denyAllHandler
+	debugLog              io.Writer         // when non-nil, every raw NDJSON line is written here
+	onToolUse             func(string)      // called on content_block_start tool_use events
+	onThinking            func(string)      // called on thinking_delta tokens
 }
 
 func New(bin string) *Agent {
@@ -43,6 +46,30 @@ func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs, permis
 func (a *Agent) WithPermissionHandler(h PermissionHandler) *Agent {
 	c := *a
 	c.permissionHandler = h
+	return &c
+}
+
+// WithDebugLog returns a copy of the agent that writes every raw NDJSON line
+// from the claude subprocess to w.
+func (a *Agent) WithDebugLog(w io.Writer) *Agent {
+	c := *a
+	c.debugLog = w
+	return &c
+}
+
+// WithOnToolUse returns a copy of the agent that calls fn whenever Claude
+// begins a tool call (content_block_start with type=tool_use).
+func (a *Agent) WithOnToolUse(fn func(string)) *Agent {
+	c := *a
+	c.onToolUse = fn
+	return &c
+}
+
+// WithOnThinking returns a copy of the agent that calls fn for each
+// thinking_delta token emitted by Claude's extended thinking.
+func (a *Agent) WithOnThinking(fn func(string)) *Agent {
+	c := *a
+	c.onThinking = fn
 	return &c
 }
 
@@ -109,7 +136,7 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 		prefix = append(prefix, "--add-dir", dir)
 	}
 	args = append(prefix, args...)
-	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose"}, args...)
+	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"}, args...)
 	return a.runPipe(ctx, pipeArgs, out)
 }
 
@@ -139,6 +166,9 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		DirRestrictionPhrases: a.dirRestrictionPhrases,
 		AllowedTools:          a.allowedTools,
 		OnPermission:          a.permissionHandler,
+		OnToolUse:             a.onToolUse,
+		OnThinking:            a.onThinking,
+		DebugLog:              a.debugLog,
 	})
 
 	// Close stdin after stream ends so Claude can exit cleanly.
