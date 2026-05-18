@@ -18,6 +18,7 @@ import (
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
+	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/router"
@@ -49,6 +50,9 @@ type spinnerTickMsg struct{}
 
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
+
+// toolUseMsg carries the name of a tool Claude just started calling.
+type toolUseMsg struct{ name string }
 
 // permRequestMsg is sent by the agent goroutine when it needs a y/n answer.
 // The agent blocks on respCh until the TUI sends a permResponseMsg back.
@@ -132,12 +136,17 @@ type model struct {
 	tabMatches []string
 	tabIdx     int
 
-	// pending permission request (non-nil while waiting for user y/n)
+	// pending permission request (non-nil while waiting for user y/n) and queue
+	// for tool-use permission prompts that arrive while a prior one is active.
 	pendingPerm *permRequestMsg
+	permQueue   []permRequestMsg
 
 	// cancelTurn cancels the context of the running agent turn; nil when idle.
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
+
+	// active tool use — non-empty while Claude is executing a tool call
+	activeToolUse string
 
 	// memory panel
 	panelMemory bool
@@ -197,7 +206,7 @@ func (m *model) refreshPrompt() {
 		}
 		label = yellow("("+dir+"-search)") + " > "
 	} else {
-		label = promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
+		label = promptLabel(m.st)
 	}
 	plain := stripANSI(label)
 	promptWidth := len(plain)
@@ -218,14 +227,26 @@ func (m *model) refreshPrompt() {
 func (m *model) inputLocked() bool { return m.busy }
 
 // handleBusyKey handles key events while an agent turn is running.
-// Only ctrl+c is acted upon (cancels the turn); all other keys are ignored.
+// Enter is blocked (with a one-time hint); ctrl+c cancels; all other keys
+// are forwarded to the textarea so the user can pre-compose the next message.
 func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" && m.cancelTurn != nil {
-		m.cancelTurn()
-		m.cancelTurn = nil
-		m.interrupted = true
+	switch msg.String() {
+	case "ctrl+c":
+		if m.cancelTurn != nil {
+			m.cancelTurn()
+			m.cancelTurn = nil
+			m.interrupted = true
+		}
+		return m, nil
+	case "enter", "ctrl+m":
+		m.appendTranscript(dim("[milk] agent is responding — press Ctrl+C to interrupt\n"))
+		return m, nil
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(msg)
+	syncHeight(&m.ta)
+	m.syncLayout()
+	return m, cmd
 }
 
 // handlePermKey routes key events while a permission prompt is pending.
@@ -233,10 +254,10 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		// deny and unblock the agent goroutine
 		m.pendingPerm.respCh <- "n"
-		m.pendingPerm = nil
 		m.appendTranscript("n\n")
+		m.pendingPerm = nil
+		m.dequeueNextPerm()
 		return m, nil
 	case "enter":
 		answer := strings.TrimSpace(m.ta.Value())
@@ -246,6 +267,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(answer + "\n")
 		m.pendingPerm.respCh <- answer
 		m.pendingPerm = nil
+		m.dequeueNextPerm()
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -253,6 +275,59 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	syncHeight(&m.ta)
 	m.syncLayout()
 	return m, cmd
+}
+
+// dequeueNextPerm promotes the next queued permission prompt, if any.
+func (m *model) dequeueNextPerm() {
+	if len(m.permQueue) == 0 {
+		return
+	}
+	next := m.permQueue[0]
+	m.permQueue = m.permQueue[1:]
+	m.pendingPerm = &next
+	m.appendTranscript(next.prompt)
+	m.ta.Reset()
+	m.ta.SetHeight(1)
+	m.syncLayout()
+}
+
+func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
+	if m.pendingPerm != nil {
+		m.permQueue = append(m.permQueue, msg)
+		return m, nil
+	}
+	m.pendingPerm = &msg
+	m.appendTranscript(msg.prompt)
+	m.ta.Reset()
+	m.ta.SetHeight(1)
+	m.syncLayout()
+	return m, nil
+}
+
+func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
+	m.busy = false
+	m.activeToolUse = ""
+	m.cancelTurn = nil
+	if m.interrupted {
+		m.interrupted = false
+		m.appendTranscript(dim("[interrupted]") + "\n")
+	} else if msg.err != nil {
+		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
+	}
+	m.appendTranscript("\n")
+	m.refreshPrompt()
+	m.syncLayout()
+	return m, nil
+}
+
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch tea.MouseEvent(msg).Button {
+	case tea.MouseButtonWheelUp:
+		m.vp.LineUp(3)
+	case tea.MouseButtonWheelDown:
+		m.vp.LineDown(3)
+	}
+	return m, nil
 }
 
 // setViewportContent rebuilds the full viewport content:
@@ -331,38 +406,12 @@ func (m *model) syncLayout() {
 
 // statusBar renders the one-line status bar.
 func (m *model) statusBar() string {
-	agent := "local"
-	switch {
-	case m.st.forceEscalate:
-		agent = "claude (forced)"
-	case m.st.forceLocal:
-		agent = "local (forced)"
-	case m.st.sess.State == session.StateClaude || m.st.sess.State == session.StateClaudeWaiting:
-		agent = "claude"
-	}
 	sessID := m.st.sess.ID
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	cwd := m.st.cwd
-	if home, err := os.UserHomeDir(); err == nil {
-		if rel, err := filepath.Rel(home, cwd); err == nil && !strings.HasPrefix(rel, "..") {
-			cwd = "~/" + rel
-		}
-	}
-	if m.busy {
-		frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
-		agent = dim(frame) + " " + agent
-	}
-	if m.searching {
-		label := "reverse-i-search"
-		if m.searchForward {
-			label = "forward-i-search"
-		}
-		agent = dim("(" + label + ")`" + m.searchQuery.String() + "'")
-	}
-	left := fmt.Sprintf(" session:%s  agent:%s", sessID, agent)
-	right := cwd + " "
+	left := fmt.Sprintf(" session:%s  agent:%s", sessID, m.statusAgent())
+	right := m.statusCwd() + " "
 	gap := m.width - len(stripANSI(left)) - len(right)
 	if gap < 1 {
 		gap = 1
@@ -372,6 +421,55 @@ func (m *model) statusBar() string {
 		return styleStatusBar.Width(m.width).Render(bar)
 	}
 	return bar
+}
+
+func (m *model) statusAgent() string {
+	if m.searching {
+		label := "reverse-i-search"
+		if m.searchForward {
+			label = "forward-i-search"
+		}
+		return dim("(" + label + ")`" + m.searchQuery.String() + "'")
+	}
+	agent := agentLabel(m.st)
+	if m.pendingPerm != nil {
+		return yellow("?") + " " + agent + yellow(" [allow?]")
+	}
+	if m.busy {
+		frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		if m.activeToolUse != "" {
+			return dim(frame) + " " + agent + dim(" ["+m.activeToolUse+"]")
+		}
+		return dim(frame) + " " + agent
+	}
+	return agent
+}
+
+func agentLabel(st *interactiveState) string {
+	switch {
+	case st.stickyEscalate:
+		return "claude (pinned)"
+	case st.forceEscalate:
+		return "claude (forced)"
+	case st.stickyLocal:
+		return "local (pinned)"
+	case st.forceLocal:
+		return "local (forced)"
+	case st.sess.State == session.StateClaude || st.sess.State == session.StateClaudeWaiting:
+		return "claude"
+	default:
+		return "local"
+	}
+}
+
+func (m *model) statusCwd() string {
+	cwd := m.st.cwd
+	if home, err := os.UserHomeDir(); err == nil {
+		if rel, err := filepath.Rel(home, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+			return "~/" + rel
+		}
+	}
+	return cwd
 }
 
 // --- Init ---
@@ -408,12 +506,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case permRequestMsg:
-		m.pendingPerm = &msg
-		// Print prompt into transcript so user sees what they're answering
-		m.appendTranscript(milkTag() + " " + msg.prompt)
-		m.ta.Reset()
-		m.ta.SetHeight(1)
-		m.syncLayout()
+		return m.handlePermRequest(msg)
+
+	case toolUseMsg:
+		m.activeToolUse = msg.name
 		return m, nil
 
 	case chunkMsg:
@@ -421,18 +517,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentDoneMsg:
-		m.busy = false
-		m.cancelTurn = nil
-		if m.interrupted {
-			m.interrupted = false
-			m.appendTranscript(dim("[interrupted]") + "\n")
-		} else if msg.err != nil {
-			m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
-		}
-		m.appendTranscript("\n")
-		m.refreshPrompt()
-		m.syncLayout()
-		return m, nil
+		return m.handleAgentDone(msg)
 
 	case spinnerTickMsg:
 		if m.busy {
@@ -448,13 +533,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		switch tea.MouseEvent(msg).Button {
-		case tea.MouseButtonWheelUp:
-			m.vp.LineUp(3)
-		case tea.MouseButtonWheelDown:
-			m.vp.LineDown(3)
-		}
-		return m, nil
+		return m.handleMouse(msg)
 
 	}
 
@@ -593,9 +672,11 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	}
-	if m.st.forceEscalate || m.st.forceLocal {
+	if m.st.forceEscalate || m.st.forceLocal || m.st.stickyEscalate || m.st.stickyLocal {
 		m.st.forceEscalate = false
 		m.st.forceLocal = false
+		m.st.stickyEscalate = false
+		m.st.stickyLocal = false
 		m.refreshPrompt()
 		m.appendTranscript(dim("[milk]") + " mode cleared\n")
 		return m, nil
@@ -615,7 +696,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	// Append echo to transcript
-	label := promptLabel(m.st.sess, m.st.forceEscalate, m.st.forceLocal)
+	label := promptLabel(m.st)
 	m.appendTranscript(label + colorizeTokens(input) + "\n")
 
 	// Append to both histories (deduped)
@@ -893,13 +974,36 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	agents := m.agents
 
 	send := func(msg tea.Msg) { st.program.Send(msg) }
+	st.toolFutures = map[string]chan string{}
+
+	tuiAgents := agents
+	sw0 := &sendWriter{send: send}
+	ir0 := &tuiInputReader{send: send}
+	tuiAgents.claude = agents.claude.
+		WithOnToolUse(func(name string) {
+			send(toolUseMsg{name: name})
+			// Skip tools already allowed in settings.
+			if st.cs != nil {
+				if ok, _ := st.cs.IsToolAllowed(name); ok {
+					return
+				}
+			}
+			// Create a buffered future and ask immediately — non-blocking.
+			ch := make(chan string, 1)
+			st.toolFutures[name] = ch
+			send(permRequestMsg{
+				prompt: fmt.Sprintf("%s allow tool %s? [Y/n] ", milkTag(), bold(name)),
+				respCh: ch,
+			})
+		}).
+		WithOnThinking(func(text string) { send(chunkMsg{text: dim(text)}) }).
+		WithPermissionHandler(makeTUIPermissionHandler(sw0, st.cs))
 	return m, tea.Batch(
 		spinnerTick(),
 		func() tea.Msg {
 			defer cancel()
 			sw := &sendWriter{send: send}
-			ir := &tuiInputReader{send: send}
-			err := runTurn(turnCtx, st, rtr, agents, input, sw, ir)
+			err := runTurn(turnCtx, st, rtr, tuiAgents, input, sw, ir0)
 			return agentDoneMsg{err: err}
 		},
 	)
@@ -1269,12 +1373,15 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	turnCtx, cancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
 	defer cancel()
 
-	decision, routeErr := rtr.Route(turnCtx, st.sess, input, st.forceEscalate, st.forceLocal)
+	forceEscalate := st.forceEscalate || st.stickyEscalate
+	forceLocal := st.forceLocal || st.stickyLocal
+	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forceLocal)
 	if routeErr != nil {
 		return fmt.Errorf("routing: %w", routeErr)
 	}
 	st.forceEscalate = false
 	st.forceLocal = false
+	// stickyEscalate/stickyLocal persist until explicitly cleared.
 
 	target := decision.Target
 	if target == router.TargetLocal && !localAvail {
@@ -1295,7 +1402,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	case router.TargetLocal:
 		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetClaude:
-		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, out)
+		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, out)
 	}
 	return nil
 }
@@ -1380,6 +1487,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAgent.WithOtelDir(od)
 	}
 	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+	if dbg, err := openClaudeDebugLog(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
+	} else if dbg != nil {
+		defer dbg.Close()
+		claudeAgent = claudeAgent.WithDebugLog(dbg)
+	}
 
 	ctx := context.Background()
 	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
@@ -1397,7 +1510,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — Claude will auto-approve all tool uses without prompting"))
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem}
+	var cs *claudesettings.Store
+	if store, err := claudesettings.Open(cwd); err == nil {
+		cs = store
+	}
+
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, toolFutures: map[string]chan string{}}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	m := newModel(ctx, st, rtr, agents, mem)

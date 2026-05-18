@@ -15,6 +15,7 @@ const (
 	msgTypeAssistant      msgType = "assistant"
 	msgTypeResult         msgType = "result"
 	msgTypeControlRequest msgType = "control_request"
+	msgTypeStreamEvent    msgType = "stream_event"
 )
 
 type contentBlock struct {
@@ -24,6 +25,29 @@ type contentBlock struct {
 
 type assistantMessage struct {
 	Content []contentBlock `json:"content"`
+}
+
+// streamEventWrapper is the outer envelope for type:"stream_event" lines
+// emitted when --include-partial-messages is passed to claude.
+type streamEventWrapper struct {
+	Event streamEventInner `json:"event"`
+}
+
+type streamEventInner struct {
+	Type         string             `json:"type"`
+	Delta        streamEventDelta   `json:"delta"`
+	ContentBlock streamContentBlock `json:"content_block"`
+}
+
+type streamEventDelta struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Thinking string `json:"thinking"` // populated for thinking_delta events
+}
+
+type streamContentBlock struct {
+	Type string `json:"type"`
+	Name string `json:"name"` // non-empty for tool_use blocks
 }
 
 // controlRequestBody is the inner "request" object in a control_request event.
@@ -82,6 +106,12 @@ type ParseResult struct {
 	PermissionDenied bool
 	DeniedTool       string
 	DirRestricted    bool
+	// streamedViaDeltas is set when text_delta events were received, so the
+	// final assistant event's text is skipped to avoid double-printing.
+	streamedViaDeltas bool
+	// hadThinking is set when at least one thinking_delta was emitted, so the
+	// first text_delta can insert a newline separator.
+	hadThinking bool
 }
 
 // detectPermissionDenied scans text for permission-request phrases.
@@ -118,35 +148,75 @@ type StreamOpts struct {
 	DirRestrictionPhrases []string
 	AllowedTools          []string // used to match tool names in permission phrases
 	OnPermission          PermissionHandler
+	// OnToolUse is called as soon as Claude begins a tool call (content_block_start
+	// with type=tool_use). The tool name is passed; called from the stream goroutine.
+	OnToolUse func(name string)
+	// OnThinking is called for each thinking_delta token. The caller is responsible
+	// for any formatting (e.g. dimming). Called from the stream goroutine.
+	OnThinking func(text string)
+	// DebugLog receives every raw NDJSON line from the claude subprocess when non-nil.
+	DebugLog io.Writer
+}
+
+// scanLines reads r line-by-line in a goroutine (so the pipe is always drained
+// even when fn blocks) and calls fn for each non-empty line. Returns the first
+// scanner error, if any.
+func scanLines(r io.Reader, debugLog io.Writer, fn func([]byte)) error {
+	type item struct {
+		text string
+		err  error
+	}
+	ch := make(chan item, 256)
+	go func() {
+		defer close(ch)
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for sc.Scan() {
+			ch <- item{text: sc.Text()}
+		}
+		if err := sc.Err(); err != nil {
+			ch <- item{err: err}
+		}
+	}()
+	for it := range ch {
+		if it.err != nil {
+			return it.err
+		}
+		if it.text == "" {
+			continue
+		}
+		if debugLog != nil {
+			fmt.Fprintln(debugLog, it.text) //nolint:errcheck
+		}
+		fn([]byte(it.text))
+	}
+	return nil
 }
 
 // Stream parses NDJSON lines from the claude subprocess, writes text tokens
 // to out as they arrive, and returns a ParseResult when the stream ends.
+//
+// The scanner runs in a goroutine so the OS pipe is always drained even while
+// onPermission blocks waiting for user input. Without this, Claude's stdout
+// pipe buffer (64 KB) can fill when --verbose produces output after a
+// control_request, causing Claude to block on write and terminate.
 func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (ParseResult, error) {
 	onPermission := opts.OnPermission
 	if onPermission == nil {
 		onPermission = denyAllHandler
 	}
+	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onThinking: opts.OnThinking}
 
 	var res ParseResult
 	var textBuf strings.Builder
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
+	if err := scanLines(r, opts.DebugLog, func(raw []byte) {
 		var ev streamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return
 		}
-		applyEvent(&res, &textBuf, out, ev, stdinW, onPermission)
-	}
-
-	if err := scanner.Err(); err != nil {
+		applyEvent(&res, &textBuf, out, ev, raw, stdinW, cb)
+	}); err != nil {
 		return res, err
 	}
 
@@ -168,38 +238,100 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	return res, nil
 }
 
+// eventCallbacks groups the optional callbacks passed to applyEvent.
+type eventCallbacks struct {
+	onPermission PermissionHandler
+	onToolUse    func(string)
+	onThinking   func(string)
+}
+
 // applyEvent updates res and textBuf based on a single stream event.
-func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent, stdinW io.Writer, onPermission PermissionHandler) {
+func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent, raw []byte, stdinW io.Writer, cb eventCallbacks) {
 	switch ev.Type {
 	case msgTypeSystem:
-		if ev.SessionID != "" {
-			res.SessionID = ev.SessionID
-		}
+		applySystem(res, ev)
+	case msgTypeStreamEvent:
+		applyStreamEvent(res, textBuf, out, raw, cb)
 	case msgTypeAssistant:
-		// Each assistant event is a distinct response turn; separate with a
-		// newline when previous output didn't already end with one.
-		if textBuf.Len() > 0 {
-			prev := textBuf.String()
-			if prev[len(prev)-1] != '\n' {
-				textBuf.WriteByte('\n')
-				io.WriteString(out, "\n") //nolint:errcheck
-			}
-		}
-		for _, block := range ev.Message.Content {
-			if block.Type == "text" && block.Text != "" {
-				textBuf.WriteString(block.Text)
-				io.WriteString(out, block.Text) //nolint:errcheck
-			}
-		}
+		applyAssistant(res, textBuf, out, ev)
 	case msgTypeResult:
-		if ev.SessionID != "" {
-			res.SessionID = ev.SessionID
-		}
-		res.IsError = ev.IsError
-		res.PermissionDenials = ev.PermissionDenials
+		applyResult(res, ev)
 	case msgTypeControlRequest:
-		req := ControlRequest{RequestID: ev.RequestID, Body: ev.Request}
-		onPermission(req, stdinW)
+		cb.onPermission(ControlRequest{RequestID: ev.RequestID, Body: ev.Request}, stdinW)
+	}
+}
+
+func applySystem(res *ParseResult, ev streamEvent) {
+	if ev.SessionID != "" {
+		res.SessionID = ev.SessionID
+	}
+}
+
+func applyResult(res *ParseResult, ev streamEvent) {
+	if ev.SessionID != "" {
+		res.SessionID = ev.SessionID
+	}
+	res.IsError = ev.IsError
+	res.PermissionDenials = ev.PermissionDenials
+}
+
+func applyAssistant(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent) {
+	if res.streamedViaDeltas {
+		return
+	}
+	ensureNewline(textBuf, out)
+	for _, block := range ev.Message.Content {
+		if block.Type == "text" && block.Text != "" {
+			textBuf.WriteString(block.Text)
+			io.WriteString(out, block.Text) //nolint:errcheck
+		}
+	}
+}
+
+func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, raw []byte, cb eventCallbacks) {
+	var wrapper streamEventWrapper
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return
+	}
+	switch wrapper.Event.Type {
+	case "message_start":
+		ensureNewline(textBuf, out)
+	case "content_block_start":
+		if wrapper.Event.ContentBlock.Type == "tool_use" && wrapper.Event.ContentBlock.Name != "" && cb.onToolUse != nil {
+			cb.onToolUse(wrapper.Event.ContentBlock.Name)
+		}
+	case "content_block_delta":
+		applyDelta(res, textBuf, out, wrapper.Event.Delta, cb.onThinking)
+	}
+}
+
+func applyDelta(res *ParseResult, textBuf *strings.Builder, out io.Writer, delta streamEventDelta, onThinking func(string)) {
+	switch delta.Type {
+	case "text_delta":
+		if delta.Text == "" {
+			return
+		}
+		if res.hadThinking && !res.streamedViaDeltas {
+			io.WriteString(out, "\n") //nolint:errcheck
+		}
+		textBuf.WriteString(delta.Text)
+		io.WriteString(out, delta.Text) //nolint:errcheck
+		res.streamedViaDeltas = true
+	case "thinking_delta":
+		if delta.Thinking != "" {
+			res.hadThinking = true
+			if onThinking != nil {
+				onThinking(delta.Thinking)
+			}
+		}
+	}
+}
+
+// ensureNewline appends a newline to textBuf and out if the last byte is not already '\n'.
+func ensureNewline(textBuf *strings.Builder, out io.Writer) {
+	if textBuf.Len() > 0 && textBuf.String()[textBuf.Len()-1] != '\n' {
+		textBuf.WriteByte('\n')
+		io.WriteString(out, "\n") //nolint:errcheck
 	}
 }
 
