@@ -64,7 +64,7 @@ type streamChunk struct {
 	} `json:"choices"`
 }
 
-// Agent is a local LLM agent backed by a llama.cpp OpenAI-compatible server.
+// Agent is a local LLM agent backed by any OpenAI-compatible inference server.
 type Agent struct {
 	baseURL        string
 	model          string
@@ -170,7 +170,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 }
 
 // executeToolCalls dispatches all tool calls and appends the results to msgs.
-// Always uses the structured OpenAI tool_calls wire format — the llama.cpp chat
+// Always uses the structured OpenAI tool_calls wire format — the server's chat
 // template renders it into the model-specific markup (<tool_call>, etc.) and
 // wraps tool results in <tool_response> automatically.
 func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
@@ -245,13 +245,13 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("llama.cpp unreachable: %w", err)
+		return "", "", nil, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(httpResp.Body)
-		return "", "", nil, fmt.Errorf("llama.cpp error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -414,7 +414,7 @@ Task: ` + prompt
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
-		return false, fmt.Errorf("llama.cpp unreachable: %w", err)
+		return false, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -436,7 +436,7 @@ Task: ` + prompt
 	return strings.HasPrefix(answer, "escalate"), nil
 }
 
-// Ping checks whether the llama.cpp server is reachable and pre-seeds the
+// Ping checks whether the inference server is reachable and pre-seeds the
 // tool-format detector from the loaded model name when possible.
 func (a *Agent) Ping(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/health", nil)
@@ -445,7 +445,7 @@ func (a *Agent) Ping(ctx context.Context) error {
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("llama.cpp unreachable at %s: %w", a.baseURL, err)
+		return fmt.Errorf("inference server unreachable at %s: %w", a.baseURL, err)
 	}
 	resp.Body.Close()
 

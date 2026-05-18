@@ -10,6 +10,8 @@ LLAMA_HOST="${LLAMA_HOST:-127.0.0.1}"
 LLAMA_PORT="${LLAMA_PORT:-8080}"
 LLAMA_CTX_SIZE="${LLAMA_CTX_SIZE:-8192}"
 LLAMA_GPU_LAYERS="${LLAMA_GPU_LAYERS:-99}"
+# Optional: override the chat template (Jinja2 string). Leave unset to use the model's built-in template.
+LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"
 
 ENV_FILE="$HOME/.milk/llama.env"
 if [[ -f "$ENV_FILE" ]]; then
@@ -30,12 +32,20 @@ if [[ ! -f "$LLAMA_MODEL" ]]; then
 fi
 
 echo "Starting llama.cpp server"
-echo "  binary : $LLAMA_BIN"
-echo "  model  : $LLAMA_MODEL"
-echo "  listen : $LLAMA_HOST:$LLAMA_PORT"
-echo "  ctx    : $LLAMA_CTX_SIZE tokens"
-echo "  gpu    : $LLAMA_GPU_LAYERS layers"
+echo "  binary   : $LLAMA_BIN"
+echo "  model    : $LLAMA_MODEL"
+echo "  listen   : $LLAMA_HOST:$LLAMA_PORT"
+echo "  ctx      : $LLAMA_CTX_SIZE tokens"
+echo "  gpu      : $LLAMA_GPU_LAYERS layers"
+if [[ -n "$LLAMA_CHAT_TEMPLATE" ]]; then
+  echo "  template : (custom)"
+fi
 echo ""
+
+EXTRA_ARGS=()
+if [[ -n "$LLAMA_CHAT_TEMPLATE" ]]; then
+  EXTRA_ARGS+=(--chat-template "$LLAMA_CHAT_TEMPLATE")
+fi
 
 exec "$LLAMA_BIN" \
   --model        "$LLAMA_MODEL" \
@@ -44,4 +54,5 @@ exec "$LLAMA_BIN" \
   --ctx-size     "$LLAMA_CTX_SIZE" \
   --n-gpu-layers "$LLAMA_GPU_LAYERS" \
   --flash-attn   on \
-  --jinja
+  --jinja \
+  "${EXTRA_ARGS[@]}"

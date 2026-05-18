@@ -1,25 +1,41 @@
 # Setup and local testing
 
 > **Scenario note:** This guide covers a specific reference setup: NVIDIA GPU on Ubuntu/WSL2, llama.cpp built from source, Qwen2.5-Coder 7B. The parameters (CUDA architecture, quant size, GPU layer count, context size) will differ for other hardware. For a general llama.cpp installation reference see the [official llama.cpp documentation](https://github.com/ggml-org/llama.cpp).
+>
+> The local agent speaks the OpenAI-compatible API and is not tied to llama.cpp. Any compliant server works — local or remote. See [Tested models](#tested-models) for models known to work well.
 
 ## Prerequisites
 
 | Dependency | Required | Notes |
-|---|---|---|
+| --- | --- | --- |
 | Go 1.21+ | yes | build only |
-| llama.cpp server | no | any OpenAI-compatible local inference server works; degrades to Claude-only if absent |
+| Inference server | no | any OpenAI-compatible server; degrades to Claude-only if absent |
 | claude CLI | no | degrades to local-only if absent |
 
 ---
 
 ## Local inference backend
 
-milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any server that exposes this interface can be used. llama.cpp is the reference option, but alternatives such as [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [vLLM](https://github.com/vllm-project/vllm) work as long as:
+milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any server that exposes this interface can be used — local or remote. llama.cpp is the reference option, but alternatives such as [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [vLLM](https://github.com/vllm-project/vllm) work as long as:
 
 - the endpoint matches `llama_url` in `~/.milk/config.json`
-- the loaded model supports function/tool calling (Qwen2.5-Coder recommended)
+- the loaded model supports function/tool calling
 
 For general llama.cpp installation instructions see the [official llama.cpp README](https://github.com/ggml-org/llama.cpp). The steps below document the reference setup.
+
+---
+
+## Tested models
+
+The following models have been tested and confirmed working with milk's tool-calling loop. Models are served via llama.cpp with `--jinja`; the streaming tool-format detector handles format differences automatically.
+
+| Model | Size | Tool format | Notes |
+| --- | --- | --- | --- |
+| **Qwen2.5-Coder-7B-Instruct** | 7B | fenced JSON (`\`\`\`json`) | Reference model. Reliable tool calls, good code quality. |
+| **Qwen2.5-Coder-3B-Instruct** | 3B | fenced JSON (`\`\`\`json`) | Fits in 4 GB VRAM (Q8_0 ~3.4 GB). Tool calls work; prose quality limited by size. |
+| **Gemma-4-E4B** (Gemma 4) | 4B (MoE) | `<tool_call>` tags | Tested. Requires `--jinja`. Chat template handles tool markup. |
+
+Other instruction-tuned models with OpenAI-style function calling should work. If tool calls are emitted in an unrecognised format, open an issue — adding a new format to the stream detector is straightforward.
 
 ---
 
@@ -85,7 +101,7 @@ The server binary is at `~/llama.cpp/build/bin/llama-server`.
 The reference model is **Qwen2.5-Coder-7B-Instruct**, chosen for its reliable function/tool calling support. Quant size depends on available VRAM:
 
 | Quant | Size | Fits in |
-|---|---|---|
+| --- | --- | --- |
 | Q4_K_M | ~4.1 GB | 4 GB VRAM (tight) |
 | Q3_K_M | ~3.2 GB | 4 GB VRAM (with headroom) |
 | Q8_0 | ~7.2 GB | 8 GB VRAM |
@@ -126,6 +142,10 @@ The script reads defaults for the binary path, model path, port, and GPU layers.
 LLAMA_MODEL="$HOME/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q3_K_M.gguf"
 LLAMA_CTX_SIZE=4096   # reduce if VRAM OOMs
 LLAMA_GPU_LAYERS=28   # partial offload: rest runs on CPU
+
+# Optional: override the chat template (Jinja2 string).
+# Leave unset to use the model's built-in template.
+# LLAMA_CHAT_TEMPLATE="..."
 ```
 
 Verify the server is up:
@@ -174,7 +194,7 @@ task build DEST=/usr/local/bin/milk
 
 Expected output:
 
-```
+```text
 llama_url:      http://localhost:8080
 llama_model:    qwen2.5-coder
 claude_bin:     claude
@@ -193,7 +213,7 @@ escalate_keywords:     [architect refactor entire design explain why]
 task test
 ```
 
-All tests run without llama.cpp or claude. They use temp directories and mock readers.
+All tests run without an inference server or claude. They use temp directories and mock readers.
 
 ### Manual smoke tests
 
@@ -207,7 +227,7 @@ All tests run without llama.cpp or claude. They use temp directories and mock re
 ./milk --list   # should be empty
 ```
 
-**Local model routing** (llama.cpp must be running):
+**Local model routing** (inference server must be running):
 
 ```sh
 # Should route to local, run bash tool, return file list
@@ -240,9 +260,9 @@ All tests run without llama.cpp or claude. They use temp directories and mock re
 **Graceful degradation**:
 
 ```sh
-# Stop llama.cpp, then:
+# Stop inference server, then:
 ./milk "list Go files"
-# Expected: "[milk] warning: llama.cpp unreachable — routing all to Claude"
+# Expected: "[milk] warning: local inference server unreachable — routing all to Claude"
 
 # Stop claude (rename binary temporarily), then:
 ./milk "list Go files"
