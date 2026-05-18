@@ -32,6 +32,8 @@ The design below extracts the RFC's **cognitive model** and maps it onto milk's 
 internal/memory/
   percept.go       # Percept and Engram types, typed edges, confidence weight
   store.go         # file-based persistence (~/.milk/memory/<session-or-global>.json)
+                   #   Store.Delete(id string) (bool, error)
+                   #   Store.FindByIDPrefix(prefix string) []Percept
   recall.go        # query interface: by keyword, by recency, by weight threshold
   embed.go         # embedding via llama.cpp /embedding endpoint
   similarity.go    # cosine similarity, k-nearest-percepts
@@ -133,7 +135,7 @@ Runs automatically when a session ends (on `milk` exit or `/new`/`/drop`). Steps
 1. **Decay** — apply `−0.03` to all non-core session Percepts
 2. **Edge propagation** — adjust weights per edge relations (see above)
 3. **Prune** — remove Percepts with `w ≤ 0`
-4. **Promote** — Percepts with `w ≥ 0.8` and `Core=false` are candidates for promotion to `global.json`
+4. **Promote** — Percepts with `w ≥ 0.6` and `Core=false` are candidates for promotion to `global.json`
 5. **Merge** — promoted Percepts are written to global store; session file is archived/deleted
 
 Promotion to global is the milk equivalent of the RFC's REM phase — long-term consolidation without a UKB.
@@ -150,9 +152,12 @@ Four tools added to `internal/agent/local/tools.go` via `memory.Schemas()`:
 ```json
 {
   "content": "User prefers flat file output over JSON when possible",
-  "subject": "user preferences"
+  "subject": "user preferences",
+  "producer": "user"
 }
 ```
+
+The optional `producer` field accepts `"user"` | `"local"` | `"claude"` | `"system"`. When `producer: "user"` is set, the Percept is recorded at `W=1.0` (instead of the default `W=0.7`), ensuring it survives consolidation and promotes to GLOBAL reliably.
 
 **`get_memory`** — agent retrieves relevant Percepts by keyword:
 ```json
@@ -246,6 +251,17 @@ To extract as a standalone package later: `go mod` rename + replace the llama.cp
 - `/learn <statement>` slash command — writes a user Percept directly to global store (`Core=true`, `W=1.0`, `Producer="user"`)
 - `/memory [global|session|<pattern>]` slash command — lists Percepts with optional scope/pattern filter
 - `/export [json|<path>]` slash command — dumps the current session transcript
+
+#### Phase 1 additions ✓ complete
+
+- **Memory panel** (`cmd/milk/panel_memory.go`) — right-side TUI panel (34 chars wide), open by default, toggled with `/panel memory`. Shows SESSION / GLOBAL / GLOBAL (core) sections. Polls every 5s. Each percept shows a short ID (`#<first-6-hex-chars-of-UUID>`, dim) on the first line, content wrapped to 2 lines max, weight right-aligned. Percepts updated within 60s are highlighted bold+yellow.
+- **Percept short IDs** — every percept in the panel shows `#<first-6-hex-chars>` for cross-command referencing.
+- **`/forget <pattern or #id>`** slash command — fuzzy search by content substring or exact `#id` prefix. Shows numbered list with short IDs on ambiguity, asks for confirmation (`y` / position / `#id`), then calls `Store.Delete(id)`.
+- **`/memory show <pattern or #id>`** slash command — shows full percept details (ID, scope, W, producer, core, content, timestamps, roles) using `FormatListVerbose`.
+- **`Store.Delete(id string) (bool, error)`** — removes a percept by exact UUID from the store.
+- **`Store.FindByIDPrefix(prefix string) []Percept`** — finds percepts whose UUID begins with the given prefix (used for short-ID resolution).
+- **`record_memory` `producer` field** — agents can pass `producer: "user"` to record user-stated facts at `W=1.0` instead of the default `W=0.7`.
+- **`promoteThreshold` lowered from 0.8 to 0.6** — local/claude-produced session percepts (W=0.7, decaying to 0.67 after one session) now reach the promotion threshold and can enter GLOBAL storage via normal use.
 
 ### Phase 2 — Recall quality
 - Embedding via llama.cpp `/embedding`

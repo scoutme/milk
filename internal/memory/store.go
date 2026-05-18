@@ -253,6 +253,44 @@ func (s *Store) allPercepts() []Percept {
 	return out
 }
 
+// Delete removes the Percept with the given ID from whichever store contains it.
+// Returns (true, nil) if deleted, (false, nil) if not found.
+func (s *Store) Delete(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, p := range s.global.Percepts {
+		if p.ID == id {
+			s.global.Percepts = append(s.global.Percepts[:i], s.global.Percepts[i+1:]...)
+			return true, s.saveFile(s.globalPath, s.global)
+		}
+	}
+	if s.sessionPath != "" {
+		for i, p := range s.session.Percepts {
+			if p.ID == id {
+				s.session.Percepts = append(s.session.Percepts[:i], s.session.Percepts[i+1:]...)
+				return true, s.saveFile(s.sessionPath, s.session)
+			}
+		}
+	}
+	return false, nil
+}
+
+// FindByIDPrefix returns all Percepts whose ID starts with the given prefix (case-insensitive).
+func (s *Store) FindByIDPrefix(prefix string) []Percept {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lower := strings.ToLower(prefix)
+	var out []Percept
+	for _, p := range s.allPercepts() {
+		if strings.HasPrefix(strings.ToLower(p.ID), lower) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Flush persists both stores to disk.
 func (s *Store) Flush() error {
 	s.mu.Lock()

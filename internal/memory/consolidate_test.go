@@ -199,3 +199,62 @@ func TestEdgePropagation_Contradicts(t *testing.T) {
 		t.Errorf("contradicts edge should lower To W, got %v", result[1].W)
 	}
 }
+
+func TestConsolidate_PromotesAtLoweredThreshold(t *testing.T) {
+	s := newTestStore(t, true)
+	// W=0.67: below old threshold 0.8, above new threshold 0.6.
+	// After decay (-0.03) it becomes 0.64, still >= promoteThreshold (0.6).
+	p := Percept{
+		ID:       "promote-1",
+		Content:  "moderately confident fact",
+		Producer: ProducerLocal,
+		W:        0.67,
+		Core:     false,
+	}
+	s.mu.Lock()
+	s.session.Percepts = append(s.session.Percepts, p)
+	s.mu.Unlock()
+
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+
+	for _, rp := range s.global.Percepts {
+		if rp.ID == "promote-1" {
+			return // promoted successfully
+		}
+	}
+	for _, rp := range s.session.Percepts {
+		if rp.ID == "promote-1" {
+			t.Error("percept should have been promoted to global, not left in session")
+			return
+		}
+	}
+	t.Error("percept not found after consolidation")
+}
+
+func TestConsolidate_DoesNotPromoteBelowThreshold(t *testing.T) {
+	s := newTestStore(t, true)
+	// W=0.55: below promoteThreshold (0.6); after decay (-0.03) becomes 0.52, still below.
+	p := Percept{
+		ID:       "nopromote-1",
+		Content:  "low confidence fact",
+		Producer: ProducerLocal,
+		W:        0.55,
+		Core:     false,
+	}
+	s.mu.Lock()
+	s.session.Percepts = append(s.session.Percepts, p)
+	s.mu.Unlock()
+
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+
+	for _, rp := range s.global.Percepts {
+		if rp.ID == "nopromote-1" {
+			t.Error("low-weight percept should NOT have been promoted to global")
+			return
+		}
+	}
+}

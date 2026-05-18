@@ -195,9 +195,15 @@ milk [flags] <prompt>         # single-prompt mode
 
 **Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/help`, `/exit`
 
+**Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
+
+**Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
+
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
 **Keyboard:** Up/Down navigates input history (single-line mode only); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
+
+**Memory panel:** A 34-column right-side panel shows SESSION / GLOBAL / GLOBAL (core) percept sections in real time (polls every 5s). Each percept displays a short `#<6hex>` ID (dim), content wrapped to 2 lines, and weight right-aligned. Percepts updated within the last 60s are highlighted bold+yellow. Toggle with `/panel memory`.
 
 ### Flags
 

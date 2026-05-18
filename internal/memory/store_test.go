@@ -216,3 +216,81 @@ func TestInitialWeight(t *testing.T) {
 		}
 	}
 }
+
+func TestDelete_RemovesFromGlobal(t *testing.T) {
+	s := newTestStore(t, false)
+	id, err := s.Record(context.Background(), "global fact to delete", ProducerUser, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	found, err := s.Delete(id)
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !found {
+		t.Fatal("expected Delete to return true for existing ID")
+	}
+	if len(s.global.Percepts) != 0 {
+		t.Errorf("expected 0 global percepts after delete, got %d", len(s.global.Percepts))
+	}
+}
+
+func TestDelete_RemovesFromSession(t *testing.T) {
+	s := newTestStore(t, true)
+	id, err := s.Record(context.Background(), "session fact to delete", ProducerLocal, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	found, err := s.Delete(id)
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !found {
+		t.Fatal("expected Delete to return true for existing session ID")
+	}
+	if len(s.session.Percepts) != 0 {
+		t.Errorf("expected 0 session percepts after delete, got %d", len(s.session.Percepts))
+	}
+}
+
+func TestDelete_NotFound(t *testing.T) {
+	s := newTestStore(t, false)
+	found, err := s.Delete("nonexistent-id-000")
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if found {
+		t.Fatal("expected Delete to return false for nonexistent ID")
+	}
+}
+
+func TestFindByIDPrefix_Matches(t *testing.T) {
+	s := newTestStore(t, false)
+	id1, err := s.Record(context.Background(), "first fact", ProducerUser, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	_, err = s.Record(context.Background(), "second fact", ProducerUser, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	prefix := id1[:4]
+	results := s.FindByIDPrefix(prefix)
+	if len(results) != 1 {
+		t.Fatalf("expected exactly 1 result, got %d", len(results))
+	}
+	if results[0].Content != "first fact" {
+		t.Errorf("unexpected content: %q", results[0].Content)
+	}
+}
+
+func TestFindByIDPrefix_NoMatch(t *testing.T) {
+	s := newTestStore(t, false)
+	s.Record(context.Background(), "some fact", ProducerUser, Roles{}, false) //nolint:errcheck
+
+	results := s.FindByIDPrefix("zzzzzzz")
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
