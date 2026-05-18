@@ -44,8 +44,11 @@ func main() {
 var rootCmd = &cobra.Command{
 	Use:   "milk [flags] [prompt]",
 	Short: "Local-first agentic orchestrator",
-	Long: `milk routes prompts between a local LLM (Qwen2.5 via llama.cpp) and
-Claude Code CLI, maintaining session state and supporting context promotion.`,
+	Long: `milk routes prompts between a local LLM and Claude Code CLI, maintaining
+session state and supporting context promotion on escalation.
+
+The local agent speaks the OpenAI-compatible API — any compliant inference server works,
+local or remote (llama.cpp, Ollama, LM Studio, vLLM, or any hosted endpoint).`,
 	Args:         cobra.ArbitraryArgs,
 	SilenceUsage: true,
 	RunE:         run,
@@ -119,7 +122,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Router uses nil localAgent when llama.cpp is down (skips classifier)
+	// Router uses nil localAgent when the inference server is unreachable (skips classifier)
 	var routeLocalAgent *local.Agent
 	if localAvail {
 		routeLocalAgent = localAgent
@@ -190,10 +193,10 @@ func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, claude
 	claudeAvail := claudeAgent.Ping() == nil
 
 	if !localAvail && !claudeAvail {
-		return false, false, fmt.Errorf("neither llama.cpp nor claude CLI is available")
+		return false, false, fmt.Errorf("neither local inference server nor claude CLI is available")
 	}
 	if !localAvail {
-		fmt.Fprintln(os.Stderr, milkTag()+" warning: llama.cpp unreachable — routing all to Claude")
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to Claude")
 	}
 	if !claudeAvail {
 		fmt.Fprintln(os.Stderr, milkTag()+" warning: claude CLI unavailable — local only")

@@ -1,6 +1,8 @@
 # milk
 
-Local-first agentic orchestrator CLI. Routes prompts between a local LLM (Gemma 4 via llama.cpp) and Claude Code, maintaining session state across turns and promoting context on escalation.
+Local-first agentic orchestrator CLI. Routes prompts between a local LLM and Claude Code, maintaining session state across turns and promoting context on escalation.
+
+The local agent speaks the OpenAI-compatible API — any compliant inference server works, local or remote (llama.cpp, Ollama, LM Studio, vLLM, or any hosted endpoint). Tested models: Qwen2.5-Coder (7B / 3B) and Gemma 4 E4B.
 
 ## Installation
 
@@ -23,7 +25,7 @@ Each prompt is routed through a decision chain:
 1. Explicit flags (`--escalate`, `--local`) override everything
 2. Session state — if Claude asked a follow-up question, the next turn goes directly back to Claude
 3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
-4. Local model classifier — Gemma 4 decides `local` or `escalate` when the scorer is inconclusive
+4. Local model classifier — the local model decides `local` or `escalate` when the scorer is inconclusive
 5. Default: local
 
 When the local model cannot handle a task, it calls `escalate_to_claude()` and milk reformats the local conversation history as context for Claude, which orients itself without a separate reformulation step.
@@ -32,11 +34,11 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 
 | Dependency | Purpose | Required |
 | --- | --- | --- |
-| [llama.cpp server](https://github.com/ggml-org/llama.cpp) | local LLM inference | no (degrades to Claude-only) |
+| Inference server | local LLM inference | no (degrades to Claude-only) |
 | [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
 | Go 1.21+ | build only | yes |
 
-milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any compatible server works — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or similar — as long as the loaded model supports function/tool calling. Gemma 4 E4B is the reference model.
+milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any compatible server works — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any hosted endpoint — as long as the loaded model supports function/tool calling.
 
 For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md).
 
@@ -167,7 +169,7 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 ```json
 {
   "llama_url": "http://localhost:8080",
-  "llama_model": "gemma-4-e4b",
+  "llama_model": "qwen2.5-coder",
   "claude_bin": "claude",
   "default_route": "local",
   "otel": {
@@ -240,12 +242,12 @@ The local model has access to these built-in tools:
 
 ## Graceful degradation
 
-| llama.cpp | claude CLI | behaviour |
+| Inference server | claude CLI | behaviour |
 | --- | --- | --- |
 | running | installed | normal routing |
-| down | installed | warns once, routes all turns to Claude |
+| unreachable | installed | warns once, routes all turns to Claude |
 | running | not installed | warns once, stays local-only |
-| down | not installed | exits with error |
+| unreachable | not installed | exits with error |
 
 ## Documentation
 
