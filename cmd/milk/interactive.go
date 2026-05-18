@@ -23,9 +23,11 @@ const cmdMetrics = "/metrics"
 const cmdMemory = "/memory"
 const cmdExport = "/export"
 const cmdHistory = "/history"
+const cmdPanel = "/panel"
+const cmdForget = "/forget"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -59,12 +61,15 @@ const interactiveHelp = `Slash commands:
   /memory global   list only global percepts
   /memory session  list only session percepts
   /memory <pat>    list percepts whose content contains <pat>
+  /memory show <pat|#id>  show full details of matching percepts
   /otel trim       archive current otel files and start fresh
   /otel off        disable OTel for this session
   /otel on         re-enable OTel for this session
   /history         show current history mode (session or global)
   /history global  switch input navigation to global history
   /history session switch input navigation to session history (default)
+  /panel memory    toggle the memory panel (right-side percept viewer)
+  /forget <pat>    delete a percept by description or #id (asks for confirmation)
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -282,6 +287,14 @@ func execMemory(sub string, st *interactiveState) string {
 		return milkTag() + " memory store not available"
 	}
 	sub = strings.TrimSpace(sub)
+
+	if sub == "show" {
+		return milkTag() + " usage: /memory show <description> or /memory show #<id>"
+	}
+	if rest, ok := strings.CutPrefix(sub, "show "); ok {
+		return execMemoryShow(strings.TrimSpace(rest), st)
+	}
+
 	opts := memory.ListOpts{}
 	switch sub {
 	case "global":
@@ -296,6 +309,19 @@ func execMemory(sub string, st *interactiveState) string {
 		return milkTag() + " (no percepts found)"
 	}
 	return milkTag() + "\n" + memory.FormatList(percepts)
+}
+
+func execMemoryShow(pat string, st *interactiveState) string {
+	var percepts []memory.Percept
+	if strings.HasPrefix(pat, "#") {
+		percepts = st.mem.FindByIDPrefix(pat[1:])
+	} else {
+		percepts = st.mem.List(memory.ListOpts{Pattern: pat})
+	}
+	if len(percepts) == 0 {
+		return milkTag() + " no percepts match " + fmt.Sprintf("%q", pat)
+	}
+	return milkTag() + "\n" + memory.FormatListVerbose(percepts)
 }
 
 // execLearn stores a user fact in the global memory store.

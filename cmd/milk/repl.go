@@ -25,6 +25,9 @@ import (
 )
 
 const agentTimeout = 10 * time.Minute
+const memoryPanelWidth = 34 // chars for the memory panel (includes border)
+const memoryPanelInner = 32 // usable chars inside the panel
+const memoryPollInterval = 5 * time.Second
 
 // dispatchAgents holds the agents and their availability for a turn.
 type dispatchAgents struct {
@@ -44,11 +47,19 @@ type agentDoneMsg struct{ err error }
 
 type spinnerTickMsg struct{}
 
+// memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
+type memoryRefreshMsg struct{}
+
 // permRequestMsg is sent by the agent goroutine when it needs a y/n answer.
 // The agent blocks on respCh until the TUI sends a permResponseMsg back.
 type permRequestMsg struct {
 	prompt string
 	respCh chan string
+}
+
+// forgetState holds the pending /forget confirmation dialog.
+type forgetState struct {
+	candidates []memory.Percept // matched percepts shown to the user
 }
 
 // sendWriter is an io.Writer that forwards each Write as a chunkMsg
@@ -128,6 +139,13 @@ type model struct {
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
 
+	// memory panel
+	panelMemory bool
+	mem         *memory.Store
+
+	// pending /forget confirmation
+	pendingForget *forgetState
+
 	// injected dependencies
 	ctx    context.Context
 	st     *interactiveState
@@ -135,16 +153,18 @@ type model struct {
 	agents dispatchAgents
 }
 
-func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents) model {
+func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
 	return model{
-		histIdx:    -1,
-		ctx:        ctx,
-		st:         st,
-		rtr:        rtr,
-		agents:     agents,
-		ta:         ta,
-		transcript: &strings.Builder{},
+		histIdx:     -1,
+		ctx:         ctx,
+		st:          st,
+		rtr:         rtr,
+		agents:      agents,
+		ta:          ta,
+		transcript:  &strings.Builder{},
+		mem:         mem,
+		panelMemory: true,
 	}
 }
 
@@ -190,7 +210,7 @@ func (m *model) refreshPrompt() {
 		return indent
 	})
 	if m.width > 0 {
-		m.ta.SetWidth(m.width - promptWidth)
+		m.ta.SetWidth(m.mainWidth() - promptWidth)
 	}
 }
 
@@ -238,7 +258,8 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // setViewportContent rebuilds the full viewport content:
 // transcript + separator + input area. The input area scrolls with the transcript.
 func (m *model) setViewportContent() {
-	sep := styleBorder.Width(m.width).Render("")
+	mw := m.mainWidth()
+	sep := styleBorder.Width(mw).Render("")
 	content := m.wrappedTranscript() + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
 	m.vp.SetContent(content)
 }
@@ -256,12 +277,13 @@ func (m *model) appendTranscript(text string) {
 	}
 }
 
-// wrappedTranscript returns the transcript word-wrapped to the viewport width.
+// wrappedTranscript returns the transcript word-wrapped to the main area width.
 func (m *model) wrappedTranscript() string {
-	if m.width <= 0 {
+	mw := m.mainWidth()
+	if mw <= 0 {
 		return m.transcript.String()
 	}
-	return ansi.Wrap(m.transcript.String(), m.width, "")
+	return ansi.Wrap(m.transcript.String(), mw, "")
 }
 
 // viewportHeight is the full terminal height minus the status bar line.
@@ -273,14 +295,31 @@ func (m *model) viewportHeight() int {
 	return h
 }
 
+// mainWidth returns the width available for the transcript+input area.
+// When the memory panel is open it is reduced by the panel width.
+func (m *model) mainWidth() int {
+	w := m.width
+	if m.panelMemory {
+		w -= memoryPanelWidth
+	}
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
 // syncLayout rebuilds viewport content after textarea size changes.
 // Sticky-bottom: scrolls to bottom only when already there.
 func (m *model) syncLayout() {
 	if !m.ready {
 		return
 	}
+	mw := m.mainWidth()
 	vpH := m.viewportHeight()
 	atBottom := m.vp.AtBottom()
+	if m.vp.Width != mw {
+		m.vp.Width = mw
+	}
 	if m.vp.Height != vpH {
 		m.vp.Height = vpH
 	}
@@ -338,11 +377,15 @@ func (m *model) statusBar() string {
 // --- Init ---
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textarea.Blink,
 		tea.EnableBracketedPaste,
 		tea.EnterAltScreen,
-	)
+	}
+	if m.panelMemory {
+		cmds = append(cmds, memoryPollTick())
+	}
+	return tea.Batch(cmds...)
 }
 
 // --- Update ---
@@ -355,6 +398,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.pendingPerm != nil {
 			return m.handlePermKey(msg)
+		}
+		if m.pendingForget != nil {
+			return m.handleForgetKey(msg)
 		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
@@ -395,6 +441,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case memoryRefreshMsg:
+		if m.panelMemory {
+			return m, memoryPollTick()
+		}
+		return m, nil
+
 	case tea.MouseMsg:
 		switch tea.MouseEvent(msg).Button {
 		case tea.MouseButtonWheelUp:
@@ -424,16 +476,17 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
+	mw := m.mainWidth()
 	vpH := m.viewportHeight()
 	if !m.ready {
-		m.vp = viewport.New(m.width, vpH)
+		m.vp = viewport.New(mw, vpH)
 		m.ready = true
 		m.refreshPrompt()
 		m.setViewportContent()
 		m.vp.GotoBottom()
 	} else {
 		atBottom := m.vp.AtBottom()
-		m.vp.Width = m.width
+		m.vp.Width = mw
 		m.vp.Height = vpH
 		m.refreshPrompt()
 		m.setViewportContent()
@@ -585,6 +638,12 @@ func (m model) handleSlashInput(cmd, rest, rawInput string) (tea.Model, tea.Cmd)
 	if cmd == cmdHistory {
 		return m.handleHistoryCmd(strings.TrimSpace(rest)), nil
 	}
+	if cmd == cmdPanel {
+		return m.handlePanelCmd(strings.TrimSpace(rest))
+	}
+	if cmd == cmdForget {
+		return m.handleForgetCmd(strings.TrimSpace(rest)), nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -597,6 +656,129 @@ func (m model) handleSlashInput(cmd, rest, rawInput string) (tea.Model, tea.Cmd)
 		return m.dispatchAgent(dispatch)
 	}
 	return m, nil
+}
+
+// handleForgetCmd starts a /forget flow: searches for candidates and
+// either deletes immediately (single exact #id match) or prompts.
+func (m model) handleForgetCmd(pat string) model {
+	if pat == "" {
+		m.appendTranscript(milkTag() + " usage: /forget <description> or /forget #<id>\n")
+		return m
+	}
+	if m.mem == nil {
+		m.appendTranscript(milkTag() + " memory store not available\n")
+		return m
+	}
+
+	var candidates []memory.Percept
+	if strings.HasPrefix(pat, "#") {
+		candidates = m.mem.FindByIDPrefix(pat[1:])
+	} else {
+		candidates = m.mem.List(memory.ListOpts{Pattern: pat})
+	}
+
+	if len(candidates) == 0 {
+		m.appendTranscript(milkTag() + " no percepts match " + fmt.Sprintf("%q", pat) + "\n")
+		return m
+	}
+
+	if len(candidates) == 1 {
+		// Single match: show and ask y/N
+		m.appendTranscript(forgetCandidateList(candidates))
+		m.appendTranscript(milkTag() + " delete this percept? [y/N] ")
+		m.pendingForget = &forgetState{candidates: candidates}
+		return m
+	}
+
+	// Multiple matches: show numbered list
+	m.appendTranscript(forgetCandidateList(candidates))
+	m.appendTranscript(milkTag() + " enter position (1-" + fmt.Sprintf("%d", len(candidates)) + "), #id, or empty to cancel: ")
+	m.pendingForget = &forgetState{candidates: candidates}
+	return m
+}
+
+// forgetCandidateList formats the candidate list for display.
+func forgetCandidateList(candidates []memory.Percept) string {
+	var b strings.Builder
+	for i, p := range candidates {
+		shortID := "#" + p.ID[:6]
+		scope := "global"
+		// session percepts have no EngramID and their ID is set per store; we can't
+		// distinguish here without passing scope through — use content length as proxy.
+		// A cleaner approach would tag the Percept; for now show scope as unknown.
+		_ = scope
+		fmt.Fprintf(&b, "  %d. %s  %s\n", i+1, dim(shortID), p.Content)
+	}
+	return b.String()
+}
+
+// handleForgetKey handles keypresses while a /forget confirmation is pending.
+func (m model) handleForgetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingForget = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.ta.SetHeight(1)
+		m.syncLayout()
+		m.appendTranscript(answer + "\n")
+		return m.resolveForget(answer), nil
+	}
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(msg)
+	syncHeight(&m.ta)
+	m.syncLayout()
+	return m, cmd
+}
+
+// resolveForget interprets the user's answer and deletes the chosen percept.
+func (m model) resolveForget(answer string) model {
+	candidates := m.pendingForget.candidates
+	m.pendingForget = nil
+
+	var target *memory.Percept
+
+	switch {
+	case answer == "" || strings.ToLower(answer) == "n" || strings.ToLower(answer) == "no":
+		m.appendTranscript(milkTag() + " cancelled\n")
+		return m
+	case len(candidates) == 1 && (strings.ToLower(answer) == "y" || strings.ToLower(answer) == "yes"):
+		target = &candidates[0]
+	case strings.HasPrefix(answer, "#"):
+		prefix := answer[1:]
+		for i := range candidates {
+			if strings.HasPrefix(candidates[i].ID, prefix) {
+				target = &candidates[i]
+				break
+			}
+		}
+	default:
+		// Try numeric position
+		var pos int
+		if _, err := fmt.Sscanf(answer, "%d", &pos); err == nil && pos >= 1 && pos <= len(candidates) {
+			target = &candidates[pos-1]
+		}
+	}
+
+	if target == nil {
+		m.appendTranscript(milkTag() + " unrecognised selection — cancelled\n")
+		return m
+	}
+
+	ok, err := m.mem.Delete(target.ID)
+	if err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+		return m
+	}
+	if !ok {
+		m.appendTranscript(milkTag() + " percept not found (already deleted?)\n")
+		return m
+	}
+	m.appendTranscript(fmt.Sprintf("%s deleted percept %s\n", milkTag(), dim("#"+target.ID[:6])))
+	return m
 }
 
 // handleSearchKey handles keypresses while ctrl+r search is active.
@@ -679,6 +861,26 @@ func (m model) handleHistoryCmd(sub string) model {
 	return m
 }
 
+func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
+	switch sub {
+	case "memory":
+		m.panelMemory = !m.panelMemory
+		m.refreshPrompt()
+		m.syncLayout()
+		var tick tea.Cmd
+		if m.panelMemory {
+			m.appendTranscript(milkTag() + " memory panel: on\n")
+			tick = memoryPollTick()
+		} else {
+			m.appendTranscript(milkTag() + " memory panel: off\n")
+		}
+		return m, tick
+	default:
+		m.appendTranscript(milkTag() + " usage: /panel memory\n")
+		return m, nil
+	}
+}
+
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
@@ -709,7 +911,21 @@ func (m model) View() string {
 	if !m.ready {
 		return ""
 	}
-	return m.vp.View() + "\n" + m.statusBar()
+	vpH := m.viewportHeight()
+	mainArea := m.vp.View()
+	if m.panelMemory {
+		panel := m.renderMemoryPanel(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel)
+	}
+	return mainArea + "\n" + m.statusBar()
+}
+
+// --- Memory panel poll ---
+
+func memoryPollTick() tea.Cmd {
+	return tea.Tick(memoryPollInterval, func(time.Time) tea.Msg {
+		return memoryRefreshMsg{}
+	})
 }
 
 // --- Spinner ---
@@ -1184,7 +1400,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
-	m := newModel(ctx, st, rtr, agents)
+	m := newModel(ctx, st, rtr, agents, mem)
 	if gp, err := globalHistoryPath(); err == nil {
 		m.globalHistory = readHistoryFile(gp)
 	}

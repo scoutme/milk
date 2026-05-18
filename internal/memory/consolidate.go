@@ -4,7 +4,7 @@ import "context"
 
 const (
 	decayPerSession   = 0.03
-	promoteThreshold  = 0.8
+	promoteThreshold  = 0.6
 	pruneThreshold    = 0.0
 	edgePositiveDelta = 0.05
 	edgeNegativeDelta = 0.10

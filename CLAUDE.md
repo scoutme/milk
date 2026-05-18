@@ -16,6 +16,7 @@ cmd/milk/main.go              # Cobra root command, single-prompt mode
 cmd/milk/repl.go              # bubbletea TUI (transcript + textarea + status bar)
 cmd/milk/interactive.go       # slash commands, tab completion, prompt label
 cmd/milk/ansi.go              # ANSI color helpers and spinner
+cmd/milk/panel_memory.go      # right-side memory panel (open by default, toggle /panel memory)
 internal/config/              # config loading (~/.milk/config.json)
 internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)
@@ -37,7 +38,7 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 - **Streaming tool-format detector**: FSM detects tool-call markup format from the stream; handles Qwen fenced JSON, `<tool_call>` tags, Gemma special tokens, bare JSON without pre-configuration
 - **Persistent TUI**: bubbletea alt-screen with viewport (transcript) + textarea (input) + status bar; agent turns run in goroutines, output streamed via `p.Send()`
 - **Input history**: per-session (`~/.milk/sessions/<id>.history`) and global (`~/.milk/input_history`); Ctrl+R/Ctrl+S incremental search
-- **Memory**: Percept store with NREM consolidation — decay/prune/promote cycle at session end
+- **Memory**: Percept store with NREM consolidation — decay/prune/promote cycle at session end; memory panel (`/panel memory`) shows SESSION/GLOBAL/GLOBAL(core) sections in real time, open by default; `/forget` and `/memory show` for interactive management
 
 ## Session states
 

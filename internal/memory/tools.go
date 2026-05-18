@@ -15,7 +15,7 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "record_memory",
-				"description": "Record a fact, preference, or decision worth remembering across sessions. Use when the user states a preference, makes a decision, or shares a fact that should persist.",
+				"description": "Record a fact, preference, or decision worth remembering across sessions. Use when the user states a preference, makes a decision, or shares a fact that should persist. Set producer='user' when the fact was explicitly stated by the user; omit or use 'local'/'claude' for inferred facts.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -26,6 +26,11 @@ func Schemas() []map[string]any {
 						"subject": map[string]any{
 							"type":        "string",
 							"description": "Short subject label for grouping (e.g. 'user preferences', 'project setup').",
+						},
+						"producer": map[string]any{
+							"type":        "string",
+							"enum":        []string{"user", "local", "claude"},
+							"description": "Who is the source of this fact. Use 'user' when the user directly stated it; defaults to the calling agent.",
 						},
 					},
 					"required": []string{"content"},
@@ -94,8 +99,9 @@ func Schemas() []map[string]any {
 // DispatchRecordMemory handles a record_memory tool call.
 func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) string {
 	var args struct {
-		Content string `json:"content"`
-		Subject string `json:"subject"`
+		Content  string `json:"content"`
+		Subject  string `json:"subject"`
+		Producer string `json:"producer"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return errResult(invalidArgs + err.Error())
@@ -107,7 +113,14 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 	if args.Subject != "" {
 		roles.Theme = args.Subject
 	}
-	id, err := store.Record(ctx, args.Content, ProducerLocal, roles, false)
+	producer := ProducerLocal
+	switch args.Producer {
+	case "user":
+		producer = ProducerUser
+	case "claude":
+		producer = ProducerClaude
+	}
+	id, err := store.Record(ctx, args.Content, producer, roles, false)
 	if err != nil {
 		return errResult("failed to record: " + err.Error())
 	}

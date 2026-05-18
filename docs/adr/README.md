@@ -19,3 +19,5 @@
 * [17. OpenTelemetry-native Observability with File Exporters](0017-opentelemetry-observability.md)
 * [18. Streaming Tool-Format Detector for Multi-Model Compatibility](0018-streaming-tool-format-detector.md)
 * [19. TUI Input History Persistence and Turn Cancellation](0019-tui-input-history-and-turn-cancellation.md)
+* [20. Memory System Refinements: Reachable Promotion and User-Stated Facts](0020-memory-system-refinements.md)
+* [21. Memory TUI Panel and Interactive Management Commands](0021-memory-tui-panel-and-management.md)
