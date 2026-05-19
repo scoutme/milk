@@ -41,6 +41,37 @@ func milkTag() string { return dim("[milk]") }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// pulseColors is a 16-step cosine-eased yellow breathing gradient using truecolor.
+// Cycles from near-black yellow (dim) to bright yellow (peak) and back, giving a
+// smooth sine-wave brightness curve that ANSI dim/bold levels cannot approximate.
+// Advances every spinner tick (80 ms/step → ~1.28 s per full breath).
+var pulseColors = [16]string{
+	"\033[38;2;60;50;0m",
+	"\033[38;2;67;58;1m",
+	"\033[38;2;81;73;4m",
+	"\033[38;2;110;101;9m",
+	"\033[38;2;157;135;15m",
+	"\033[38;2;204;170;20m",
+	"\033[38;2;232;197;25m",
+	"\033[38;2;251;215;28m",
+	"\033[38;2;255;220;30m",
+	"\033[38;2;251;215;28m",
+	"\033[38;2;232;197;25m",
+	"\033[38;2;204;170;20m",
+	"\033[38;2;157;135;15m",
+	"\033[38;2;110;101;9m",
+	"\033[38;2;81;73;4m",
+	"\033[38;2;67;58;1m",
+}
+
+// pulse applies a cosine-eased breathing color effect keyed to the spinner frame counter.
+func pulse(s string, frame int) string {
+	if !isTTY {
+		return s
+	}
+	return pulseColors[frame%len(pulseColors)] + s + ansiReset
+}
+
 // Spinner prints an animated spinner on the current line until Stop is called.
 // Designed to run after a label has been printed with no trailing newline.
 // Stop is idempotent and safe to call multiple times.
@@ -104,7 +135,7 @@ func (a *activityWriter) run() {
 				a.spinning = true
 			}
 			if a.spinning {
-				fmt.Fprintf(a.w, "\033[u%s", dim(spinnerFrames[a.frame%len(spinnerFrames)]))
+				fmt.Fprintf(a.w, "\033[u%s", yellow(spinnerFrames[a.frame%len(spinnerFrames)]))
 				a.frame++
 			}
 			a.mu.Unlock()

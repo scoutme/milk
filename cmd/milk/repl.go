@@ -95,7 +95,6 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 
 var (
 	styleStatusBar = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#555", Dark: "#888"}).
 			Background(lipgloss.AdaptiveColor{Light: "#E5E5E5", Dark: "#2B2B2B"})
 	styleStatusBarPerm = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#1A1A00")).
@@ -411,8 +410,8 @@ func (m *model) statusBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	left := fmt.Sprintf(" session:%s  agent:%s", sessID, m.statusAgent())
-	right := m.statusCwd() + " "
+	left := fmt.Sprintf(" %s  %s", dim("session:"+sessID), dim("agent:")+m.statusAgent())
+	right := dim(m.statusCwd() + " ")
 	gap := m.width - len(stripANSI(left)) - len(right)
 	if gap < 1 {
 		gap = 1
@@ -435,16 +434,17 @@ func (m *model) statusAgent() string {
 		}
 		return dim("(" + label + ")`" + m.searchQuery.String() + "'")
 	}
-	agent := agentLabel(m.st)
+	agent := dim(agentLabel(m.st))
 	if m.pendingPerm != nil {
-		return yellow("?") + " " + agent + yellow(" [allow?]")
+		return "? " + agent + " [allow?]"
 	}
 	if m.busy {
-		frame := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		frame := yellow(bold(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]))
+		pulsed := pulse(agentLabel(m.st), m.spinnerFrame)
 		if m.activeToolUse != "" {
-			return dim(frame) + " " + agent + dim(" ["+m.activeToolUse+"]")
+			return frame + " " + pulsed + dim(" ["+m.activeToolUse+"]")
 		}
-		return dim(frame) + " " + agent
+		return frame + " " + pulsed
 	}
 	return agent
 }
@@ -982,19 +982,25 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	tuiAgents.claude = agents.claude.
 		WithOnToolUse(func(name string) {
 			send(toolUseMsg{name: name})
+		}).
+		WithOnToolUseReady(func(name string, input map[string]any) {
 			// Skip tools already allowed in settings.
 			if st.cs != nil {
 				if ok, _ := st.cs.IsToolAllowed(name); ok {
 					return
 				}
 			}
-			// Create a buffered future and ask immediately — non-blocking.
+			// Create a buffered future and ask — non-blocking from this goroutine.
 			ch := make(chan string, 1)
 			st.toolFutures[name] = ch
-			send(permRequestMsg{
-				prompt: fmt.Sprintf("%s allow tool %s? [Y/n] ", milkTag(), bold(name)),
-				respCh: ch,
-			})
+			detail := formatToolInput(input)
+			var prompt string
+			if detail != "" {
+				prompt = fmt.Sprintf("%s allow tool %s %s? [Y/n] ", milkTag(), bold(name), dim(detail))
+			} else {
+				prompt = fmt.Sprintf("%s allow tool %s? [Y/n] ", milkTag(), bold(name))
+			}
+			send(permRequestMsg{prompt: prompt, respCh: ch})
 		}).
 		WithOnThinking(func(text string) { send(chunkMsg{text: dim(text)}) }).
 		WithPermissionHandler(makeTUIPermissionHandler(sw0, st.cs))
