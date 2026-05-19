@@ -12,16 +12,17 @@ import (
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin                   string            // path to claude binary, e.g. "claude"
-	skipPermissions       bool              // pass --dangerously-skip-permissions to the CLI
-	allowedTools          []string          // tools pre-approved via --allowedTools
-	addDirs               []string          // extra directories granted via --add-dir
-	permissionPhrases     []string          // phrases indicating tool permission denial
-	dirRestrictionPhrases []string          // phrases indicating directory restriction
-	permissionHandler     PermissionHandler // nil → denyAllHandler
-	debugLog              io.Writer         // when non-nil, every raw NDJSON line is written here
-	onToolUse             func(string)      // called on content_block_start tool_use events
-	onThinking            func(string)      // called on thinking_delta tokens
+	bin                   string                       // path to claude binary, e.g. "claude"
+	skipPermissions       bool                         // pass --dangerously-skip-permissions to the CLI
+	allowedTools          []string                     // tools pre-approved via --allowedTools
+	addDirs               []string                     // extra directories granted via --add-dir
+	permissionPhrases     []string                     // phrases indicating tool permission denial
+	dirRestrictionPhrases []string                     // phrases indicating directory restriction
+	permissionHandler     PermissionHandler            // nil → denyAllHandler
+	debugLog              io.Writer                    // when non-nil, every raw NDJSON line is written here
+	onToolUse             func(string)                 // called on content_block_start tool_use events
+	onToolUseReady        func(string, map[string]any) // called on content_block_stop with full input
+	onThinking            func(string)                 // called on thinking_delta tokens
 }
 
 func New(bin string) *Agent {
@@ -62,6 +63,14 @@ func (a *Agent) WithDebugLog(w io.Writer) *Agent {
 func (a *Agent) WithOnToolUse(fn func(string)) *Agent {
 	c := *a
 	c.onToolUse = fn
+	return &c
+}
+
+// WithOnToolUseReady returns a copy of the agent that calls fn when a tool
+// call block is complete (content_block_stop) and the full input is available.
+func (a *Agent) WithOnToolUseReady(fn func(string, map[string]any)) *Agent {
+	c := *a
+	c.onToolUseReady = fn
 	return &c
 }
 
@@ -167,6 +176,7 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		AllowedTools:          a.allowedTools,
 		OnPermission:          a.permissionHandler,
 		OnToolUse:             a.onToolUse,
+		OnToolUseReady:        a.onToolUseReady,
 		OnThinking:            a.onThinking,
 		DebugLog:              a.debugLog,
 	})

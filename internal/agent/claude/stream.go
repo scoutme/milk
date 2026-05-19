@@ -40,9 +40,10 @@ type streamEventInner struct {
 }
 
 type streamEventDelta struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	Thinking string `json:"thinking"` // populated for thinking_delta events
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	Thinking    string `json:"thinking"`     // populated for thinking_delta events
+	PartialJSON string `json:"partial_json"` // populated for input_json_delta events
 }
 
 type streamContentBlock struct {
@@ -151,6 +152,9 @@ type StreamOpts struct {
 	// OnToolUse is called as soon as Claude begins a tool call (content_block_start
 	// with type=tool_use). The tool name is passed; called from the stream goroutine.
 	OnToolUse func(name string)
+	// OnToolUseReady is called when a tool call block is complete (content_block_stop)
+	// and the full input map is available. Supersedes OnToolUse when params are needed.
+	OnToolUseReady func(name string, input map[string]any)
 	// OnThinking is called for each thinking_delta token. The caller is responsible
 	// for any formatting (e.g. dimming). Called from the stream goroutine.
 	OnThinking func(text string)
@@ -205,17 +209,18 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	if onPermission == nil {
 		onPermission = denyAllHandler
 	}
-	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onThinking: opts.OnThinking}
+	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onToolUseReady: opts.OnToolUseReady, onThinking: opts.OnThinking}
 
 	var res ParseResult
 	var textBuf strings.Builder
+	var tb toolBlockState
 
 	if err := scanLines(r, opts.DebugLog, func(raw []byte) {
 		var ev streamEvent
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return
 		}
-		applyEvent(&res, &textBuf, out, ev, raw, stdinW, cb)
+		applyEvent(&res, &textBuf, out, ev, raw, stdinW, cb, &tb)
 	}); err != nil {
 		return res, err
 	}
@@ -240,18 +245,19 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 
 // eventCallbacks groups the optional callbacks passed to applyEvent.
 type eventCallbacks struct {
-	onPermission PermissionHandler
-	onToolUse    func(string)
-	onThinking   func(string)
+	onPermission   PermissionHandler
+	onToolUse      func(string)
+	onToolUseReady func(string, map[string]any)
+	onThinking     func(string)
 }
 
 // applyEvent updates res and textBuf based on a single stream event.
-func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent, raw []byte, stdinW io.Writer, cb eventCallbacks) {
+func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent, raw []byte, stdinW io.Writer, cb eventCallbacks, tb *toolBlockState) {
 	switch ev.Type {
 	case msgTypeSystem:
 		applySystem(res, ev)
 	case msgTypeStreamEvent:
-		applyStreamEvent(res, textBuf, out, raw, cb)
+		applyStreamEvent(res, textBuf, out, raw, cb, tb)
 	case msgTypeAssistant:
 		applyAssistant(res, textBuf, out, ev)
 	case msgTypeResult:
@@ -288,7 +294,7 @@ func applyAssistant(res *ParseResult, textBuf *strings.Builder, out io.Writer, e
 	}
 }
 
-func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, raw []byte, cb eventCallbacks) {
+func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, raw []byte, cb eventCallbacks, toolBlock *toolBlockState) {
 	var wrapper streamEventWrapper
 	if err := json.Unmarshal(raw, &wrapper); err != nil {
 		return
@@ -297,12 +303,37 @@ func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer,
 	case "message_start":
 		ensureNewline(textBuf, out)
 	case "content_block_start":
-		if wrapper.Event.ContentBlock.Type == "tool_use" && wrapper.Event.ContentBlock.Name != "" && cb.onToolUse != nil {
-			cb.onToolUse(wrapper.Event.ContentBlock.Name)
+		if wrapper.Event.ContentBlock.Type == "tool_use" && wrapper.Event.ContentBlock.Name != "" {
+			if cb.onToolUse != nil {
+				cb.onToolUse(wrapper.Event.ContentBlock.Name)
+			}
+			if cb.onToolUseReady != nil {
+				toolBlock.name = wrapper.Event.ContentBlock.Name
+				toolBlock.buf.Reset()
+			}
 		}
 	case "content_block_delta":
+		if cb.onToolUseReady != nil && wrapper.Event.Delta.Type == "input_json_delta" {
+			toolBlock.buf.WriteString(wrapper.Event.Delta.PartialJSON)
+		}
 		applyDelta(res, textBuf, out, wrapper.Event.Delta, cb.onThinking)
+	case "content_block_stop":
+		if cb.onToolUseReady != nil && toolBlock.name != "" {
+			var input map[string]any
+			if s := toolBlock.buf.String(); s != "" {
+				json.Unmarshal([]byte(s), &input) //nolint:errcheck
+			}
+			cb.onToolUseReady(toolBlock.name, input)
+			toolBlock.name = ""
+			toolBlock.buf.Reset()
+		}
 	}
+}
+
+// toolBlockState tracks the current tool_use content block being streamed.
+type toolBlockState struct {
+	name string
+	buf  strings.Builder
 }
 
 func applyDelta(res *ParseResult, textBuf *strings.Builder, out io.Writer, delta streamEventDelta, onThinking func(string)) {

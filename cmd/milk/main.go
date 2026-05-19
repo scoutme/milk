@@ -659,6 +659,20 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 	}
 }
 
+// formatToolInput extracts the most user-relevant parameter from a tool input map
+// and returns a short label like "→ <value>". Returns "" if nothing useful is found.
+func formatToolInput(input map[string]any) string {
+	for _, key := range []string{"command", "file_path", "path", "pattern", "description", "query"} {
+		if v, ok := input[key].(string); ok && v != "" {
+			if len(v) > 80 {
+				v = v[:77] + "..."
+			}
+			return "→ " + v
+		}
+	}
+	return ""
+}
+
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
 // Claude turns are excluded: the local model should only see its own prior conversation.
 func sessionToMessages(sess *session.Session) []local.Message {
