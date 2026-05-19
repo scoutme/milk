@@ -97,6 +97,9 @@ var (
 	styleStatusBar = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#555", Dark: "#888"}).
 			Background(lipgloss.AdaptiveColor{Light: "#E5E5E5", Dark: "#2B2B2B"})
+	styleStatusBarPerm = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#1A1A00")).
+				Background(lipgloss.AdaptiveColor{Light: "#FFD700", Dark: "#B8860B"})
 	styleBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
@@ -416,6 +419,9 @@ func (m *model) statusBar() string {
 	}
 	bar := left + strings.Repeat(" ", gap) + right
 	if isTTY {
+		if m.pendingPerm != nil {
+			return styleStatusBarPerm.Width(m.width).Render(bar)
+		}
 		return styleStatusBar.Width(m.width).Render(bar)
 	}
 	return bar
