@@ -243,8 +243,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
+	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
 }
@@ -271,8 +270,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
+	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
 }
@@ -542,8 +540,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	cmds = append(cmds, cmd)
-	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
+	cmd = m.updateTA(msg)
 	if _, isMouseMsg := msg.(tea.MouseMsg); !isMouseMsg {
 		m.syncLayout()
 	}
@@ -580,8 +577,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Bracketed paste — let the textarea handle it directly.
 	if msg.Paste {
 		var cmd tea.Cmd
-		m.ta, cmd = m.ta.Update(msg)
-		syncHeight(&m.ta)
+		cmd = m.updateTA(msg)
 		m.syncLayout()
 		return m, cmd
 	}
@@ -657,8 +653,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 	}
 	var cmd tea.Cmd
-	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
+	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
 }
@@ -809,8 +804,7 @@ func (m model) handleForgetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.resolveForget(answer), nil
 	}
 	var cmd tea.Cmd
-	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
+	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
 }
@@ -1278,6 +1272,19 @@ func visualRows(ta *textarea.Model) int {
 func syncHeight(ta *textarea.Model) {
 	h := visualRows(ta)
 	ta.SetHeight(h)
+}
+
+// updateTA pre-grows the textarea by one row before passing the message to
+// ta.Update. Without this, when text first wraps to a second line the textarea
+// scrolls its internal viewport (offset +1) to keep the cursor visible, hiding
+// line 1. The extra row gives headroom so no internal scroll happens; syncHeight
+// then resets the height to the exact visual row count.
+func (m *model) updateTA(msg tea.Msg) tea.Cmd {
+	m.ta.SetHeight(m.ta.Height() + 1)
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(msg)
+	syncHeight(&m.ta)
+	return cmd
 }
 
 // --- Input colorizer ---
