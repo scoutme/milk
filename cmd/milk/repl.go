@@ -137,6 +137,8 @@ type model struct {
 	// tab completion
 	tabMatches []string
 	tabIdx     int
+	tabPrefix  string   // what the user had typed when Tab was first pressed
+	tabHints   []string // hint lines shown below viewport while completing a slash command
 
 	// pending permission request (non-nil while waiting for user y/n) and queue
 	// for tool-use permission prompts that arrive while a prior one is active.
@@ -374,9 +376,9 @@ func (m *model) wrappedTranscript() string {
 	return ansi.Wrap(m.transcript.String(), vw, "")
 }
 
-// viewportHeight is the full terminal height minus the status bar line.
+// viewportHeight is the full terminal height minus the status bar line (and hint lines if active).
 func (m *model) viewportHeight() int {
-	h := m.height - 1
+	h := m.height - 1 - len(m.tabHints)
 	if h < 3 {
 		h = 3
 	}
@@ -670,6 +672,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Non-Tab key resets tab cycling
 	m.tabMatches = nil
 	m.tabIdx = -1
+	m.tabPrefix = ""
+	m.tabHints = nil
 
 	switch msg.String() {
 	case "shift+enter", "alt+enter", "ctrl+n":
@@ -688,6 +692,8 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.ta.SetHeight(1)
 		m.tabMatches = nil
 		m.tabIdx = -1
+		m.tabPrefix = ""
+		m.tabHints = nil
 		m.syncLayout()
 		return m, nil
 	}
@@ -707,6 +713,10 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(m.ta.Value())
 	m.ta.Reset()
 	m.ta.SetHeight(1)
+	m.tabMatches = nil
+	m.tabIdx = -1
+	m.tabPrefix = ""
+	m.tabHints = nil
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
@@ -1084,6 +1094,9 @@ func (m model) View() string {
 		pbar := m.renderPanelScrollbar(vpH)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel, pbar)
 	}
+	if len(m.tabHints) > 0 {
+		return mainArea + "\n" + strings.Join(m.tabHints, "\n") + "\n" + m.statusBar()
+	}
 	return mainArea + "\n" + m.statusBar()
 }
 
@@ -1217,6 +1230,40 @@ func (m model) historySearchForward() model {
 
 // --- Tab completion ---
 
+// cmdVariants is derived from interactiveHelp at init time so hints can never
+// drift from the canonical help text.
+var cmdVariants = buildCmdVariants()
+
+type cmdVariant struct {
+	sig  string // full signature, e.g. "/memory show <pat|#id>"
+	desc string
+}
+
+// buildCmdVariants parses interactiveHelp and returns a map from bare slash
+// command to its ordered list of variants (sig + desc).
+func buildCmdVariants() map[string][]cmdVariant {
+	result := map[string][]cmdVariant{}
+
+	for _, line := range strings.Split(interactiveHelp, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "/") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "  ", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		sig := strings.TrimSpace(parts[0])
+		desc := strings.TrimSpace(parts[1])
+		if desc == "" {
+			continue
+		}
+		cmd := strings.Fields(sig)[0]
+		result[cmd] = append(result[cmd], cmdVariant{sig: sig, desc: desc})
+	}
+	return result
+}
+
 func (m model) handleTab() model {
 	input := m.ta.Value()
 	if len(m.tabMatches) == 0 {
@@ -1224,13 +1271,57 @@ func (m model) handleTab() model {
 		if len(m.tabMatches) == 0 {
 			return m
 		}
+		// Capture what the user typed before completion — used to bold the
+		// matching prefix in hints and the completed text in the textarea.
+		m.tabPrefix = tabInputPrefix(input)
 	} else {
 		m.tabIdx = (m.tabIdx + 1) % len(m.tabMatches)
 	}
 	completed := m.tabMatches[m.tabIdx]
 	m.ta.SetValue(applyTabCompletion(input, completed))
 	m.ta.CursorEnd()
+
+	// Build hint lines for the completed slash command.
+	m.tabHints = nil
+	if vs, ok := cmdVariants[completed]; ok {
+		cycleIndicator := ""
+		if len(m.tabMatches) > 1 {
+			cycleIndicator = dim(fmt.Sprintf("  (%d/%d)", m.tabIdx+1, len(m.tabMatches)))
+		}
+		prefix := m.tabPrefix
+		for i, v := range vs {
+			suffix := ""
+			if i == len(vs)-1 {
+				suffix = cycleIndicator
+			}
+			// Bold the typed prefix within the sig; rest in normal yellow.
+			sig := v.sig
+			if prefix != "" && strings.HasPrefix(sig, prefix) {
+				sig = boldYellow(prefix) + yellow(sig[len(prefix):])
+			} else {
+				sig = yellow(sig)
+			}
+			m.tabHints = append(m.tabHints, " "+sig+"  "+dim(v.desc)+suffix)
+		}
+	}
+
+	m.syncLayout()
 	return m
+}
+
+// tabInputPrefix extracts the slash-command prefix the user had typed in input.
+func tabInputPrefix(input string) string {
+	words := strings.Fields(input)
+	for _, w := range words {
+		if strings.HasPrefix(w, "/") {
+			return w
+		}
+	}
+	stripped := strings.TrimLeft(input, " ")
+	if strings.HasPrefix(stripped, "/") {
+		return stripped
+	}
+	return ""
 }
 
 // applyTabCompletion replaces the relevant token in input with completed.
@@ -1392,6 +1483,14 @@ func highlightMatch(s, query string) string {
 }
 
 func colorizeTokens(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = colorizeTokenLine(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func colorizeTokenLine(s string) string {
 	words := strings.Fields(s)
 	if len(words) == 0 {
 		return s

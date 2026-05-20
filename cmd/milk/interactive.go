@@ -77,7 +77,7 @@ const interactiveHelp = `Slash commands:
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
-  /help            show this help
+  /help            show commands and key bindings
   /exit            quit
 
 Scrolling:

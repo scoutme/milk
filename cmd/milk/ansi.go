@@ -29,12 +29,13 @@ func colorize(s, code string) string {
 	return code + s + ansiReset
 }
 
-func green(s string) string  { return colorize(s, ansiGreen) }
-func blue(s string) string   { return colorize(s, ansiBlue) }
-func yellow(s string) string { return colorize(s, ansiYellow) }
-func red(s string) string    { return colorize(s, ansiRed) }
-func dim(s string) string    { return colorize(s, ansiDim) }
-func bold(s string) string   { return colorize(s, ansiBold) }
+func green(s string) string      { return colorize(s, ansiGreen) }
+func blue(s string) string       { return colorize(s, ansiBlue) }
+func yellow(s string) string     { return colorize(s, ansiYellow) }
+func red(s string) string        { return colorize(s, ansiRed) }
+func dim(s string) string        { return colorize(s, ansiDim) }
+func bold(s string) string       { return colorize(s, ansiBold) }
+func boldYellow(s string) string { return colorize(s, "\033[1;33m") }
 
 // milkTag returns the dimmed [milk] system prefix.
 func milkTag() string { return dim("[milk]") }
