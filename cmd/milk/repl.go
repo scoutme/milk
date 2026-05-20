@@ -26,8 +26,8 @@ import (
 )
 
 const agentTimeout = 10 * time.Minute
-const memoryPanelWidth = 34 // chars for the memory panel (includes border)
-const memoryPanelInner = 32 // usable chars inside the panel
+const memoryPanelWidth = 33 // chars for the memory panel (32 inner + 1 right scrollbar)
+const memoryPanelInner = 32 // usable inner chars; scrollbar is a separate column in View()
 const memoryPollInterval = 5 * time.Second
 
 // dispatchAgents holds the agents and their availability for a turn.
@@ -152,6 +152,7 @@ type model struct {
 
 	// memory panel
 	panelMemory bool
+	panelOffset int
 	mem         *memory.Store
 
 	// pending /forget confirmation
@@ -320,12 +321,24 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch tea.MouseEvent(msg).Button {
+func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	ev := tea.MouseEvent(msg)
+	inPanel := m.panelMemory && ev.X >= m.mainWidth()
+	switch ev.Button {
 	case tea.MouseButtonWheelUp:
-		m.vp.LineUp(3)
+		if inPanel {
+			if m.panelOffset > 0 {
+				m.panelOffset--
+			}
+		} else {
+			m.vp.LineUp(3)
+		}
 	case tea.MouseButtonWheelDown:
-		m.vp.LineDown(3)
+		if inPanel {
+			m.panelOffset++
+		} else {
+			m.vp.LineDown(3)
+		}
 	}
 	return m, nil
 }
@@ -333,8 +346,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // setViewportContent rebuilds the full viewport content:
 // transcript + separator + input area. The input area scrolls with the transcript.
 func (m *model) setViewportContent() {
-	mw := m.mainWidth()
-	sep := styleBorder.Width(mw).Render("")
+	vw := m.vpWidth()
+	sep := styleBorder.Width(vw).Render("")
 	content := m.wrappedTranscript() + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
 	m.vp.SetContent(content)
 }
@@ -352,13 +365,13 @@ func (m *model) appendTranscript(text string) {
 	}
 }
 
-// wrappedTranscript returns the transcript word-wrapped to the main area width.
+// wrappedTranscript returns the transcript word-wrapped to the viewport content width.
 func (m *model) wrappedTranscript() string {
-	mw := m.mainWidth()
-	if mw <= 0 {
+	vw := m.vpWidth()
+	if vw <= 0 {
 		return m.transcript.String()
 	}
-	return ansi.Wrap(m.transcript.String(), mw, "")
+	return ansi.Wrap(m.transcript.String(), vw, "")
 }
 
 // viewportHeight is the full terminal height minus the status bar line.
@@ -383,17 +396,22 @@ func (m *model) mainWidth() int {
 	return w
 }
 
+// vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.
+func (m *model) vpWidth() int {
+	return m.mainWidth() - 1
+}
+
 // syncLayout rebuilds viewport content after textarea size changes.
 // Sticky-bottom: scrolls to bottom only when already there.
 func (m *model) syncLayout() {
 	if !m.ready {
 		return
 	}
-	mw := m.mainWidth()
+	vw := m.vpWidth()
 	vpH := m.viewportHeight()
 	atBottom := m.vp.AtBottom()
-	if m.vp.Width != mw {
-		m.vp.Width = mw
+	if m.vp.Width != vw {
+		m.vp.Width = vw
 	}
 	if m.vp.Height != vpH {
 		m.vp.Height = vpH
@@ -558,17 +576,17 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	mw := m.mainWidth()
+	vw := m.vpWidth()
 	vpH := m.viewportHeight()
 	if !m.ready {
-		m.vp = viewport.New(mw, vpH)
+		m.vp = viewport.New(vw, vpH)
 		m.ready = true
 		m.refreshPrompt()
 		m.setViewportContent()
 		m.vp.GotoBottom()
 	} else {
 		atBottom := m.vp.AtBottom()
-		m.vp.Width = mw
+		m.vp.Width = vw
 		m.vp.Height = vpH
 		m.refreshPrompt()
 		m.setViewportContent()
@@ -1015,6 +1033,43 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	)
 }
 
+// renderScrollbar returns a single-column string of h lines showing a dim │
+// track with a bright ▌ thumb proportional to scroll position.
+// When all content fits in the viewport, returns a blank column.
+// renderSeparator renders the 1-column separator between the viewport and the
+// memory panel (or right edge when the panel is closed).
+//
+// Visibility rules:
+//   - panel open: always show a dim │ track; overlay ▌ thumb when scrollable
+//   - panel closed + scrollable: show dim │ track with ▌ thumb
+//   - panel closed + fits: blank column (no visual noise)
+func (m *model) renderSeparator(h int) string {
+	total := m.vp.TotalLineCount()
+	scrollable := total > h
+	visible := m.panelMemory || scrollable
+
+	var rows []string
+	if !visible {
+		for i := 0; i < h; i++ {
+			rows = append(rows, " ")
+		}
+		return strings.Join(rows, "\n")
+	}
+
+	var thumbTop, thumbBot int
+	if scrollable {
+		thumbTop, thumbBot = scrollThumb(h, total, m.vp.YOffset)
+	}
+	for i := 0; i < h; i++ {
+		if scrollable && i >= thumbTop && i <= thumbBot {
+			rows = append(rows, dim("▌"))
+		} else {
+			rows = append(rows, dim("│"))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
 // --- View ---
 
 func (m model) View() string {
@@ -1022,10 +1077,12 @@ func (m model) View() string {
 		return ""
 	}
 	vpH := m.viewportHeight()
-	mainArea := m.vp.View()
+	sep := m.renderSeparator(vpH)
+	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, m.vp.View(), sep)
 	if m.panelMemory {
 		panel := m.renderMemoryPanel(vpH)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel)
+		pbar := m.renderPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel, pbar)
 	}
 	return mainArea + "\n" + m.statusBar()
 }
