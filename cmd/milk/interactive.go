@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -136,14 +137,10 @@ func extractSlashCommand(input string) (cmd, rest string, found bool) {
 	var keep []string
 	for _, w := range words {
 		if !found && strings.HasPrefix(w, "/") {
-			for _, known := range slashCommands {
-				if w == known {
-					cmd = w
-					found = true
-					break
-				}
-			}
-			if !found {
+			if slices.Contains(slashCommands, w) {
+				cmd = w
+				found = true
+			} else {
 				keep = append(keep, w)
 			}
 		} else {
@@ -362,7 +359,11 @@ func execLearn(fact string, st *interactiveState) string {
 	if st.mem == nil {
 		return milkTag() + " memory store not available"
 	}
-	id, err := st.mem.RecordGlobal(context.Background(), fact, memory.ProducerUser, memory.Roles{})
+	id, err := st.mem.RecordGlobal(context.Background(), fact, memory.ProducerUser, memory.ConsumerAll, memory.Roles{})
+	if dup, ok := memory.IsDuplicate(err); ok {
+		return fmt.Sprintf("%s skipped — similar memory already exists (%.0f%% overlap): %q (#%s)",
+			milkTag(), dup.Similarity*100, dup.Existing.Content, id[:8])
+	}
 	if err != nil {
 		return fmt.Sprintf("%s error storing memory: %v", milkTag(), err)
 	}

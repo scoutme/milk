@@ -29,14 +29,11 @@ func (m *model) renderMemoryPanel(h int) string {
 		return strings.Repeat("\n", h)
 	}
 
-	all := buildPanelLines(m.mem, inner, 1<<20)
+	all := buildPanelLines(m.mem, inner)
 	total := len(all)
 
 	// Clamp offset so we never scroll past the last screenful.
-	maxOffset := total - h
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
+	maxOffset := max(total-h, 0)
 	if m.panelOffset > maxOffset {
 		m.panelOffset = maxOffset
 	}
@@ -63,20 +60,20 @@ func (m *model) renderMemoryPanel(h int) string {
 // renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
 // a ▌ thumb when the panel content overflows, or a blank column otherwise.
 func (m *model) renderPanelScrollbar(h int) string {
-	all := buildPanelLines(m.mem, memoryPanelInner, 1<<20)
+	all := buildPanelLines(m.mem, memoryPanelInner)
 	total := len(all)
 	needsBar := total > h
 
 	var rows []string
 	if !needsBar {
-		for i := 0; i < h; i++ {
+		for range h {
 			rows = append(rows, " ")
 		}
 		return strings.Join(rows, "\n")
 	}
 
 	thumbTop, thumbBot := scrollThumb(h, total, m.panelOffset)
-	for i := 0; i < h; i++ {
+	for i := range h {
 		if i >= thumbTop && i <= thumbBot {
 			rows = append(rows, dim("▌"))
 		} else {
@@ -89,10 +86,7 @@ func (m *model) renderPanelScrollbar(h int) string {
 // scrollThumb computes the inclusive [top, bot] row indices of the scroll thumb
 // within a viewport of height h showing content of length total starting at offset.
 func scrollThumb(h, total, offset int) (top, bot int) {
-	thumbH := h * h / total
-	if thumbH < 1 {
-		thumbH = 1
-	}
+	thumbH := max(h*h/total, 1)
 	top = offset * (h - thumbH) / (total - h)
 	bot = top + thumbH - 1
 	if bot >= h {
@@ -101,7 +95,7 @@ func scrollThumb(h, total, offset int) (top, bot int) {
 	return top, bot
 }
 
-func buildPanelLines(mem *memory.Store, inner, maxLines int) []string {
+func buildPanelLines(mem *memory.Store, inner int) []string {
 	var lines []string
 
 	addLine := func(s string) {
@@ -182,29 +176,23 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 	}
 	shortID := perceptIDShort(p) + " " // e.g. "#a3f2c1 "
 	wStr := fmt.Sprintf("%.2f", p.W)
+	if badge := consumerBadge(p); badge != "" {
+		wStr = badge + " " + wStr
+	}
 
 	// Visual widths (ANSI chars do not affect display width)
 	bulletW := utf8.RuneCountInString(bullet)
 	idW := utf8.RuneCountInString(shortID)
 	// First line: bullet + id + content + pad + " " + wStr
-	firstW := inner - bulletW - idW - 1 - len(wStr)
-	if firstW < 8 {
-		firstW = 8
-	}
-	contW := inner - 2 // "  " continuation indent
-	if contW < 8 {
-		contW = 8
-	}
+	firstW := max(inner-bulletW-idW-1-len(wStr), 8)
+	contW := max(inner-2, 8) // "  " continuation indent
 
 	wrapped := wordWrap(p.Content, firstW, contW, 2)
 
 	for i, line := range wrapped {
 		var out string
 		if i == 0 {
-			textPad := firstW - utf8.RuneCountInString(line)
-			if textPad < 0 {
-				textPad = 0
-			}
+			textPad := max(firstW-utf8.RuneCountInString(line), 0)
 			idPart := dim(shortID)
 			raw := bullet + idPart + line + strings.Repeat(" ", textPad) + " " + wStr
 			if recent {
@@ -223,6 +211,18 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 		}
 		*lines = append(*lines, out)
 	}
+}
+
+// consumerBadge returns a short display badge for non-all consumers: "[L]" for
+// local-only percepts and "[C]" for Claude-only. Returns "" for ConsumerAll.
+func consumerBadge(p memory.Percept) string {
+	switch p.Consumer {
+	case memory.ConsumerLocal:
+		return dim("[L]")
+	case memory.ConsumerClaude:
+		return dim("[C]")
+	}
+	return ""
 }
 
 // wordWrap splits text into at most maxLines lines. The first line has width

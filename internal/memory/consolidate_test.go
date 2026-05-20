@@ -7,7 +7,7 @@ import (
 
 func TestConsolidate_NoSessionIsNoop(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "global fact", ProducerUser, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "global fact", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate with no session: %v", err)
@@ -20,7 +20,7 @@ func TestConsolidate_NoSessionIsNoop(t *testing.T) {
 
 func TestConsolidate_DecaysNonCorePercepts(t *testing.T) {
 	s := newTestStore(t, true)
-	s.Record(context.Background(), "decayable fact", ProducerLocal, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "decayable fact", ProducerLocal, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	before := s.session.Percepts[0].W
 	if err := s.Consolidate(); err != nil {

@@ -333,13 +333,13 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.panelOffset--
 			}
 		} else {
-			m.vp.LineUp(3)
+			m.vp.ScrollUp(3)
 		}
 	case tea.MouseButtonWheelDown:
 		if inPanel {
 			m.panelOffset++
 		} else {
-			m.vp.LineDown(3)
+			m.vp.ScrollDown(3)
 		}
 	}
 	return m, nil
@@ -379,10 +379,7 @@ func (m *model) wrappedTranscript() string {
 // viewportHeight is the full terminal height minus the status bar line (and hint lines if active).
 func (m *model) viewportHeight() int {
 	h := m.height - 1 - len(m.tabHints)
-	if h < 3 {
-		h = 3
-	}
-	return h
+	return max(h, 3)
 }
 
 // mainWidth returns the width available for the transcript+input area.
@@ -432,10 +429,7 @@ func (m *model) statusBar() string {
 	}
 	left := fmt.Sprintf(" %s  %s", dim("session:"+sessID), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
-	gap := m.width - len(stripANSI(left)) - len(right)
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(m.width-len(stripANSI(left))-len(right), 1)
 	bar := left + strings.Repeat(" ", gap) + right
 	if isTTY {
 		if m.pendingPerm != nil {
@@ -662,10 +656,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.handleTab()
 		return m, nil
 	case "pgup", "ctrl+u":
-		m.vp.HalfViewUp()
+		m.vp.HalfPageUp()
 		return m, nil
 	case "pgdown", "ctrl+f":
-		m.vp.HalfViewDown()
+		m.vp.HalfPageDown()
 		return m, nil
 	}
 
@@ -738,13 +732,13 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	if cmd, rest, found := extractSlashCommand(input); found {
-		return m.handleSlashInput(cmd, rest, input)
+		return m.handleSlashInput(cmd, rest)
 	}
 
 	return m.dispatchAgent(input)
 }
 
-func (m model) handleSlashInput(cmd, rest, rawInput string) (tea.Model, tea.Cmd) {
+func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdHistory {
 		return m.handleHistoryCmd(strings.TrimSpace(rest)), nil
 	}
@@ -1060,7 +1054,7 @@ func (m *model) renderSeparator(h int) string {
 
 	var rows []string
 	if !visible {
-		for i := 0; i < h; i++ {
+		for range h {
 			rows = append(rows, " ")
 		}
 		return strings.Join(rows, "\n")
@@ -1070,7 +1064,7 @@ func (m *model) renderSeparator(h int) string {
 	if scrollable {
 		thumbTop, thumbBot = scrollThumb(h, total, m.vp.YOffset)
 	}
-	for i := 0; i < h; i++ {
+	for i := range h {
 		if scrollable && i >= thumbTop && i <= thumbBot {
 			rows = append(rows, dim("▌"))
 		} else {
@@ -1244,7 +1238,7 @@ type cmdVariant struct {
 func buildCmdVariants() map[string][]cmdVariant {
 	result := map[string][]cmdVariant{}
 
-	for _, line := range strings.Split(interactiveHelp, "\n") {
+	for line := range strings.SplitSeq(interactiveHelp, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "/") {
 			continue
@@ -1311,8 +1305,7 @@ func (m model) handleTab() model {
 
 // tabInputPrefix extracts the slash-command prefix the user had typed in input.
 func tabInputPrefix(input string) string {
-	words := strings.Fields(input)
-	for _, w := range words {
+	for w := range strings.FieldsSeq(input) {
 		if strings.HasPrefix(w, "/") {
 			return w
 		}
@@ -1419,7 +1412,7 @@ func visualRows(ta *textarea.Model) int {
 		w = 80
 	}
 	total := 0
-	for _, line := range strings.Split(ta.Value(), "\n") {
+	for line := range strings.SplitSeq(ta.Value(), "\n") {
 		cols := len([]rune(line))
 		total += cols/w + 1
 	}
@@ -1577,7 +1570,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	case router.TargetLocal:
 		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetClaude:
-		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, out)
+		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
 	}
 	return nil
 }

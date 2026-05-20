@@ -21,3 +21,4 @@
 * [19. TUI Input History Persistence and Turn Cancellation](0019-tui-input-history-and-turn-cancellation.md)
 * [20. Memory System Refinements: Reachable Promotion and User-Stated Facts](0020-memory-system-refinements.md)
 * [21. Memory TUI Panel and Interactive Management Commands](0021-memory-tui-panel-and-management.md)
+* [22. Claude Percept Skill: Nonce Tags, Consumer Hints, and Bidirectional Memory](0022-claude-percept-skill-nonce-tags.md)

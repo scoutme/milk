@@ -82,17 +82,29 @@ func (s *Store) saveFile(path string, src storeFile) error {
 
 // Record adds a new Percept to the session store (or global if no session).
 // Returns the new Percept's ID.
-func (s *Store) Record(ctx context.Context, content string, producer Producer, roles Roles, core bool) (string, error) {
+//
+// If the incoming content is too similar to an existing Percept (Jaccard token
+// overlap ≥ DuplicateSimilarityThreshold), Record skips insertion and returns
+// the existing Percept's ID together with a *DuplicateError. Callers that want
+// to surface a user-facing hint should type-assert the error; callers that
+// want silent deduplication can ignore the error when IsDuplicate returns true.
+func (s *Store) Record(ctx context.Context, content string, producer Producer, consumer Consumer, roles Roles, core bool) (string, error) {
 	ctx, end := traceRecord(ctx, producer)
 	defer func() { end(nil) }()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
+		dupErr := &DuplicateError{Existing: *dup, Similarity: jaccardSimilarity(tokenize(content), tokenize(dup.Content))}
+		return dup.ID, dupErr
+	}
+
 	p := Percept{
 		ID:        uuid.New().String(),
 		Content:   content,
 		Producer:  producer,
+		Consumer:  consumer,
 		W:         initialWeight(producer, core),
 		Roles:     roles,
 		Core:      core,
@@ -133,17 +145,26 @@ func initialWeight(producer Producer, core bool) float64 {
 
 // RecordGlobal writes a Percept directly to the global store regardless of
 // session scope. Used by /learn.
-func (s *Store) RecordGlobal(ctx context.Context, content string, producer Producer, roles Roles) (string, error) {
+//
+// Like Record, it returns a *DuplicateError when the incoming content is too
+// similar to an existing global percept, along with the ID of that percept.
+func (s *Store) RecordGlobal(ctx context.Context, content string, producer Producer, consumer Consumer, roles Roles) (string, error) {
 	ctx, end := traceRecord(ctx, producer)
 	defer func() { end(nil) }()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
+		dupErr := &DuplicateError{Existing: *dup, Similarity: jaccardSimilarity(tokenize(content), tokenize(dup.Content))}
+		return dup.ID, dupErr
+	}
+
 	p := Percept{
 		ID:        uuid.New().String(),
 		Content:   content,
 		Producer:  producer,
+		Consumer:  consumer,
 		W:         1.0,
 		Core:      true,
 		Roles:     roles,
@@ -159,7 +180,8 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 
 // Query returns Percepts matching a keyword query, ordered by weight desc.
 // maxResults <= 0 means no limit. minConfidence filters by W.
-func (s *Store) Query(ctx context.Context, query string, minConfidence float64, maxResults int) []Percept {
+// caller restricts results to percepts visible to that agent (ConsumerAll = no restriction).
+func (s *Store) Query(ctx context.Context, query string, minConfidence float64, maxResults int, caller Consumer) []Percept {
 	ctx, end := traceRecall(ctx, query)
 
 	s.mu.Lock()
@@ -171,6 +193,9 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 	var candidates []Percept
 	for _, p := range all {
 		if p.W < minConfidence {
+			continue
+		}
+		if caller != ConsumerAll && p.Consumer != ConsumerAll && p.Consumer != caller {
 			continue
 		}
 		if lower == "" || strings.Contains(strings.ToLower(p.Content), lower) {
@@ -194,10 +219,11 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 
 // ListOpts filters for List.
 type ListOpts struct {
-	Scope    string  // "global" | "session" | "" (both)
-	MinW     float64 // 0 means no floor
-	Producer string  // filter by producer, "" means all
-	Pattern  string  // case-insensitive substring
+	Scope    string   // "global" | "session" | "" (both)
+	MinW     float64  // 0 means no floor
+	Producer string   // filter by producer, "" means all
+	Consumer Consumer // filter by consumer visibility; ConsumerAll ("") means no filter
+	Pattern  string   // case-insensitive substring
 }
 
 // List returns Percepts matching opts, ordered by weight desc.
@@ -223,6 +249,10 @@ func (s *Store) List(opts ListOpts) []Percept {
 			continue
 		}
 		if opts.Producer != "" && string(p.Producer) != opts.Producer {
+			continue
+		}
+		// Consumer filter: when set, keep only percepts whose consumer matches or is ConsumerAll.
+		if opts.Consumer != ConsumerAll && p.Consumer != ConsumerAll && p.Consumer != opts.Consumer {
 			continue
 		}
 		if lower != "" && !strings.Contains(strings.ToLower(p.Content), lower) {
