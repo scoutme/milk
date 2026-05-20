@@ -13,11 +13,6 @@ import (
 const recentThreshold = 60 * time.Second
 
 var (
-	stylePanelBorder = lipgloss.NewStyle().
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderLeft(true).
-				BorderForeground(lipgloss.AdaptiveColor{Light: "#AAA", Dark: "#555"})
-
 	stylePanelTitle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#555", Dark: "#888"}).
 			Bold(true)
@@ -27,25 +22,83 @@ var (
 )
 
 // renderMemoryPanel returns a vertical panel string of exactly h lines and
-// memoryPanelWidth columns (including left border). When mem is nil or the
-// panel height is too small it returns a blank panel.
+// memoryPanelInner columns (32 chars; scrollbar is rendered separately via renderPanelScrollbar).
 func (m *model) renderMemoryPanel(h int) string {
 	inner := memoryPanelInner
 	if !isTTY {
 		return strings.Repeat("\n", h)
 	}
 
-	lines := buildPanelLines(m.mem, inner, h)
+	all := buildPanelLines(m.mem, inner, 1<<20)
+	total := len(all)
 
-	// Pad or trim to exactly h lines.
+	// Clamp offset so we never scroll past the last screenful.
+	maxOffset := total - h
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.panelOffset > maxOffset {
+		m.panelOffset = maxOffset
+	}
+
+	// Slice the visible window.
+	lines := all[m.panelOffset:]
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	lines = lines[:h]
 
-	// Join, then apply left-border style at full panel width.
-	content := strings.Join(lines, "\n")
-	return stylePanelBorder.Width(inner).Height(h).Render(content)
+	// Pad each row to exactly inner cols (no scrollbar — that's a separate column).
+	var rows []string
+	for _, line := range lines {
+		lineW := utf8.RuneCountInString(stripANSI(line))
+		if lineW < inner {
+			line += strings.Repeat(" ", inner-lineW)
+		}
+		rows = append(rows, line)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
+// a ▌ thumb when the panel content overflows, or a blank column otherwise.
+func (m *model) renderPanelScrollbar(h int) string {
+	all := buildPanelLines(m.mem, memoryPanelInner, 1<<20)
+	total := len(all)
+	needsBar := total > h
+
+	var rows []string
+	if !needsBar {
+		for i := 0; i < h; i++ {
+			rows = append(rows, " ")
+		}
+		return strings.Join(rows, "\n")
+	}
+
+	thumbTop, thumbBot := scrollThumb(h, total, m.panelOffset)
+	for i := 0; i < h; i++ {
+		if i >= thumbTop && i <= thumbBot {
+			rows = append(rows, dim("▌"))
+		} else {
+			rows = append(rows, dim("│"))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+// scrollThumb computes the inclusive [top, bot] row indices of the scroll thumb
+// within a viewport of height h showing content of length total starting at offset.
+func scrollThumb(h, total, offset int) (top, bot int) {
+	thumbH := h * h / total
+	if thumbH < 1 {
+		thumbH = 1
+	}
+	top = offset * (h - thumbH) / (total - h)
+	bot = top + thumbH - 1
+	if bot >= h {
+		bot = h - 1
+	}
+	return top, bot
 }
 
 func buildPanelLines(mem *memory.Store, inner, maxLines int) []string {
