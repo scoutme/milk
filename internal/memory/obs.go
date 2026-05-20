@@ -121,8 +121,3 @@ func traceConsolidation(ctx context.Context) (context.Context, func(decayed, pru
 		obs.EndSpan(span, err)
 	}
 }
-
-// elapsedMs returns elapsed milliseconds since start.
-func elapsedMs(start time.Time) float64 {
-	return float64(time.Since(start).Milliseconds())
-}

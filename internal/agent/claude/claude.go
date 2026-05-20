@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -23,6 +25,8 @@ type Agent struct {
 	onToolUse             func(string)                 // called on content_block_start tool_use events
 	onToolUseReady        func(string, map[string]any) // called on content_block_stop with full input
 	onThinking            func(string)                 // called on thinking_delta tokens
+	onPercept             func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
+	perceptNonce          string                       // session-specific nonce matching the system-prompt instruction
 }
 
 func New(bin string) *Agent {
@@ -82,6 +86,17 @@ func (a *Agent) WithOnThinking(fn func(string)) *Agent {
 	return &c
 }
 
+// WithOnPercept returns a copy of the agent that calls fn for each
+// <milk:percept:NONCE>…</milk:percept:NONCE> tag intercepted in the response stream.
+// fn receives the percept body and a consumerHint ("local", "claude", or "").
+// nonce must be the same value passed to escalation.MemoryInstruction(nonce).
+func (a *Agent) WithOnPercept(fn func(content, consumerHint string), nonce string) *Agent {
+	c := *a
+	c.onPercept = fn
+	c.perceptNonce = nonce
+	return &c
+}
+
 // WithExtraAllowedTool returns a copy of the agent with the tool appended to the allowed list.
 func (a *Agent) WithExtraAllowedTool(tool string) *Agent {
 	c := *a
@@ -106,14 +121,19 @@ func (a *Agent) Ping() error {
 }
 
 // RunFirst runs the first turn of a new Claude escalation session.
-// systemContext is the formatted local transcript passed via --append-system-prompt.
+// systemContext is the formatted local transcript passed via --append-system-prompt-file.
 // Returns the session ID emitted by the subprocess and a ParseResult.
 func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out io.Writer) (string, ParseResult, error) {
 	sessionID := uuid.New().String()
 	var args []string
 	args = append(args, "--session-id", sessionID)
 	if systemContext != "" {
-		args = append(args, "--append-system-prompt", systemContext)
+		f, err := writeTempContext(systemContext)
+		if err != nil {
+			return "", ParseResult{}, err
+		}
+		defer os.Remove(f)
+		args = append(args, "--append-system-prompt-file", f)
 	}
 	args = append(args, prompt)
 
@@ -125,9 +145,36 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 }
 
 // RunResume continues an existing Claude session.
-func (a *Agent) RunResume(ctx context.Context, claudeSessionID, prompt string, out io.Writer) (ParseResult, error) {
-	args := []string{"--resume", claudeSessionID, prompt}
+// systemContext is re-injected via --append-system-prompt-file on every resumed turn
+// so that instructions (e.g. the percept tag convention) remain active even
+// when Claude's conversation compresses its original context.
+func (a *Agent) RunResume(ctx context.Context, claudeSessionID, systemContext, prompt string, out io.Writer) (ParseResult, error) {
+	args := []string{"--resume", claudeSessionID}
+	if systemContext != "" {
+		f, err := writeTempContext(systemContext)
+		if err != nil {
+			return ParseResult{}, err
+		}
+		defer os.Remove(f)
+		args = append(args, "--append-system-prompt-file", f)
+	}
+	args = append(args, prompt)
 	return a.run(ctx, args, out)
+}
+
+// writeTempContext writes content to a temp file and returns its path.
+func writeTempContext(content string) (string, error) {
+	f, err := os.CreateTemp("", "milk-ctx-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("creating context temp file: %w", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("writing context temp file: %w", err)
+	}
+	f.Close()
+	return f.Name(), nil
 }
 
 // run builds the full arg list and delegates to runPipe.
@@ -178,6 +225,8 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		OnToolUse:             a.onToolUse,
 		OnToolUseReady:        a.onToolUseReady,
 		OnThinking:            a.onThinking,
+		OnPercept:             a.onPercept,
+		PerceptNonce:          a.perceptNonce,
 		DebugLog:              a.debugLog,
 	})
 
@@ -210,14 +259,7 @@ func mergeUniq(base, extra []string) []string {
 	out := make([]string, len(base), len(base)+len(extra))
 	copy(out, base)
 	for _, v := range extra {
-		found := false
-		for _, e := range out {
-			if e == v {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(out, v) {
 			out = append(out, v)
 		}
 	}

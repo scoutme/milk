@@ -4,7 +4,7 @@ Date: 2026-05-15
 
 ## Status
 
-Accepted
+Accepted — partially superseded by [ADR-0020](0020-memory-system-refinements.md) (promotion threshold, user-stated facts) and [ADR-0022](0022-claude-percept-skill-nonce-tags.md) (Claude write path via nonce tags)
 
 ## Context
 

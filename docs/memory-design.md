@@ -20,8 +20,8 @@ The design below extracts the RFC's **cognitive model** and maps it onto milk's 
 | Memory API Gateway | `get_memory` and `record_memory` local agent tools |
 | Confidence Weight | `w float64` on each Percept, decays per session |
 | Inter-Percept edges | stored in Engram as typed relation records |
-| Raw signal ingestion | local agent records Percepts via tool call; system auto-records turn summaries |
-| Vector DB + semantic recall | local llama.cpp embedding call; cosine similarity in-process |
+| Raw signal ingestion | local agent and Claude both record Percepts; local via tool call, Claude via nonce-tagged emission |
+| Vector DB + semantic recall | Phase 2 — currently keyword substring matching in `Store.Query` |
 | NL synthesis | local model answers recall query using retrieved Percepts as context |
 
 ---
@@ -34,12 +34,15 @@ internal/memory/
   store.go         # file-based persistence (~/.milk/memory/<session-or-global>.json)
                    #   Store.Delete(id string) (bool, error)
                    #   Store.FindByIDPrefix(prefix string) []Percept
+  dedup.go         # Jaccard token-overlap deduplication (DuplicateSimilarityThreshold=0.60)
   recall.go        # query interface: by keyword, by recency, by weight threshold
-  embed.go         # embedding via llama.cpp /embedding endpoint
-  similarity.go    # cosine similarity, k-nearest-percepts
   consolidate.go   # end-of-session NREM: decay, edge propagation, pruning
-  tools.go         # OpenAI function schemas + dispatch for record_memory / get_memory
+  tools.go         # OpenAI function schemas + dispatch for record_memory / get_memory / list_memory
+  obs.go           # OpenTelemetry spans and metrics for memory operations
 ```
+
+> **Note:** `embed.go` (llama.cpp `/embedding`) and `similarity.go` (cosine recall) are Phase 2 —
+> not yet implemented. Current recall uses keyword substring matching in `Store.Query`.
 
 The package exposes a `Store` interface. Everything outside `internal/memory` depends only on this interface — isolation boundary for future extraction.
 
@@ -203,7 +206,27 @@ This mirrors the RFC's automatic ingestion path — the agent doesn't need to ex
 
 ### Claude agent
 
-Claude has no tool access to the memory store directly. Instead, at the start of each Claude turn, relevant Percepts (top-5 by recall score) are injected into `--append-system-prompt` alongside the existing session context. Claude reads memory; it doesn't write it. The local agent (or the system) handles writes.
+Claude participates in memory both as a reader and as a writer (see ADR-0022).
+
+**Read path.** At the start of each Claude turn, relevant Percepts (top-5, filtered to
+`ConsumerClaude` or `ConsumerAll`) are rendered as a `[Remembered facts]` block inside
+`BuildContext` and injected via `--append-system-prompt`.
+
+**Write path.** Every Claude turn also receives a `MemoryInstruction` fragment (re-injected on
+every `--resume` turn to survive context compaction). The instruction tells Claude to emit atomic
+facts using session-specific nonce tags:
+
+```
+<milk:percept:NONCE>fact in one sentence</milk:percept:NONCE>
+```
+
+The nonce is a 6-character alphanumeric string generated fresh per session by
+`claude.GenerateNonce()`. milk's stream layer (`perceptWriter`) intercepts and strips these tags,
+recording each fact into the store with `ProducerClaude`. The tags never appear in Claude's
+displayed output.
+
+**Consumer hints.** Claude may prefix a tag body with `@local: ` or `@claude: ` to restrict which
+agent receives the percept at injection time. Unprefixed facts are visible to both agents.
 
 ---
 
@@ -274,9 +297,11 @@ To extract as a standalone package later: `go mod` rename + replace the llama.cp
 - Weight propagation on consolidation
 - Engram grouping by subject label
 
-### Phase 4 — Routing and Claude injection
-- Memory-aware routing nudge
-- Percept injection into Claude `--append-system-prompt`
+### Phase 4 — Routing and Claude injection ✓ partially complete
+
+- Percept injection into Claude `--append-system-prompt` ✓ complete (see ADR-0022)
+- Claude percept emission via nonce tags ✓ complete (see ADR-0022)
+- Memory-aware routing nudge — deferred
 
 ---
 

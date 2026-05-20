@@ -22,7 +22,7 @@ func newTestStore(t *testing.T, withSession bool) *Store {
 
 func TestRecord_GlobalWhenNoSession(t *testing.T) {
 	s := newTestStore(t, false)
-	id, err := s.Record(context.Background(), "test fact", ProducerUser, Roles{}, false)
+	id, err := s.Record(context.Background(), "test fact", ProducerUser, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestRecord_GlobalWhenNoSession(t *testing.T) {
 
 func TestRecord_SessionScoped(t *testing.T) {
 	s := newTestStore(t, true)
-	_, err := s.Record(context.Background(), "session fact", ProducerLocal, Roles{}, false)
+	_, err := s.Record(context.Background(), "session fact", ProducerLocal, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestRecord_SessionScoped(t *testing.T) {
 
 func TestRecord_CoreGoesToGlobal(t *testing.T) {
 	s := newTestStore(t, true)
-	_, err := s.Record(context.Background(), "core fact", ProducerUser, Roles{}, true)
+	_, err := s.Record(context.Background(), "core fact", ProducerUser, ConsumerAll, Roles{}, true)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestRecord_CoreGoesToGlobal(t *testing.T) {
 
 func TestRecordGlobal_AlwaysGlobal(t *testing.T) {
 	s := newTestStore(t, true)
-	id, err := s.RecordGlobal(context.Background(), "global fact", ProducerUser, Roles{})
+	id, err := s.RecordGlobal(context.Background(), "global fact", ProducerUser, ConsumerAll, Roles{})
 	if err != nil {
 		t.Fatalf("RecordGlobal: %v", err)
 	}
@@ -78,10 +78,10 @@ func TestRecordGlobal_AlwaysGlobal(t *testing.T) {
 
 func TestQuery_FindsByKeyword(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "needle in a haystack", ProducerUser, Roles{}, false) //nolint:errcheck
-	s.Record(context.Background(), "unrelated fact", ProducerUser, Roles{}, false)       //nolint:errcheck
+	s.Record(context.Background(), "needle in a haystack", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "unrelated fact", ProducerUser, ConsumerAll, Roles{}, false)       //nolint:errcheck
 
-	results := s.Query(context.Background(), "needle", 0, 10)
+	results := s.Query(context.Background(), "needle", 0, 10, ConsumerAll)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -92,10 +92,10 @@ func TestQuery_FindsByKeyword(t *testing.T) {
 
 func TestQuery_EmptyQueryReturnsAll(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "fact one", ProducerUser, Roles{}, false)   //nolint:errcheck
-	s.Record(context.Background(), "fact two", ProducerSystem, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "fact one", ProducerUser, ConsumerAll, Roles{}, false)   //nolint:errcheck
+	s.Record(context.Background(), "fact two", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
 
-	results := s.Query(context.Background(), "", 0, 10)
+	results := s.Query(context.Background(), "", 0, 10, ConsumerAll)
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
@@ -103,10 +103,10 @@ func TestQuery_EmptyQueryReturnsAll(t *testing.T) {
 
 func TestQuery_MinConfidenceFilters(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "low weight fact", ProducerSystem, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "low weight fact", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
 	// ProducerSystem gets W=0.5
 
-	results := s.Query(context.Background(), "", 0.9, 10)
+	results := s.Query(context.Background(), "", 0.9, 10, ConsumerAll)
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results above 0.9 threshold, got %d", len(results))
 	}
@@ -114,11 +114,11 @@ func TestQuery_MinConfidenceFilters(t *testing.T) {
 
 func TestQuery_SortedByWeightDesc(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "system fact", ProducerSystem, Roles{}, false) //nolint:errcheck
-	s.Record(context.Background(), "user fact", ProducerUser, Roles{}, false)     //nolint:errcheck
+	s.Record(context.Background(), "system fact", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "user fact", ProducerUser, ConsumerAll, Roles{}, false)     //nolint:errcheck
 	// ProducerUser W=1.0, ProducerSystem W=0.5
 
-	results := s.Query(context.Background(), "", 0, 10)
+	results := s.Query(context.Background(), "", 0, 10, ConsumerAll)
 	if len(results) < 2 {
 		t.Fatal("expected 2 results")
 	}
@@ -129,8 +129,8 @@ func TestQuery_SortedByWeightDesc(t *testing.T) {
 
 func TestList_ScopeFilter(t *testing.T) {
 	s := newTestStore(t, true)
-	s.RecordGlobal(context.Background(), "global fact", ProducerUser, Roles{})    //nolint:errcheck
-	s.Record(context.Background(), "session fact", ProducerLocal, Roles{}, false) //nolint:errcheck
+	s.RecordGlobal(context.Background(), "global fact", ProducerUser, ConsumerAll, Roles{})    //nolint:errcheck
+	s.Record(context.Background(), "session fact", ProducerLocal, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	global := s.List(ListOpts{Scope: "global"})
 	if len(global) != 1 || global[0].Content != "global fact" {
@@ -150,8 +150,8 @@ func TestList_ScopeFilter(t *testing.T) {
 
 func TestList_PatternFilter(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "alpha fact", ProducerUser, Roles{}, false) //nolint:errcheck
-	s.Record(context.Background(), "beta fact", ProducerUser, Roles{}, false)  //nolint:errcheck
+	s.Record(context.Background(), "alpha fact", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "beta fact", ProducerUser, ConsumerAll, Roles{}, false)  //nolint:errcheck
 
 	results := s.List(ListOpts{Pattern: "ALPHA"}) // case-insensitive
 	if len(results) != 1 || results[0].Content != "alpha fact" {
@@ -159,10 +159,37 @@ func TestList_PatternFilter(t *testing.T) {
 	}
 }
 
+func TestList_ConsumerFilter(t *testing.T) {
+	s := newTestStore(t, false)
+	s.Record(context.Background(), "for all", ProducerUser, ConsumerAll, Roles{}, false)        //nolint:errcheck
+	s.Record(context.Background(), "local only", ProducerUser, ConsumerLocal, Roles{}, false)   //nolint:errcheck
+	s.Record(context.Background(), "claude only", ProducerUser, ConsumerClaude, Roles{}, false) //nolint:errcheck
+
+	localResults := s.List(ListOpts{Consumer: ConsumerLocal})
+	for _, p := range localResults {
+		if p.Consumer == ConsumerClaude {
+			t.Errorf("local filter returned Claude-only percept: %q", p.Content)
+		}
+	}
+	if len(localResults) != 2 { // "for all" + "local only"
+		t.Errorf("expected 2 results for local filter, got %d", len(localResults))
+	}
+
+	claudeResults := s.List(ListOpts{Consumer: ConsumerClaude})
+	for _, p := range claudeResults {
+		if p.Consumer == ConsumerLocal {
+			t.Errorf("claude filter returned local-only percept: %q", p.Content)
+		}
+	}
+	if len(claudeResults) != 2 { // "for all" + "claude only"
+		t.Errorf("expected 2 results for claude filter, got %d", len(claudeResults))
+	}
+}
+
 func TestList_ProducerFilter(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "user fact", ProducerUser, Roles{}, false)     //nolint:errcheck
-	s.Record(context.Background(), "system fact", ProducerSystem, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "user fact", ProducerUser, ConsumerAll, Roles{}, false)     //nolint:errcheck
+	s.Record(context.Background(), "system fact", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	results := s.List(ListOpts{Producer: "user"})
 	if len(results) != 1 || results[0].Producer != ProducerUser {
@@ -173,13 +200,13 @@ func TestList_ProducerFilter(t *testing.T) {
 func TestPersistence_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s1, _ := NewStore(dir, "")
-	s1.Record(context.Background(), "persistent fact", ProducerUser, Roles{}, false) //nolint:errcheck
+	s1.Record(context.Background(), "persistent fact", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	s2, err := NewStore(dir, "")
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	results := s2.Query(context.Background(), "persistent", 0, 10)
+	results := s2.Query(context.Background(), "persistent", 0, 10, ConsumerAll)
 	if len(results) != 1 {
 		t.Fatalf("expected persisted percept after reload, got %d results", len(results))
 	}
@@ -187,7 +214,7 @@ func TestPersistence_RoundTrip(t *testing.T) {
 
 func TestFlush_WritesFiles(t *testing.T) {
 	s := newTestStore(t, true)
-	s.Record(context.Background(), "some fact", ProducerUser, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "some fact", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	if err := s.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -219,7 +246,7 @@ func TestInitialWeight(t *testing.T) {
 
 func TestDelete_RemovesFromGlobal(t *testing.T) {
 	s := newTestStore(t, false)
-	id, err := s.Record(context.Background(), "global fact to delete", ProducerUser, Roles{}, false)
+	id, err := s.Record(context.Background(), "global fact to delete", ProducerUser, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -237,7 +264,7 @@ func TestDelete_RemovesFromGlobal(t *testing.T) {
 
 func TestDelete_RemovesFromSession(t *testing.T) {
 	s := newTestStore(t, true)
-	id, err := s.Record(context.Background(), "session fact to delete", ProducerLocal, Roles{}, false)
+	id, err := s.Record(context.Background(), "session fact to delete", ProducerLocal, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -266,11 +293,11 @@ func TestDelete_NotFound(t *testing.T) {
 
 func TestFindByIDPrefix_Matches(t *testing.T) {
 	s := newTestStore(t, false)
-	id1, err := s.Record(context.Background(), "first fact", ProducerUser, Roles{}, false)
+	id1, err := s.Record(context.Background(), "first fact", ProducerUser, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	_, err = s.Record(context.Background(), "second fact", ProducerUser, Roles{}, false)
+	_, err = s.Record(context.Background(), "second fact", ProducerUser, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -287,7 +314,7 @@ func TestFindByIDPrefix_Matches(t *testing.T) {
 
 func TestFindByIDPrefix_NoMatch(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "some fact", ProducerUser, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "some fact", ProducerUser, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	results := s.FindByIDPrefix("zzzzzzz")
 	if len(results) != 0 {

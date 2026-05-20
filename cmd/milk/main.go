@@ -155,7 +155,7 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
 	case router.TargetClaude:
-		return runClaude(ctx, sess, claudeAgent, prompt, cs)
+		return runClaude(ctx, sess, claudeAgent, prompt, cs, mem)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
@@ -269,7 +269,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			if cwd, err := os.Getwd(); err == nil {
 				localCs, _ = claudesettings.Open(cwd)
 			}
-			return runClaudeWith(ctx, sess, claudeAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, out)
+			return runClaudeWith(ctx, sess, claudeAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
 		}
 		return err
 	}
@@ -320,11 +320,11 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 	return "", io.EOF
 }
 
-func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store) error {
-	return runClaudeWith(ctx, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs})
+func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
+	return runClaudeWith(ctx, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
 }
 
-func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, outs ...io.Writer) error {
+func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
@@ -335,21 +335,42 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
 	sess.ForceState(session.StateClaude)
 
+	// Generate a fresh nonce for this Claude turn. The same nonce is embedded in
+	// the system-prompt instruction (via MemoryInstruction/BuildContext) and in the
+	// stream parser (via WithOnPercept), so only tags containing this nonce are
+	// captured — explanatory text about the tag format is ignored.
+	nonce := claude.GenerateNonce()
+
 	agent = applyPersistedGrants(agent, pc)
 	// In TUI mode the handler is pre-attached by dispatchAgent (toolFutures != nil).
 	// In single-shot mode install an interactive handler here.
 	if pc.cs != nil && pc.toolFutures == nil {
 		agent = agent.WithPermissionHandler(makePermissionHandler(input, out, pc.cs))
 	}
+	if mem != nil {
+		agent = agent.WithOnPercept(func(content, consumerHint string) {
+			var consumer memory.Consumer
+			switch consumerHint {
+			case "local":
+				consumer = memory.ConsumerLocal
+			case "claude":
+				consumer = memory.ConsumerClaude
+			}
+			_, err := mem.Record(ctx, content, memory.ProducerClaude, consumer, memory.Roles{}, false)
+			// DuplicateError is expected when Claude emits a percept similar to one
+			// already stored — silently drop it; any other error is also non-fatal.
+			_ = err
+		}, nonce)
+	}
 
-	res, err := runClaudeAgent(ctx, sess, agent, prompt, aw, resuming)
+	res, err := runClaudeAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForClaude(mem))
 	aw.Done()
 	if err != nil {
 		return err
 	}
 
 	if sess.ClaudeSessionID != "" {
-		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc)
+		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc, nonce)
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
@@ -382,11 +403,13 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 }
 
 // runClaudeAgent runs one Claude turn (first or resume) and returns the result.
-func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool) (claude.ParseResult, error) {
+// nonce is the session-specific percept nonce embedded in the system-prompt instruction.
+// percepts are injected as a [Remembered facts] block in the system prompt.
+func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string) (claude.ParseResult, error) {
 	if resuming {
-		return agent.RunResume(ctx, sess.ClaudeSessionID, prompt, out)
+		return agent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), prompt, out)
 	}
-	sysContext := escalation.BuildContext(sess)
+	sysContext := escalation.BuildContext(sess, nonce, percepts)
 	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, out)
 	if err == nil {
 		sess.ClaudeSessionID = claudeSessionID
@@ -395,14 +418,14 @@ func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Ag
 }
 
 // handlePermissionDenials checks the result for permission issues and retries if the user approves.
-func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext) claude.ParseResult {
+func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
 	switch {
 	case len(res.PermissionDenials) > 0:
-		return handleStructuredDenials(ctx, sess, agent, res, input, out, pc)
+		return handleStructuredDenials(ctx, sess, agent, res, input, out, pc, nonce)
 	case res.PermissionDenied:
-		return handlePhrasePermission(ctx, sess, agent, res, input, out)
+		return handlePhrasePermission(ctx, sess, agent, res, input, out, nonce)
 	case res.DirRestricted:
-		return handlePhraseDir(ctx, sess, agent, input, out)
+		return handlePhraseDir(ctx, sess, agent, input, out, nonce)
 	}
 	return res
 }
@@ -415,14 +438,14 @@ type permContext struct {
 
 // handleStructuredDenials handles permission_denials from the result event —
 // language-neutral, fires regardless of Claude's response language.
-func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext) claude.ParseResult {
+func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
 	fmt.Fprintf(out, "\n%s Claude was blocked from using:\n", milkTag())
 	retryAgent, changed := applyDenials(agent, dedupDenials(res.PermissionDenials), input, out, pc)
 	if !changed {
 		return res
 	}
 	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permissions.", out)
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
 	}
@@ -448,7 +471,7 @@ func applyDenials(agent *claude.Agent, denials []claude.PermissionDenialRecord, 
 		if applyToolGrant(d, input, out, pc, &agent) {
 			changed = true
 		}
-		if applyDirGrant(d, input, out, pc, &agent) {
+		if applyDirGrant(d, input, pc, &agent) {
 			changed = true
 		}
 	}
@@ -485,8 +508,8 @@ func applyToolGrant(d claude.PermissionDenialRecord, input inputReader, out io.W
 	return true
 }
 
-func applyDirGrant(d claude.PermissionDenialRecord, input inputReader, out io.Writer, pc permContext, agent **claude.Agent) bool {
-	dir := askDir(input, out, suggestDir(d.ToolInput))
+func applyDirGrant(d claude.PermissionDenialRecord, input inputReader, pc permContext, agent **claude.Agent) bool {
+	dir := askDir(input, suggestDir(d.ToolInput))
 	if dir == "" {
 		return false
 	}
@@ -499,7 +522,7 @@ func applyDirGrant(d claude.PermissionDenialRecord, input inputReader, out io.Wr
 
 // handlePhrasePermission handles a tool permission denial detected via phrase scanning.
 // Asks the user y/n and retries via --resume with the tool added to allowed list.
-func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer) claude.ParseResult {
+func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, nonce string) claude.ParseResult {
 	tool := res.DeniedTool
 	var prompt string
 	if tool != "" {
@@ -518,7 +541,7 @@ func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *c
 		retryAgent = agent
 	}
 	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, "Please continue with the approved permission.", out)
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permission.", out)
 	if err != nil {
 		return res
 	}
@@ -535,7 +558,7 @@ func suggestDir(input map[string]any) string {
 		}
 	}
 	if cmd, ok := input["command"].(string); ok {
-		for _, token := range strings.Fields(cmd) {
+		for token := range strings.FieldsSeq(cmd) {
 			if strings.HasPrefix(token, "/") {
 				return filepath.Dir(token)
 			}
@@ -546,7 +569,7 @@ func suggestDir(input map[string]any) string {
 
 // askDir proposes a directory and asks Y/n (enter = yes).
 // Falls back to cwd when suggested is empty. Returns "" only if the user types "n".
-func askDir(input inputReader, out io.Writer, suggested string) string {
+func askDir(input inputReader, suggested string) string {
 	if suggested == "" {
 		suggested, _ = os.Getwd()
 	}
@@ -578,14 +601,14 @@ func drainFuture(futures map[string]chan string, toolName string) string {
 	return yn
 }
 
-func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader, out io.Writer) claude.ParseResult {
-	dir := askDir(input, out, "")
+func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader, out io.Writer, nonce string) claude.ParseResult {
+	dir := askDir(input, "")
 	if dir == "" {
 		return claude.ParseResult{}
 	}
 	retryAgent := agent.WithExtraDir(dir)
 	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, fmt.Sprintf("Access to %q has been granted. Please continue.", dir), out)
+	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), fmt.Sprintf("Access to %q has been granted. Please continue.", dir), out)
 	if err != nil {
 		return claude.ParseResult{}
 	}
@@ -740,6 +763,27 @@ func runDrop() error {
 	}
 	fmt.Printf("dropped session %s\n", sess.ID[:8])
 	return nil
+}
+
+// perceptsForClaude returns the content strings of all percepts that Claude
+// should receive at session start: those not exclusively targeted at the local
+// agent and not already produced by Claude (to avoid echo loops).
+func perceptsForClaude(mem *memory.Store) []string {
+	if mem == nil {
+		return nil
+	}
+	all := mem.List(memory.ListOpts{})
+	var out []string
+	for _, p := range all {
+		if p.Producer == memory.ProducerClaude {
+			continue // Claude wrote it; no need to echo it back
+		}
+		if p.Consumer == memory.ConsumerLocal {
+			continue // explicitly local-only
+		}
+		out = append(out, p.Content)
+	}
+	return out
 }
 
 var configCmd = &cobra.Command{

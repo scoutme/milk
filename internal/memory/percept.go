@@ -12,6 +12,16 @@ const (
 	ProducerSystem Producer = "system"
 )
 
+// Consumer identifies which agent(s) should receive a Percept at injection time.
+// Empty (ConsumerAll) is the default and means both agents receive it.
+type Consumer string
+
+const (
+	ConsumerAll    Consumer = ""       // default — injected for both agents
+	ConsumerLocal  Consumer = "local"  // only injected for the local agent
+	ConsumerClaude Consumer = "claude" // only injected for Claude
+)
+
 // Roles holds Neo-Davidsonian semantic roles extracted from a Percept's content.
 // Fields left empty when not inferable — never fabricated.
 type Roles struct {
@@ -29,7 +39,8 @@ type Percept struct {
 	ID        string    `json:"id"`
 	Content   string    `json:"content"`
 	Producer  Producer  `json:"producer"`
-	W         float64   `json:"w"` // confidence weight [0,1]
+	Consumer  Consumer  `json:"consumer,omitempty"` // which agent(s) receive this at injection; empty = all
+	W         float64   `json:"w"`                  // confidence weight [0,1]
 	Roles     Roles     `json:"roles"`
 	EngramID  string    `json:"engram_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`

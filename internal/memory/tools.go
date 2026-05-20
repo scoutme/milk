@@ -32,6 +32,11 @@ func Schemas() []map[string]any {
 							"enum":        []string{"user", "local", "claude"},
 							"description": "Who is the source of this fact. Use 'user' when the user directly stated it; defaults to the calling agent.",
 						},
+						"consumer": map[string]any{
+							"type":        "string",
+							"enum":        []string{"local", "claude", ""},
+							"description": "Which agent receives this at injection time. 'local' = only the local model; 'claude' = only Claude; omit or empty = both.",
+						},
 					},
 					"required": []string{"content"},
 				},
@@ -102,6 +107,7 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 		Content  string `json:"content"`
 		Subject  string `json:"subject"`
 		Producer string `json:"producer"`
+		Consumer string `json:"consumer"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return errResult(invalidArgs + err.Error())
@@ -120,7 +126,18 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 	case "claude":
 		producer = ProducerClaude
 	}
-	id, err := store.Record(ctx, args.Content, producer, roles, false)
+	var consumer Consumer
+	switch args.Consumer {
+	case "local":
+		consumer = ConsumerLocal
+	case "claude":
+		consumer = ConsumerClaude
+	}
+	id, err := store.Record(ctx, args.Content, producer, consumer, roles, false)
+	if dup, ok := IsDuplicate(err); ok {
+		return okResult(fmt.Sprintf("skipped — similar percept already exists: %s (%.0f%% overlap): %s",
+			id[:8], dup.Similarity*100, dup.Existing.Content))
+	}
 	if err != nil {
 		return errResult("failed to record: " + err.Error())
 	}
@@ -128,7 +145,8 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 }
 
 // DispatchGetMemory handles a get_memory tool call.
-func DispatchGetMemory(ctx context.Context, store *Store, argsJSON string) string {
+// caller restricts which percepts are visible (ConsumerAll = no restriction).
+func DispatchGetMemory(ctx context.Context, store *Store, argsJSON string, caller Consumer) string {
 	var args struct {
 		Query         string  `json:"query"`
 		MinConfidence float64 `json:"min_confidence"`
@@ -144,7 +162,7 @@ func DispatchGetMemory(ctx context.Context, store *Store, argsJSON string) strin
 		args.MaxResults = 5
 	}
 
-	percepts := store.Query(ctx, args.Query, args.MinConfidence, args.MaxResults)
+	percepts := store.Query(ctx, args.Query, args.MinConfidence, args.MaxResults, caller)
 	if len(percepts) == 0 {
 		return okResult("(no relevant memories found)")
 	}
@@ -182,8 +200,8 @@ func DispatchListMemory(_ context.Context, store *Store, argsJSON string) string
 // FormatList renders a human-readable table of Percepts.
 func FormatList(percepts []Percept) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-8s  %-6s  %-7s  %-5s  %-10s  %s\n", "ID", "SCOPE", "W", "CORE", "PRODUCER", "CONTENT")
-	fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 80))
+	fmt.Fprintf(&b, "%-8s  %-6s  %-7s  %-5s  %-10s  %-6s  %s\n", "ID", "SCOPE", "W", "CORE", "PRODUCER", "FOR", "CONTENT")
+	fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 88))
 	for _, p := range percepts {
 		scope := "session"
 		if p.Core {
@@ -193,12 +211,16 @@ func FormatList(percepts []Percept) string {
 		if p.Core {
 			core = "yes"
 		}
+		consumer := string(p.Consumer)
+		if consumer == "" {
+			consumer = "all"
+		}
 		content := p.Content
 		if len(content) > 50 {
 			content = content[:47] + "..."
 		}
-		fmt.Fprintf(&b, "%-8s  %-6s  %-7.2f  %-5s  %-10s  %s\n",
-			p.ID[:8], scope, p.W, core, string(p.Producer), content)
+		fmt.Fprintf(&b, "%-8s  %-6s  %-7.2f  %-5s  %-10s  %-6s  %s\n",
+			p.ID[:8], scope, p.W, core, string(p.Producer), consumer, content)
 	}
 	return b.String()
 }

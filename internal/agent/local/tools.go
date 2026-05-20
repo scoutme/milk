@@ -255,7 +255,7 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return toolResult{Error: errMemUnavailable}.String(), false
 	case "get_memory":
 		if mem != nil {
-			return memory.DispatchGetMemory(ctx, mem, argsJSON), false
+			return memory.DispatchGetMemory(ctx, mem, argsJSON, memory.ConsumerLocal), false
 		}
 		return toolResult{Error: errMemUnavailable}.String(), false
 	case "list_memory":

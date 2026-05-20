@@ -240,6 +240,234 @@ func TestStream_MessageStartSeparatesMessages(t *testing.T) {
 	}
 }
 
+func TestStripPerceptTags(t *testing.T) {
+	const nonce = "xtest1"
+	open := "<milk:percept:" + nonce + ">"
+	close_ := "</milk:percept:" + nonce + ">"
+	cases := []struct{ in, want string }{
+		{"hello " + open + "fact" + close_ + " world", "hello  world"},
+		{"no tags here", "no tags here"},
+		{open + "only tag" + close_, ""},
+		{"a " + open + "f1" + close_ + " b " + open + "f2" + close_ + " c", "a  b  c"},
+		{"unclosed " + open + "dangling", "unclosed"},
+		// Legacy tags (no nonce) must NOT be stripped
+		{"hello <milk:percept>fact</milk:percept> world", "hello <milk:percept>fact</milk:percept> world"},
+	}
+	for _, tc := range cases {
+		got := strings.TrimSpace(stripPerceptTags(tc.in, nonce))
+		want := strings.TrimSpace(tc.want)
+		if got != want {
+			t.Errorf("stripPerceptTags(%q): want %q, got %q", tc.in, want, got)
+		}
+	}
+}
+
+func newTestPerceptWriter(out *strings.Builder, nonce string, percepts *[]string) *perceptWriter {
+	open, close_ := perceptTagPair(nonce)
+	return &perceptWriter{
+		w:         out,
+		onPercept: func(s, _ string) { *percepts = append(*percepts, s) },
+		openTag:   open,
+		closeTag:  close_,
+	}
+}
+
+func TestPerceptWriter_SingleWrite(t *testing.T) {
+	const nonce = "n0001"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	open, close_ := perceptTagPair(nonce)
+	pw.Write([]byte("before " + open + "my fact" + close_ + " after")) //nolint:errcheck
+
+	if out.String() != "before  after" {
+		t.Errorf("output: want %q, got %q", "before  after", out.String())
+	}
+	if len(percepts) != 1 || percepts[0] != "my fact" {
+		t.Errorf("percepts: want [my fact], got %v", percepts)
+	}
+}
+
+func TestPerceptWriter_LegacyTagIgnored(t *testing.T) {
+	// With a nonce set, legacy <milk:percept> tags (no nonce) must pass through unchanged.
+	const nonce = "n0002"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	pw.Write([]byte("before <milk:percept>legacy</milk:percept> after")) //nolint:errcheck
+	pw.flush()                                                           //nolint:errcheck
+
+	if len(percepts) != 0 {
+		t.Errorf("legacy tag should not be captured, got %v", percepts)
+	}
+	if !strings.Contains(out.String(), "<milk:percept>legacy</milk:percept>") {
+		t.Errorf("legacy tag should pass through unchanged, got %q", out.String())
+	}
+}
+
+func TestPerceptWriter_FlushTrailingBytes(t *testing.T) {
+	const nonce = "n0003"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	// Write text that ends mid-way through the open tag prefix — buffered, not yet flushed.
+	open, _ := perceptTagPair(nonce)
+	partial := open[:len(open)/2]
+	before := "trailing text "
+	pw.Write([]byte(before + partial)) //nolint:errcheck
+	if out.String() != before {
+		t.Errorf("before flush: want %q, got %q", before, out.String())
+	}
+	pw.flush() //nolint:errcheck
+	if out.String() != before+partial {
+		t.Errorf("after flush: want %q, got %q", before+partial, out.String())
+	}
+}
+
+func TestPerceptWriter_FlushUnclosedTag(t *testing.T) {
+	const nonce = "n0004"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	// Write a complete open tag but no close tag — content should be discarded on flush.
+	open, _ := perceptTagPair(nonce)
+	pw.Write([]byte("prefix " + open + "unclosed content")) //nolint:errcheck
+	pw.flush()                                              //nolint:errcheck
+	if out.String() != "prefix " {
+		t.Errorf("want %q, got %q", "prefix ", out.String())
+	}
+}
+
+func TestPerceptWriter_SplitAcrossWrites(t *testing.T) {
+	const nonce = "n0005"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	open, close_ := perceptTagPair(nonce)
+	// Split the open tag across writes at the midpoint
+	mid := len(open) / 2
+	part1 := "hello " + open[:mid]
+	part2 := open[mid:] + "split fact" + close_[:len(close_)/2]
+	part3 := close_[len(close_)/2:] + " end"
+
+	pw.Write([]byte(part1)) //nolint:errcheck
+	pw.Write([]byte(part2)) //nolint:errcheck
+	pw.Write([]byte(part3)) //nolint:errcheck
+
+	if out.String() != "hello  end" {
+		t.Errorf("output: want %q, got %q", "hello  end", out.String())
+	}
+	if len(percepts) != 1 || percepts[0] != "split fact" {
+		t.Errorf("percepts: want [split fact], got %v", percepts)
+	}
+}
+
+func TestStream_OnPerceptCallback(t *testing.T) {
+	const nonce = "testn1"
+	var percepts []string
+	open, close_ := perceptTagPair(nonce)
+	text := "Result. " + open + "user prefers Go" + close_
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"`+text+`"}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
+		OnPercept:    func(s, _ string) { percepts = append(percepts, s) },
+		PerceptNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(percepts) != 1 || percepts[0] != "user prefers Go" {
+		t.Errorf("OnPercept: want [user prefers Go], got %v", percepts)
+	}
+	if strings.Contains(res.Text, "milk:percept") {
+		t.Errorf("percept tag must not appear in res.Text, got %q", res.Text)
+	}
+	if strings.Contains(out.String(), "milk:percept") {
+		t.Errorf("percept tag must not appear in output, got %q", out.String())
+	}
+}
+
+func TestStream_OnPerceptLegacyTagIgnored(t *testing.T) {
+	// When a nonce is set, legacy tags without the nonce must NOT be captured.
+	const nonce = "testn2"
+	var percepts []string
+	// This simulates Claude explaining the format in a code example
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Use `+"`<milk:percept>fact</milk:percept>`"+` to emit facts."}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	_, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
+		OnPercept:    func(s, _ string) { percepts = append(percepts, s) },
+		PerceptNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(percepts) != 0 {
+		t.Errorf("legacy tag should not be captured with nonce set, got %v", percepts)
+	}
+}
+
+func TestStream_OnPerceptConsumerHint(t *testing.T) {
+	const nonce = "testn3"
+	type captured struct{ body, hint string }
+	var got []captured
+	open, close_ := perceptTagPair(nonce)
+	text := open + "@local: use local for simple tasks" + close_ +
+		" " + open + "user prefers Go" + close_
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"`+text+`"}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	_, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
+		OnPercept:    func(body, hint string) { got = append(got, captured{body, hint}) },
+		PerceptNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 percepts, got %v", got)
+	}
+	if got[0].body != "use local for simple tasks" || got[0].hint != "local" {
+		t.Errorf("first percept: want body=%q hint=%q, got body=%q hint=%q",
+			"use local for simple tasks", "local", got[0].body, got[0].hint)
+	}
+	if got[1].body != "user prefers Go" || got[1].hint != "" {
+		t.Errorf("second percept: want body=%q hint=%q, got body=%q hint=%q",
+			"user prefers Go", "", got[1].body, got[1].hint)
+	}
+}
+
+func TestConsumerHintFrom(t *testing.T) {
+	cases := []struct{ in, wantBody, wantHint string }{
+		{"@local: some fact", "some fact", "local"},
+		{"@claude: other fact", "other fact", "claude"},
+		{"plain fact", "plain fact", ""},
+		{"@local:no space", "@local:no space", ""},
+	}
+	for _, c := range cases {
+		body, hint := consumerHintFrom(c.in)
+		if body != c.wantBody || hint != c.wantHint {
+			t.Errorf("consumerHintFrom(%q) = (%q, %q), want (%q, %q)",
+				c.in, body, hint, c.wantBody, c.wantHint)
+		}
+	}
+}
+
 func TestStream_PermissionDenialsInResult(t *testing.T) {
 	input := ndjson(
 		`{"type":"system","session_id":"s1"}`,
