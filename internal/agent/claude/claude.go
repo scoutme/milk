@@ -197,13 +197,27 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 }
 
 // runPipe runs the claude CLI and streams structured JSON output.
-// Claude's stdin is connected to a pipe so control_response messages can be sent.
+// When permissions are handled via stdio, stdin is a pipe so control_response
+// messages can be sent. When permissions are skipped, stdin is /dev/null to
+// avoid Claude's 3-second "no stdin data" warning.
 func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	cmd := newCmd(ctx, a.bin, args)
 
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return ParseResult{}, fmt.Errorf("creating stdin pipe: %w", err)
+	var stdinPipe io.WriteCloser
+	if a.skipPermissions {
+		devNull, err := os.Open(os.DevNull)
+		if err != nil {
+			return ParseResult{}, fmt.Errorf("opening /dev/null: %w", err)
+		}
+		defer devNull.Close()
+		cmd.Stdin = devNull
+		stdinPipe = discardWriteCloser{} // sentinel: writes are no-ops, Close is safe
+	} else {
+		var err error
+		stdinPipe, err = cmd.StdinPipe()
+		if err != nil {
+			return ParseResult{}, fmt.Errorf("creating stdin pipe: %w", err)
+		}
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -249,6 +263,13 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 
 	return res, nil
 }
+
+// discardWriteCloser is a no-op WriteCloser used as a sentinel stdin when
+// Claude's stdin is redirected to /dev/null and no control messages are needed.
+type discardWriteCloser struct{}
+
+func (discardWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (discardWriteCloser) Close() error                { return nil }
 
 // newCmd builds an exec.Cmd for the given binary and args.
 func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {

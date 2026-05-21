@@ -94,6 +94,12 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 // --- Styles ---
 
 var (
+	styleHeaderBar = lipgloss.NewStyle().
+			Background(lipgloss.AdaptiveColor{Light: "#1E2A4A", Dark: "#0E0E1A"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#D8E4F8", Dark: "#AABBCC"}).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(lipgloss.AdaptiveColor{Light: "#4466AA", Dark: "#334466"})
 	styleStatusBar = lipgloss.NewStyle().
 			Background(lipgloss.AdaptiveColor{Light: "#E5E5E5", Dark: "#2B2B2B"})
 	styleStatusBarPerm = lipgloss.NewStyle().
@@ -376,9 +382,9 @@ func (m *model) wrappedTranscript() string {
 	return ansi.Wrap(m.transcript.String(), vw, "")
 }
 
-// viewportHeight is the full terminal height minus the status bar line (and hint lines if active).
+// viewportHeight is the full terminal height minus the header bar (content + border), status bar, and hint lines.
 func (m *model) viewportHeight() int {
-	h := m.height - 1 - len(m.tabHints)
+	h := m.height - 3 - len(m.tabHints)
 	return max(h, 3)
 }
 
@@ -419,6 +425,47 @@ func (m *model) syncLayout() {
 	if atBottom {
 		m.vp.GotoBottom()
 	}
+}
+
+// headerBar renders the persistent application header.
+// Left: animated logo + tagline. Right: repo link + session info + /help hint.
+func (m *model) headerBar() string {
+	frame := 8 // static peak (bright gold) when idle
+	if m.busy {
+		frame = m.spinnerFrame
+	}
+	logo := headerLogo(frame)
+	tagline := dim("local-first agentic orchestrator")
+	taglinePlain := "local-first agentic orchestrator"
+
+	sessID := m.st.sess.ID
+	if len(sessID) > 8 {
+		sessID = sessID[:8]
+	}
+	model := m.st.cfg.LlamaModel
+	if model == "" {
+		model = "local"
+	}
+	const repoURL = "github.com/scoutme/milk"
+	rightFull := dim(repoURL + "  sess:" + sessID + "  model:" + model + "  /help")
+	rightFulPlain := repoURL + "  sess:" + sessID + "  model:" + model + "  /help"
+	rightShort := dim("sess:" + sessID + "  /help")
+	rightShortPlain := "sess:" + sessID + "  /help"
+
+	logoPlain := stripANSI(logo)
+	available := m.width - 2
+	rightPart, rightPlain := rightFull, rightFulPlain
+	if available < len(logoPlain)+2+len(taglinePlain)+2+len(rightFulPlain) {
+		rightPart, rightPlain = rightShort, rightShortPlain
+	}
+	left := " " + logo + "  " + tagline
+	leftPlain := " " + logoPlain + "  " + taglinePlain
+	gap := max(available-len(leftPlain)-len(rightPlain), 1)
+	bar := left + strings.Repeat(" ", gap) + rightPart + " "
+	if isTTY {
+		return styleHeaderBar.Width(m.width).Render(bar)
+	}
+	return bar
 }
 
 // statusBar renders the one-line status bar.
@@ -1089,9 +1136,9 @@ func (m model) View() string {
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel, pbar)
 	}
 	if len(m.tabHints) > 0 {
-		return mainArea + "\n" + strings.Join(m.tabHints, "\n") + "\n" + m.statusBar()
+		return m.headerBar() + "\n" + mainArea + "\n" + strings.Join(m.tabHints, "\n") + "\n" + m.statusBar()
 	}
-	return mainArea + "\n" + m.statusBar()
+	return m.headerBar() + "\n" + mainArea + "\n" + m.statusBar()
 }
 
 // --- Memory panel poll ---
@@ -1693,11 +1740,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if sp, err := sessionHistoryPath(sess.ID); err == nil {
 		m.sessionHistory = readHistoryFile(sp)
 	}
-
-	// Prime transcript with welcome line
-	welcome := fmt.Sprintf("%s interactive mode — session %s  (type /help for commands)\n",
-		milkTag(), sess.ID[:8])
-	m.transcript.WriteString(welcome)
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),

@@ -73,6 +73,23 @@ func pulse(s string, frame int) string {
 	return pulseColors[frame%len(pulseColors)] + s + ansiReset
 }
 
+// logoMark is the diamond glyph used in the header.
+const logoMark = "◈"
+
+// headerLogo returns the styled logo string for the persistent header bar.
+// The ◈ mark pulses through the breathing gradient keyed to frame.
+// Use frame=8 (peak brightness) for a static appearance when idle.
+// Layout: pulsing ◈ · bold "milk" in bright gold
+func headerLogo(frame int) string {
+	if !isTTY {
+		return logoMark + " milk"
+	}
+	mark := pulseColors[frame%len(pulseColors)] + logoMark + ansiReset
+	// "milk" rendered in bold bright-gold (#FFD060) to match peak pulse color
+	name := "\033[1;38;2;255;208;60m" + "milk" + ansiReset
+	return mark + " " + name
+}
+
 // Spinner prints an animated spinner on the current line until Stop is called.
 // Designed to run after a label has been printed with no trailing newline.
 // Stop is idempotent and safe to call multiple times.
