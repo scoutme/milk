@@ -187,8 +187,8 @@ func TestDispatchGetMemory_ConsumerFilter(t *testing.T) {
 
 func TestDispatchListMemory_AllPercepts(t *testing.T) {
 	s := newToolsStore(t)
-	s.Record(context.Background(), "fact alpha", ProducerUser, ConsumerAll, Roles{}, false)   //nolint:errcheck
-	s.Record(context.Background(), "fact beta", ProducerSystem, ConsumerAll, Roles{}, false)  //nolint:errcheck
+	s.Record(context.Background(), "fact alpha", ProducerUser, ConsumerAll, Roles{}, false)  //nolint:errcheck
+	s.Record(context.Background(), "fact beta", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
 
 	result := DispatchListMemory(context.Background(), s, `{}`)
 	var out map[string]any
