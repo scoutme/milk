@@ -70,3 +70,6 @@ The input prompt currently shows the next-turn agent (e.g. `[local]`, `[claude]`
 
 When typing a long enough input to overflow the first textarea line, subsequent lines are not visible — only the first line is shown in the input area. The text is being buffered (it can be submitted), but the visual display doesn't grow to show continuation lines.
 
+## Memory tuning
+
+Nothing decays, all becomes global

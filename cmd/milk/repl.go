@@ -233,6 +233,8 @@ func buildTextarea() textarea.Model {
 
 	km := textarea.DefaultKeyMap
 	km.InsertNewline.SetKeys("shift+enter", "alt+enter", "ctrl+n")
+	km.WordBackward.SetKeys("alt+left", "ctrl+left")
+	km.WordForward.SetKeys("alt+right", "ctrl+right")
 	ta.KeyMap = km
 
 	ta.Focus() //nolint:errcheck
@@ -445,6 +447,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// No selection: paste clipboard content into the textarea.
 			text, err := clipboard.ReadAll()
 			if err == nil && text != "" {
+				// Pre-expand to terminal height so repositionView() inside
+				// InsertString never scrolls on a multiline clipboard paste.
+				m.ta.SetHeight(m.height)
 				m.ta.InsertString(text)
 			}
 		}
@@ -949,7 +954,10 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Bracketed paste — let the textarea handle it directly.
+	// Pre-expand to terminal height so repositionView() inside ta.Update never
+	// scrolls on a large paste (updateTA's +1 is insufficient for multi-line pastes).
 	if msg.Paste {
+		m.ta.SetHeight(m.height)
 		var cmd tea.Cmd
 		cmd = m.updateTA(msg)
 		m.syncLayout()
@@ -993,13 +1001,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.handleEnter()
 	case "up":
-		if m.ta.Line() == 0 {
+		li := m.ta.LineInfo()
+		if m.ta.Line() == 0 && li.RowOffset == 0 {
 			m = m.historyBack()
 			m.syncLayout()
 			return m, nil
 		}
 	case "down":
-		if m.ta.Line() == m.ta.LineCount()-1 {
+		li := m.ta.LineInfo()
+		if m.ta.Line() == m.ta.LineCount()-1 && li.RowOffset == li.Height-1 {
 			m = m.historyForward()
 			m.syncLayout()
 			return m, nil
