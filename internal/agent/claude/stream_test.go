@@ -252,6 +252,8 @@ func TestStripPerceptTags(t *testing.T) {
 		{"unclosed " + open + "dangling", "unclosed"},
 		// Legacy tags (no nonce) must NOT be stripped
 		{"hello <milk:percept>fact</milk:percept> world", "hello <milk:percept>fact</milk:percept> world"},
+		// Stale nonce (different from current turn) must ALSO be stripped — prevents leaking old-context tags.
+		{"hello <milk:percept:bx7201>stale fact</milk:percept:bx7201> world", "hello  world"},
 	}
 	for _, tc := range cases {
 		got := strings.TrimSpace(stripPerceptTags(tc.in, nonce))
@@ -263,12 +265,10 @@ func TestStripPerceptTags(t *testing.T) {
 }
 
 func newTestPerceptWriter(out *strings.Builder, nonce string, percepts *[]string) *perceptWriter {
-	open, close_ := perceptTagPair(nonce)
 	return &perceptWriter{
-		w:         out,
-		onPercept: func(s, _ string) { *percepts = append(*percepts, s) },
-		openTag:   open,
-		closeTag:  close_,
+		w:           out,
+		onPercept:   func(s, _ string) { *percepts = append(*percepts, s) },
+		recordNonce: nonce,
 	}
 }
 
@@ -304,6 +304,30 @@ func TestPerceptWriter_LegacyTagIgnored(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "<milk:percept>legacy</milk:percept>") {
 		t.Errorf("legacy tag should pass through unchanged, got %q", out.String())
+	}
+}
+
+func TestPerceptWriter_StaleNonceStrippedNotRecorded(t *testing.T) {
+	// A tag with a different (stale) nonce must be stripped from display
+	// but must NOT be passed to onPercept (memory recording).
+	const currentNonce = "n0002"
+	const staleNonce = "bx7201"
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, currentNonce, &percepts)
+
+	input := "before <milk:percept:" + staleNonce + ">stale fact</milk:percept:" + staleNonce + "> after"
+	pw.Write([]byte(input)) //nolint:errcheck
+	pw.flush()              //nolint:errcheck
+
+	if len(percepts) != 0 {
+		t.Errorf("stale-nonce tag must not be recorded, got %v", percepts)
+	}
+	if strings.Contains(out.String(), "milk:percept") {
+		t.Errorf("stale-nonce tag must be stripped from output, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "before") || !strings.Contains(out.String(), "after") {
+		t.Errorf("surrounding text must be preserved, got %q", out.String())
 	}
 }
 

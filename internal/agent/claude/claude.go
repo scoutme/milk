@@ -248,10 +248,18 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 	stdinPipe.Close() //nolint:errcheck
 
 	if err := cmd.Wait(); err != nil {
-		if stderrBuf.Len() > 0 {
-			return res, fmt.Errorf("claude exited with error: %s", strings.TrimSpace(stderrBuf.String()))
+		stderr := filterKnownWarnings(strings.TrimSpace(stderrBuf.String()))
+		if stderr != "" {
+			return res, fmt.Errorf("claude exited with error: %s", stderr)
 		}
-		return res, fmt.Errorf("claude exited: %w", err)
+		// Only benign warnings on stderr — if the parse succeeded, don't error.
+		if parseErr != nil {
+			return res, parseErr
+		}
+		if res.IsError {
+			return res, fmt.Errorf("claude returned an error response")
+		}
+		return res, nil
 	}
 
 	if parseErr != nil {
@@ -274,6 +282,19 @@ func (discardWriteCloser) Close() error                { return nil }
 // newCmd builds an exec.Cmd for the given binary and args.
 func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
+}
+
+// filterKnownWarnings removes known benign stderr lines that Claude emits even
+// on success (e.g. the 3-second stdin-wait warning when no stdin data arrives).
+func filterKnownWarnings(stderr string) string {
+	var keep []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, "no stdin data received") {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
 }
 
 func mergeUniq(base, extra []string) []string {

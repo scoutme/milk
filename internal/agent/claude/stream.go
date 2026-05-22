@@ -231,8 +231,7 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 		onPermission = denyAllHandler
 	}
 	if opts.OnPercept != nil {
-		open, close_ := perceptTagPair(opts.PerceptNonce)
-		out = &perceptWriter{w: out, onPercept: opts.OnPercept, openTag: open, closeTag: close_}
+		out = &perceptWriter{w: out, onPercept: opts.OnPercept, recordNonce: opts.PerceptNonce}
 	}
 	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onToolUseReady: opts.OnToolUseReady, onThinking: opts.OnThinking}
 
@@ -407,41 +406,69 @@ func perceptTagPair(nonce string) (open, close_ string) {
 	return "<milk:percept:" + nonce + ">", "</milk:percept:" + nonce + ">"
 }
 
-// stripPerceptTags removes all <milk:percept:NONCE>…</milk:percept:NONCE> occurrences from s.
-func stripPerceptTags(s, nonce string) string {
-	openTag, closeTag := perceptTagPair(nonce)
+// stripPerceptTags removes all <milk:percept:*>…</milk:percept:*> occurrences from s,
+// regardless of nonce. This prevents stale-nonce tags (from old injected context) from
+// leaking into the display output.
+func stripPerceptTags(s, _ string) string {
+	const openPrefix = "<milk:percept:"
+	const closePrefix = "</milk:percept:"
 	for {
-		open := strings.Index(s, openTag)
+		open := strings.Index(s, openPrefix)
 		if open < 0 {
 			break
 		}
-		closeIdx := strings.Index(s[open:], closeTag)
-		if closeIdx < 0 {
-			// Unclosed tag — strip from open tag to end.
+		// Find the end of the open tag.
+		openEnd := strings.Index(s[open:], ">")
+		if openEnd < 0 {
 			s = s[:open]
 			break
 		}
-		s = s[:open] + s[open+closeIdx+len(closeTag):]
+		openEnd += open + 1 // position after '>'
+		// Derive the expected close tag from the nonce inside the open tag.
+		noncePart := s[open+len(openPrefix) : openEnd-1] // text between "<milk:percept:" and ">"
+		closeTag := closePrefix + noncePart + ">"
+		closeIdx := strings.Index(s[openEnd:], closeTag)
+		if closeIdx < 0 {
+			// Also try any close tag as fallback.
+			closeAny := strings.Index(s[openEnd:], closePrefix)
+			if closeAny < 0 {
+				s = s[:open]
+				break
+			}
+			closeAny += openEnd
+			closeEnd := strings.Index(s[closeAny:], ">")
+			if closeEnd < 0 {
+				s = s[:open]
+				break
+			}
+			s = s[:open] + s[closeAny+closeEnd+1:]
+		} else {
+			s = s[:open] + s[openEnd+closeIdx+len(closeTag):]
+		}
 	}
 	return strings.TrimSpace(s)
 }
 
-// perceptWriter wraps an io.Writer and intercepts <milk:percept:NONCE>…</milk:percept:NONCE>
-// tags in the byte stream. Matched tag bodies are passed to onPercept and
-// stripped from the output; all other bytes pass through unchanged.
+// perceptWriter wraps an io.Writer and intercepts <milk:percept:*>…</milk:percept:*>
+// tags in the byte stream. Tags matching the current nonce have their body passed
+// to onPercept. ALL percept tags (any nonce) are stripped from the display output,
+// preventing stale-nonce tags from leaked context from reaching the TUI.
 //
 // Tags may span multiple Write calls, so partial tag bytes are buffered until
 // a complete open tag, body, and close tag have been seen.
 //
 // The tag body may be prefixed with "@local: " or "@claude: " to target a
 // specific agent; parsePerceptBody strips the prefix and returns the hint.
+// perceptOpenPrefix is the fixed prefix of all percept open tags.
+const perceptOpenPrefix = "<milk:percept:"
+
 type perceptWriter struct {
-	w         io.Writer
-	onPercept func(content, consumerHint string)
-	openTag   string
-	closeTag  string
-	buf       strings.Builder // accumulates bytes while inside or possibly inside a tag
-	inTag     bool            // true once the open tag is confirmed
+	w           io.Writer
+	onPercept   func(content, consumerHint string)
+	recordNonce string          // only tags with this nonce call onPercept; others are still stripped
+	closeTag    string          // set once an open tag is fully parsed; cleared on close
+	buf         strings.Builder // accumulates bytes while inside or possibly inside a tag
+	inTag       bool            // true once the open tag is confirmed
 }
 
 // consumerHintFrom strips an optional "@local: " or "@claude: " prefix from s
@@ -470,13 +497,15 @@ func (pw *perceptWriter) Write(p []byte) (int, error) {
 			s := pw.buf.String()
 			if idx := strings.Index(s, pw.closeTag); idx >= 0 {
 				raw := strings.TrimSpace(s[:idx])
-				if pw.onPercept != nil && raw != "" {
+				// Only record into memory when the nonce matches the current turn.
+				if pw.onPercept != nil && raw != "" && pw.closeTag == "</milk:percept:"+pw.recordNonce+">" {
 					body, hint := consumerHintFrom(raw)
 					pw.onPercept(body, hint)
 				}
-				// Emit any bytes after the close tag to the real writer.
+				// Emit any bytes after the close tag to the real writer (tag body is always stripped).
 				tail := s[idx+len(pw.closeTag):]
 				pw.buf.Reset()
+				pw.closeTag = ""
 				pw.inTag = false
 				if tail != "" {
 					if _, err := io.WriteString(pw.w, tail); err != nil {
@@ -487,8 +516,25 @@ func (pw *perceptWriter) Write(p []byte) (int, error) {
 		} else {
 			pw.buf.WriteByte(b)
 			s := pw.buf.String()
-			if idx := strings.Index(s, pw.openTag); idx >= 0 {
-				// Flush everything before the open tag, then enter tag mode.
+			if idx := strings.Index(s, perceptOpenPrefix); idx >= 0 {
+				// Check if we have the full open tag yet (needs closing '>').
+				afterPrefix := s[idx+len(perceptOpenPrefix):]
+				closeAngle := strings.Index(afterPrefix, ">")
+				if closeAngle < 0 {
+					// Partial open tag — flush everything before the prefix, keep buffering.
+					before := s[:idx]
+					if before != "" {
+						if _, err := io.WriteString(pw.w, before); err != nil {
+							return n, err
+						}
+						pw.buf.Reset()
+						pw.buf.WriteString(s[idx:])
+					}
+					continue
+				}
+				// Full open tag found: extract nonce and set closeTag.
+				nonce := afterPrefix[:closeAngle]
+				pw.closeTag = "</milk:percept:" + nonce + ">"
 				before := s[:idx]
 				if before != "" {
 					if _, err := io.WriteString(pw.w, before); err != nil {
@@ -497,14 +543,14 @@ func (pw *perceptWriter) Write(p []byte) (int, error) {
 				}
 				pw.buf.Reset()
 				pw.inTag = true
-			} else if !strings.HasPrefix(pw.openTag, s) {
-				// buf is not a prefix of the open tag — flush and reset.
+			} else if !strings.HasPrefix(perceptOpenPrefix, s) {
+				// buf is not a prefix of the open prefix — flush and reset.
 				if _, err := io.WriteString(pw.w, s); err != nil {
 					return n, err
 				}
 				pw.buf.Reset()
 			}
-			// else: buf is a prefix of openTag — keep buffering.
+			// else: buf is a prefix of perceptOpenPrefix — keep buffering.
 		}
 	}
 	return n, nil

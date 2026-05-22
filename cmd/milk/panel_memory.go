@@ -225,6 +225,81 @@ func consumerBadge(p memory.Percept) string {
 	return ""
 }
 
+// buildPanelLineIDs returns one percept ID per line in the same order as
+// buildPanelLines. Non-percept lines (titles, section headers, blank lines)
+// get an empty string.
+func buildPanelLineIDs(mem *memory.Store) []string {
+	var ids []string
+	add := func(id string) { ids = append(ids, id) }
+
+	add("") // title
+	add("") // blank
+
+	if mem == nil {
+		add("")
+		return ids
+	}
+
+	addPercept := func(p memory.Percept) {
+		// Mirror addPerceptLines width calculation so line counts match exactly.
+		const inner = memoryPanelInner
+		bulletW := utf8.RuneCountInString("• ") // same for both bullet types
+		idW := utf8.RuneCountInString(perceptIDShort(p) + " ")
+		wStr := fmt.Sprintf("%.2f", p.W)
+		if badge := consumerBadge(p); badge != "" {
+			wStr = badge + " " + wStr
+		}
+		firstW := max(inner-bulletW-idW-1-len(wStr), 8)
+		contW := max(inner-2, 8)
+		wrapped := wordWrap(p.Content, firstW, contW, 2)
+		for range wrapped {
+			add(p.ID)
+		}
+	}
+
+	sessionPercepts := mem.List(memory.ListOpts{Scope: "session"})
+	add("") // SESSION header
+	if len(sessionPercepts) == 0 {
+		add("")
+	} else {
+		for _, p := range sessionPercepts {
+			addPercept(p)
+		}
+	}
+	add("") // blank
+
+	allGlobal := mem.List(memory.ListOpts{Scope: "global"})
+	var corePercepts, normalPercepts []memory.Percept
+	for _, p := range allGlobal {
+		if p.Core {
+			corePercepts = append(corePercepts, p)
+		} else {
+			normalPercepts = append(normalPercepts, p)
+		}
+	}
+
+	add("") // GLOBAL header
+	if len(normalPercepts) == 0 {
+		add("")
+	} else {
+		for _, p := range normalPercepts {
+			addPercept(p)
+		}
+	}
+	add("") // blank
+
+	add("") // GLOBAL (core) header
+	if len(corePercepts) == 0 {
+		add("")
+	} else {
+		for _, p := range corePercepts {
+			addPercept(p)
+		}
+	}
+
+	return ids
+}
+
 // wordWrap splits text into at most maxLines lines. The first line has width
 // firstW, continuation lines have width contW. If text overflows, the last
 // line ends with "…".
