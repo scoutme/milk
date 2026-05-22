@@ -11,6 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	rw "github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
+
 	"github.com/atotto/clipboard"
 	"github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -178,6 +181,10 @@ type model struct {
 	// pending /forget confirmation
 	pendingForget *forgetState
 
+	// prompt width (visual columns) set by the most recent refreshPrompt call;
+	// used by taRows() to compute the exact content wrap width.
+	promptWidth int
+
 	// click-to-select state (content-space coordinates; -1 = none)
 	selAnchorLine int
 	selAnchorCol  int
@@ -221,6 +228,8 @@ func buildTextarea() textarea.Model {
 	ta.FocusedStyle.Prompt = lipgloss.NewStyle()
 	ta.BlurredStyle.Prompt = lipgloss.NewStyle()
 	ta.CharLimit = 0
+	ta.MaxHeight = 0
+	ta.SetHeight(1)
 
 	km := textarea.DefaultKeyMap
 	km.InsertNewline.SetKeys("shift+enter", "alt+enter", "ctrl+n")
@@ -243,16 +252,16 @@ func (m *model) refreshPrompt() {
 		label = promptLabel(m.st)
 	}
 	plain := stripANSI(label)
-	promptWidth := len(plain)
+	m.promptWidth = len(plain)
 
-	m.ta.SetPromptFunc(promptWidth, func(lineIdx int) string {
+	m.ta.SetPromptFunc(m.promptWidth, func(lineIdx int) string {
 		if lineIdx == 0 {
 			return label
 		}
 		return ""
 	})
 	if m.width > 0 {
-		m.ta.SetWidth(m.mainWidth() - promptWidth)
+		m.ta.SetWidth(m.mainWidth())
 	}
 }
 
@@ -294,7 +303,6 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		answer := strings.TrimSpace(m.ta.Value())
 		m.ta.Reset()
-		m.ta.SetHeight(1)
 		m.syncLayout()
 		m.appendTranscript(answer + "\n")
 		m.pendingPerm.respCh <- answer
@@ -318,7 +326,6 @@ func (m *model) dequeueNextPerm() {
 	m.pendingPerm = &next
 	m.appendTranscript(next.prompt)
 	m.ta.Reset()
-	m.ta.SetHeight(1)
 	m.syncLayout()
 }
 
@@ -330,7 +337,6 @@ func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
 	m.pendingPerm = &msg
 	m.appendTranscript(msg.prompt)
 	m.ta.Reset()
-	m.ta.SetHeight(1)
 	m.syncLayout()
 	return m, nil
 }
@@ -517,9 +523,83 @@ func (m *model) clearSelection() {
 	m.selText = ""
 }
 
+// taRows returns the number of display rows the textarea content needs.
+// It replicates the exact word-wrap logic from bubbles/textarea wrap() so the
+// count matches what the textarea will render — using uniseg.StringWidth for
+// display widths and word-boundary splitting, same as the upstream code.
+func (m *model) taRows() int {
+	w := m.ta.Width()
+	if w <= 0 {
+		w = 1
+	}
+	lines := strings.Split(m.ta.Value(), "\n")
+	total := 0
+	for _, line := range lines {
+		total += taWrapRows([]rune(line), w)
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+// taWrapRows counts soft-wrapped rows for a single logical line, mirroring
+// the wrap() function in charmbracelet/bubbles/textarea/textarea.go.
+func taWrapRows(runes []rune, width int) int {
+	var (
+		lineW  int    // display width of current soft row
+		word   []rune // current word being accumulated
+		spaces int    // pending spaces after last word
+		rows   = 1
+	)
+	flush := func() {
+		pending := uniseg.StringWidth(string(word)) + spaces
+		if lineW+pending > width {
+			rows++
+			lineW = uniseg.StringWidth(string(word)) + spaces
+		} else {
+			lineW += pending
+		}
+		word = nil
+		spaces = 0
+	}
+	for _, r := range runes {
+		if r == ' ' || r == '\t' {
+			if len(word) > 0 || spaces > 0 {
+				spaces++
+			}
+		} else {
+			if spaces > 0 {
+				flush()
+			}
+			word = append(word, r)
+			// hard-wrap a single word that fills the entire width
+			lastW := rw.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastW > width {
+				if lineW > 0 {
+					rows++
+					lineW = 0
+				}
+				lineW += uniseg.StringWidth(string(word))
+				word = nil
+			}
+		}
+	}
+	// flush remaining word+spaces
+	pending := uniseg.StringWidth(string(word)) + spaces
+	if lineW+pending >= width {
+		rows++
+	}
+	return rows
+}
+
 // setViewportContent rebuilds the full viewport content:
 // transcript + separator + input area. The input area scrolls with the transcript.
 func (m *model) setViewportContent() {
+	rows := m.taRows()
+	if m.ta.Height() != rows {
+		m.ta.SetHeight(rows)
+	}
 	vw := m.vpWidth()
 	sep := styleBorder.Width(vw).Render("")
 	content := m.wrappedTranscript() + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
@@ -913,13 +993,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.handleEnter()
 	case "up":
-		if m.ta.LineCount() == 1 {
+		if m.ta.Line() == 0 {
 			m = m.historyBack()
 			m.syncLayout()
 			return m, nil
 		}
 	case "down":
-		if m.ta.LineCount() == 1 {
+		if m.ta.Line() == m.ta.LineCount()-1 {
 			m = m.historyForward()
 			m.syncLayout()
 			return m, nil
@@ -949,11 +1029,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.tabPrefix = ""
 	m.tabHints = nil
 
-	switch msg.String() {
-	case "shift+enter", "alt+enter", "ctrl+n":
-		m.ta.SetHeight(m.ta.LineCount() + 1)
-		m.syncLayout()
-	}
 	var cmd tea.Cmd
 	cmd = m.updateTA(msg)
 	m.syncLayout()
@@ -963,7 +1038,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if m.ta.Value() != "" {
 		m.ta.Reset()
-		m.ta.SetHeight(1)
+
 		m.tabMatches = nil
 		m.tabIdx = -1
 		m.tabPrefix = ""
@@ -986,7 +1061,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(m.ta.Value())
 	m.ta.Reset()
-	m.ta.SetHeight(1)
+
 	m.tabMatches = nil
 	m.tabIdx = -1
 	m.tabPrefix = ""
@@ -1106,7 +1181,7 @@ func (m model) handleForgetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		answer := strings.TrimSpace(m.ta.Value())
 		m.ta.Reset()
-		m.ta.SetHeight(1)
+
 		m.syncLayout()
 		m.appendTranscript(answer + "\n")
 		return m.resolveForget(answer), nil
@@ -1186,7 +1261,6 @@ func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searching = false
 		m.searchQuery.Reset()
 		m.ta.SetValue(m.saved)
-		m.ta.SetHeight(m.ta.LineCount())
 		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
@@ -1423,7 +1497,6 @@ func (m model) historyBack() model {
 		m.histIdx--
 	}
 	m.ta.SetValue(h[m.histIdx])
-	m.ta.SetHeight(m.ta.LineCount())
 	return m
 }
 
@@ -1439,7 +1512,6 @@ func (m model) historyForward() model {
 	} else {
 		m.ta.SetValue(h[m.histIdx])
 	}
-	m.ta.SetHeight(m.ta.LineCount())
 	return m
 }
 
@@ -1482,7 +1554,6 @@ func (m model) historySearchBack() model {
 	if idx := searchBack(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
 		m.searchIdx = idx
 		m.ta.SetValue(h[idx])
-		m.ta.SetHeight(m.ta.LineCount())
 	}
 	return m
 }
@@ -1497,7 +1568,6 @@ func (m model) historySearchForward() model {
 	if idx := searchForward(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
 		m.searchIdx = idx
 		m.ta.SetValue(h[idx])
-		m.ta.SetHeight(m.ta.LineCount())
 	}
 	return m
 }
@@ -1728,32 +1798,14 @@ func expandPath(prefix, cwd string) []string {
 
 // --- Textarea helpers ---
 
-// syncHeight sets the textarea height to exactly the number of display rows
-// the textarea itself renders. We derive this from ta.View() so the count
-// matches the textarea's own word-wrap logic (uniseg grapheme widths, prompt
-// width, etc.) rather than our own approximation which drifts for long lines.
-func syncHeight(ta *textarea.Model) {
-	view := ta.View()
-	// ta.View() includes a trailing \n on each row (including the last one
-	// added by the "always show m.Height lines" padding loop). Count newlines
-	// and that gives us the display row count the textarea wants.
-	rows := strings.Count(view, "\n")
-	if rows < 1 {
-		rows = 1
-	}
-	ta.SetHeight(rows)
-}
-
-// updateTA pre-grows the textarea by one row before passing the message to
-// ta.Update. Without this, when text first wraps to a second line the textarea
-// scrolls its internal viewport (offset +1) to keep the cursor visible, hiding
-// line 1. The extra row gives headroom so no internal scroll happens; syncHeight
-// then resets the height to the exact visual row count.
 func (m *model) updateTA(msg tea.Msg) tea.Cmd {
+	// Pre-expand the textarea by one row before the update so that
+	// repositionView() inside ta.Update never scrolls when a new wrap row
+	// appears. After the update, setViewportContent / syncLayout trims it back
+	// to the exact row count via taRows().
 	m.ta.SetHeight(m.ta.Height() + 1)
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
-	syncHeight(&m.ta)
 	return cmd
 }
 
