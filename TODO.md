@@ -42,7 +42,7 @@ I didn't see a single percept decaying
 
 When trying to submit input during agent response, "[milk] agent is responding..." is added to chat view. Show it in status bar instead
 
-## Slash commands and @files colorization broken when using multiline input
+## ~~Slash commands and @files colorization broken when using multiline input~~ DONE
 
 Works only in single line
 
@@ -53,3 +53,23 @@ Claude keeps asking the same permissions, as if milk isn't saving them into clau
 ## Selection hint too present
 
 Selection hint should be visible only when selection is started, that is when mouse as been moved at least a bit after press, before release
+
+## Possible permission issue
+
+Claude is asking many times between different turns the same permission requests, sa if milk isn't updating correctly its configurations
+
+## Input Navigation vs History
+
+When in input area, if up arrow is pressed while at the beginning of the first line, history should be navigated
+
+## Prompt label refactor
+
+The input prompt currently shows the next-turn agent (e.g. `[local]`, `[claude]`). Since the header bar and status bar already carry full agent/mode info, the prompt label could be simplified to just `>` or a very short marker. Evaluate whether removing the agent name from the prompt reduces clutter without losing context.
+
+## Input area: lines beyond the first not visible
+
+When typing a long enough input to overflow the first textarea line, subsequent lines are not visible — only the first line is shown in the input area. The text is being buffered (it can be submitted), but the visual display doesn't grow to show continuation lines.
+
+## Memory tuning
+
+Nothing decays, all becomes global
