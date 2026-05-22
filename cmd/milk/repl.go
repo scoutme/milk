@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
+	"github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,6 +50,12 @@ type chunkMsg struct{ text string }
 type agentDoneMsg struct{ err error }
 
 type spinnerTickMsg struct{}
+
+// copyFeedbackClearMsg clears the transient copy confirmation in the status bar.
+type copyFeedbackClearMsg struct{}
+
+// busyHintClearMsg clears the transient "agent is responding" hint in the status bar.
+type busyHintClearMsg struct{}
 
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
@@ -143,6 +152,7 @@ type model struct {
 	// tab completion
 	tabMatches []string
 	tabIdx     int
+	tabLine    int      // line index the current tabMatches were built for
 	tabPrefix  string   // what the user had typed when Tab was first pressed
 	tabHints   []string // hint lines shown below viewport while completing a slash command
 
@@ -159,12 +169,23 @@ type model struct {
 	activeToolUse string
 
 	// memory panel
-	panelMemory bool
-	panelOffset int
-	mem         *memory.Store
+	panelMemory        bool
+	panelOffset        int
+	mem                *memory.Store
+	lastPanelClickID   string
+	lastPanelClickTime time.Time
 
 	// pending /forget confirmation
 	pendingForget *forgetState
+
+	// click-to-select state (content-space coordinates; -1 = none)
+	selAnchorLine int
+	selAnchorCol  int
+	selEndLine    int
+	selEndCol     int
+	selText       string // plain text of the selected range (populated after release)
+	copyFeedback  string // transient "[copied N chars]" shown in status bar
+	busyHint      string // transient "agent is responding" shown in status bar
 
 	// injected dependencies
 	ctx    context.Context
@@ -176,15 +197,17 @@ type model struct {
 func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
 	return model{
-		histIdx:     -1,
-		ctx:         ctx,
-		st:          st,
-		rtr:         rtr,
-		agents:      agents,
-		ta:          ta,
-		transcript:  &strings.Builder{},
-		mem:         mem,
-		panelMemory: true,
+		histIdx:       -1,
+		ctx:           ctx,
+		st:            st,
+		rtr:           rtr,
+		agents:        agents,
+		ta:            ta,
+		transcript:    &strings.Builder{},
+		mem:           mem,
+		panelMemory:   true,
+		selAnchorLine: -1,
+		selEndLine:    -1,
 	}
 }
 
@@ -222,12 +245,11 @@ func (m *model) refreshPrompt() {
 	plain := stripANSI(label)
 	promptWidth := len(plain)
 
-	indent := strings.Repeat(" ", promptWidth)
 	m.ta.SetPromptFunc(promptWidth, func(lineIdx int) string {
 		if lineIdx == 0 {
 			return label
 		}
-		return indent
+		return ""
 	})
 	if m.width > 0 {
 		m.ta.SetWidth(m.mainWidth() - promptWidth)
@@ -250,8 +272,8 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", "ctrl+m":
-		m.appendTranscript(dim("[milk] agent is responding — press Ctrl+C to interrupt\n"))
-		return m, nil
+		m.busyHint = "agent is responding — Ctrl+C to interrupt"
+		return m, busyHintClearCmd()
 	}
 	var cmd tea.Cmd
 	cmd = m.updateTA(msg)
@@ -317,6 +339,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.busy = false
 	m.activeToolUse = ""
 	m.cancelTurn = nil
+	m.busyHint = ""
 	if m.interrupted {
 		m.interrupted = false
 		m.appendTranscript(dim("[interrupted]") + "\n")
@@ -347,8 +370,151 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.vp.ScrollDown(3)
 		}
+	case tea.MouseButtonLeft:
+		if inPanel && ev.Action == tea.MouseActionPress {
+			const panelRowStart = 2 // same header offset as the main viewport
+			panelLine := m.panelOffset + (ev.Y - panelRowStart)
+			ids := buildPanelLineIDs(m.mem)
+			if panelLine >= 0 && panelLine < len(ids) {
+				id := ids[panelLine]
+				if id != "" {
+					now := time.Now()
+					if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
+						// Double-click: show full percept details in the transcript.
+						result := execMemoryShow("#"+id[:min(6, len(id))], m.st)
+						m.appendTranscript(result + "\n")
+						m.vp.GotoBottom()
+						m.lastPanelClickID = ""
+					} else {
+						m.lastPanelClickID = id
+						m.lastPanelClickTime = now
+					}
+				}
+			}
+			break
+		}
+		// Only handle events inside the viewport area (rows 2..height-2).
+		const vpRowStart = 2
+		vpRowEnd := m.height - 2
+		if ev.Y < vpRowStart || ev.Y >= vpRowEnd || inPanel {
+			break
+		}
+		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
+		switch ev.Action {
+		case tea.MouseActionPress:
+			m.selAnchorLine = contentLine
+			m.selAnchorCol = ev.X
+			m.selEndLine = -1
+			m.selEndCol = 0
+			m.selText = ""
+			m.setViewportContent()
+		case tea.MouseActionMotion:
+			if m.selAnchorLine >= 0 {
+				m.selEndLine = contentLine
+				m.selEndCol = ev.X
+				m.setViewportContent()
+			}
+		case tea.MouseActionRelease:
+			if m.selAnchorLine >= 0 {
+				if contentLine == m.selAnchorLine && ev.X == m.selAnchorCol {
+					m.clearSelection()
+					m.setViewportContent()
+					return m, nil
+				}
+				m.selEndLine = contentLine
+				m.selEndCol = ev.X
+				m.selText = m.selectionText()
+				m.setViewportContent()
+			}
+		}
+	case tea.MouseButtonRight:
+		if ev.Action == tea.MouseActionPress {
+			if m.selText != "" {
+				copyToClipboard(m.selText)
+				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.selText)))
+				m.clearSelection()
+				m.setViewportContent()
+				return m, copyFeedbackClearCmd()
+			}
+			// No selection: paste clipboard content into the textarea.
+			text, err := clipboard.ReadAll()
+			if err == nil && text != "" {
+				m.ta.InsertString(text)
+			}
+		}
 	}
 	return m, nil
+}
+
+// selectionText extracts the plain text between the selection anchor and end,
+// respecting column boundaries on the first and last lines.
+func (m *model) selectionText() string {
+	lines := strings.Split(m.wrappedTranscript(), "\n")
+	loLine, loCol := m.selAnchorLine, m.selAnchorCol
+	hiLine, hiCol := m.selEndLine, m.selEndCol
+	if hiLine < loLine || (hiLine == loLine && hiCol < loCol) {
+		loLine, loCol, hiLine, hiCol = hiLine, hiCol, loLine, loCol
+	}
+	if loLine < 0 {
+		loLine = 0
+	}
+	if hiLine >= len(lines) {
+		hiLine = len(lines) - 1
+	}
+	var sb strings.Builder
+	for i := loLine; i <= hiLine; i++ {
+		plain := []rune(ansi.Strip(lines[i]))
+		start, end := 0, len(plain)
+		if i == loLine {
+			if loCol < len(plain) {
+				start = loCol
+			} else {
+				start = len(plain)
+			}
+		}
+		if i == hiLine {
+			if hiCol < len(plain) {
+				end = hiCol
+			}
+		}
+		if start > end {
+			start = end
+		}
+		sb.WriteString(string(plain[start:end]))
+		if i < hiLine {
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// copyToClipboard writes text to the system clipboard via atotto/clipboard (which
+// handles WSL via clip.exe, Wayland via wl-copy, X11 via xclip/xsel) and also
+// emits an OSC 52 sequence as a fallback for SSH or tmux environments.
+func copyToClipboard(text string) {
+	// Primary: OS clipboard (works on WSL, X11, Wayland, macOS).
+	_ = clipboard.WriteAll(text)
+	// Secondary: OSC 52 — picked up by terminals that support it (kitty, iTerm2, tmux).
+	osc52.New(text).WriteTo(os.Stderr)
+}
+
+// copyFeedbackClearCmd returns a command that clears the copy feedback after 2s.
+func copyFeedbackClearCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return copyFeedbackClearMsg{} })
+}
+
+// busyHintClearCmd returns a command that clears the busy hint after 3s.
+func busyHintClearCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return busyHintClearMsg{} })
+}
+
+// clearSelection resets selection state.
+func (m *model) clearSelection() {
+	m.selAnchorLine = -1
+	m.selAnchorCol = 0
+	m.selEndLine = -1
+	m.selEndCol = 0
+	m.selText = ""
 }
 
 // setViewportContent rebuilds the full viewport content:
@@ -374,12 +540,52 @@ func (m *model) appendTranscript(text string) {
 }
 
 // wrappedTranscript returns the transcript word-wrapped to the viewport content width.
+// When a selection range is active, the selected text region is highlighted with an
+// inverted background, respecting column boundaries on the first and last lines.
 func (m *model) wrappedTranscript() string {
 	vw := m.vpWidth()
+	raw := m.transcript.String()
 	if vw <= 0 {
-		return m.transcript.String()
+		return raw
 	}
-	return ansi.Wrap(m.transcript.String(), vw, "")
+	wrapped := ansi.Wrap(raw, vw, "")
+	if m.selAnchorLine < 0 || m.selEndLine < 0 {
+		return wrapped
+	}
+	loLine, loCol := m.selAnchorLine, m.selAnchorCol
+	hiLine, hiCol := m.selEndLine, m.selEndCol
+	if hiLine < loLine || (hiLine == loLine && hiCol < loCol) {
+		loLine, loCol, hiLine, hiCol = hiLine, hiCol, loLine, loCol
+	}
+	lines := strings.Split(wrapped, "\n")
+	selStyle := lipgloss.NewStyle().Reverse(true)
+	for i := range lines {
+		if i < loLine || i > hiLine {
+			continue
+		}
+		plain := []rune(ansi.Strip(lines[i]))
+		start, end := 0, len(plain)
+		if i == loLine {
+			if loCol < len(plain) {
+				start = loCol
+			} else {
+				start = len(plain)
+			}
+		}
+		if i == hiLine {
+			if hiCol < len(plain) {
+				end = hiCol
+			}
+		}
+		if start > end {
+			start = end
+		}
+		before := string(plain[:start])
+		sel := selStyle.Render(string(plain[start:end]))
+		after := string(plain[end:])
+		lines[i] = before + sel + after
+	}
+	return strings.Join(lines, "\n")
 }
 
 // viewportHeight is the full terminal height minus the header bar (content + border), status bar, and hint lines.
@@ -476,7 +682,20 @@ func (m *model) statusBar() string {
 	}
 	left := fmt.Sprintf(" %s  %s", dim("session:"+sessID), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
-	gap := max(m.width-len(stripANSI(left))-len(right), 1)
+	if m.busyHint != "" {
+		left += yellow(" [" + m.busyHint + "]")
+	} else if m.copyFeedback != "" {
+		left += green(" [" + m.copyFeedback + "]")
+	} else if m.selAnchorLine >= 0 {
+		var selStatus string
+		if m.selText != "" {
+			selStatus = yellow(fmt.Sprintf(" [%d chars — right-click to copy]", len([]rune(m.selText))))
+		} else {
+			selStatus = yellow(fmt.Sprintf(" [selecting: line %d col %d — release to end]", m.selAnchorLine+1, m.selAnchorCol+1))
+		}
+		left += selStatus
+	}
+	gap := max(m.width-len(stripANSI(left))-len(ansi.Strip(right)), 1)
 	bar := left + strings.Repeat(" ", gap) + right
 	if isTTY {
 		if m.pendingPerm != nil {
@@ -591,6 +810,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case copyFeedbackClearMsg:
+		m.copyFeedback = ""
+		return m, nil
+
+	case busyHintClearMsg:
+		m.busyHint = ""
+		return m, nil
+
 	case memoryRefreshMsg:
 		if m.panelMemory {
 			return m, memoryPollTick()
@@ -655,6 +882,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "esc":
+		if m.selAnchorLine >= 0 {
+			m.clearSelection()
+			m.setViewportContent()
+			return m, nil
+		}
 	case "ctrl+c":
 		return m.handleCtrlC()
 	case "ctrl+d":
@@ -1306,20 +1539,29 @@ func buildCmdVariants() map[string][]cmdVariant {
 }
 
 func (m model) handleTab() model {
-	input := m.ta.Value()
-	if len(m.tabMatches) == 0 {
-		m.tabMatches, m.tabIdx = buildTabMatches(input, m.st.cwd)
+	fullInput := m.ta.Value()
+	lines := strings.Split(fullInput, "\n")
+	curLine := m.ta.Line()
+	if curLine >= len(lines) {
+		curLine = len(lines) - 1
+	}
+	lineInput := lines[curLine]
+
+	if len(m.tabMatches) == 0 || curLine != m.tabLine {
+		m.tabMatches, m.tabIdx = buildTabMatches(lineInput, m.st.cwd)
+		m.tabLine = curLine
 		if len(m.tabMatches) == 0 {
 			return m
 		}
 		// Capture what the user typed before completion — used to bold the
 		// matching prefix in hints and the completed text in the textarea.
-		m.tabPrefix = tabInputPrefix(input)
+		m.tabPrefix = tabInputPrefix(lineInput)
 	} else {
 		m.tabIdx = (m.tabIdx + 1) % len(m.tabMatches)
 	}
 	completed := m.tabMatches[m.tabIdx]
-	m.ta.SetValue(applyTabCompletion(input, completed))
+	lines[curLine] = applyTabCompletion(lineInput, completed)
+	m.ta.SetValue(strings.Join(lines, "\n"))
 	m.ta.CursorEnd()
 
 	// Build hint lines for the completed slash command.
@@ -1351,66 +1593,102 @@ func (m model) handleTab() model {
 }
 
 // tabInputPrefix extracts the slash-command prefix the user had typed in input.
+// Uses the last /cmd token so that "/help foo /exp<TAB>" completes /exp, not /help.
+// isSlashCmdToken returns true when w looks like a slash command token
+// (/word…), as opposed to bare slashes or paths like "////".
+func isSlashCmdToken(w string) bool {
+	return len(w) >= 2 && w[0] == '/' && w[1] != '/'
+}
+
 func tabInputPrefix(input string) string {
-	for w := range strings.FieldsSeq(input) {
-		if strings.HasPrefix(w, "/") {
-			return w
-		}
+	if input == "" || input[len(input)-1] == ' ' || input[len(input)-1] == '\t' {
+		return ""
 	}
-	stripped := strings.TrimLeft(input, " ")
-	if strings.HasPrefix(stripped, "/") {
-		return stripped
+	words := strings.Fields(input)
+	if len(words) == 0 {
+		return ""
+	}
+	last := words[len(words)-1]
+	if isSlashCmdToken(last) || strings.HasPrefix(last, "@") {
+		return last
 	}
 	return ""
 }
 
-// applyTabCompletion replaces the relevant token in input with completed.
+// applyTabCompletion replaces the relevant token in input with completed,
+// preserving all surrounding whitespace (no space collapsing).
 func applyTabCompletion(input, completed string) string {
-	if !strings.HasPrefix(completed, "@") {
+	if strings.HasPrefix(completed, "@") {
+		result, found := replaceLastToken(input, func(w string) bool { return strings.HasPrefix(w, "@") }, completed)
+		if found {
+			return result
+		}
 		return completed
 	}
-	words := strings.Fields(input)
-	for i := len(words) - 1; i >= 0; i-- {
-		if strings.HasPrefix(words[i], "@") {
-			words[i] = completed
-			return strings.Join(words, " ")
-		}
+	result, found := replaceLastToken(input, isSlashCmdToken, completed)
+	if found {
+		return result
 	}
-	return input
+	return completed
+}
+
+// replaceLastToken finds the last token in input matching pred and replaces it
+// with replacement, preserving all surrounding whitespace (no space collapsing).
+// Returns the result and whether a matching token was found.
+func replaceLastToken(input string, pred func(string) bool, replacement string) (string, bool) {
+	lastStart, lastEnd := -1, -1
+	i := 0
+	for i < len(input) {
+		// skip whitespace
+		for i < len(input) && (input[i] == ' ' || input[i] == '\t') {
+			i++
+		}
+		if i >= len(input) {
+			break
+		}
+		// find token end
+		j := i
+		for j < len(input) && input[j] != ' ' && input[j] != '\t' {
+			j++
+		}
+		w := input[i:j]
+		if pred(w) {
+			lastStart, lastEnd = i, j
+		}
+		i = j
+	}
+	if lastStart < 0 {
+		return input, false
+	}
+	return input[:lastStart] + replacement + input[lastEnd:], true
 }
 
 func buildTabMatches(input, cwd string) ([]string, int) {
+	// Never complete when the cursor is between words (trailing whitespace).
+	if input == "" || input[len(input)-1] == ' ' || input[len(input)-1] == '\t' {
+		return nil, 0
+	}
 	words := strings.Fields(input)
-	for i := len(words) - 1; i >= 0; i-- {
-		if strings.HasPrefix(words[i], "@") {
-			pathPrefix := words[i][1:]
-			matches := expandPath(pathPrefix, cwd)
-			atMatches := make([]string, len(matches))
-			for j, m := range matches {
-				atMatches[j] = "@" + m
-			}
-			return atMatches, 0
-		}
+	if len(words) == 0 {
+		return nil, 0
 	}
-	prefix := ""
-	for _, w := range words {
-		if strings.HasPrefix(w, "/") {
-			prefix = w
-			break
+	// Only complete the last word — the token the cursor is actively on.
+	last := words[len(words)-1]
+	if strings.HasPrefix(last, "@") {
+		pathPrefix := last[1:]
+		matches := expandPath(pathPrefix, cwd)
+		atMatches := make([]string, len(matches))
+		for j, m := range matches {
+			atMatches[j] = "@" + m
 		}
+		return atMatches, 0
 	}
-	if prefix == "" {
-		stripped := strings.TrimLeft(input, " ")
-		if strings.HasPrefix(stripped, "/") {
-			prefix = stripped
-		}
-	}
-	if prefix == "" {
+	if !isSlashCmdToken(last) {
 		return nil, 0
 	}
 	var matches []string
 	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd, prefix) {
+		if strings.HasPrefix(cmd, last) {
 			matches = append(matches, cmd)
 		}
 	}
@@ -1450,28 +1728,20 @@ func expandPath(prefix, cwd string) []string {
 
 // --- Textarea helpers ---
 
-// visualRows returns the number of visual rows the textarea content occupies,
-// accounting for soft-wrapping of long logical lines. Sizes the textarea so it
-// always shows all content without internal scrolling.
-func visualRows(ta *textarea.Model) int {
-	w := ta.Width()
-	if w <= 0 {
-		w = 80
-	}
-	total := 0
-	for line := range strings.SplitSeq(ta.Value(), "\n") {
-		cols := len([]rune(line))
-		total += cols/w + 1
-	}
-	if total < 1 {
-		total = 1
-	}
-	return total
-}
-
+// syncHeight sets the textarea height to exactly the number of display rows
+// the textarea itself renders. We derive this from ta.View() so the count
+// matches the textarea's own word-wrap logic (uniseg grapheme widths, prompt
+// width, etc.) rather than our own approximation which drifts for long lines.
 func syncHeight(ta *textarea.Model) {
-	h := visualRows(ta)
-	ta.SetHeight(h)
+	view := ta.View()
+	// ta.View() includes a trailing \n on each row (including the last one
+	// added by the "always show m.Height lines" padding loop). Count newlines
+	// and that gives us the display row count the textarea wants.
+	rows := strings.Count(view, "\n")
+	if rows < 1 {
+		rows = 1
+	}
+	ta.SetHeight(rows)
 }
 
 // updateTA pre-grows the textarea by one row before passing the message to
@@ -1493,24 +1763,149 @@ func (m *model) colorizeInput(view string) string {
 	if !isTTY {
 		return view
 	}
-	lastNL := strings.LastIndex(view, "\n")
-	var prefix, line string
-	if lastNL >= 0 {
-		prefix = view[:lastNL+1]
-		line = view[lastNL+1:]
-	} else {
-		line = view
+
+	// The textarea cursor is rendered as \x1b[7m<char>\x1b[m (reverse-video).
+	// Extract it before colorizing so ANSI width math stays correct, then
+	// re-inject at the same visual column afterward.
+	type cursorSave struct {
+		lineIdx   int
+		visualCol int // 0-based visual column of the cursor character
+		escape    string
 	}
-	promptEnd := strings.LastIndex(line, "> ")
+	var cursor *cursorSave
+
+	cursorRE := "\x1b[7m"
+	if idx := strings.Index(view, cursorRE); idx >= 0 {
+		// Find the full cursor sequence: \x1b[7m<char>\x1b[m
+		end := strings.Index(view[idx:], "\x1b[m")
+		var seq string
+		if end >= 0 {
+			seq = view[idx : idx+end+3] // include trailing \x1b[m
+		} else {
+			seq = view[idx:]
+		}
+		// Determine which line and visual column the cursor sits on.
+		before := view[:idx]
+		lineIdx := strings.Count(before, "\n")
+		lastNL := strings.LastIndex(before, "\n")
+		linePrefix := before[lastNL+1:]
+		visualCol := ansi.StringWidth(linePrefix)
+		cursor = &cursorSave{lineIdx: lineIdx, visualCol: visualCol, escape: seq}
+		// Remove cursor from view so subsequent ANSI stripping is clean.
+		view = view[:idx] + ansi.Strip(seq) + view[idx+len(seq):]
+	}
+
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return view
+	}
+
+	// Strip ANSI from line 0 to find the visual position of "> ".
+	// line0Plain is used for measurement only; line 0 itself is re-written below.
+	line0Plain := ansi.Strip(lines[0])
+	promptEnd := strings.Index(line0Plain, "> ")
 	if promptEnd < 0 {
 		return view
 	}
-	promptPart := line[:promptEnd+2]
-	inputPart := line[promptEnd+2:]
-	if m.searching && m.searchQuery.Len() > 0 {
-		return prefix + promptPart + highlightMatch(inputPart, m.searchQuery.String())
+	// indentVisual is the number of visible columns up to and including "> ".
+	indentVisual := promptEnd + 2
+
+	// For line 0: find the byte offset in the raw (ANSI-containing) line that
+	// corresponds to indentVisual visible columns, then split there.
+	// We advance through the raw line, counting visible chars by stripping ANSI.
+	line0ByteSplit := func(raw string, visualCols int) int {
+		vis := 0
+		i := 0
+		for i < len(raw) {
+			if raw[i] == '\x1b' {
+				// skip ANSI escape sequence
+				j := i + 1
+				for j < len(raw) && raw[j] != 'm' {
+					j++
+				}
+				if j < len(raw) {
+					j++ // consume 'm'
+				}
+				i = j
+				continue
+			}
+			vis++
+			if vis == visualCols {
+				_, runeSize := utf8.DecodeRuneInString(raw[i:])
+				return i + runeSize
+			}
+			_, runeSize := utf8.DecodeRuneInString(raw[i:])
+			i += runeSize
+		}
+		return len(raw)
 	}
-	return prefix + promptPart + colorizeTokens(inputPart)
+
+	for i, line := range lines {
+		// Strip ANSI from this line to work with visible characters only.
+		plain := ansi.Strip(line)
+
+		var prefix, inputPart string
+		if i == 0 {
+			split := line0ByteSplit(line, indentVisual)
+			prefix = line[:split]
+			inputPart = plain[indentVisual:]
+		} else {
+			// Continuation lines have indentVisual plain spaces as indent.
+			if len(plain) <= indentVisual {
+				continue
+			}
+			prefix = strings.Repeat(" ", indentVisual)
+			inputPart = plain[indentVisual:]
+		}
+
+		var colored string
+		if m.searching && m.searchQuery.Len() > 0 {
+			colored = highlightMatch(inputPart, m.searchQuery.String())
+		} else {
+			colored = colorizeTokens(inputPart)
+		}
+		lines[i] = prefix + colored
+	}
+
+	// Re-inject the cursor escape at the saved visual column.
+	if cursor != nil && cursor.lineIdx < len(lines) {
+		line := lines[cursor.lineIdx]
+		targetCol := cursor.visualCol
+		byteOff := 0
+		vis := 0
+		for byteOff < len(line) {
+			if line[byteOff] == '\x1b' {
+				// skip ANSI escape sequence
+				j := byteOff + 1
+				for j < len(line) && line[j] != 'm' {
+					j++
+				}
+				if j < len(line) {
+					j++
+				}
+				byteOff = j
+				continue
+			}
+			if vis == targetCol {
+				break
+			}
+			// Advance by one full UTF-8 rune.
+			_, runeSize := utf8.DecodeRuneInString(line[byteOff:])
+			vis++
+			byteOff += runeSize
+		}
+		// Wrap the rune at byteOff with reverse-video on/off.
+		// Use \x1b[27m (reverse off) instead of \x1b[m (full reset) so active
+		// color codes (e.g. yellow on a slash command) remain in effect after
+		// the cursor character.
+		if byteOff < len(line) {
+			_, runeSize := utf8.DecodeRuneInString(line[byteOff:])
+			ch := line[byteOff : byteOff+runeSize]
+			lines[cursor.lineIdx] = line[:byteOff] + "\x1b[7m" + ch + "\x1b[27m" + line[byteOff+runeSize:]
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // highlightMatch bolds and yellows the first occurrence of query inside s.
@@ -1531,26 +1926,34 @@ func colorizeTokens(s string) string {
 }
 
 func colorizeTokenLine(s string) string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return s
-	}
+	plain := ansi.Strip(s)
 	var out strings.Builder
-	for i, w := range words {
-		if i > 0 {
-			out.WriteByte(' ')
+	i := 0
+	for i < len(plain) {
+		// Emit whitespace runs as-is.
+		j := i
+		for j < len(plain) && plain[j] == ' ' {
+			j++
 		}
+		if j > i {
+			out.WriteString(plain[i:j])
+			i = j
+			continue
+		}
+		// Collect non-whitespace token.
+		for j < len(plain) && plain[j] != ' ' {
+			j++
+		}
+		w := plain[i:j]
 		switch {
-		case strings.HasPrefix(w, "/"):
+		case isSlashCmdToken(w):
 			out.WriteString(yellow(w))
 		case strings.HasPrefix(w, "@"):
 			out.WriteString(dim(w))
 		default:
 			out.WriteString(w)
 		}
-	}
-	if len(s) > 0 && s[len(s)-1] == ' ' {
-		out.WriteByte(' ')
+		i = j
 	}
 	return out.String()
 }
@@ -1654,9 +2057,10 @@ func readHistoryFile(path string) []string {
 	defer f.Close()
 	var lines []string
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20) // 1 MiB — accommodate long multi-line entries
 	for sc.Scan() {
 		if line := sc.Text(); line != "" {
-			lines = append(lines, line)
+			lines = append(lines, strings.ReplaceAll(line, `\n`, "\n"))
 		}
 	}
 	return lines
@@ -1673,8 +2077,8 @@ func writeHistoryFile(path string, history []string) {
 	if len(history) > maxPersistedHistory {
 		start = len(history) - maxPersistedHistory
 	}
-	for _, line := range history[start:] {
-		fmt.Fprintln(w, line)
+	for _, entry := range history[start:] {
+		fmt.Fprintln(w, strings.ReplaceAll(entry, "\n", `\n`))
 	}
 	w.Flush() //nolint:errcheck
 }
@@ -1746,12 +2150,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	)
 	st.program = p
 
-	// Mode 1000+1006: X10 basic mouse + SGR extension.
-	// Reports scroll wheel and clicks as tea.MouseMsg without capturing drag,
-	// so native terminal selection and middle-click paste work without Shift.
-	os.Stdout.WriteString("\x1b[?1000h\x1b[?1006h") //nolint:errcheck
+	// Mode 1002+1006: button-motion + SGR extension.
+	// Reports drag coordinates while a button is held, enabling live selection
+	// highlight updates. Native terminal selection is replaced by app-managed selection.
+	os.Stdout.WriteString("\x1b[?1002h\x1b[?1006h") //nolint:errcheck
 	finalModel, err := p.Run()
-	os.Stdout.WriteString("\x1b[?1006l\x1b[?1000l") //nolint:errcheck
+	os.Stdout.WriteString("\x1b[?1006l\x1b[?1002l") //nolint:errcheck
 
 	if fm, ok := finalModel.(model); ok {
 		if gp, err := globalHistoryPath(); err == nil {

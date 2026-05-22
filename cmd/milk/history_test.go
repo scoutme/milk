@@ -126,6 +126,26 @@ func TestHistoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHistoryRoundTrip_MultiLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history")
+	entries := []string{
+		"single line",
+		"line one\nline two\nline three",
+		"another entry",
+	}
+	writeHistoryFile(path, entries)
+	got := readHistoryFile(path)
+	if len(got) != len(entries) {
+		t.Fatalf("expected %d entries, got %d: %q", len(entries), len(got), got)
+	}
+	for i, want := range entries {
+		if got[i] != want {
+			t.Errorf("entry %d: expected %q, got %q", i, want, got[i])
+		}
+	}
+}
+
 func TestHistoryRoundTrip_Missing(t *testing.T) {
 	got := readHistoryFile("/nonexistent/path/history")
 	if got != nil {
