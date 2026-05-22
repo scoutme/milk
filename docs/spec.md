@@ -92,6 +92,7 @@ The classifier uses the same model instance as the local coding agent. No second
 ## Claude Agent
 
 - Interface: `claude` CLI subprocess
+- **AWS credential injection**: when `aws_auth_refresh: true` in `~/.milk/config.json`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn to obtain fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped from the inherited environment to prevent wrong-account overrides. See ADR 23.
 - First escalation turn:
   ```
   claude --print --output-format stream-json \
@@ -230,6 +231,7 @@ milk [flags] <prompt>         # single-prompt mode
   "llama_model": "qwen2.5-coder",
   "claude_bin": "claude",
   "default_route": "local",
+  "aws_auth_refresh": false,
   "rules": {
     "escalate_above_tokens": 2000,
     "local_below_tokens": 30,

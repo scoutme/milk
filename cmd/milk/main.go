@@ -117,6 +117,7 @@ func run(cmd *cobra.Command, args []string) error {
 		localAgent.WithOtelDir(od)
 	}
 	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+	claudeAgent = applyAWSCreds(cfg, claudeAgent)
 	if dbg, err := openClaudeDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
@@ -159,6 +160,28 @@ func run(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+}
+
+// applyAWSCreds injects resolved AWS credentials into the agent when
+// cfg.AWSAuthRefresh is enabled. The command is read from ~/.claude/settings.json.
+func applyAWSCreds(cfg config.Config, agent *claude.Agent) *claude.Agent {
+	if !cfg.AWSAuthRefresh {
+		return agent
+	}
+	cmd := claudesettings.AWSAuthRefreshCommand()
+	if cmd == "" {
+		fmt.Fprintf(os.Stderr, "%s warning: aws_auth_refresh enabled but awsAuthRefresh not found in ~/.claude/settings.json\n", milkTag())
+		return agent
+	}
+	creds, err := claude.ResolveAWSCreds(cmd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: aws_auth_refresh failed: %v\n", milkTag(), err)
+		return agent
+	}
+	if creds != nil {
+		agent = agent.WithExtraEnv(creds.Env()...)
+	}
+	return agent
 }
 
 // openClaudeDebugLog opens (or creates/appends) the Claude raw NDJSON debug log
@@ -264,12 +287,13 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+			escalateAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+			escalateAgent = applyAWSCreds(cfg, escalateAgent)
 			var localCs *claudesettings.Store
 			if cwd, err := os.Getwd(); err == nil {
 				localCs, _ = claudesettings.Open(cwd)
 			}
-			return runClaudeWith(ctx, sess, claudeAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
+			return runClaudeWith(ctx, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
 		}
 		return err
 	}

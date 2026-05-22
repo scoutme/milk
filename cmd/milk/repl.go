@@ -2020,6 +2020,10 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	case router.TargetLocal:
 		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetClaude:
+		// Refresh credentials before each turn so expiring tokens are renewed.
+		// The credential-process handles its own cache and returns immediately
+		// when the token is still fresh, so this is cheap in the common case.
+		claudeAgent = applyAWSCreds(st.cfg, claudeAgent)
 		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
 	}
 	return nil
@@ -2106,6 +2110,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAgent.WithOtelDir(od)
 	}
 	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+	claudeAgent = applyAWSCreds(cfg, claudeAgent)
 	if dbg, err := openClaudeDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {

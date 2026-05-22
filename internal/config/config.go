@@ -65,6 +65,13 @@ type Config struct {
 	// DebugClaudeCode writes every raw NDJSON line from the claude subprocess to
 	// ~/.milk/claude_debug.ndjson — useful for understanding stream protocol issues.
 	DebugClaudeCode bool `json:"debug_claude_code"`
+	// AWSAuthRefresh enables AWS credential injection for the claude subprocess.
+	// When true, milk reads the awsAuthRefresh command from ~/.claude/settings.json,
+	// runs it, and injects the resulting credentials as explicit AWS_* env vars.
+	// This prevents stale or wrong-account credentials in the shell environment
+	// from overriding the correct ones. Requires awsAuthRefresh to be set in
+	// ~/.claude/settings.json (it is set automatically by claude-code-with-bedrock).
+	AWSAuthRefresh bool `json:"aws_auth_refresh"`
 }
 
 func defaults() Config {

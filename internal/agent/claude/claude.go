@@ -27,6 +27,7 @@ type Agent struct {
 	onThinking            func(string)                 // called on thinking_delta tokens
 	onPercept             func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
 	perceptNonce          string                       // session-specific nonce matching the system-prompt instruction
+	extraEnv              []string                     // extra KEY=VALUE pairs injected into subprocess env
 }
 
 func New(bin string) *Agent {
@@ -101,6 +102,14 @@ func (a *Agent) WithOnPercept(fn func(content, consumerHint string), nonce strin
 func (a *Agent) WithExtraAllowedTool(tool string) *Agent {
 	c := *a
 	c.allowedTools = mergeUniq(a.allowedTools, []string{tool})
+	return &c
+}
+
+// WithExtraEnv returns a copy of the agent with the given KEY=VALUE pairs appended
+// to the subprocess environment. These override any inherited values for the same key.
+func (a *Agent) WithExtraEnv(pairs ...string) *Agent {
+	c := *a
+	c.extraEnv = append(append([]string{}, a.extraEnv...), pairs...)
 	return &c
 }
 
@@ -201,7 +210,7 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 // messages can be sent. When permissions are skipped, stdin is /dev/null to
 // avoid Claude's 3-second "no stdin data" warning.
 func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
-	cmd := newCmd(ctx, a.bin, args)
+	cmd := newCmd(ctx, a.bin, args, a.extraEnv)
 
 	var stdinPipe io.WriteCloser
 	if a.skipPermissions {
@@ -280,8 +289,44 @@ func (discardWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (discardWriteCloser) Close() error                { return nil }
 
 // newCmd builds an exec.Cmd for the given binary and args.
-func newCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
-	return exec.CommandContext(ctx, bin, args...)
+// Claude Code env vars from the parent session are stripped so the subprocess
+// does not inherit an in-progress session ID or entrypoint context.
+// extraEnv KEY=VALUE pairs are appended last so they override inherited values.
+func newCmd(ctx context.Context, bin string, args []string, extraEnv []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	strip := []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"}
+	// When explicit AWS credentials are injected, strip any vars that could
+	// override them. AWS_BEARER_TOKEN_BEDROCK is used by the Anthropic SDK as a
+	// higher-priority auth path and will beat AWS_ACCESS_KEY_ID if left in place.
+	if len(extraEnv) > 0 {
+		strip = append(strip,
+			"AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+			"AWS_BEARER_TOKEN_BEDROCK",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_MODEL",
+		)
+	}
+	base := filterEnv(os.Environ(), strip...)
+	cmd.Env = append(base, extraEnv...)
+	return cmd
+}
+
+// filterEnv returns os.Environ() with the named keys removed.
+func filterEnv(env []string, stripKeys ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		skip := false
+		for _, k := range stripKeys {
+			if strings.HasPrefix(e, k+"=") {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // filterKnownWarnings removes known benign stderr lines that Claude emits even

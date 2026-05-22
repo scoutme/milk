@@ -12,6 +12,29 @@ import (
 	"sync"
 )
 
+// userSettings mirrors the relevant subset of ~/.claude/settings.json.
+type userSettings struct {
+	AWSAuthRefresh string `json:"awsAuthRefresh"`
+}
+
+// AWSAuthRefreshCommand reads the awsAuthRefresh command from the user-level
+// ~/.claude/settings.json. Returns "" if the key is absent or the file is unreadable.
+func AWSAuthRefreshCommand() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var s userSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return ""
+	}
+	return s.AWSAuthRefresh
+}
+
 // Settings mirrors the relevant subset of Claude's project settings.json.
 type Settings struct {
 	Permissions struct {

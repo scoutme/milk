@@ -105,3 +105,49 @@ func TestStore_EmptyWhenFileAbsent(t *testing.T) {
 		t.Errorf("want empty, got %v", tools)
 	}
 }
+
+// --- AWSAuthRefreshCommand tests ---
+
+func writeUserSettings(t *testing.T, homeDir, content string) {
+	t.Helper()
+	dir := filepath.Join(homeDir, ".claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAWSAuthRefreshCommand_Present(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeUserSettings(t, home, `{"awsAuthRefresh":"aws-credential-helper --profile default"}`)
+
+	got := AWSAuthRefreshCommand()
+	if got != "aws-credential-helper --profile default" {
+		t.Errorf("want %q, got %q", "aws-credential-helper --profile default", got)
+	}
+}
+
+func TestAWSAuthRefreshCommand_Absent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeUserSettings(t, home, `{"someOtherKey":"value"}`)
+
+	got := AWSAuthRefreshCommand()
+	if got != "" {
+		t.Errorf("want empty string, got %q", got)
+	}
+}
+
+func TestAWSAuthRefreshCommand_NoFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// No settings.json written — directory doesn't even have .claude/
+
+	got := AWSAuthRefreshCommand()
+	if got != "" {
+		t.Errorf("want empty string, got %q", got)
+	}
+}
