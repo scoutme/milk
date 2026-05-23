@@ -194,6 +194,10 @@ type model struct {
 	copyFeedback  string // transient "[copied N chars]" shown in status bar
 	busyHint      string // transient "agent is responding" shown in status bar
 
+	// keyboard selection state in the input area (rune offsets into ta.Value(); -1 = none)
+	taSelAnchor int
+	taSelEnd    int
+
 	// injected dependencies
 	ctx    context.Context
 	st     *interactiveState
@@ -215,6 +219,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		panelMemory:   true,
 		selAnchorLine: -1,
 		selEndLine:    -1,
+		taSelAnchor:   -1,
+		taSelEnd:      -1,
 	}
 }
 
@@ -437,10 +443,18 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseButtonRight:
 		if ev.Action == tea.MouseActionPress {
+			// Transcript selection takes priority; then keyboard input selection.
 			if m.selText != "" {
 				copyToClipboard(m.selText)
 				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.selText)))
 				m.clearSelection()
+				m.setViewportContent()
+				return m, copyFeedbackClearCmd()
+			}
+			if t := m.taSelText(); t != "" {
+				copyToClipboard(t)
+				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(t)))
+				m.taClearSel()
 				m.setViewportContent()
 				return m, copyFeedbackClearCmd()
 			}
@@ -528,6 +542,46 @@ func (m *model) clearSelection() {
 	m.selText = ""
 }
 
+// taCursorOffset returns the global rune offset of the textarea cursor within ta.Value().
+func (m *model) taCursorOffset() int {
+	lines := strings.Split(m.ta.Value(), "\n")
+	row := m.ta.Line()
+	col := m.ta.LineInfo().ColumnOffset
+	offset := 0
+	for i := 0; i < row && i < len(lines); i++ {
+		offset += len([]rune(lines[i])) + 1 // +1 for the '\n'
+	}
+	return offset + col
+}
+
+// taClearSel clears the keyboard selection in the input area.
+func (m *model) taClearSel() {
+	m.taSelAnchor = -1
+	m.taSelEnd = -1
+}
+
+// taSelText returns the plain text of the current keyboard selection, or "".
+func (m *model) taSelText() string {
+	if m.taSelAnchor < 0 || m.taSelEnd < 0 || m.taSelAnchor == m.taSelEnd {
+		return ""
+	}
+	runes := []rune(m.ta.Value())
+	lo, hi := m.taSelAnchor, m.taSelEnd
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(runes) {
+		hi = len(runes)
+	}
+	if lo > hi {
+		return ""
+	}
+	return string(runes[lo:hi])
+}
+
 // taRows returns the number of display rows the textarea content needs.
 // It replicates the exact word-wrap logic from bubbles/textarea wrap() so the
 // count matches what the textarea will render — using uniseg.StringWidth for
@@ -607,8 +661,43 @@ func (m *model) setViewportContent() {
 	}
 	vw := m.vpWidth()
 	sep := styleBorder.Width(vw).Render("")
-	content := m.wrappedTranscript() + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
+	var transcript string
+	if m.transcript.Len() == 0 {
+		transcript = m.welcomeScreen()
+	} else {
+		transcript = m.wrappedTranscript()
+	}
+	content := transcript + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
 	m.vp.SetContent(content)
+}
+
+// welcomeScreen returns a centered welcome message shown when the transcript is empty.
+func (m *model) welcomeScreen() string {
+	vpH := m.vp.Height
+	if vpH <= 0 {
+		vpH = m.viewportHeight()
+	}
+	lines := []string{
+		pulseColors[8] + "◈" + ansiReset + " " + "\033[1;38;2;255;208;96mmilk\033[0m",
+		dim("local-first agentic orchestrator"),
+		"",
+		dim("type a message and press Enter to start"),
+		dim("/help for available commands"),
+	}
+	padTop := (vpH - len(lines)) / 2
+	if padTop < 0 {
+		padTop = 0
+	}
+	var sb strings.Builder
+	for i := 0; i < padTop; i++ {
+		sb.WriteString("\n")
+	}
+	centered := lipgloss.NewStyle().Width(m.vpWidth()).Align(lipgloss.Center)
+	for _, l := range lines {
+		sb.WriteString(centered.Render(l))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // appendTranscript adds text to the transcript.
@@ -771,10 +860,15 @@ func (m *model) statusBar() string {
 		left += yellow(" [" + m.busyHint + "]")
 	} else if m.copyFeedback != "" {
 		left += green(" [" + m.copyFeedback + "]")
+	} else if m.taSelAnchor >= 0 && m.taSelEnd >= 0 && m.taSelAnchor != m.taSelEnd {
+		n := len([]rune(m.taSelText()))
+		left += yellow(fmt.Sprintf(" [%d chars selected — ctrl+c / right-click to copy]", n))
+	} else if m.taSelAnchor >= 0 {
+		left += dim(" [selecting…]")
 	} else if m.selAnchorLine >= 0 {
 		var selStatus string
 		if m.selText != "" {
-			selStatus = yellow(fmt.Sprintf(" [%d chars — right-click to copy]", len([]rune(m.selText))))
+			selStatus = yellow(fmt.Sprintf(" [%d chars — ctrl+c / right-click to copy]", len([]rune(m.selText))))
 		} else {
 			selStatus = yellow(fmt.Sprintf(" [selecting: line %d col %d — release to end]", m.selAnchorLine+1, m.selAnchorCol+1))
 		}
@@ -971,6 +1065,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc":
+		if m.taSelAnchor >= 0 {
+			m.taClearSel()
+			m.setViewportContent()
+			return m, nil
+		}
 		if m.selAnchorLine >= 0 {
 			m.clearSelection()
 			m.setViewportContent()
@@ -1022,6 +1121,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.historyForward()
 		m.syncLayout()
 		return m, nil
+	case "shift+left", "shift+right", "shift+up", "shift+down", "shift+home", "shift+end",
+		"shift+ctrl+left", "shift+ctrl+right", "shift+alt+left", "shift+alt+right":
+		return m.handleShiftArrow(msg)
 	case "tab":
 		m = m.handleTab()
 		return m, nil
@@ -1039,13 +1141,68 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.tabPrefix = ""
 	m.tabHints = nil
 
+	// Any non-shift key clears the keyboard selection.
+	m.taClearSel()
+
 	var cmd tea.Cmd
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
 }
 
+// handleShiftArrow manages keyboard selection in the input textarea.
+// Shift+Arrow keys extend the selection; the anchor is set on the first shift press.
+// The bare direction key is forwarded to the textarea to move the cursor.
+func (m model) handleShiftArrow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Set anchor at current cursor position before moving.
+	if m.taSelAnchor < 0 {
+		m.taSelAnchor = m.taCursorOffset()
+	}
+
+	// Map shift+arrow → bare direction for the textarea.
+	var bareKey tea.KeyMsg
+	switch msg.String() {
+	case "shift+left":
+		bareKey = tea.KeyMsg{Type: tea.KeyLeft}
+	case "shift+right":
+		bareKey = tea.KeyMsg{Type: tea.KeyRight}
+	case "shift+up":
+		bareKey = tea.KeyMsg{Type: tea.KeyUp}
+	case "shift+down":
+		bareKey = tea.KeyMsg{Type: tea.KeyDown}
+	case "shift+home":
+		bareKey = tea.KeyMsg{Type: tea.KeyHome}
+	case "shift+end":
+		bareKey = tea.KeyMsg{Type: tea.KeyEnd}
+	case "shift+ctrl+left", "shift+alt+left":
+		bareKey = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+	case "shift+ctrl+right", "shift+alt+right":
+		bareKey = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+	default:
+		bareKey = tea.KeyMsg{Type: tea.KeyRight}
+	}
+
+	cmd := m.updateTA(bareKey)
+	m.taSelEnd = m.taCursorOffset()
+	m.syncLayout()
+	return m, cmd
+}
+
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if m.selText != "" {
+		copyToClipboard(m.selText)
+		m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.selText)))
+		m.clearSelection()
+		m.setViewportContent()
+		return m, copyFeedbackClearCmd()
+	}
+	if t := m.taSelText(); t != "" {
+		copyToClipboard(t)
+		m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(t)))
+		m.taClearSel()
+		m.setViewportContent()
+		return m, copyFeedbackClearCmd()
+	}
 	if m.ta.Value() != "" {
 		m.ta.Reset()
 
@@ -1507,6 +1664,7 @@ func (m model) historyBack() model {
 		m.histIdx--
 	}
 	m.ta.SetValue(h[m.histIdx])
+	m.taClearSel()
 	return m
 }
 
@@ -1522,6 +1680,7 @@ func (m model) historyForward() model {
 	} else {
 		m.ta.SetValue(h[m.histIdx])
 	}
+	m.taClearSel()
 	return m
 }
 
@@ -1929,6 +2088,56 @@ func (m *model) colorizeInput(view string) string {
 		lines[i] = prefix + colored
 	}
 
+	// Apply keyboard selection highlight (before cursor re-injection so cursor
+	// takes visual precedence over the selection background).
+	if m.taSelAnchor >= 0 && m.taSelEnd >= 0 && m.taSelAnchor != m.taSelEnd {
+		loRune, hiRune := m.taSelAnchor, m.taSelEnd
+		if loRune > hiRune {
+			loRune, hiRune = hiRune, loRune
+		}
+		// Walk display lines, tracking which global rune offset each line starts at.
+		// Each display line corresponds to exactly the plain chars in inputPart.
+		// We reconstruct the mapping by re-splitting the value.
+		valueRunes := []rune(m.ta.Value())
+		logicalLines := strings.Split(m.ta.Value(), "\n")
+		displayLineOffset := 0 // global rune offset at the start of this logical line
+		displayLineIdx := 0    // index into lines[]
+		for _, logLine := range logicalLines {
+			logRunes := []rune(logLine)
+			// memoizedWrap-equivalent: split logLine into display rows using taWrapRows logic.
+			wrapW := m.ta.Width()
+			if wrapW <= 0 {
+				wrapW = 1
+			}
+			displayRows := wrapLineIntoRows(logRunes, wrapW)
+			rowOffset := 0 // rune offset within the logical line for this display row
+			for _, row := range displayRows {
+				rowLen := len(row)
+				rowStart := displayLineOffset + rowOffset
+				// Clamp sel range to this row.
+				selLo := loRune - rowStart
+				selHi := hiRune - rowStart
+				if selLo < rowLen && selHi >= 0 {
+					if selLo < 0 {
+						selLo = 0
+					}
+					if selHi > rowLen {
+						selHi = rowLen
+					}
+					// Apply highlight to lines[displayLineIdx] between selLo and selHi (rune positions in inputPart).
+					if displayLineIdx < len(lines) {
+						lines[displayLineIdx] = applyInputHighlight(lines[displayLineIdx], indentVisual, selLo, selHi)
+					}
+				}
+				rowOffset += rowLen
+				displayLineIdx++
+			}
+			// +1 for the '\n' separator between logical lines.
+			displayLineOffset += len(logRunes) + 1
+		}
+		_ = valueRunes // used only for length context; actual work done via logicalLines
+	}
+
 	// Re-inject the cursor escape at the saved visual column.
 	if cursor != nil && cursor.lineIdx < len(lines) {
 		line := lines[cursor.lineIdx]
@@ -1968,6 +2177,100 @@ func (m *model) colorizeInput(view string) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// wrapLineIntoRows splits a logical line (as rune slice) into display rows of
+// at most `width` display columns, matching the bubbles/textarea wrap() logic.
+// Returns each row as a rune slice.
+func wrapLineIntoRows(runes []rune, width int) [][]rune {
+	var (
+		rows   [][]rune
+		curRow []rune
+		word   []rune
+		curW   int
+		spaces int
+	)
+	flush := func() {
+		ww := uniseg.StringWidth(string(word))
+		sw := spaces
+		if curW+ww+sw > width {
+			rows = append(rows, curRow)
+			curRow = append(append([]rune{}, word...), []rune(strings.Repeat(" ", spaces))...)
+			curW = ww + sw
+		} else {
+			curRow = append(append(curRow, word...), []rune(strings.Repeat(" ", spaces))...)
+			curW += ww + sw
+		}
+		word = nil
+		spaces = 0
+	}
+	for _, r := range runes {
+		if r == ' ' || r == '\t' {
+			if len(word) > 0 || spaces > 0 {
+				spaces++
+			}
+		} else {
+			if spaces > 0 {
+				flush()
+			}
+			word = append(word, r)
+			lastW := rw.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastW > width {
+				if curW > 0 {
+					rows = append(rows, curRow)
+					curRow = nil
+					curW = 0
+				}
+				curRow = append(curRow, word...)
+				curW += uniseg.StringWidth(string(word))
+				word = nil
+			}
+		}
+	}
+	// flush remaining
+	ww := uniseg.StringWidth(string(word))
+	sw := spaces
+	if curW+ww+sw >= width {
+		rows = append(rows, curRow)
+		curRow = append(append([]rune{}, word...), []rune(strings.Repeat(" ", spaces))...)
+	} else {
+		curRow = append(append(curRow, word...), []rune(strings.Repeat(" ", spaces))...)
+	}
+	rows = append(rows, curRow)
+	return rows
+}
+
+// applyInputHighlight applies reverse-video highlight to rune positions [selLo, selHi)
+// of the inputPart section of a colorized display line (after indentVisual prefix chars).
+func applyInputHighlight(line string, indentVisual, selLo, selHi int) string {
+	// Re-split at indentVisual to isolate the input part.
+	plainLine := ansi.Strip(line)
+	if len([]rune(plainLine)) <= indentVisual {
+		return line
+	}
+	// Find the byte split for the indent in the colorized line.
+	inputRunes := []rune(plainLine[indentVisual:])
+	if selLo >= len(inputRunes) || selHi <= 0 {
+		return line
+	}
+	if selLo < 0 {
+		selLo = 0
+	}
+	if selHi > len(inputRunes) {
+		selHi = len(inputRunes)
+	}
+	// Build the highlighted version of the plain input part.
+	// Use a background-color highlight (not \x1b[7m reverse-video) so it doesn't
+	// conflict with the cursor which also uses \x1b[7m.
+	var sb strings.Builder
+	sb.WriteString(string(inputRunes[:selLo]))
+	sb.WriteString("\x1b[48;5;240m") // dark-gray bg for selection
+	sb.WriteString(string(inputRunes[selLo:selHi]))
+	sb.WriteString("\x1b[49m") // reset background only
+	sb.WriteString(string(inputRunes[selHi:]))
+	// Reconstruct with original prefix.
+	prefix := string([]rune(plainLine)[:indentVisual])
+	return prefix + sb.String()
 }
 
 // highlightMatch bolds and yellows the first occurrence of query inside s.
