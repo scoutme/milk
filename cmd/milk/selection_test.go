@@ -146,4 +146,3 @@ func TestApplyInputHighlight_NegativeLo(t *testing.T) {
 		t.Error("expected highlight for negative selLo clamped to 0")
 	}
 }
-

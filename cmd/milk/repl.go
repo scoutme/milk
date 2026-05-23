@@ -32,6 +32,27 @@ import (
 )
 
 const agentTimeout = 10 * time.Minute
+
+// undoDebugLog is a debug-only file writer for undo/redo diagnostics.
+// Set undoDebugLogPath to a non-empty path to enable; leave empty to disable.
+const undoDebugLogPath = "/tmp/milk_undo_debug.log"
+
+var undoDebugFile *os.File
+
+func undoDebugLog(format string, args ...any) {
+	if undoDebugLogPath == "" {
+		return
+	}
+	if undoDebugFile == nil {
+		var err error
+		undoDebugFile, err = os.OpenFile(undoDebugLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			return
+		}
+	}
+	fmt.Fprintf(undoDebugFile, "[%s] "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+}
+
 const memoryPanelWidth = 33 // chars for the memory panel (32 inner + 1 right scrollbar)
 const memoryPanelInner = 32 // usable inner chars; scrollbar is a separate column in View()
 const memoryPollInterval = 5 * time.Second
@@ -60,6 +81,9 @@ type copyFeedbackClearMsg struct{}
 // busyHintClearMsg clears the transient "agent is responding" hint in the status bar.
 type busyHintClearMsg struct{}
 
+// quitPendingClearMsg clears the "press ctrl+c again to exit" hint.
+type quitPendingClearMsg struct{}
+
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
 
@@ -77,6 +101,15 @@ type permRequestMsg struct {
 type forgetState struct {
 	candidates []memory.Percept // matched percepts shown to the user
 }
+
+// undoEntry records a textarea snapshot for undo/redo.
+type undoEntry struct {
+	value  string
+	cursor int // rune offset
+}
+
+const undoMaxDepth = 100
+const undoCoalesceWindow = 2 * time.Second
 
 // sendWriter is an io.Writer that forwards each Write as a chunkMsg
 // via tea.Program.Send, enabling live streaming into the TUI viewport.
@@ -190,6 +223,7 @@ type model struct {
 	selAnchorCol  int
 	selEndLine    int
 	selEndCol     int
+	selDragging   bool   // true once the mouse has moved after the initial press
 	selText       string // plain text of the selected range (populated after release)
 	copyFeedback  string // transient "[copied N chars]" shown in status bar
 	busyHint      string // transient "agent is responding" shown in status bar
@@ -197,6 +231,15 @@ type model struct {
 	// keyboard selection state in the input area (rune offsets into ta.Value(); -1 = none)
 	taSelAnchor int
 	taSelEnd    int
+
+	// undo/redo stacks for the input textarea
+	undoStack     []undoEntry
+	redoStack     []undoEntry
+	lastUndoTime  time.Time
+	lastUndoValue string // ta.Value() at the time of the last pushed entry
+
+	// quit confirmation state
+	quitPending bool
 
 	// injected dependencies
 	ctx    context.Context
@@ -221,6 +264,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		selEndLine:    -1,
 		taSelAnchor:   -1,
 		taSelEnd:      -1,
+		lastUndoValue: "\x00", // sentinel: never equals real textarea value, so first push always succeeds
 	}
 }
 
@@ -293,6 +337,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, busyHintClearCmd()
 	}
 	var cmd tea.Cmd
+	m.undoPush(true)
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
@@ -319,6 +364,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
+	m.undoPush(true)
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
@@ -420,10 +466,12 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.selAnchorCol = ev.X
 			m.selEndLine = -1
 			m.selEndCol = 0
+			m.selDragging = false
 			m.selText = ""
 			m.setViewportContent()
 		case tea.MouseActionMotion:
 			if m.selAnchorLine >= 0 {
+				m.selDragging = true
 				m.selEndLine = contentLine
 				m.selEndCol = ev.X
 				m.setViewportContent()
@@ -533,12 +581,18 @@ func busyHintClearCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return busyHintClearMsg{} })
 }
 
+// quitPendingClearCmd clears the quit-confirmation state after 3s of inaction.
+func quitPendingClearCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return quitPendingClearMsg{} })
+}
+
 // clearSelection resets selection state.
 func (m *model) clearSelection() {
 	m.selAnchorLine = -1
 	m.selAnchorCol = 0
 	m.selEndLine = -1
 	m.selEndCol = 0
+	m.selDragging = false
 	m.selText = ""
 }
 
@@ -558,6 +612,32 @@ func (m *model) taCursorOffset() int {
 func (m *model) taClearSel() {
 	m.taSelAnchor = -1
 	m.taSelEnd = -1
+}
+
+// taDeleteSelection removes the selected rune range from the textarea, placing
+// the cursor at the start of the deleted range. Does nothing if no selection.
+func (m model) taDeleteSelection() model {
+	if m.taSelText() == "" {
+		return m
+	}
+	m.undoPush(false)
+	runes := []rune(m.ta.Value())
+	lo, hi := m.taSelAnchor, m.taSelEnd
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(runes) {
+		hi = len(runes)
+	}
+	// SetValue(prefix) positions cursor at end of prefix (= lo), then InsertString
+	// appends the suffix without moving the cursor.
+	m.ta.SetValue(string(runes[:lo]))
+	m.ta.InsertString(string(runes[hi:]))
+	m.taClearSel()
+	return m
 }
 
 // taSelText returns the plain text of the current keyboard selection, or "".
@@ -856,16 +936,16 @@ func (m *model) statusBar() string {
 	}
 	left := fmt.Sprintf(" %s  %s", dim("session:"+sessID), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
-	if m.busyHint != "" {
+	if m.quitPending {
+		left += yellow(" [press ctrl+c again to exit]")
+	} else if m.busyHint != "" {
 		left += yellow(" [" + m.busyHint + "]")
 	} else if m.copyFeedback != "" {
 		left += green(" [" + m.copyFeedback + "]")
 	} else if m.taSelAnchor >= 0 && m.taSelEnd >= 0 && m.taSelAnchor != m.taSelEnd {
 		n := len([]rune(m.taSelText()))
-		left += yellow(fmt.Sprintf(" [%d chars selected — ctrl+c / right-click to copy]", n))
-	} else if m.taSelAnchor >= 0 {
-		left += dim(" [selecting…]")
-	} else if m.selAnchorLine >= 0 {
+		left += yellow(fmt.Sprintf(" [%d chars selected — ctrl+c copy · ctrl+x cut · del delete · type to replace]", n))
+	} else if m.selAnchorLine >= 0 && m.selDragging {
 		var selStatus string
 		if m.selText != "" {
 			selStatus = yellow(fmt.Sprintf(" [%d chars — ctrl+c / right-click to copy]", len([]rune(m.selText))))
@@ -997,6 +1077,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyHint = ""
 		return m, nil
 
+	case quitPendingClearMsg:
+		m.quitPending = false
+		return m, nil
+
 	case memoryRefreshMsg:
 		if m.panelMemory {
 			return m, memoryPollTick()
@@ -1051,11 +1135,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Pre-expand to terminal height so repositionView() inside ta.Update never
 	// scrolls on a large paste (updateTA's +1 is insufficient for multi-line pastes).
 	if msg.Paste {
+		m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
 		m.ta.SetHeight(m.height)
 		var cmd tea.Cmd
 		cmd = m.updateTA(msg)
 		m.syncLayout()
 		return m, cmd
+	}
+
+	// Any key other than ctrl+c cancels a pending quit confirmation.
+	if m.quitPending && msg.String() != "ctrl+c" {
+		m.quitPending = false
 	}
 
 	// ctrl+r search mode: intercept most keys.
@@ -1064,6 +1154,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "ctrl+z":
+		undoDebugLog("KEY ctrl+z val=%q undoStack=%d redoStack=%d lastUndoValue=%q", m.ta.Value(), len(m.undoStack), len(m.redoStack), m.lastUndoValue)
+		if m.undoApply(&m.undoStack, &m.redoStack) {
+			m.syncLayout()
+		}
+		return m, nil
+	case "ctrl+y":
+		undoDebugLog("KEY ctrl+y val=%q undoStack=%d redoStack=%d lastUndoValue=%q", m.ta.Value(), len(m.undoStack), len(m.redoStack), m.lastUndoValue)
+		if m.undoApply(&m.redoStack, &m.undoStack) {
+			m.syncLayout()
+		}
+		return m, nil
 	case "esc":
 		if m.taSelAnchor >= 0 {
 			m.taClearSel()
@@ -1141,10 +1243,36 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.tabPrefix = ""
 	m.tabHints = nil
 
+	// When a keyboard selection is active, special keys act on it.
+	if m.taSelText() != "" {
+		switch msg.String() {
+		case "ctrl+x":
+			// Cut: copy then delete.
+			t := m.taSelText()
+			copyToClipboard(t)
+			m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(t)))
+			m = m.taDeleteSelection()
+			m.syncLayout()
+			return m, copyFeedbackClearCmd()
+		case "backspace", "delete", "ctrl+h":
+			// Delete selection without copying.
+			m = m.taDeleteSelection()
+			m.syncLayout()
+			return m, nil
+		default:
+			// Any printable key replaces the selection.
+			if len(msg.Runes) > 0 || msg.Type == tea.KeySpace {
+				m = m.taDeleteSelection()
+				// Fall through to let the textarea insert the typed key.
+			}
+		}
+	}
+
 	// Any non-shift key clears the keyboard selection.
 	m.taClearSel()
 
 	var cmd tea.Cmd
+	m.undoPush(true)
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
@@ -1222,7 +1350,11 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.appendTranscript(dim("[milk]") + " mode cleared\n")
 		return m, nil
 	}
-	return m, tea.Quit
+	if m.quitPending {
+		return m, tea.Quit
+	}
+	m.quitPending = true
+	return m, quitPendingClearCmd()
 }
 
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
@@ -1965,6 +2097,53 @@ func expandPath(prefix, cwd string) []string {
 	return matches
 }
 
+// --- Undo/redo ---
+
+// undoPush saves the current textarea state before a mutation.
+// Consecutive single-character edits within undoCoalesceWindow are coalesced
+// into a single undo step so that Ctrl+Z undoes a word, not a character.
+func (m *model) undoPush(coalesce bool) {
+	val := m.ta.Value()
+	now := time.Now()
+	if coalesce && len(m.undoStack) > 0 && val == m.lastUndoValue &&
+		now.Sub(m.lastUndoTime) < undoCoalesceWindow {
+		undoDebugLog("undoPush COALESCE-SKIP coalesce=%v val=%q lastUndoValue=%q stack=%d", coalesce, val, m.lastUndoValue, len(m.undoStack))
+		return
+	}
+	if val == m.lastUndoValue {
+		undoDebugLog("undoPush SAME-VALUE-SKIP val=%q stack=%d", val, len(m.undoStack))
+		return
+	}
+	entry := undoEntry{value: val, cursor: m.taCursorOffset()}
+	m.undoStack = append(m.undoStack, entry)
+	if len(m.undoStack) > undoMaxDepth {
+		m.undoStack = m.undoStack[1:]
+	}
+	m.redoStack = m.redoStack[:0]
+	m.lastUndoValue = val
+	m.lastUndoTime = now
+	undoDebugLog("undoPush PUSHED coalesce=%v val=%q cursor=%d stack=%d", coalesce, val, entry.cursor, len(m.undoStack))
+}
+
+// undoApply pops from src, pushes current state to dst, restores the entry.
+// Cursor is placed at the end of the restored value (textarea default after SetValue).
+func (m *model) undoApply(src, dst *[]undoEntry) bool {
+	if len(*src) == 0 {
+		undoDebugLog("undoApply EMPTY-STACK src=%d dst=%d", len(*src), len(*dst))
+		return false
+	}
+	cur := undoEntry{value: m.ta.Value(), cursor: m.taCursorOffset()}
+	entry := (*src)[len(*src)-1]
+	*src = (*src)[:len(*src)-1]
+	*dst = append(*dst, cur)
+	undoDebugLog("undoApply RESTORE cur=%q entry=%q src=%d dst=%d lastUndoValue=%q", cur.value, entry.value, len(*src), len(*dst), m.lastUndoValue)
+	m.ta.SetValue(entry.value)
+	m.ta.CursorEnd()
+	m.lastUndoValue = entry.value
+	m.taClearSel()
+	return true
+}
+
 // --- Textarea helpers ---
 
 func (m *model) updateTA(msg tea.Msg) tea.Cmd {
@@ -1972,6 +2151,9 @@ func (m *model) updateTA(msg tea.Msg) tea.Cmd {
 	// repositionView() inside ta.Update never scrolls when a new wrap row
 	// appears. After the update, setViewportContent / syncLayout trims it back
 	// to the exact row count via taRows().
+	if km, ok := msg.(tea.KeyMsg); ok {
+		undoDebugLog("updateTA KEY=%q val_before=%q undoStack=%d lastUndoValue=%q", km.String(), m.ta.Value(), len(m.undoStack), m.lastUndoValue)
+	}
 	m.ta.SetHeight(m.ta.Height() + 1)
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
