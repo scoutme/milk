@@ -22,11 +22,12 @@ func TestConsolidate_DecaysNonCorePercepts(t *testing.T) {
 	s := newTestStore(t, true)
 	s.Record(context.Background(), "decayable fact", ProducerLocal, ConsumerAll, Roles{}, false) //nolint:errcheck
 
-	before := s.session.Percepts[0].W
+	before := s.session.Percepts[0].W // ProducerLocal → 0.7
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Percept may have been pruned or promoted — check if it survived
+	// After decay: 0.7 − 0.10 = 0.60, which is < promoteThreshold (0.80) and > pruneThreshold (0.20).
+	// So the percept should survive in session with reduced W.
 	remaining := append(s.session.Percepts, s.global.Percepts...) //nolint:gocritic
 	for _, p := range remaining {
 		if p.Content == "decayable fact" {
@@ -36,10 +37,8 @@ func TestConsolidate_DecaysNonCorePercepts(t *testing.T) {
 			return
 		}
 	}
-	// If not found, it was pruned — that is acceptable only if W hit 0
-	if before-decayPerSession > pruneThreshold {
-		t.Error("percept should survive first consolidation at W=0.7")
-	}
+	t.Errorf("percept should survive first consolidation at W=%.2f (after decay %.2f > pruneThreshold %.2f)",
+		before, before-decayPerSession, pruneThreshold)
 }
 
 func TestConsolidate_CoreExemptsFromDecay(t *testing.T) {
@@ -147,14 +146,17 @@ func TestApplyDecayCount(t *testing.T) {
 }
 
 func TestPrunePerceptsCount(t *testing.T) {
+	// pruneThreshold = 0.20: percepts with W <= 0.20 are removed.
 	percepts := []Percept{
-		{ID: "1", W: 0.5},
-		{ID: "2", W: 0.0},
-		{ID: "3", W: 0.1},
+		{ID: "1", W: 0.5},  // survives
+		{ID: "2", W: 0.0},  // pruned (== threshold floor)
+		{ID: "3", W: 0.1},  // pruned (< threshold)
+		{ID: "4", W: 0.21}, // survives (> threshold)
+		{ID: "5", W: 0.20}, // pruned (== threshold, not strictly greater)
 	}
 	result, pruned := prunePerceptsCount(percepts)
-	if pruned != 1 {
-		t.Errorf("expected 1 pruned, got %d", pruned)
+	if pruned != 3 {
+		t.Errorf("expected 3 pruned, got %d", pruned)
 	}
 	if len(result) != 2 {
 		t.Errorf("expected 2 remaining, got %d", len(result))
@@ -200,15 +202,14 @@ func TestEdgePropagation_Contradicts(t *testing.T) {
 	}
 }
 
-func TestConsolidate_PromotesAtLoweredThreshold(t *testing.T) {
+func TestConsolidate_PromotesAtThreshold(t *testing.T) {
 	s := newTestStore(t, true)
-	// W=0.67: below old threshold 0.8, above new threshold 0.6.
-	// After decay (-0.03) it becomes 0.64, still >= promoteThreshold (0.6).
+	// W=0.91: after decay (−0.10) becomes 0.81, which is >= promoteThreshold (0.80) → promotes.
 	p := Percept{
 		ID:       "promote-1",
-		Content:  "moderately confident fact",
+		Content:  "high confidence fact",
 		Producer: ProducerLocal,
-		W:        0.67,
+		W:        0.91,
 		Core:     false,
 	}
 	s.mu.Lock()
@@ -235,12 +236,12 @@ func TestConsolidate_PromotesAtLoweredThreshold(t *testing.T) {
 
 func TestConsolidate_DoesNotPromoteBelowThreshold(t *testing.T) {
 	s := newTestStore(t, true)
-	// W=0.55: below promoteThreshold (0.6); after decay (-0.03) becomes 0.52, still below.
+	// W=0.85: after decay (−0.10) becomes 0.75, which is < promoteThreshold (0.80) → stays in session.
 	p := Percept{
 		ID:       "nopromote-1",
-		Content:  "low confidence fact",
+		Content:  "medium confidence fact",
 		Producer: ProducerLocal,
-		W:        0.55,
+		W:        0.85,
 		Core:     false,
 	}
 	s.mu.Lock()
@@ -253,8 +254,50 @@ func TestConsolidate_DoesNotPromoteBelowThreshold(t *testing.T) {
 
 	for _, rp := range s.global.Percepts {
 		if rp.ID == "nopromote-1" {
-			t.Error("low-weight percept should NOT have been promoted to global")
+			t.Error("percept with post-decay W=0.75 should NOT have been promoted (threshold 0.80)")
 			return
+		}
+	}
+}
+
+func TestConsolidate_UserPerceptPromotesAfterOneSession(t *testing.T) {
+	s := newTestStore(t, true)
+	// ProducerUser initialWeight=0.9; after one decay (−0.10) = 0.80 == promoteThreshold.
+	_, err := s.Record(context.Background(), "user stated fact", ProducerUser, ConsumerAll, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	for _, rp := range s.global.Percepts {
+		if rp.Content == "user stated fact" {
+			return // promoted — correct
+		}
+	}
+	t.Error("user percept (W=0.9) should promote after one session (post-decay W=0.80 >= threshold 0.80)")
+}
+
+func TestConsolidate_PrunesWeakPercept(t *testing.T) {
+	s := newTestStore(t, true)
+	// W=0.30: after decay (−0.10) = 0.20, which is NOT > pruneThreshold (0.20) → pruned.
+	p := Percept{ID: "weak-1", Content: "system hint", Producer: ProducerSystem, W: 0.30, Core: false}
+	s.mu.Lock()
+	s.session.Percepts = append(s.session.Percepts, p)
+	s.mu.Unlock()
+
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	for _, rp := range s.session.Percepts {
+		if rp.ID == "weak-1" {
+			t.Error("W=0.30 percept should have been pruned after decay to 0.20 (must be strictly > pruneThreshold 0.20)")
+			return
+		}
+	}
+	for _, rp := range s.global.Percepts {
+		if rp.ID == "weak-1" {
+			t.Error("weak percept should not have been promoted")
 		}
 	}
 }

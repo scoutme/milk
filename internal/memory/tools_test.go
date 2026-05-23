@@ -53,8 +53,8 @@ func TestDispatchRecordMemory_UserProducer(t *testing.T) {
 	if p.Producer != ProducerUser {
 		t.Errorf("expected ProducerUser, got %q", p.Producer)
 	}
-	if p.W != 1.0 {
-		t.Errorf("expected W=1.0 for user producer, got %v", p.W)
+	if p.W != 0.9 {
+		t.Errorf("expected W=0.9 for user producer, got %v", p.W)
 	}
 }
 
