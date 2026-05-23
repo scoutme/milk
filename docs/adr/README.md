@@ -23,3 +23,4 @@
 * [21. Memory TUI Panel and Interactive Management Commands](0021-memory-tui-panel-and-management.md)
 * [22. Claude Percept Skill: Nonce Tags, Consumer Hints, and Bidirectional Memory](0022-claude-percept-skill-nonce-tags.md)
 * [23. AWS Credential Injection for Bedrock-backed Claude Subprocess](0023-aws-credential-injection.md)
+* [24. TUI Selection, Copy/Paste, and Welcome Screen](0024-tui-selection-copy-paste-welcome-screen.md)

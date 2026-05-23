@@ -4,7 +4,7 @@ Date: 2026-05-14
 
 ## Status
 
-Accepted — partially superseded by [ADR-0019](0019-tui-input-history-and-turn-cancellation.md) (input locking and history)
+Accepted — partially superseded by [ADR-0019](0019-tui-input-history-and-turn-cancellation.md) (input locking and history), partially superseded by [ADR-0024](0024-tui-selection-copy-paste-welcome-screen.md) (input area selection and welcome screen)
 
 ## Context
 
