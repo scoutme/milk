@@ -33,22 +33,8 @@ var slashCommands = []string{
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
-func promptLabel(st *interactiveState) string {
-	// Sticky overrides take priority over per-turn flags.
-	if st.stickyEscalate || st.forceEscalate {
-		return blue("[claude]") + " > "
-	}
-	if st.stickyLocal || st.forceLocal {
-		return green("[local]") + " > "
-	}
-	switch st.sess.State {
-	case session.StateClaudeWaiting:
-		return yellow("[claude:waiting]") + " > "
-	case session.StateClaude:
-		return blue("[claude]") + " > "
-	default:
-		return green("[local]") + " > "
-	}
+func promptLabel(_ *interactiveState) string {
+	return "> "
 }
 
 const interactiveHelp = `Slash commands:
