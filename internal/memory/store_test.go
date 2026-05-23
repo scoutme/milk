@@ -230,9 +230,9 @@ func TestInitialWeight(t *testing.T) {
 		core     bool
 		want     float64
 	}{
-		{ProducerUser, false, 1.0},
+		{ProducerUser, false, 0.9},
 		{ProducerUser, true, 1.0},
-		{ProducerSystem, false, 0.5},
+		{ProducerSystem, false, 0.4},
 		{ProducerLocal, false, 0.7},
 		{ProducerClaude, false, 0.7},
 	}

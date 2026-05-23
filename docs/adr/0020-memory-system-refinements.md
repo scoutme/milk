@@ -4,7 +4,7 @@ Date: 2026-05-18
 
 ## Status
 
-Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md)
+Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md); constants further re-tuned in [ADR-0025](0025-memory-decay-constant-retuning.md)
 
 ## Context
 

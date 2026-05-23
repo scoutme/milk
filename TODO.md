@@ -34,7 +34,7 @@ when typing multiline content, sometimes text not fitting in current line disapp
 
 Add code colorization
 
-## Check memory decay
+## ~~Check memory decay~~ DONE
 
 I didn't see a single percept decaying
 
@@ -74,10 +74,19 @@ When typing a long enough input to overflow the first textarea line, subsequent 
 
 When the user pastes content (via Ctrl+V or right-click) and wants to undo it, Ctrl+Z should revert the textarea to its previous state. Currently there is no undo history in the input area.
 
-## Memory tuning
+## ~~Memory tuning~~ DONE
 
 Nothing decays, all becomes global
 
 ## Dangerous permission skip via command
 
 A command should enable permission management mode switching
+
+## Agent generalization
+
+The "local" slot assumes a locally-running inference server but already supports any OpenAI-compatible endpoint — including remote ones. The "claude" slot is hardwired to the Claude Code CLI subprocess. Both slots should become configurable agent types:
+
+- Rename "local" → "agent A" (or a user-configured name); support any OpenAI-compatible endpoint, local or remote
+- Make "claude" replaceable with a second OpenAI-compatible agent (plain API, no CLI subprocess required), keeping the Claude Code CLI path as one possible backend
+- Routing labels, prompt labels, session state names, config keys, and UI copy should reflect the configured agent names rather than hardcoded "local"/"claude"
+- Escalation and sticky-mode mechanics should be backend-agnostic

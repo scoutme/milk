@@ -3,9 +3,9 @@ package memory
 import "context"
 
 const (
-	decayPerSession   = 0.03
-	promoteThreshold  = 0.6
-	pruneThreshold    = 0.0
+	decayPerSession   = 0.10 // −10% per session end; Local/Claude percepts prune after ~5 sessions
+	promoteThreshold  = 0.80 // only genuinely high-confidence percepts graduate to global
+	pruneThreshold    = 0.20 // cull weak percepts before they accumulate
 	edgePositiveDelta = 0.05
 	edgeNegativeDelta = 0.10
 	maxW              = 1.0
