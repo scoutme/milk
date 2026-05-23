@@ -26,7 +26,7 @@ Keep chain-of-thought / thinking tokens separated from conversation history, wit
 
 Analyze the possibility to automate the llama.cpp process launch (or similar solution) in order to grant local model inference on milk start. The launch should be configurable via milk configuration, and commands and tools must be implemented to interact with llama.cpp for model switching. Keep evolution in mind, since llama.cpp is just an option: in the future we'll add support for remote inference or other inference server, keeping functionalities intact.
 
-## Input area bug
+## ~~Input area bug~~ DONE
 
 when typing multiline content, sometimes text not fitting in current line disappears, to appear then only when it's long enough to be seen in subsequent line. This doesn't happen between first and second line
 
@@ -50,7 +50,7 @@ Works only in single line
 
 Claude keeps asking the same permissions, as if milk isn't saving them into claude settings
 
-## Selection hint too present
+## ~~Selection hint too present~~ DONE
 
 Selection hint should be visible only when selection is started, that is when mouse as been moved at least a bit after press, before release
 
@@ -70,7 +70,7 @@ The input prompt currently shows the next-turn agent (e.g. `[local]`, `[claude]`
 
 When typing a long enough input to overflow the first textarea line, subsequent lines are not visible — only the first line is shown in the input area. The text is being buffered (it can be submitted), but the visual display doesn't grow to show continuation lines.
 
-## Ctrl+Z undo paste
+## ~~Ctrl+Z undo paste~~ DONE
 
 When the user pastes content (via Ctrl+V or right-click) and wants to undo it, Ctrl+Z should revert the textarea to its previous state. Currently there is no undo history in the input area.
 
