@@ -25,3 +25,4 @@
 * [23. AWS Credential Injection for Bedrock-backed Claude Subprocess](0023-aws-credential-injection.md)
 * [24. TUI Selection, Copy/Paste, and Welcome Screen](0024-tui-selection-copy-paste-welcome-screen.md)
 * [25. Memory Decay Constant Re-tuning](0025-memory-decay-constant-retuning.md)
+* [26. Tool-Usage UI: Inline ⚙ Hint Line](0026-tool-usage-ui-hint.md)

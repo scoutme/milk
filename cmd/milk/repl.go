@@ -1652,33 +1652,24 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	st.toolFutures = map[string]chan string{}
 
 	tuiAgents := agents
-	sw0 := &sendWriter{send: send}
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents.claude = agents.claude.
+		WithSkipPermissions(st.skipPermissions).
 		WithOnToolUse(func(name string) {
 			send(toolUseMsg{name: name})
 		}).
 		WithOnToolUseReady(func(name string, input map[string]any) {
-			// Skip tools already allowed in settings.
-			if st.cs != nil {
-				if ok, _ := st.cs.IsToolAllowed(name); ok {
-					return
-				}
-			}
-			// Create a buffered future and ask — non-blocking from this goroutine.
-			ch := make(chan string, 1)
-			st.toolFutures[name] = ch
-			detail := formatToolInput(input)
-			var prompt string
-			if detail != "" {
-				prompt = fmt.Sprintf("%s allow tool %s %s? [Y/n] ", milkTag(), bold(name), dim(detail))
+			summary := claudeToolArgSummary(input)
+			var hint string
+			if summary != "" {
+				hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
 			} else {
-				prompt = fmt.Sprintf("%s allow tool %s? [Y/n] ", milkTag(), bold(name))
+				hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
 			}
-			send(permRequestMsg{prompt: prompt, respCh: ch})
+			send(chunkMsg{text: hint})
 		}).
 		WithOnThinking(func(text string) { send(chunkMsg{text: dim(text)}) }).
-		WithPermissionHandler(makeTUIPermissionHandler(sw0, st.cs))
+		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs))
 	return m, tea.Batch(
 		spinnerTick(),
 		func() tea.Msg {
@@ -2686,7 +2677,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		cs = store
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, toolFutures: map[string]chan string{}}
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, toolFutures: map[string]chan string{}, skipPermissions: cfg.DangerouslySkipPermissions}
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	m := newModel(ctx, st, rtr, agents, mem)
