@@ -108,6 +108,21 @@ The classifier uses the same model instance as the local coding agent. No second
 - `session_id` is extracted from the first NDJSON message and persisted to the milk session file
 - Claude orients itself from the appended context — no separate reformulation step
 
+### Permission prompt flow
+
+milk passes `--permission-prompt-tool stdio` on every Claude invocation. When Claude wants to use a tool that has not been pre-approved, it emits a `control_request` NDJSON event on stdout and pauses. milk intercepts this event and, in TUI mode, routes a blocking prompt through the bubbletea message queue (see ADR-0015):
+
+1. The agent goroutine calls `tuiInputReader.readLine(prompt)` and blocks on a channel.
+2. The TUI appends the prompt to the transcript and switches key events to `handlePermKey`.
+3. The user types `y` (allow) or `n` (deny) and presses Enter; Ctrl-C sends `n`.
+4. milk writes a `control_response` JSON to Claude's stdin; the agent goroutine unblocks.
+
+The prompt shows the tool name, key arguments, and — for `workingDir` blocks — the restricted path. The session stays alive throughout; no `--resume` round-trip is needed.
+
+`dangerously_skip_permissions` (config field) bypasses this flow entirely: Claude auto-approves all tool uses. `/skip-permissions on|off` overrides this setting per session without restarting.
+
+Pre-approved tools and directories can be listed in `allowed_tools` and `add_dirs` config fields; they are passed as `--allowedTools` / `--add-dir` flags and never trigger a prompt.
+
 ### Context handoff (escalation)
 
 When promoting from local to Claude, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt`. Format:
@@ -194,11 +209,13 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) is embedded in the textarea and reflects the current routing state, updated after each turn.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
 **Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
+
+**/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes Claude auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 

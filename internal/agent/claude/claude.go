@@ -87,6 +87,16 @@ func (a *Agent) WithOnThinking(fn func(string)) *Agent {
 	return &c
 }
 
+// SkipPermissions reports whether the agent is running with dangerously_skip_permissions.
+func (a *Agent) SkipPermissions() bool { return a.skipPermissions }
+
+// WithSkipPermissions returns a copy of the agent with skipPermissions set to v.
+func (a *Agent) WithSkipPermissions(v bool) *Agent {
+	c := *a
+	c.skipPermissions = v
+	return &c
+}
+
 // WithOnPercept returns a copy of the agent that calls fn for each
 // <milk:percept:NONCE>…</milk:percept:NONCE> tag intercepted in the response stream.
 // fn receives the percept body and a consumerHint ("local", "claude", or "").

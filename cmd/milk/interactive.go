@@ -27,9 +27,10 @@ const cmdExport = "/export"
 const cmdHistory = "/history"
 const cmdPanel = "/panel"
 const cmdForget = "/forget"
+const cmdSkipPerms = "/skip-permissions"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -61,6 +62,9 @@ const interactiveHelp = `Slash commands:
   /history session switch input navigation to session history (default)
   /panel memory    toggle the memory panel (right-side percept viewer)
   /forget <pat>    delete a percept by description or #id (asks for confirmation)
+  /skip-permissions        show current dangerously_skip_permissions state
+  /skip-permissions on     enable skip-permissions for this session (Claude auto-approves all tools)
+  /skip-permissions off    disable skip-permissions for this session (Claude prompts for tool use)
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -112,7 +116,8 @@ type interactiveState struct {
 	// as each tool call is detected in the stream. The user is asked immediately
 	// via the TUI; handleStructuredDenials reads the answer (blocking briefly if
 	// the user hasn't responded yet). Keyed by tool name.
-	toolFutures map[string]chan string
+	toolFutures     map[string]chan string
+	skipPermissions bool // session-level override for DangerouslySkipPermissions
 }
 
 // extractSlashCommand scans input for a known slash command token anywhere in
@@ -190,6 +195,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 			st.forceLocal = true
 		}
 		return false, prompt, output
+	case cmdSkipPerms:
+		output = execSkipPerms(prompt, st)
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
@@ -354,6 +361,24 @@ func execLearn(fact string, st *interactiveState) string {
 		return fmt.Sprintf("%s error storing memory: %v", milkTag(), err)
 	}
 	return fmt.Sprintf("%s learned: %q (id %s)", milkTag(), fact, id[:8])
+}
+
+// execSkipPerms handles /skip-permissions [on|off].
+func execSkipPerms(sub string, st *interactiveState) string {
+	switch strings.TrimSpace(sub) {
+	case "on":
+		st.skipPermissions = true
+		return milkTag() + " " + red("dangerously_skip_permissions ON") + " — Claude will auto-approve all tool uses"
+	case "off":
+		st.skipPermissions = false
+		return milkTag() + " dangerously_skip_permissions OFF — Claude will prompt for tool permissions"
+	default:
+		state := "off"
+		if st.skipPermissions {
+			state = red("on")
+		}
+		return fmt.Sprintf("%s dangerously_skip_permissions is %s  (use /skip-permissions on|off)", milkTag(), state)
+	}
 }
 
 // dropAndNewSession drops the current session, creates a fresh one, and writes output to w.

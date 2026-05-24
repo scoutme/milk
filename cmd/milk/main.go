@@ -267,6 +267,13 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 const claudeLabel = "claude:"
 const localLabel = "local:"
 
+func claudeLabelStyled(a *claude.Agent) string {
+	if a.SkipPermissions() {
+		return bold(red(claudeLabel))
+	}
+	return bold(blue(claudeLabel))
+}
+
 func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, mem *memory.Store, prompt string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
@@ -353,7 +360,7 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
 	}
-	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	fmt.Fprint(out, claudeLabelStyled(agent)+" ")
 	aw := newActivityWriter(out)
 	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
@@ -468,7 +475,7 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 	if !changed {
 		return res
 	}
-	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
 	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
@@ -564,7 +571,7 @@ func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *c
 	} else {
 		retryAgent = agent
 	}
-	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
 	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permission.", out)
 	if err != nil {
 		return res
@@ -631,7 +638,7 @@ func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.A
 		return claude.ParseResult{}
 	}
 	retryAgent := agent.WithExtraDir(dir)
-	fmt.Fprint(out, bold(blue(claudeLabel))+" ")
+	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
 	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), fmt.Sprintf("Access to %q has been granted. Please continue.", dir), out)
 	if err != nil {
 		return claude.ParseResult{}
@@ -666,26 +673,56 @@ func makePermissionHandler(input inputReader, out io.Writer, cs *claudesettings.
 	}
 }
 
-// makeTUIPermissionHandler returns a PermissionHandler for TUI mode.
-// It auto-allows every request immediately (no blocking), notifies the user
-// via out, and persists the grant to Claude project settings.
-// cs may be nil — persistence is best-effort.
-func makeTUIPermissionHandler(out io.Writer, cs *claudesettings.Store) claude.PermissionHandler {
-	return func(req claude.ControlRequest, stdinW io.Writer) {
-		claude.Allow(req.RequestID, stdinW)
-		b := req.Body
-		fmt.Fprintf(out, "\n%s auto-allowed tool: %s", milkTag(), bold(b.ToolName))
-		if b.BlockedPath != "" {
-			fmt.Fprintf(out, "  path: %s", dim(b.BlockedPath))
+// claudeToolArgSummary picks the most informative single argument value for display,
+// mirroring the local agent's toolArgSummary.
+func claudeToolArgSummary(args map[string]any) string {
+	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			if len(v) > 60 {
+				return v[:57] + "..."
+			}
+			return v
 		}
-		fmt.Fprintln(out)
-		if cs != nil {
-			if b.ToolName != "" {
-				cs.AllowTool(b.ToolName) //nolint:errcheck
+	}
+	return ""
+}
+
+// makeTUIPermissionHandler returns a PermissionHandler for TUI mode.
+// It blocks the stream goroutine by sending a permRequestMsg to the TUI and
+// waiting for the user's y/n reply before forwarding allow/deny to Claude.
+// cs may be nil — persistence is best-effort.
+func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claude.PermissionHandler {
+	return func(req claude.ControlRequest, stdinW io.Writer) {
+		b := req.Body
+		prompt := fmt.Sprintf("\n%s permission request — tool: %s", milkTag(), bold(b.ToolName))
+		if b.BlockedPath != "" {
+			prompt += fmt.Sprintf("  path: %s", dim(b.BlockedPath))
+		}
+		if b.DecisionReasonType != "" {
+			prompt += fmt.Sprintf("  reason: %s", b.DecisionReasonType)
+		}
+		prompt += "\n"
+		if b.Description != "" {
+			prompt += fmt.Sprintf("  %s\n", b.Description)
+		}
+		prompt += fmt.Sprintf("%s Allow? [Y/n] ", milkTag())
+
+		yn, _ := input.readLine(prompt)
+		if yn == "" {
+			yn = "y"
+		}
+		if strings.EqualFold(yn, "y") {
+			claude.Allow(req.RequestID, stdinW)
+			if cs != nil {
+				if b.ToolName != "" {
+					cs.AllowTool(b.ToolName) //nolint:errcheck
+				}
+				if b.BlockedPath != "" {
+					cs.AllowDirectory(filepath.Dir(b.BlockedPath)) //nolint:errcheck
+				}
 			}
-			if b.BlockedPath != "" {
-				cs.AllowDirectory(filepath.Dir(b.BlockedPath)) //nolint:errcheck
-			}
+		} else {
+			claude.Deny(req.RequestID, stdinW)
 		}
 	}
 }
@@ -704,20 +741,6 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 	if b.Description != "" {
 		fmt.Fprintf(out, "  %s\n", b.Description)
 	}
-}
-
-// formatToolInput extracts the most user-relevant parameter from a tool input map
-// and returns a short label like "→ <value>". Returns "" if nothing useful is found.
-func formatToolInput(input map[string]any) string {
-	for _, key := range []string{"command", "file_path", "path", "pattern", "description", "query"} {
-		if v, ok := input[key].(string); ok && v != "" {
-			if len(v) > 80 {
-				v = v[:77] + "..."
-			}
-			return "→ " + v
-		}
-	}
-	return ""
 }
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.

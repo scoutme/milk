@@ -46,7 +46,7 @@ When trying to submit input during agent response, "[milk] agent is responding..
 
 Works only in single line
 
-## Permissions
+## ~~Permissions~~ DONE
 
 Claude keeps asking the same permissions, as if milk isn't saving them into claude settings
 
@@ -54,7 +54,7 @@ Claude keeps asking the same permissions, as if milk isn't saving them into clau
 
 Selection hint should be visible only when selection is started, that is when mouse as been moved at least a bit after press, before release
 
-## Possible permission issue
+## ~~Possible permission issue~~ DONE
 
 Claude is asking many times between different turns the same permission requests, sa if milk isn't updating correctly its configurations
 
@@ -62,7 +62,7 @@ Claude is asking many times between different turns the same permission requests
 
 When in input area, if up arrow is pressed while at the beginning of the first line, history should be navigated
 
-## Prompt label refactor
+## ~~Prompt label refactor~~ DONE
 
 The input prompt currently shows the next-turn agent (e.g. `[local]`, `[claude]`). Since the header bar and status bar already carry full agent/mode info, the prompt label could be simplified to just `>` or a very short marker. Evaluate whether removing the agent name from the prompt reduces clutter without losing context.
 
@@ -78,7 +78,7 @@ When the user pastes content (via Ctrl+V or right-click) and wants to undo it, C
 
 Nothing decays, all becomes global
 
-## Dangerous permission skip via command
+## ~~Dangerous permission skip via command~~ DONE
 
 A command should enable permission management mode switching
 

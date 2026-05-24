@@ -1,6 +1,6 @@
 # ADR 0018 — Streaming Tool-Format Detector
 
-**Status:** proposed  
+**Status:** accepted  
 **Date:** 2026-05-16
 
 ---
@@ -265,31 +265,6 @@ auto-detection is strictly better UX.
   required for correctness)
 - Add a note on supported model families
 
-### Step 6 — Tool-usage UI (design only, implementation deferred)
+### Step 6 — Tool-usage UI
 
-The detector now has precise knowledge of when a tool call starts and ends.
-This makes a richer UI possible. Design questions to resolve before
-implementing:
-
-**What to show:** currently the user sees raw markup leaking (the bug being
-fixed) or nothing (native tool_calls path). Options:
-
-- A single status line while the tool is running: `⚙ bash: ls -la`
-- A collapsible block in the TUI viewport: tool name + args on entry,
-  result summary on exit, expandable on click
-- An inline indicator in the transcript: `[tool: bash → exit 0]`
-
-**Where it lives:** the TUI (`cmd/milk/repl.go` + bubbletea model) already
-manages the viewport. The detector lives in `internal/agent/local` and
-currently writes to an `io.Writer`. Bridging these requires either:
-
-- A `ToolEvent` channel that the TUI listens to alongside the text stream
-- A callback/hook on `StreamDetector` (`OnToolStart`, `OnToolComplete`)
-- Treating tool events as structured tea.Msg sent via `tea.Program.Send`
-
-**Deferred work (separate branch `feat/tool-usage-ui`):**
-
-- Define `ToolEvent` type (start / complete / error) in `internal/agent/local`
-- Thread events from `streamCompletion` → `Run` → REPL via `tea.Program.Send`
-- Design bubbletea component: spinner while running, summary line on complete
-- Decide truncation strategy for long tool results in the viewport
+Implemented. See ADR-0026 for the design and implementation record.
