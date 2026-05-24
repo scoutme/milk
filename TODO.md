@@ -1,3 +1,10 @@
+# milk — closed issue archive
+
+> **Deprecated as a backlog.** Open items are now tracked as GitHub Issues.
+> This file is kept as an archive of closed/done items for historical reference.
+
+---
+
 # milk — feature backlog
 
 ## Remote oversight interface (Telegram or similar)
