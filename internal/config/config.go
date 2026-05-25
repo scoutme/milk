@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Rules struct {
@@ -48,9 +49,83 @@ type OtelConfig struct {
 	MetricsFlushMinutes int    `json:"metrics_flush_minutes"` // periodic flush interval (0 = session-end only)
 }
 
+// LocalAgentConfig holds configuration for a single local-agent backend.
+// Multiple backends can be listed under local_agents; the active one is
+// selected by name via the local_agent field (defaults to the first entry).
+// Flat llama_* fields at the Config root are accepted for backward compatibility.
+type LocalAgentConfig struct {
+	Name string `json:"name"` // display name, used as selector key
+
+	URL   string `json:"url"`   // base URL of the inference server
+	Model string `json:"model"` // model name or ARN
+
+	// Provider selects the auth transport.
+	// "" or "local" = no auth (default)
+	// "bedrock"     = AWS SigV4 signing (native Converse API)
+	// anything else = Bearer token via APIKey
+	Provider string `json:"provider,omitempty"`
+
+	// APIKey is a Bearer token / API key used when Provider is not "" or "bedrock".
+	APIKey string `json:"api_key,omitempty"`
+
+	// Headers are extra HTTP headers injected on every request (e.g. "api-key" for Azure,
+	// "HTTP-Referer" for OpenRouter).
+	//
+	// Azure OpenAI workaround: Azure uses a non-standard URL path and "api-key" header instead
+	// of Bearer auth. Set url to the full deployment endpoint and add {"api-key": "<key>"} here.
+	// A dedicated azure provider with URL templating is tracked in GitHub Issues.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// TLSSkipVerify disables TLS certificate verification. Use only for dev/self-signed certs.
+	TLSSkipVerify bool `json:"tls_skip_verify,omitempty"`
+	// TLSCACert is a path to a PEM-encoded CA cert for private/self-signed endpoints.
+	TLSCACert string `json:"tls_ca_cert,omitempty"`
+
+	// AWS credentials for Provider = "bedrock".
+	AWSRegion  string `json:"aws_region,omitempty"`
+	AWSKeyID   string `json:"aws_key_id,omitempty"`
+	AWSSecret  string `json:"aws_secret,omitempty"`
+	AWSToken   string `json:"aws_token,omitempty"`   // optional session token
+	AWSService string `json:"aws_service,omitempty"` // default "bedrock"
+}
+
 type Config struct {
-	LlamaURL                   string   `json:"llama_url"`
-	LlamaModel                 string   `json:"llama_model"`
+	// LocalAgent is the name of the active backend from LocalAgents.
+	// If empty, the first entry in LocalAgents is used.
+	LocalAgent  string             `json:"local_agent"`
+	LocalAgents []LocalAgentConfig `json:"local_agents"`
+
+	// Flat llama_* fields are kept for backward compatibility.
+	// When LocalAgents is non-empty the flat fields are ignored.
+	LlamaURL   string `json:"llama_url"`
+	LlamaModel string `json:"llama_model"`
+
+	// LlamaProvider selects the auth transport.
+	// "" or "local" = no auth (default)
+	// "bedrock"     = AWS SigV4 signing
+	// anything else = Bearer token via LlamaAPIKey
+	LlamaProvider string `json:"llama_provider"`
+
+	// LlamaAPIKey is a Bearer token / API key used when LlamaProvider is not "" or "bedrock".
+	// Injected as "Authorization: Bearer <key>".
+	LlamaAPIKey string `json:"llama_api_key"`
+
+	// LlamaHeaders are extra HTTP headers injected on every request.
+	LlamaHeaders map[string]string `json:"llama_headers"`
+
+	// LlamaTLSSkipVerify disables TLS certificate verification. Use only for local dev/self-signed certs.
+	LlamaTLSSkipVerify bool `json:"llama_tls_skip_verify"`
+
+	// LlamaTLSCACert is a path to a PEM-encoded CA certificate file.
+	LlamaTLSCACert string `json:"llama_tls_ca_cert"`
+
+	// AWS credentials for LlamaProvider = "bedrock".
+	LlamaAWSRegion  string `json:"llama_aws_region"`
+	LlamaAWSKeyID   string `json:"llama_aws_key_id"`
+	LlamaAWSSecret  string `json:"llama_aws_secret"`
+	LlamaAWSToken   string `json:"llama_aws_token"`   // optional session token
+	LlamaAWSService string `json:"llama_aws_service"` // default "bedrock"
+
 	ClaudeBin                  string   `json:"claude_bin"`
 	DefaultRoute               string   `json:"default_route"`
 	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
@@ -76,8 +151,6 @@ type Config struct {
 
 func defaults() Config {
 	return Config{
-		LlamaURL:     "http://localhost:8080",
-		LlamaModel:   "qwen2.5-coder",
 		ClaudeBin:    "claude",
 		DefaultRoute: "local",
 		Otel: OtelConfig{
@@ -142,6 +215,52 @@ var builtinDirRestrictionPhrases = []string{
 	"directory non consentita", "percorso non autorizzato",
 	"non è consentito accedere", "directory limitata",
 	"cartella non accessibile",
+}
+
+// ActiveLocalAgent returns the resolved LocalAgentConfig to use.
+// Priority: local_agents list (selected by local_agent name, or first entry)
+// → backward-compat flat llama_* fields → built-in defaults.
+func (c Config) ActiveLocalAgent() LocalAgentConfig {
+	if len(c.LocalAgents) > 0 {
+		if c.LocalAgent != "" {
+			for _, a := range c.LocalAgents {
+				if strings.EqualFold(a.Name, c.LocalAgent) {
+					return a
+				}
+			}
+		}
+		return c.LocalAgents[0]
+	}
+	// Backward compat: promote flat fields only when explicitly set.
+	if c.LlamaURL == "" {
+		return LocalAgentConfig{} // no provider configured
+	}
+	return LocalAgentConfig{
+		Name:          "local",
+		URL:           c.LlamaURL,
+		Model:         c.LlamaModel,
+		Provider:      c.LlamaProvider,
+		APIKey:        c.LlamaAPIKey,
+		Headers:       c.LlamaHeaders,
+		TLSSkipVerify: c.LlamaTLSSkipVerify,
+		TLSCACert:     c.LlamaTLSCACert,
+		AWSRegion:     c.LlamaAWSRegion,
+		AWSKeyID:      c.LlamaAWSKeyID,
+		AWSSecret:     c.LlamaAWSSecret,
+		AWSToken:      c.LlamaAWSToken,
+		AWSService:    c.LlamaAWSService,
+	}
+}
+
+// HasLocalAgentConfig reports whether the user has explicitly configured a
+// local-agent backend beyond the built-in defaults (localhost:8080 / qwen2.5-coder).
+// Used by the TUI to decide whether to show setup hints on the welcome screen.
+func (c Config) HasLocalAgentConfig() bool {
+	if len(c.LocalAgents) > 0 {
+		return true
+	}
+	// Flat fields: any explicitly-set URL counts.
+	return c.LlamaURL != ""
 }
 
 // EffectivePermissionPhrases merges built-in phrases with any user-supplied extras.

@@ -28,9 +28,10 @@ const cmdHistory = "/history"
 const cmdPanel = "/panel"
 const cmdForget = "/forget"
 const cmdSkipPerms = "/skip-permissions"
+const cmdProvider = "/provider"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -65,6 +66,11 @@ const interactiveHelp = `Slash commands:
   /skip-permissions        show current dangerously_skip_permissions state
   /skip-permissions on     enable skip-permissions for this session (Claude auto-approves all tools)
   /skip-permissions off    disable skip-permissions for this session (Claude prompts for tool use)
+  /provider                show active local-agent provider (URL, model, auth method)
+  /provider list           list all configured local-agent backends
+  /provider switch <name>  switch the active local agent to the named backend
+  /provider add            add a new backend interactively (prompts for missing fields)
+  /provider add name=... url=... model=... [provider=...] [api_key=...] [aws_region=...]  add inline
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -379,6 +385,49 @@ func execSkipPerms(sub string, st *interactiveState) string {
 		}
 		return fmt.Sprintf("%s dangerously_skip_permissions is %s  (use /skip-permissions on|off)", milkTag(), state)
 	}
+}
+
+// execProvider shows the active local-agent provider configuration (no credentials).
+// arg is the remainder after "/provider" — empty for status display.
+func execProvider(st *interactiveState) string {
+	ac := st.cfg.ActiveLocalAgent()
+
+	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
+	var authDesc string
+	switch provider {
+	case "", "local":
+		authDesc = "none (local / no-auth)"
+	case "bedrock":
+		region := ac.AWSRegion
+		if region == "" {
+			region = "(unset)"
+		}
+		service := ac.AWSService
+		if service == "" {
+			service = "bedrock"
+		}
+		authDesc = fmt.Sprintf("AWS SigV4 (region: %s, service: %s)", region, service)
+	default:
+		if ac.APIKey != "" {
+			authDesc = fmt.Sprintf("Bearer token (%s, key set)", provider)
+		} else {
+			authDesc = fmt.Sprintf("Bearer token (%s, key NOT set)", provider)
+		}
+	}
+
+	extraHeaders := len(ac.Headers)
+	var headerNote string
+	if extraHeaders > 0 {
+		headerNote = fmt.Sprintf(", %d extra header(s)", extraHeaders)
+	}
+
+	name := ac.Name
+	if name == "" {
+		name = "local"
+	}
+
+	return fmt.Sprintf("%s local agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
+		milkTag(), bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
 }
 
 // dropAndNewSession drops the current session, creates a fresh one, and writes output to w.
