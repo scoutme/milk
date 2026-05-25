@@ -67,6 +67,10 @@ const interactiveHelp = `Slash commands:
   /skip-permissions on     enable skip-permissions for this session (Claude auto-approves all tools)
   /skip-permissions off    disable skip-permissions for this session (Claude prompts for tool use)
   /provider                show active local-agent provider (URL, model, auth method)
+  /provider list           list all configured local-agent backends
+  /provider switch <name>  switch the active local agent to the named backend
+  /provider add            add a new backend interactively (prompts for missing fields)
+  /provider add name=... url=... model=... [provider=...] [api_key=...] [aws_region=...]  add inline
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -199,8 +203,6 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		return false, prompt, output
 	case cmdSkipPerms:
 		output = execSkipPerms(prompt, st)
-	case cmdProvider:
-		output = execProvider(st)
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
@@ -386,49 +388,46 @@ func execSkipPerms(sub string, st *interactiveState) string {
 }
 
 // execProvider shows the active local-agent provider configuration (no credentials).
+// arg is the remainder after "/provider" — empty for status display.
 func execProvider(st *interactiveState) string {
-	cfg := st.cfg
+	ac := st.cfg.ActiveLocalAgent()
 
-	url := cfg.LlamaURL
-	if url == "" {
-		url = "http://localhost:8080"
-	}
-	model := cfg.LlamaModel
-	if model == "" {
-		model = "qwen2.5-coder"
-	}
-
-	provider := strings.ToLower(strings.TrimSpace(cfg.LlamaProvider))
+	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
 	var authDesc string
 	switch provider {
 	case "", "local":
 		authDesc = "none (local / no-auth)"
 	case "bedrock":
-		region := cfg.LlamaAWSRegion
+		region := ac.AWSRegion
 		if region == "" {
 			region = "(unset)"
 		}
-		service := cfg.LlamaAWSService
+		service := ac.AWSService
 		if service == "" {
 			service = "bedrock"
 		}
 		authDesc = fmt.Sprintf("AWS SigV4 (region: %s, service: %s)", region, service)
 	default:
-		if cfg.LlamaAPIKey != "" {
+		if ac.APIKey != "" {
 			authDesc = fmt.Sprintf("Bearer token (%s, key set)", provider)
 		} else {
 			authDesc = fmt.Sprintf("Bearer token (%s, key NOT set)", provider)
 		}
 	}
 
-	extraHeaders := len(cfg.LlamaHeaders)
+	extraHeaders := len(ac.Headers)
 	var headerNote string
 	if extraHeaders > 0 {
 		headerNote = fmt.Sprintf(", %d extra header(s)", extraHeaders)
 	}
 
-	return fmt.Sprintf("%s local agent provider\n  url:    %s\n  model:  %s\n  auth:   %s%s",
-		milkTag(), bold(url), bold(model), authDesc, headerNote)
+	name := ac.Name
+	if name == "" {
+		name = "local"
+	}
+
+	return fmt.Sprintf("%s local agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
+		milkTag(), bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
 }
 
 // dropAndNewSession drops the current session, creates a fresh one, and writes output to w.

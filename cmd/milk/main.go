@@ -112,7 +112,8 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	localAgent := local.NewFromConfig(cfg.LlamaURL, cfg.LlamaModel, cfg)
+	ac := applyFreshAWSCreds(cfg, cfg.ActiveLocalAgent())
+	localAgent := local.NewFromConfig(ac)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
@@ -130,7 +131,7 @@ func run(cmd *cobra.Command, args []string) error {
 		cs = store
 	}
 
-	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
+	localAvail, claudeAvail, err := checkAgentAvailabilityStrict(ctx, localAgent, claudeAgent)
 	if err != nil {
 		return err
 	}
@@ -160,6 +161,33 @@ func run(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+}
+
+// applyFreshAWSCreds refreshes AWS credentials in ac when aws_auth_refresh is
+// enabled and the provider is "bedrock" without explicit credentials already set.
+func applyFreshAWSCreds(cfg config.Config, ac config.LocalAgentConfig) config.LocalAgentConfig {
+	if !cfg.AWSAuthRefresh {
+		return ac
+	}
+	if strings.ToLower(strings.TrimSpace(ac.Provider)) != "bedrock" {
+		return ac
+	}
+	if ac.AWSKeyID != "" {
+		return ac // explicit config takes precedence; don't override
+	}
+	cmd := claudesettings.AWSAuthRefreshCommand()
+	if cmd == "" {
+		return ac
+	}
+	creds, err := claude.ResolveAWSCreds(cmd)
+	if err != nil || creds == nil {
+		fmt.Fprintf(os.Stderr, "%s warning: aws_auth_refresh for local bedrock agent failed: %v\n", milkTag(), err)
+		return ac
+	}
+	ac.AWSKeyID = creds.AccessKeyID
+	ac.AWSSecret = creds.SecretAccessKey
+	ac.AWSToken = creds.SessionToken
+	return ac
 }
 
 // applyAWSCreds injects resolved AWS credentials into the agent when
@@ -241,9 +269,6 @@ func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, claude
 	localAvail := localAgent.Ping(ctx) == nil
 	claudeAvail := claudeAgent.Ping() == nil
 
-	if !localAvail && !claudeAvail {
-		return false, false, fmt.Errorf("neither local inference server nor claude CLI is available")
-	}
 	if !localAvail {
 		fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to Claude")
 	}
@@ -251,6 +276,20 @@ func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, claude
 		fmt.Fprintln(os.Stderr, milkTag()+" warning: claude CLI unavailable — local only")
 	}
 
+	return localAvail, claudeAvail, nil
+}
+
+// checkAgentAvailabilityStrict is like checkAgentAvailability but returns an
+// error when both agents are unavailable. Used by single-prompt mode where
+// starting without any agent makes no sense.
+func checkAgentAvailabilityStrict(ctx context.Context, localAgent *local.Agent, claudeAgent *claude.Agent) (bool, bool, error) {
+	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
+	if err != nil {
+		return false, false, err
+	}
+	if !localAvail && !claudeAvail {
+		return false, false, fmt.Errorf("neither local inference server nor claude CLI is available")
+	}
 	return localAvail, claudeAvail, nil
 }
 
@@ -265,7 +304,6 @@ func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Ta
 }
 
 const claudeLabel = "claude:"
-const localLabel = "local:"
 
 func claudeLabelStyled(a *claude.Agent) string {
 	if a.SkipPermissions() {
@@ -274,12 +312,24 @@ func claudeLabelStyled(a *claude.Agent) string {
 	return bold(blue(claudeLabel))
 }
 
+func localLabel(cfg config.Config) string {
+	ac := cfg.ActiveLocalAgent()
+	name := strings.ToLower(strings.TrimSpace(ac.Name))
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(ac.Provider))
+	}
+	if name == "" {
+		name = "local"
+	}
+	return name + ":"
+}
+
 func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, mem *memory.Store, prompt string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
 	}
-	fmt.Fprint(out, bold(green(localLabel))+" ")
+	fmt.Fprint(out, bold(green(localLabel(cfg)))+" ")
 	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
 

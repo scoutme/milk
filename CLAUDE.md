@@ -20,7 +20,7 @@ cmd/milk/panel_memory.go      # right-side memory panel (open by default, toggle
 internal/config/              # config loading (~/.milk/config.json)
 internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)
-internal/agent/local/         # OpenAI-compat client + tool loop + stream detector
+internal/agent/local/         # OpenAI-compat client + Bedrock Converse native path + auth transports (SigV4, Bearer, custom headers) + tool loop + stream detector
 internal/agent/claude/        # claude CLI subprocess + stream-json parser
 internal/escalation/          # context builder (local transcript → Claude prompt)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
@@ -29,7 +29,7 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 
 ## Key design decisions
 
-- **OpenAI-compat local agent**: any compliant inference server works (llama.cpp, Ollama, LM Studio, vLLM, or remote). Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
+- **OpenAI-compat local agent**: any compliant inference server works (llama.cpp, Ollama, LM Studio, vLLM, or remote cloud providers). Auth transports: none (local), AWS SigV4 (Bedrock), Bearer token (OpenRouter, Together.ai, Groq, …), arbitrary extra headers. Set `llama_provider` in config to select. Bedrock also uses a native Converse API path (not OpenAI-compat). Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API
 - **Context handoff**: local transcript passed via `--append-system-prompt`; Claude orients itself

@@ -65,11 +65,11 @@ func (t *sigv4Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.Header.Set("host", r.URL.Host)
 
 	// Canonical request
+	// AWS SigV4 requires each path segment to be URI-encoded independently.
+	// Use r.URL.EscapedPath() to get the single-encoded path (as sent on the wire),
+	// then re-encode each segment so special chars like %3A become %253A.
 	signedHeaders, canonicalHeaders := buildCanonicalHeaders(r)
-	canonicalURI := r.URL.EscapedPath()
-	if canonicalURI == "" {
-		canonicalURI = "/"
-	}
+	canonicalURI := buildCanonicalURI(r.URL.EscapedPath())
 	canonicalRequest := strings.Join([]string{
 		r.Method,
 		canonicalURI,
@@ -93,6 +93,47 @@ func (t *sigv4Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	))
 
 	return t.inner.RoundTrip(r)
+}
+
+// buildCanonicalURI constructs the canonical URI for SigV4 by re-encoding each
+// path segment. The input is the already-escaped path from url.URL.EscapedPath().
+// Re-encoding makes any percent-encoded characters (e.g. %3A) become %253A, which
+// matches what AWS expects for services like Bedrock when the model ID is an ARN.
+func buildCanonicalURI(escapedPath string) string {
+	if escapedPath == "" {
+		return "/"
+	}
+	segments := strings.Split(escapedPath, "/")
+	for i, seg := range segments {
+		segments[i] = awsURIEncodeSegment(seg)
+	}
+	return strings.Join(segments, "/")
+}
+
+// awsURIEncodeSegment percent-encodes a single path segment, encoding all
+// characters except unreserved ones (A-Z a-z 0-9 - _ . ~).
+func awsURIEncodeSegment(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// awsURIEncodeModel encodes a model ID (plain ID or full ARN) for use as a single
+// path segment in a Bedrock URL. All characters except unreserved ones are encoded,
+// including forward slashes (/ → %2F) and colons (: → %3A), so that an ARN like
+// "arn:aws:bedrock:...:application-inference-profile/id" becomes a single opaque
+// path segment rather than splitting into multiple segments. The SigV4 transport
+// then double-encodes this segment in the canonical URI (e.g. %2F → %252F).
+func awsURIEncodeModel(s string) string {
+	return awsURIEncodeSegment(s)
 }
 
 func buildCanonicalHeaders(req *http.Request) (signedHeaders, canonicalHeaders string) {

@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -65,13 +68,16 @@ type streamChunk struct {
 	} `json:"choices"`
 }
 
-// Agent is a local LLM agent backed by any OpenAI-compatible inference server.
+// Agent is a local LLM agent backed by any OpenAI-compatible inference server,
+// or the AWS Bedrock Converse API when useBedrockNative is true.
 type Agent struct {
-	baseURL        string
-	model          string
-	otelDir        string
-	client         *http.Client
-	detectedFormat ToolFormat // confirmed format from last tool-bearing turn
+	baseURL          string
+	model            string
+	otelDir          string
+	skipHealthCheck  bool // true for remote providers that have no /health endpoint (e.g. Bedrock)
+	useBedrockNative bool // true when llama_provider = "bedrock"; uses Converse API instead of /v1/chat/completions
+	client           *http.Client
+	detectedFormat   ToolFormat // confirmed format from last tool-bearing turn
 }
 
 func New(baseURL, model string) *Agent {
@@ -82,49 +88,102 @@ func New(baseURL, model string) *Agent {
 	}
 }
 
-// NewFromConfig creates an Agent with the appropriate auth transport based on cfg.
-func NewFromConfig(baseURL, model string, cfg config.Config) *Agent {
-	inner := http.DefaultTransport
+// NewFromConfig creates an Agent from the active LocalAgentConfig.
+func NewFromConfig(ac config.LocalAgentConfig) *Agent {
+	inner := buildBaseTransport(ac)
 	var transport http.RoundTripper = inner
 
-	provider := strings.ToLower(strings.TrimSpace(cfg.LlamaProvider))
+	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
 	switch provider {
 	case "bedrock":
-		service := cfg.LlamaAWSService
+		service := ac.AWSService
 		if service == "" {
 			service = "bedrock"
 		}
+		// Credentials: explicit config takes precedence, then env vars.
+		keyID := ac.AWSKeyID
+		if keyID == "" {
+			keyID = os.Getenv("AWS_ACCESS_KEY_ID")
+		}
+		secret := ac.AWSSecret
+		if secret == "" {
+			secret = os.Getenv("AWS_SECRET_ACCESS_KEY")
+		}
+		token := ac.AWSToken
+		if token == "" {
+			token = os.Getenv("AWS_SESSION_TOKEN")
+		}
+		region := ac.AWSRegion
+		if region == "" {
+			region = os.Getenv("AWS_REGION")
+		}
+		if region == "" {
+			region = os.Getenv("AWS_DEFAULT_REGION")
+		}
+		if region == "" {
+			region = regionFromBedrockURL(ac.URL)
+		}
 		transport = &sigv4Transport{
 			inner:   inner,
-			region:  cfg.LlamaAWSRegion,
+			region:  region,
 			service: service,
-			keyID:   cfg.LlamaAWSKeyID,
-			secret:  cfg.LlamaAWSSecret,
-			token:   cfg.LlamaAWSToken,
+			keyID:   keyID,
+			secret:  secret,
+			token:   token,
+		}
+		return &Agent{
+			baseURL:          strings.TrimRight(ac.URL, "/"),
+			model:            ac.Model,
+			skipHealthCheck:  true,
+			useBedrockNative: true,
+			client:           &http.Client{Timeout: 5 * time.Minute, Transport: transport},
 		}
 	case "", "local":
 		// plain transport; extra headers may still apply
 	default:
-		// treat as Bearer-token provider
+		// treat as Bearer-token provider (OpenRouter, Together.ai, Groq, GitHub Copilot, …)
+		//
+		// Azure OpenAI workaround: Azure uses "api-key" header + a non-standard URL path instead
+		// of Bearer auth. Use provider="" or "local", set url to the full deployment endpoint,
+		// and add {"api-key": "<key>"} to headers. A dedicated azure provider with URL
+		// templating is tracked in GitHub Issues.
 	}
 
-	// Always layer headerTransport on top if there are extra headers or an API key
+	// Layer headerTransport if there are extra headers or an API key.
 	headers := make(map[string]string)
-	for k, v := range cfg.LlamaHeaders {
+	for k, v := range ac.Headers {
 		headers[k] = v
 	}
-	if cfg.LlamaAPIKey != "" && provider != "bedrock" {
-		headers["Authorization"] = "Bearer " + cfg.LlamaAPIKey
+	if ac.APIKey != "" && provider != "bedrock" {
+		headers["Authorization"] = "Bearer " + ac.APIKey
 	}
 	if len(headers) > 0 {
 		transport = &headerTransport{inner: transport, headers: headers}
 	}
 
 	return &Agent{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
+		baseURL: strings.TrimRight(ac.URL, "/"),
+		model:   ac.Model,
 		client:  &http.Client{Timeout: 5 * time.Minute, Transport: transport},
 	}
+}
+
+// buildBaseTransport returns an http.RoundTripper with TLS configured per ac.
+// Falls back to http.DefaultTransport when no TLS overrides are set.
+func buildBaseTransport(ac config.LocalAgentConfig) http.RoundTripper {
+	if !ac.TLSSkipVerify && ac.TLSCACert == "" {
+		return http.DefaultTransport
+	}
+	tlsCfg := &tls.Config{InsecureSkipVerify: ac.TLSSkipVerify} //nolint:gosec
+	if ac.TLSCACert != "" {
+		pem, err := os.ReadFile(ac.TLSCACert)
+		if err == nil {
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(pem)
+			tlsCfg.RootCAs = pool
+		}
+	}
+	return &http.Transport{TLSClientConfig: tlsCfg}
 }
 
 // WithOtelDir sets the otel directory so the agent can offer get_metrics.
@@ -171,9 +230,11 @@ func normalizePrompt(s string) string {
 // history — the local agent's internal wire format. The router only sees the
 // raw prompt string and session metadata; it has no per-model turn history to
 // compare against.
+const minRepeatCheckLen = 20
+
 func isRepeatedPrompt(history []Message, userPrompt string) bool {
 	norm := normalizePrompt(userPrompt)
-	if norm == "" {
+	if len(norm) < minRepeatCheckLen {
 		return false
 	}
 	for _, m := range history {
@@ -298,9 +359,12 @@ func toolArgSummary(args map[string]any) string {
 }
 
 // streamCompletion sends a chat completion request and streams the response.
-// Returns the accumulated text content, the raw fallback markup (non-empty only when
-// tool calls were extracted from content rather than the tool_calls field), and any tool calls.
+// Routes to the Bedrock Converse streaming API when useBedrockNative is set;
+// otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
 func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, error) {
+	if a.useBedrockNative {
+		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
+	}
 	req := chatRequest{
 		Model:       a.model,
 		Messages:    msgs,
@@ -462,8 +526,11 @@ func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
 }
 
 // Classify asks the model to classify whether a prompt should be handled locally
-// or escalated to Claude. Returns true if escalation is recommended.
+// or escalated to Claude. Routes to Bedrock Converse when useBedrockNative is set.
 func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
+	if a.useBedrockNative {
+		return a.bedrockClassify(ctx, prompt)
+	}
 	classifyPrompt := `You are a routing classifier. Respond with exactly one word: "local" or "escalate".
 Respond "escalate" only if the task clearly requires: complex multi-file refactoring, architectural design decisions, or tasks that require deep reasoning beyond coding assistance.
 Respond "local" for: shell commands, file reading, grep, simple code questions, debugging, writing small functions.
@@ -517,16 +584,20 @@ Task: ` + prompt
 
 // Ping checks whether the inference server is reachable and pre-seeds the
 // tool-format detector from the loaded model name when possible.
+// For remote providers without a /health endpoint (e.g. Bedrock), the health
+// check is skipped and the agent is assumed reachable.
 func (a *Agent) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/health", nil)
-	if err != nil {
-		return err
+	if !a.skipHealthCheck {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/health", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := a.client.Do(req)
+		if err != nil {
+			return fmt.Errorf("inference server unreachable at %s: %w", a.baseURL, err)
+		}
+		resp.Body.Close()
 	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("inference server unreachable at %s: %w", a.baseURL, err)
-	}
-	resp.Body.Close()
 
 	// Best-effort: query /v1/models to pre-seed the format detector.
 	// Errors are silently ignored — detection still works on the first tool turn.
@@ -561,4 +632,22 @@ func (a *Agent) seedFormatFromModels(ctx context.Context) {
 	if f := GuessFormatFromModel(body.Data[0].ID); f != ToolFormatUnknown {
 		a.detectedFormat = f
 	}
+}
+
+// regionFromBedrockURL extracts the AWS region from a Bedrock runtime URL.
+// "https://bedrock-runtime.eu-central-1.amazonaws.com" → "eu-central-1"
+func regionFromBedrockURL(rawURL string) string {
+	host := rawURL
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	// host is e.g. "bedrock-runtime.eu-central-1.amazonaws.com"
+	parts := strings.SplitN(host, ".", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
 }

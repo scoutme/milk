@@ -102,6 +102,25 @@ type forgetState struct {
 	candidates []memory.Percept // matched percepts shown to the user
 }
 
+// addProviderState tracks state for the multi-step /provider add wizard.
+// Fields are filled one at a time when the user doesn't supply them inline.
+type addProviderState struct {
+	ac   config.LocalAgentConfig
+	step addProviderStep
+}
+
+type addProviderStep int
+
+const (
+	addStepName addProviderStep = iota
+	addStepURL
+	addStepModel
+	addStepProvider
+	addStepAPIKey    // only when provider is bearer
+	addStepAWSRegion // only when provider is bedrock
+	addStepDone
+)
+
 // undoEntry records a textarea snapshot for undo/redo.
 type undoEntry struct {
 	value  string
@@ -214,6 +233,9 @@ type model struct {
 	// pending /forget confirmation
 	pendingForget *forgetState
 
+	// pending /provider add wizard
+	pendingAdd *addProviderState
+
 	// prompt width (visual columns) set by the most recent refreshPrompt call;
 	// used by taRows() to compute the exact content wrap width.
 	promptWidth int
@@ -240,6 +262,10 @@ type model struct {
 
 	// quit confirmation state
 	quitPending bool
+
+	// hasLocalAgentConfig is true when the user has explicitly configured a
+	// local-agent backend. Used to show setup hints on the welcome screen.
+	hasLocalAgentConfig bool
 
 	// injected dependencies
 	ctx    context.Context
@@ -519,10 +545,25 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// transcriptLines returns the lines of the currently displayed transcript area
+// (welcome screen when empty, wrapped transcript otherwise), without selection
+// highlighting applied. Used for selection text extraction.
+func (m *model) transcriptLines() []string {
+	if m.transcript.Len() == 0 {
+		return strings.Split(m.welcomeScreen(), "\n")
+	}
+	vw := m.vpWidth()
+	raw := m.transcript.String()
+	if vw <= 0 {
+		return strings.Split(raw, "\n")
+	}
+	return strings.Split(ansi.Wrap(raw, vw, ""), "\n")
+}
+
 // selectionText extracts the plain text between the selection anchor and end,
 // respecting column boundaries on the first and last lines.
 func (m *model) selectionText() string {
-	lines := strings.Split(m.wrappedTranscript(), "\n")
+	lines := m.transcriptLines()
 	loLine, loCol := m.selAnchorLine, m.selAnchorCol
 	hiLine, hiCol := m.selEndLine, m.selEndCol
 	if hiLine < loLine || (hiLine == loLine && hiCol < loCol) {
@@ -741,12 +782,7 @@ func (m *model) setViewportContent() {
 	}
 	vw := m.vpWidth()
 	sep := styleBorder.Width(vw).Render("")
-	var transcript string
-	if m.transcript.Len() == 0 {
-		transcript = m.welcomeScreen()
-	} else {
-		transcript = m.wrappedTranscript()
-	}
+	transcript := m.wrappedTranscript()
 	content := transcript + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
 	m.vp.SetContent(content)
 }
@@ -757,13 +793,68 @@ func (m *model) welcomeScreen() string {
 	if vpH <= 0 {
 		vpH = m.viewportHeight()
 	}
+	localAvail := m.agents.localAvail
+	claudeAvail := m.agents.claudeAvail
+
 	lines := []string{
 		pulseColors[8] + "◈" + ansiReset + " " + "\033[1;38;2;255;208;96mmilk\033[0m",
 		dim("local-first agentic orchestrator"),
 		"",
-		dim("type a message and press Enter to start"),
-		dim("/help for available commands"),
 	}
+
+	switch {
+	case !m.hasLocalAgentConfig:
+		// No provider configured at all — show setup guidance regardless of Claude.
+		lines = append(lines,
+			yellow("no local agent configured"),
+			"",
+			dim("quickstart — add a backend with /provider add:"),
+			"",
+			dim("llama.cpp · Ollama"),
+			"› /provider add url=http://localhost:8080 provider=local model=qwen2.5-coder",
+			"",
+			dim("AWS Bedrock"),
+			"› /provider add url=https://bedrock-runtime.<region>.amazonaws.com provider=bedrock model=<arn>",
+			"",
+			dim("OpenRouter · Together · Groq"),
+			"› /provider add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
+			"",
+		)
+		if !claudeAvail {
+			lines = append(lines,
+				dim("claude CLI not found — install Claude Code to enable escalation"),
+				"",
+			)
+		}
+		lines = append(lines, dim("/help for all commands"))
+	case !localAvail && !claudeAvail:
+		lines = append(lines,
+			yellow("no agents available"),
+			"",
+			dim("local agent unreachable — check your provider config with /provider"),
+			dim("claude CLI not found — install Claude Code to enable escalation"),
+			"",
+			dim("/help for available commands"),
+		)
+	case !localAvail:
+		lines = append(lines,
+			dim("type a message and press Enter to start"),
+			dim("local agent unreachable — use /provider to check or switch backends"),
+			dim("/help for available commands"),
+		)
+	case !claudeAvail:
+		lines = append(lines,
+			dim("type a message and press Enter to start"),
+			dim("claude CLI not found — escalation unavailable"),
+			dim("/help for available commands"),
+		)
+	default:
+		lines = append(lines,
+			dim("type a message and press Enter to start"),
+			dim("/help for available commands"),
+		)
+	}
+
 	padTop := (vpH - len(lines)) / 2
 	if padTop < 0 {
 		padTop = 0
@@ -793,25 +884,35 @@ func (m *model) appendTranscript(text string) {
 	}
 }
 
-// wrappedTranscript returns the transcript word-wrapped to the viewport content width.
-// When a selection range is active, the selected text region is highlighted with an
-// inverted background, respecting column boundaries on the first and last lines.
+// wrappedTranscript returns the transcript (or welcome screen) word-wrapped to
+// the viewport content width. When a selection range is active, the selected
+// text region is highlighted with an inverted background, respecting column
+// boundaries on the first and last lines.
 func (m *model) wrappedTranscript() string {
+	if m.transcript.Len() == 0 {
+		return m.applySelectionHighlight(m.welcomeScreen())
+	}
 	vw := m.vpWidth()
 	raw := m.transcript.String()
 	if vw <= 0 {
 		return raw
 	}
 	wrapped := ansi.Wrap(raw, vw, "")
+	return m.applySelectionHighlight(wrapped)
+}
+
+// applySelectionHighlight applies the selection background highlight to the
+// given content string. Returns content unchanged if no selection is active.
+func (m *model) applySelectionHighlight(content string) string {
 	if m.selAnchorLine < 0 || m.selEndLine < 0 {
-		return wrapped
+		return content
 	}
 	loLine, loCol := m.selAnchorLine, m.selAnchorCol
 	hiLine, hiCol := m.selEndLine, m.selEndCol
 	if hiLine < loLine || (hiLine == loLine && hiCol < loCol) {
 		loLine, loCol, hiLine, hiCol = hiLine, hiCol, loLine, loCol
 	}
-	lines := strings.Split(wrapped, "\n")
+	lines := strings.Split(content, "\n")
 	selStyle := lipgloss.NewStyle().Reverse(true)
 	for i := range lines {
 		if i < loLine || i > hiLine {
@@ -902,7 +1003,11 @@ func (m *model) headerBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	model := m.st.cfg.LlamaModel
+	ac := m.st.cfg.ActiveLocalAgent()
+	model := ac.Name
+	if model == "" {
+		model = ac.Model
+	}
 	if model == "" {
 		model = "local"
 	}
@@ -934,7 +1039,7 @@ func (m *model) statusBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	left := fmt.Sprintf(" %s  %s", dim("session:"+sessID), dim("agent:")+m.statusAgent())
+	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("state:"+string(m.st.sess.State)), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
 	if m.quitPending {
 		left += yellow(" [press ctrl+c again to exit]")
@@ -989,19 +1094,23 @@ func (m *model) statusAgent() string {
 }
 
 func agentLabel(st *interactiveState) string {
+	localName := st.cfg.ActiveLocalAgent().Name
+	if localName == "" {
+		localName = "local"
+	}
 	switch {
 	case st.stickyEscalate:
 		return "claude (pinned)"
 	case st.forceEscalate:
 		return "claude (forced)"
 	case st.stickyLocal:
-		return "local (pinned)"
+		return localName + " (pinned)"
 	case st.forceLocal:
-		return "local (forced)"
+		return localName + " (forced)"
 	case st.sess.State == session.StateClaude || st.sess.State == session.StateClaudeWaiting:
 		return "claude"
 	default:
-		return "local"
+		return localName
 	}
 }
 
@@ -1042,6 +1151,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingForget != nil {
 			return m.handleForgetKey(msg)
+		}
+		if m.pendingAdd != nil {
+			return m.handleAddProviderKey(msg)
 		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
@@ -1402,6 +1514,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdForget {
 		return m.handleForgetCmd(strings.TrimSpace(rest)), nil
 	}
+	if cmd == cmdProvider {
+		return m.handleProviderCmd(strings.TrimSpace(rest)), nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -1452,6 +1567,284 @@ func (m model) handleForgetCmd(pat string) model {
 	m.appendTranscript(forgetCandidateList(candidates))
 	m.appendTranscript(milkTag() + " enter position (1-" + fmt.Sprintf("%d", len(candidates)) + "), #id, or empty to cancel: ")
 	m.pendingForget = &forgetState{candidates: candidates}
+	return m
+}
+
+// handleProviderCmd handles `/provider [list|switch <name>|add [key=val ...]]`.
+func (m model) handleProviderCmd(arg string) model {
+	// Re-read config so externally added providers are visible.
+	if fresh, err := config.Load(); err == nil {
+		// Preserve the in-session active selection if the user hasn't changed it.
+		if m.st.cfg.LocalAgent != "" {
+			fresh.LocalAgent = m.st.cfg.LocalAgent
+		}
+		m.st.cfg = fresh
+	}
+
+	switch {
+	case arg == "" || arg == "status":
+		m.appendTranscript(execProvider(m.st) + "\n")
+
+	case arg == "list":
+		m.appendTranscript(execProviderList(m.st) + "\n")
+
+	case strings.HasPrefix(arg, "switch "):
+		name := strings.TrimSpace(arg[len("switch "):])
+		if name == "" {
+			m.appendTranscript(milkTag() + " usage: /provider switch <name>\n")
+			return m
+		}
+		found := false
+		for _, a := range m.st.cfg.LocalAgents {
+			if strings.EqualFold(a.Name, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var names []string
+			for _, a := range m.st.cfg.LocalAgents {
+				names = append(names, a.Name)
+			}
+			m.appendTranscript(fmt.Sprintf("%s unknown agent %q — available: %s\n",
+				milkTag(), name, strings.Join(names, ", ")))
+			return m
+		}
+		m.st.cfg.LocalAgent = name
+		ac := applyFreshAWSCreds(m.st.cfg, m.st.cfg.ActiveLocalAgent())
+		newAgent := local.NewFromConfig(ac)
+		if od, err := config.OtelDir(); err == nil {
+			newAgent.WithOtelDir(od)
+		}
+		m.agents.local = newAgent
+		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+		m.appendTranscript(execProvider(m.st) + "\n")
+
+	case strings.HasPrefix(arg, "add"):
+		inline := strings.TrimSpace(arg[len("add"):])
+		return m.startAddProvider(inline)
+
+	default:
+		m.appendTranscript(milkTag() + " usage: /provider [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
+	}
+	return m
+}
+
+// execProviderList formats all configured local-agent backends.
+func execProviderList(st *interactiveState) string {
+	agents := st.cfg.LocalAgents
+	if len(agents) == 0 {
+		// show the single backward-compat entry
+		agents = []config.LocalAgentConfig{st.cfg.ActiveLocalAgent()}
+	}
+	active := strings.ToLower(strings.TrimSpace(st.cfg.ActiveLocalAgent().Name))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s local agents (%d):\n", milkTag(), len(agents))
+	for _, a := range agents {
+		marker := "  "
+		if strings.EqualFold(a.Name, active) {
+			marker = bold("* ")
+		}
+		provider := a.Provider
+		if provider == "" {
+			provider = "local"
+		}
+		fmt.Fprintf(&b, "%s%s  %s  %s  [%s]", marker, bold(a.Name), dim(a.URL), dim(a.Model), provider)
+		if a.Name != agents[len(agents)-1].Name {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// startAddProvider handles `/provider add [key=val ...]`.
+// Known keys: name, url, model, provider, api_key, aws_region.
+// Missing required fields (name, url, model) are prompted interactively.
+func (m model) startAddProvider(inline string) model {
+	ac := parseProviderInlineArgs(inline)
+
+	// If all required fields are present, add immediately.
+	if ac.Name != "" && ac.URL != "" && ac.Model != "" {
+		return m.commitAddProvider(ac)
+	}
+
+	// Otherwise start the wizard from the first missing required field.
+	st := &addProviderState{ac: ac}
+	st.step = firstMissingStep(ac)
+	m.pendingAdd = st
+	m.appendTranscript(addProviderPrompt(st.step) + " ")
+	m.ta.Reset()
+	return m
+}
+
+// parseProviderInlineArgs parses "key=val key2=val2 ..." into a LocalAgentConfig.
+func parseProviderInlineArgs(s string) config.LocalAgentConfig {
+	var ac config.LocalAgentConfig
+	for _, tok := range strings.Fields(s) {
+		k, v, ok := strings.Cut(tok, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "name":
+			ac.Name = v
+		case "url":
+			ac.URL = v
+		case "model":
+			ac.Model = v
+		case "provider":
+			ac.Provider = v
+		case "api_key":
+			ac.APIKey = v
+		case "aws_region":
+			ac.AWSRegion = v
+		}
+	}
+	return ac
+}
+
+// firstMissingStep returns the first wizard step that still needs input.
+func firstMissingStep(ac config.LocalAgentConfig) addProviderStep {
+	if ac.Name == "" {
+		return addStepName
+	}
+	if ac.URL == "" {
+		return addStepURL
+	}
+	if ac.Model == "" {
+		return addStepModel
+	}
+	if ac.Provider == "" {
+		return addStepProvider
+	}
+	p := strings.ToLower(ac.Provider)
+	if p != "" && p != "local" && p != "bedrock" && ac.APIKey == "" {
+		return addStepAPIKey
+	}
+	if p == "bedrock" && ac.AWSRegion == "" {
+		return addStepAWSRegion
+	}
+	return addStepDone
+}
+
+// addProviderPrompt returns the prompt string for a wizard step.
+func addProviderPrompt(step addProviderStep) string {
+	switch step {
+	case addStepName:
+		return milkTag() + " name:"
+	case addStepURL:
+		return milkTag() + " url:"
+	case addStepModel:
+		return milkTag() + " model:"
+	case addStepProvider:
+		return milkTag() + " provider [local/bedrock/<bearer-name>, enter to skip]:"
+	case addStepAPIKey:
+		return milkTag() + " api_key:"
+	case addStepAWSRegion:
+		return milkTag() + " aws_region:"
+	default:
+		return ""
+	}
+}
+
+// handleAddProviderKey handles keypresses during the /provider add wizard.
+func (m model) handleAddProviderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingAdd = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript(answer + "\n")
+
+		st := m.pendingAdd
+		switch st.step {
+		case addStepName:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " name is required\n" + addProviderPrompt(addStepName) + " ")
+				return m, nil
+			}
+			st.ac.Name = answer
+		case addStepURL:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " url is required\n" + addProviderPrompt(addStepURL) + " ")
+				return m, nil
+			}
+			st.ac.URL = answer
+		case addStepModel:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " model is required\n" + addProviderPrompt(addStepModel) + " ")
+				return m, nil
+			}
+			st.ac.Model = answer
+		case addStepProvider:
+			st.ac.Provider = answer // empty = local, which is fine
+		case addStepAPIKey:
+			st.ac.APIKey = answer
+		case addStepAWSRegion:
+			st.ac.AWSRegion = answer
+		}
+
+		// Advance to next missing step.
+		st.step = firstMissingStep(st.ac)
+		if st.step == addStepDone {
+			m.pendingAdd = nil
+			m = m.commitAddProvider(st.ac)
+		} else {
+			m.appendTranscript(addProviderPrompt(st.step) + " ")
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
+
+// commitAddProvider appends the new agent to config, saves, and confirms.
+func (m model) commitAddProvider(ac config.LocalAgentConfig) model {
+	// Check for name collision.
+	for _, existing := range m.st.cfg.LocalAgents {
+		if strings.EqualFold(existing.Name, ac.Name) {
+			m.appendTranscript(fmt.Sprintf("%s agent %q already exists — use /provider switch %s to activate it\n",
+				milkTag(), ac.Name, ac.Name))
+			return m
+		}
+	}
+	isFirst := len(m.st.cfg.LocalAgents) == 0
+	m.st.cfg.LocalAgents = append(m.st.cfg.LocalAgents, ac)
+	if isFirst {
+		m.st.cfg.LocalAgent = ac.Name
+	}
+	if err := config.Save(m.st.cfg); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+		return m
+	}
+	m.hasLocalAgentConfig = true
+	if isFirst {
+		freshAC := applyFreshAWSCreds(m.st.cfg, m.st.cfg.ActiveLocalAgent())
+		newAgent := local.NewFromConfig(freshAC)
+		if od, err := config.OtelDir(); err == nil {
+			newAgent.WithOtelDir(od)
+		}
+		m.agents.local = newAgent
+		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+		m.rtr = router.New(m.st.cfg, newAgent)
+	}
+	provider := ac.Provider
+	if provider == "" {
+		provider = "local"
+	}
+	m.appendTranscript(fmt.Sprintf("%s added agent %s  (%s | %s | %s)\n",
+		milkTag(), bold(ac.Name), ac.URL, ac.Model, provider))
+	if isFirst {
+		m.appendTranscript(milkTag() + " activated as the default provider\n")
+	} else {
+		m.appendTranscript(milkTag() + " use /provider switch " + ac.Name + " to activate it\n")
+	}
 	return m
 }
 
@@ -2643,7 +3036,8 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	localAgent := local.NewFromConfig(cfg.LlamaURL, cfg.LlamaModel, cfg)
+	ac := applyFreshAWSCreds(cfg, cfg.ActiveLocalAgent())
+	localAgent := local.NewFromConfig(ac)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
@@ -2657,10 +3051,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	ctx := context.Background()
-	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
-	if err != nil {
-		return err
-	}
+	// TUI mode continues even when both agents are unavailable so the user can
+	// add providers via /provider commands without re-launching.
+	localAvail, claudeAvail, _ := checkAgentAvailability(ctx, localAgent, claudeAgent)
 
 	var routeLocalAgent *local.Agent
 	if localAvail {
@@ -2681,6 +3074,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
 
 	m := newModel(ctx, st, rtr, agents, mem)
+	m.hasLocalAgentConfig = cfg.HasLocalAgentConfig()
 	if gp, err := globalHistoryPath(); err == nil {
 		m.globalHistory = readHistoryFile(gp)
 	}

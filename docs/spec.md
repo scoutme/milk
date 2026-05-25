@@ -73,8 +73,26 @@ The classifier uses the same model instance as the local coding agent. No second
 
 ## Local Agent
 
-- Backend: any OpenAI-compatible inference server, default `http://localhost:8080` (llama.cpp reference; also works with Ollama, LM Studio, vLLM, remote endpoints)
+- Backend: any OpenAI-compatible inference server, default `http://localhost:8080` (llama.cpp reference; also works with Ollama, LM Studio, vLLM, and remote cloud providers)
 - Model: user-configured via `llama_model`; any tool-calling-capable model works. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
+
+### Remote inference / authentication
+
+Set `llama_provider` in `~/.milk/config.json` to select the auth transport:
+
+| `llama_provider` | Auth mechanism | Required fields |
+|---|---|---|
+| `""` or `"local"` | None (plain HTTP) | — |
+| `"bedrock"` | AWS SigV4 | `llama_aws_region` + credentials (config or env vars) |
+| any other string | `Authorization: Bearer <llama_api_key>` | `llama_api_key` |
+
+Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injected via `llama_headers`.
+
+**AWS Bedrock credential resolution** (in order): explicit config fields → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` env vars.
+
+**TLS overrides**: `llama_tls_skip_verify: true` disables cert verification (dev/self-signed only); `llama_tls_ca_cert: "/path/to/ca.pem"` trusts a private CA.
+
+**Azure OpenAI workaround**: Azure uses a non-standard URL path and an `api-key` header rather than Bearer auth. Use `llama_provider: ""`, set `llama_url` to the full deployment endpoint, and add `"api-key": "<key>"` to `llama_headers`. A dedicated `azure` provider with URL templating is tracked in GitHub Issues. See ADR 27.
 - Tool loop: standard agentic loop — call → check tool calls → execute → feed result → repeat until final answer
 - Built-in tools (implemented in Go, exposed as OpenAI function schemas):
   - `bash(command string) → stdout, stderr, exit_code`
@@ -209,13 +227,25 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) is embedded in the textarea and reflects the current routing state, updated after each turn.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
 **Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
 
 **/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes Claude auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
+
+**/provider** manages local-agent backends at runtime:
+
+| Subcommand | Action |
+|---|---|
+| `/provider` | Show active backend (URL, model, auth method) |
+| `/provider list` | List all configured backends; active marked with `*` |
+| `/provider switch <name>` | Switch to the named backend (rebuilds agent, pings) |
+| `/provider add` | Add a backend via interactive wizard (prompts for each field) |
+| `/provider add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
+
+New backends are appended to `local_agents` in `~/.milk/config.json` immediately. Use `/provider switch` to activate a newly added backend in the current session.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -244,8 +274,21 @@ milk [flags] <prompt>         # single-prompt mode
 
 ```json
 {
-  "llama_url": "http://localhost:8080",
-  "llama_model": "qwen2.5-coder",
+  "local_agent": "haiku",
+  "local_agents": [
+    {
+      "name": "haiku",
+      "url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
+      "model": "arn:aws:bedrock:...:application-inference-profile/...",
+      "provider": "bedrock",
+      "aws_region": "eu-central-1"
+    },
+    {
+      "name": "local",
+      "url": "http://localhost:8080",
+      "model": "gemma4"
+    }
+  ],
   "claude_bin": "claude",
   "default_route": "local",
   "aws_auth_refresh": false,
@@ -266,6 +309,28 @@ milk [flags] <prompt>         # single-prompt mode
   }
 }
 ```
+
+`local_agent` names the active backend from `local_agents`. If empty, the first entry is used. Flat `llama_*` fields at the root are accepted for backward compatibility when `local_agents` is absent.
+
+### `local_agents` entry fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Display name; used as selector key |
+| `url` | string | Base URL of the inference server |
+| `model` | string | Model name or ARN |
+| `provider` | string | Auth transport: `""` / `"local"` = none; `"bedrock"` = AWS SigV4; anything else = Bearer token |
+| `api_key` | string | Bearer token (used when provider is not `""`, `"local"`, or `"bedrock"`) |
+| `headers` | object | Extra HTTP headers (e.g. `"api-key"` for Azure, `"HTTP-Referer"` for OpenRouter) |
+| `tls_skip_verify` | bool | Disable TLS cert verification (dev/self-signed only) |
+| `tls_ca_cert` | string | Path to PEM CA cert for private endpoints |
+| `aws_region` | string | AWS region for Bedrock (fallback: `AWS_REGION` env, then parsed from `url`) |
+| `aws_key_id` | string | AWS access key ID (fallback: `AWS_ACCESS_KEY_ID` env) |
+| `aws_secret` | string | AWS secret key (fallback: `AWS_SECRET_ACCESS_KEY` env) |
+| `aws_token` | string | AWS session token (fallback: `AWS_SESSION_TOKEN` env) |
+| `aws_service` | string | SigV4 service name (default `"bedrock"`) |
+
+**Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 
 ---
 
