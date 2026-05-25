@@ -49,9 +49,31 @@ type OtelConfig struct {
 }
 
 type Config struct {
-	LlamaURL                   string   `json:"llama_url"`
-	LlamaModel                 string   `json:"llama_model"`
-	ClaudeBin                  string   `json:"claude_bin"`
+	LlamaURL   string `json:"llama_url"`
+	LlamaModel string `json:"llama_model"`
+
+	// LlamaProvider selects the auth transport.
+	// "" or "local" = no auth (default)
+	// "bedrock"     = AWS SigV4 signing
+	// anything else = Bearer token via LlamaAPIKey
+	LlamaProvider string `json:"llama_provider"`
+
+	// LlamaAPIKey is a Bearer token / API key used when LlamaProvider is not "" or "bedrock".
+	// Injected as "Authorization: Bearer <key>".
+	LlamaAPIKey string `json:"llama_api_key"`
+
+	// LlamaHeaders are extra HTTP headers injected on every request (e.g. "api-key" for Azure,
+	// "HTTP-Referer" for OpenRouter).
+	LlamaHeaders map[string]string `json:"llama_headers"`
+
+	// AWS credentials for LlamaProvider = "bedrock".
+	LlamaAWSRegion  string `json:"llama_aws_region"`
+	LlamaAWSKeyID   string `json:"llama_aws_key_id"`
+	LlamaAWSSecret  string `json:"llama_aws_secret"`
+	LlamaAWSToken   string `json:"llama_aws_token"`   // optional session token
+	LlamaAWSService string `json:"llama_aws_service"`  // default "bedrock"
+
+	ClaudeBin string `json:"claude_bin"`
 	DefaultRoute               string   `json:"default_route"`
 	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
 	AllowedTools               []string `json:"allowed_tools"`

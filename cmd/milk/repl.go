@@ -2643,7 +2643,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
+	localAgent := local.NewFromConfig(cfg.LlamaURL, cfg.LlamaModel, cfg)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}

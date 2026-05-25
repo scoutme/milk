@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -78,6 +79,51 @@ func New(baseURL, model string) *Agent {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
 		client:  &http.Client{Timeout: 5 * time.Minute},
+	}
+}
+
+// NewFromConfig creates an Agent with the appropriate auth transport based on cfg.
+func NewFromConfig(baseURL, model string, cfg config.Config) *Agent {
+	inner := http.DefaultTransport
+	var transport http.RoundTripper = inner
+
+	provider := strings.ToLower(strings.TrimSpace(cfg.LlamaProvider))
+	switch provider {
+	case "bedrock":
+		service := cfg.LlamaAWSService
+		if service == "" {
+			service = "bedrock"
+		}
+		transport = &sigv4Transport{
+			inner:   inner,
+			region:  cfg.LlamaAWSRegion,
+			service: service,
+			keyID:   cfg.LlamaAWSKeyID,
+			secret:  cfg.LlamaAWSSecret,
+			token:   cfg.LlamaAWSToken,
+		}
+	case "", "local":
+		// plain transport; extra headers may still apply
+	default:
+		// treat as Bearer-token provider
+	}
+
+	// Always layer headerTransport on top if there are extra headers or an API key
+	headers := make(map[string]string)
+	for k, v := range cfg.LlamaHeaders {
+		headers[k] = v
+	}
+	if cfg.LlamaAPIKey != "" && provider != "bedrock" {
+		headers["Authorization"] = "Bearer " + cfg.LlamaAPIKey
+	}
+	if len(headers) > 0 {
+		transport = &headerTransport{inner: transport, headers: headers}
+	}
+
+	return &Agent{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		model:   model,
+		client:  &http.Client{Timeout: 5 * time.Minute, Transport: transport},
 	}
 }
 

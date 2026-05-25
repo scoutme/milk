@@ -112,7 +112,7 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	localAgent := local.New(cfg.LlamaURL, cfg.LlamaModel)
+	localAgent := local.NewFromConfig(cfg.LlamaURL, cfg.LlamaModel, cfg)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
