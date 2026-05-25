@@ -40,9 +40,9 @@ func promptLabel(_ *interactiveState) string {
 }
 
 const interactiveHelp = `Slash commands:
-  /escalate        pin all subsequent turns to Claude (until /local or Ctrl+C clears it)
+  /escalate        pin all subsequent turns to Claude (until /local clears it)
   /escalate <msg>  force this single turn to Claude, then return to normal routing
-  /local           pin all subsequent turns to local model (until /escalate or Ctrl+C)
+  /local           pin all subsequent turns to local model (until /escalate clears it)
   /local <msg>     force this single turn to local model, then return to normal routing
   /learn <fact>    store a persistent memory (e.g. /learn prefer JSON output)
   /metrics         show most recent metric values (memory stats, otel sizes)

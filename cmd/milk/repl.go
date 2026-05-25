@@ -1453,15 +1453,6 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	}
-	if m.st.forceEscalate || m.st.forceLocal || m.st.stickyEscalate || m.st.stickyLocal {
-		m.st.forceEscalate = false
-		m.st.forceLocal = false
-		m.st.stickyEscalate = false
-		m.st.stickyLocal = false
-		m.refreshPrompt()
-		m.appendTranscript(dim("[milk]") + " mode cleared\n")
-		return m, nil
-	}
 	if m.quitPending {
 		return m, tea.Quit
 	}
