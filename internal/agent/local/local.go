@@ -204,7 +204,8 @@ Rules:
 - Call get_memory before answering questions that reference past context or stated preferences. Call record_memory when the user states a preference, makes a decision, or shares a fact worth remembering across sessions.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 - The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without naming one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
-- Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.`
+- Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
+- When the user refers to "current changes", "what you did", "that commit", "the fix", or any recent work you have no context about, call get_session_context with agent: "claude" first. If the results show the work was done by Claude, respond: "That change was made by Claude — do you want me to escalate so Claude can continue with full context?" and offer to call escalate_to_claude.`
 
 func buildSystemPrompt(cwd string) string {
 	if cwd == "" {
