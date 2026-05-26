@@ -1,8 +1,6 @@
 # milk
 
-<p align="center">
-  <img src="docs/images/milk.png" alt="milk" width="200"/>
-</p>
+![milk](docs/images/milk.png)
 
 Switch models, not context.
 
@@ -56,14 +54,7 @@ For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local
 milk
 ```
 
-Starts a REPL session with colored prompt, Tab completion, and command history.
-
-```text
-[local] > fix the off-by-one in parser.go
-[claude] > design an alternative approach
-```
-
-The prompt label reflects the current routing state: `[local]` (local model), `[claude]` (Claude), `[claude:waiting]` (Claude asked a follow-up — next turn goes directly back to Claude via `--resume`).
+Starts an interactive session. The status bar shows the current routing state, active provider, and agent availability.
 
 **Slash commands:**
 
