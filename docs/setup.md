@@ -3,6 +3,8 @@
 > **Scenario note:** This guide covers a specific reference setup: NVIDIA GPU on Ubuntu/WSL2, llama.cpp built from source, Qwen2.5-Coder 7B. The parameters (CUDA architecture, quant size, GPU layer count, context size) will differ for other hardware. For a general llama.cpp installation reference see the [official llama.cpp documentation](https://github.com/ggml-org/llama.cpp).
 >
 > The local agent is not tied to llama.cpp or to the OpenAI-compatible API. Any OpenAI-compat server works (local or remote), and AWS Bedrock is supported natively via the Converse API. See [Tested models](#tested-models) for models known to work well.
+>
+> For cloud provider setup (Bedrock, OpenRouter, Together.ai, Groq, Azure), see [docs/providers.md](providers.md).
 
 ## Prerequisites
 
@@ -108,7 +110,7 @@ The reference model is **Qwen2.5-Coder-7B-Instruct**, chosen for its reliable fu
 | Q3_K_M | ~3.2 GB | 4 GB VRAM (with headroom) |
 | Q8_0 | ~7.2 GB | 8 GB VRAM |
 
-Larger VRAM or a different GPU architecture may accommodate the 14B variant. Any Qwen2.5-Coder GGUF with tool calling support can be substituted by adjusting `llama_model` in `~/.milk/config.json`.
+Larger VRAM or a different GPU architecture may accommodate the 14B variant. Any Qwen2.5-Coder GGUF with tool calling support can be substituted by adjusting the `model` field of the active entry in `local_agents` in `~/.milk/config.json`.
 
 ```sh
 pip3 install hf-xet huggingface_hub[hf_xet,cli]
@@ -194,11 +196,10 @@ A custom destination is also supported:
 task build DEST=/usr/local/bin/milk
 ```
 
-Expected output:
+Expected output (will reflect your current `local_agents` config):
 
 ```text
-llama_url:      http://localhost:8080
-llama_model:    qwen2.5-coder
+local_agent:    local
 claude_bin:     claude
 default_route:  local
 escalate_above_tokens: 2000

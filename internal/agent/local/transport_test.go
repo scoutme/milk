@@ -195,6 +195,79 @@ func TestRegionFromBedrockURL(t *testing.T) {
 	}
 }
 
+// --- tokenCmdTransport ---
+
+func TestTokenCmdTransport_FetchesToken(t *testing.T) {
+	var gotAuth string
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotAuth = r.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	})
+	tr := &tokenCmdTransport{inner: inner, cmd: "echo mytoken"}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+	if gotAuth != "Bearer mytoken" {
+		t.Errorf("want 'Bearer mytoken', got %q", gotAuth)
+	}
+}
+
+func TestTokenCmdTransport_CachesToken(t *testing.T) {
+	calls := 0
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	})
+	tr := &tokenCmdTransport{inner: inner, cmd: "echo tok"}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	for i := 0; i < 3; i++ {
+		resp, _ := tr.RoundTrip(req)
+		resp.Body.Close()
+	}
+	// token command is only called once; inner is called 3 times
+	if tr.token != "tok" {
+		t.Errorf("expected cached token 'tok', got %q", tr.token)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 inner calls, got %d", calls)
+	}
+}
+
+func TestTokenCmdTransport_RefreshesOn401(t *testing.T) {
+	attempt := 0
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempt++
+		if attempt == 1 {
+			return &http.Response{StatusCode: 401, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	})
+	tr := &tokenCmdTransport{inner: inner, cmd: "echo newtoken"}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 after refresh, got %d", resp.StatusCode)
+	}
+	if attempt != 2 {
+		t.Errorf("expected 2 inner calls (original + retry), got %d", attempt)
+	}
+}
+
+func TestTokenCmdTransport_EmptyOutputError(t *testing.T) {
+	tr := &tokenCmdTransport{inner: http.DefaultTransport, cmd: "echo ''"}
+	_, err := tr.fetchToken()
+	if err == nil {
+		t.Error("expected error for empty token output")
+	}
+}
+
 // --- helpers ---
 
 func containsString(s, sub string) bool {

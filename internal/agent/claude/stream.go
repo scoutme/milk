@@ -105,44 +105,12 @@ type ParseResult struct {
 	EndsWithQ         bool // true if the final text ends with a question mark
 	IsError           bool
 	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
-	// Reactive phrase detection — populated when control_request is not available.
-	PermissionDenied bool
-	DeniedTool       string
-	DirRestricted    bool
 	// streamedViaDeltas is set when text_delta events were received, so the
 	// final assistant event's text is skipped to avoid double-printing.
 	streamedViaDeltas bool
 	// hadThinking is set when at least one thinking_delta was emitted, so the
 	// first text_delta can insert a newline separator.
 	hadThinking bool
-}
-
-// detectPermissionDenied scans text for permission-request phrases.
-// phrases and toolNames come from config so detection is language-configurable.
-func detectPermissionDenied(text string, phrases, toolNames []string) (bool, string) {
-	lower := strings.ToLower(text)
-	for _, phrase := range phrases {
-		if strings.Contains(lower, strings.ToLower(phrase)) {
-			for _, tool := range toolNames {
-				if strings.Contains(text, tool) {
-					return true, tool
-				}
-			}
-			return true, ""
-		}
-	}
-	return false, ""
-}
-
-// detectDirRestricted scans text for directory-restriction phrases.
-func detectDirRestricted(text string, phrases []string) bool {
-	lower := strings.ToLower(text)
-	for _, phrase := range phrases {
-		if strings.Contains(lower, strings.ToLower(phrase)) {
-			return true
-		}
-	}
-	return false
 }
 
 // GenerateNonce returns a random 6-character alphanumeric string suitable for
@@ -157,12 +125,9 @@ func GenerateNonce() string {
 	return string(b)
 }
 
-// StreamOpts holds optional phrase lists for reactive permission detection.
+// StreamOpts holds optional callbacks and configuration for a claude stream.
 type StreamOpts struct {
-	PermissionPhrases     []string
-	DirRestrictionPhrases []string
-	AllowedTools          []string // used to match tool names in permission phrases
-	OnPermission          PermissionHandler
+	OnPermission PermissionHandler
 	// OnToolUse is called as soon as Claude begins a tool call (content_block_start
 	// with type=tool_use). The tool name is passed; called from the stream goroutine.
 	OnToolUse func(name string)
@@ -259,14 +224,6 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	}
 	res.Text = text
 	res.EndsWithQ = strings.HasSuffix(text, "?")
-
-	// Reactive phrase detection — fallback for when control_request is not emitted.
-	if !res.PermissionDenied && len(opts.PermissionPhrases) > 0 {
-		res.PermissionDenied, res.DeniedTool = detectPermissionDenied(text, opts.PermissionPhrases, opts.AllowedTools)
-	}
-	if !res.DirRestricted && !res.PermissionDenied && len(opts.DirRestrictionPhrases) > 0 {
-		res.DirRestricted = detectDirRestricted(text, opts.DirRestrictionPhrases)
-	}
 
 	if text != "" {
 		io.WriteString(out, "\n") //nolint:errcheck

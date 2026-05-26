@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -15,13 +16,19 @@ type AWSCreds struct {
 }
 
 // ResolveAWSCreds runs the given credential_process command and parses its JSON output.
-// Returns nil if cmd is empty.
+// Returns nil if cmd is empty. Uses a background context (no timeout).
 func ResolveAWSCreds(cmd string) (*AWSCreds, error) {
+	return ResolveAWSCredsContext(context.Background(), cmd)
+}
+
+// ResolveAWSCredsContext is like ResolveAWSCreds but honours the provided context
+// for cancellation and deadline — the subprocess is killed when ctx is done.
+func ResolveAWSCredsContext(ctx context.Context, cmd string) (*AWSCreds, error) {
 	if cmd == "" {
 		return nil, nil
 	}
 	parts := strings.Fields(cmd)
-	out, err := exec.Command(parts[0], parts[1:]...).Output()
+	out, err := exec.CommandContext(ctx, parts[0], parts[1:]...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("aws_auth_refresh command failed: %w", err)
 	}

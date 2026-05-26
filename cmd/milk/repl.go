@@ -90,6 +90,15 @@ type memoryRefreshMsg struct{}
 // toolUseMsg carries the name of a tool Claude just started calling.
 type toolUseMsg struct{ name string }
 
+// credRefreshReadyMsg is sent when a background credential refresh completes.
+// label identifies the provider (e.g. "AWS", "token_cmd"). err is non-nil on
+// failure; creds carries new AWS credentials when applicable (nil for token_cmd).
+type credRefreshReadyMsg struct {
+	label string
+	creds *claude.AWSCreds
+	err   error
+}
+
 // permRequestMsg is sent by the agent goroutine when it needs a y/n answer.
 // The agent blocks on respCh until the TUI sends a permResponseMsg back.
 type permRequestMsg struct {
@@ -241,14 +250,18 @@ type model struct {
 	promptWidth int
 
 	// click-to-select state (content-space coordinates; -1 = none)
-	selAnchorLine int
-	selAnchorCol  int
-	selEndLine    int
-	selEndCol     int
-	selDragging   bool   // true once the mouse has moved after the initial press
-	selText       string // plain text of the selected range (populated after release)
-	copyFeedback  string // transient "[copied N chars]" shown in status bar
-	busyHint      string // transient "agent is responding" shown in status bar
+	selAnchorLine  int
+	selAnchorCol   int
+	selEndLine     int
+	selEndCol      int
+	selDragging    bool   // true once the mouse has moved after the initial press
+	selText        string // plain text of the selected range (populated after release)
+	copyFeedback   string // transient "[copied N chars]" shown in status bar
+	busyHint       string // transient "agent is responding" shown in status bar
+	credRefreshing bool   // true while any background credential refresh is running
+	credLabel      string // which credential is being refreshed (e.g. "AWS", "token")
+	credStatus     string // non-empty after refresh completes: last result message
+	credOK         bool   // true if last refresh succeeded, false if failed
 
 	// keyboard selection state in the input area (rune offsets into ta.Value(); -1 = none)
 	taSelAnchor int
@@ -1041,6 +1054,15 @@ func (m *model) statusBar() string {
 	}
 	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("state:"+string(m.st.sess.State)), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
+	if m.credRefreshing {
+		left += dim(" [refreshing " + m.credLabel + " credentials…]")
+	} else if m.credStatus != "" {
+		if m.credOK {
+			left += dim(" [" + m.credLabel + " creds: " + m.credStatus + "]")
+		} else {
+			left += yellow(" [" + m.credLabel + " creds failed: " + m.credStatus + "]")
+		}
+	}
 	if m.quitPending {
 		left += yellow(" [press ctrl+c again to exit]")
 	} else if m.busyHint != "" {
@@ -1187,6 +1209,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case busyHintClearMsg:
 		m.busyHint = ""
+		return m, nil
+
+	case credRefreshReadyMsg:
+		m.credRefreshing = false
+		m.credLabel = msg.label
+		if msg.err != nil {
+			m.credStatus = msg.err.Error()
+			m.credOK = false
+		} else {
+			m.credStatus = "ok"
+			m.credOK = true
+			if msg.creds != nil {
+				// AWS: apply fresh credentials and rebuild the local agent.
+				ac := m.st.cfg.ActiveLocalAgent()
+				ac.AWSKeyID = msg.creds.AccessKeyID
+				ac.AWSSecret = msg.creds.SecretAccessKey
+				ac.AWSToken = msg.creds.SessionToken
+				newAgent := local.NewFromConfig(ac)
+				if od, err := config.OtelDir(); err == nil {
+					newAgent.WithOtelDir(od)
+				}
+				m.agents.local = newAgent
+				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+				m.rtr = router.New(m.st.cfg, newAgent)
+			}
+			// For token_cmd providers the transport already holds the token
+			// internally; no agent rebuild is needed.
+		}
 		return m, nil
 
 	case quitPendingClearMsg:
@@ -1506,7 +1556,7 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m.handleForgetCmd(strings.TrimSpace(rest)), nil
 	}
 	if cmd == cmdProvider {
-		return m.handleProviderCmd(strings.TrimSpace(rest)), nil
+		return m.handleProviderCmd(strings.TrimSpace(rest))
 	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
@@ -1562,7 +1612,7 @@ func (m model) handleForgetCmd(pat string) model {
 }
 
 // handleProviderCmd handles `/provider [list|switch <name>|add [key=val ...]]`.
-func (m model) handleProviderCmd(arg string) model {
+func (m model) handleProviderCmd(arg string) (model, tea.Cmd) {
 	// Re-read config so externally added providers are visible.
 	if fresh, err := config.Load(); err == nil {
 		// Preserve the in-session active selection if the user hasn't changed it.
@@ -1583,7 +1633,7 @@ func (m model) handleProviderCmd(arg string) model {
 		name := strings.TrimSpace(arg[len("switch "):])
 		if name == "" {
 			m.appendTranscript(milkTag() + " usage: /provider switch <name>\n")
-			return m
+			return m, nil
 		}
 		found := false
 		for _, a := range m.st.cfg.LocalAgents {
@@ -1599,26 +1649,55 @@ func (m model) handleProviderCmd(arg string) model {
 			}
 			m.appendTranscript(fmt.Sprintf("%s unknown agent %q — available: %s\n",
 				milkTag(), name, strings.Join(names, ", ")))
-			return m
+			return m, nil
 		}
 		m.st.cfg.LocalAgent = name
-		ac := applyFreshAWSCreds(m.st.cfg, m.st.cfg.ActiveLocalAgent())
-		newAgent := local.NewFromConfig(ac)
+		if err := config.Save(m.st.cfg); err != nil {
+			m.appendTranscript(fmt.Sprintf("%s warning: could not persist provider switch: %v\n", milkTag(), err))
+		}
+		// Build agent without blocking — creds are fetched async below.
+		newAgent := local.NewFromConfig(m.st.cfg.ActiveLocalAgent())
 		if od, err := config.OtelDir(); err == nil {
 			newAgent.WithOtelDir(od)
 		}
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+		// Clear stale credential status from the previous provider.
+		m.credStatus = ""
+		m.credLabel = ""
+		m.credOK = false
 		m.appendTranscript(execProvider(m.st) + "\n")
+		if newAgent.HasTokenCmd() {
+			m.credRefreshing = true
+			m.credLabel = "token"
+			return m, func() tea.Msg {
+				err := newAgent.WarmToken()
+				return credRefreshReadyMsg{label: "token", err: err}
+			}
+		}
+		if needsAWSRefresh(m.st.cfg) {
+			m.credRefreshing = true
+			m.credLabel = "AWS"
+			ctx := m.ctx
+			return m, func() tea.Msg {
+				cmd := claudesettings.AWSAuthRefreshCommand()
+				refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				creds, err := claude.ResolveAWSCredsContext(refreshCtx, cmd)
+				return credRefreshReadyMsg{label: "AWS", creds: creds, err: err}
+			}
+		}
+		m.credRefreshing = false
+		return m, nil
 
 	case strings.HasPrefix(arg, "add"):
 		inline := strings.TrimSpace(arg[len("add"):])
-		return m.startAddProvider(inline)
+		return m.startAddProvider(inline), nil
 
 	default:
 		m.appendTranscript(milkTag() + " usage: /provider [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
 	}
-	return m
+	return m, nil
 }
 
 // execProviderList formats all configured local-agent backends.
@@ -3027,12 +3106,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	ac := applyFreshAWSCreds(cfg, cfg.ActiveLocalAgent())
-	localAgent := local.NewFromConfig(ac)
+	// Build the local agent without blocking on credential refresh. If
+	// aws_auth_refresh is enabled, the agent starts with no/stale credentials
+	// and a background goroutine refreshes them after the TUI is running.
+	baseAC := cfg.ActiveLocalAgent()
+	localAgent := local.NewFromConfig(baseAC)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 	claudeAgent = applyAWSCreds(cfg, claudeAgent)
 	if dbg, err := openClaudeDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
@@ -3066,6 +3148,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.hasLocalAgentConfig = cfg.HasLocalAgentConfig()
+	if needsAWSRefresh(cfg) {
+		m.credRefreshing = true
+		m.credLabel = "AWS"
+	} else if needsTokenCmdRefresh(cfg) {
+		m.credRefreshing = true
+		m.credLabel = "token"
+	}
 	if gp, err := globalHistoryPath(); err == nil {
 		m.globalHistory = readHistoryFile(gp)
 	}
@@ -3077,6 +3166,23 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Refresh credentials in the background so the TUI starts immediately.
+	// A 30-second timeout prevents indefinite blocking on network errors.
+	if needsAWSRefresh(cfg) {
+		go func() {
+			cmd := claudesettings.AWSAuthRefreshCommand()
+			refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			creds, err := claude.ResolveAWSCredsContext(refreshCtx, cmd)
+			p.Send(credRefreshReadyMsg{label: "AWS", creds: creds, err: err})
+		}()
+	} else if needsTokenCmdRefresh(cfg) {
+		go func() {
+			err := localAgent.WarmToken()
+			p.Send(credRefreshReadyMsg{label: "token", err: err})
+		}()
+	}
 
 	// Mode 1002+1006: button-motion + SGR extension.
 	// Reports drag coordinates while a button is held, enabling live selection

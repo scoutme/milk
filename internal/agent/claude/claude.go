@@ -14,20 +14,18 @@ import (
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin                   string                       // path to claude binary, e.g. "claude"
-	skipPermissions       bool                         // pass --dangerously-skip-permissions to the CLI
-	allowedTools          []string                     // tools pre-approved via --allowedTools
-	addDirs               []string                     // extra directories granted via --add-dir
-	permissionPhrases     []string                     // phrases indicating tool permission denial
-	dirRestrictionPhrases []string                     // phrases indicating directory restriction
-	permissionHandler     PermissionHandler            // nil → denyAllHandler
-	debugLog              io.Writer                    // when non-nil, every raw NDJSON line is written here
-	onToolUse             func(string)                 // called on content_block_start tool_use events
-	onToolUseReady        func(string, map[string]any) // called on content_block_stop with full input
-	onThinking            func(string)                 // called on thinking_delta tokens
-	onPercept             func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
-	perceptNonce          string                       // session-specific nonce matching the system-prompt instruction
-	extraEnv              []string                     // extra KEY=VALUE pairs injected into subprocess env
+	bin               string                       // path to claude binary, e.g. "claude"
+	skipPermissions   bool                         // pass --dangerously-skip-permissions to the CLI
+	allowedTools      []string                     // tools pre-approved via --allowedTools
+	addDirs           []string                     // extra directories granted via --add-dir
+	permissionHandler PermissionHandler            // nil → denyAllHandler
+	debugLog          io.Writer                    // when non-nil, every raw NDJSON line is written here
+	onToolUse         func(string)                 // called on content_block_start tool_use events
+	onToolUseReady    func(string, map[string]any) // called on content_block_stop with full input
+	onThinking        func(string)                 // called on thinking_delta tokens
+	onPercept         func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
+	perceptNonce      string                       // session-specific nonce matching the system-prompt instruction
+	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
 }
 
 func New(bin string) *Agent {
@@ -37,14 +35,13 @@ func New(bin string) *Agent {
 	return &Agent{bin: bin}
 }
 
-func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs, permissionPhrases, dirRestrictionPhrases []string) *Agent {
+func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []string) *Agent {
 	if bin == "" {
 		bin = "claude"
 	}
 	return &Agent{
 		bin: bin, skipPermissions: skipPermissions,
 		allowedTools: allowedTools, addDirs: addDirs,
-		permissionPhrases: permissionPhrases, dirRestrictionPhrases: dirRestrictionPhrases,
 	}
 }
 
@@ -251,16 +248,13 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 	}
 
 	res, parseErr := Stream(stdout, out, stdinPipe, StreamOpts{
-		PermissionPhrases:     a.permissionPhrases,
-		DirRestrictionPhrases: a.dirRestrictionPhrases,
-		AllowedTools:          a.allowedTools,
-		OnPermission:          a.permissionHandler,
-		OnToolUse:             a.onToolUse,
-		OnToolUseReady:        a.onToolUseReady,
-		OnThinking:            a.onThinking,
-		OnPercept:             a.onPercept,
-		PerceptNonce:          a.perceptNonce,
-		DebugLog:              a.debugLog,
+		OnPermission:   a.permissionHandler,
+		OnToolUse:      a.onToolUse,
+		OnToolUseReady: a.onToolUseReady,
+		OnThinking:     a.onThinking,
+		OnPercept:      a.onPercept,
+		PerceptNonce:   a.perceptNonce,
+		DebugLog:       a.debugLog,
 	})
 
 	// Close stdin after stream ends so Claude can exit cleanly.

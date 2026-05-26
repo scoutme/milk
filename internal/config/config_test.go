@@ -57,36 +57,11 @@ func TestActiveLocalAgent_ListUnknownNameFallsToFirst(t *testing.T) {
 	}
 }
 
-func TestActiveLocalAgent_FlatFallback(t *testing.T) {
-	cfg := Config{
-		LlamaURL:      "http://flat",
-		LlamaModel:    "flat-model",
-		LlamaProvider: "bearer",
-		LlamaAPIKey:   "sk-key",
-	}
-	got := cfg.ActiveLocalAgent()
-	if got.URL != "http://flat" || got.Model != "flat-model" || got.Provider != "bearer" || got.APIKey != "sk-key" {
-		t.Fatalf("flat fallback wrong: %+v", got)
-	}
-}
-
-func TestActiveLocalAgent_FlatFallbackDefaults(t *testing.T) {
+func TestActiveLocalAgent_EmptyConfigReturnsZero(t *testing.T) {
 	// Empty config means no provider configured — returns zero LocalAgentConfig.
 	cfg := Config{}
 	got := cfg.ActiveLocalAgent()
 	if got.URL != "" || got.Model != "" {
 		t.Fatalf("empty config should return zero LocalAgentConfig, got %+v", got)
-	}
-}
-
-func TestActiveLocalAgent_ListPreferredOverFlat(t *testing.T) {
-	cfg := Config{
-		LlamaURL:    "http://should-not-use",
-		LlamaModel:  "old",
-		LocalAgents: []LocalAgentConfig{{Name: "new", URL: "http://new", Model: "new-model"}},
-	}
-	got := cfg.ActiveLocalAgent()
-	if got.URL != "http://new" {
-		t.Fatalf("expected list to take precedence, got %q", got.URL)
 	}
 }
