@@ -2,24 +2,26 @@
 
 > **Scenario note:** This guide covers a specific reference setup: NVIDIA GPU on Ubuntu/WSL2, llama.cpp built from source, Qwen2.5-Coder 7B. The parameters (CUDA architecture, quant size, GPU layer count, context size) will differ for other hardware. For a general llama.cpp installation reference see the [official llama.cpp documentation](https://github.com/ggml-org/llama.cpp).
 >
-> The local agent speaks the OpenAI-compatible API and is not tied to llama.cpp. Any compliant server works — local or remote. See [Tested models](#tested-models) for models known to work well.
+> The local agent is not tied to llama.cpp or to the OpenAI-compatible API. Any OpenAI-compat server works (local or remote), and AWS Bedrock is supported natively via the Converse API. See [Tested models](#tested-models) for models known to work well.
 
 ## Prerequisites
 
 | Dependency | Required | Notes |
 | --- | --- | --- |
 | Go 1.21+ | yes | build only |
-| Inference server | no | any OpenAI-compatible server; degrades to Claude-only if absent |
+| Inference server or cloud provider | no | OpenAI-compat server or AWS Bedrock; degrades to Claude-only if absent |
 | claude CLI | no | degrades to local-only if absent |
 
 ---
 
 ## Local inference backend
 
-milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any server that exposes this interface can be used — local or remote. llama.cpp is the reference option, but alternatives such as [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [vLLM](https://github.com/vllm-project/vllm) work as long as:
+milk supports two local agent protocols:
 
-- the endpoint matches `llama_url` in `~/.milk/config.json`
-- the loaded model supports function/tool calling
+- **OpenAI-compatible Chat Completions** (default): any compliant server — llama.cpp, [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm), or remote cloud providers (OpenRouter, Together.ai, Groq, Azure OpenAI). Configure via `local_agents` in `~/.milk/config.json`.
+- **AWS Bedrock Converse API** (native): SigV4-signed requests with binary event-stream responses. Set `provider: "bedrock"` in the agent config entry. No OpenAI-compat layer required.
+
+For either protocol, the model must support function/tool calling.
 
 For general llama.cpp installation instructions see the [official llama.cpp README](https://github.com/ggml-org/llama.cpp). The steps below document the reference setup.
 

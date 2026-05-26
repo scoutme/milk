@@ -44,12 +44,11 @@ func main() {
 
 var rootCmd = &cobra.Command{
 	Use:   "milk [flags] [prompt]",
-	Short: "Local-first agentic orchestrator",
-	Long: `milk routes prompts between a local LLM and Claude Code CLI, maintaining
-session state and supporting context promotion on escalation.
-
-The local agent speaks the OpenAI-compatible API — any compliant inference server works,
-local or remote (llama.cpp, Ollama, LM Studio, vLLM, or any hosted endpoint).`,
+	Short: "Switch models, not context.",
+	Long: `milk lets you move between a local LLM and Claude Code mid-workflow, without
+losing context. The local agent speaks the OpenAI-compatible API — any compliant
+inference server works, local or remote (llama.cpp, Ollama, LM Studio, vLLM, or
+any hosted endpoint).`,
 	Args:         cobra.ArbitraryArgs,
 	SilenceUsage: true,
 	RunE:         run,

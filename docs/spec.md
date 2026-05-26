@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk is a local-first agentic orchestrator CLI. It routes user prompts between a local LLM agent (any OpenAI-compatible inference server) and a rich cloud agent (Claude Code CLI), maintaining session state across turns and supporting context promotion from local to cloud.
+milk lets you switch between a local LLM agent and a rich cloud agent (Claude Code CLI) mid-workflow, maintaining full session context across the switch. The local agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
 
 The primary use case is code assistance and shell automation for a single user.
 
@@ -73,8 +73,9 @@ The classifier uses the same model instance as the local coding agent. No second
 
 ## Local Agent
 
-- Backend: any OpenAI-compatible inference server, default `http://localhost:8080` (llama.cpp reference; also works with Ollama, LM Studio, vLLM, and remote cloud providers)
-- Model: user-configured via `llama_model`; any tool-calling-capable model works. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
+- Backend: configurable via `local_agents` in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/provider switch <name>`
+- Protocols: OpenAI-compatible Chat Completions API (llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, Together.ai, Groq, Azure OpenAI) **or** AWS Bedrock Converse API natively (binary event-stream, SigV4 signing — not OpenAI-compat)
+- Model: any tool-calling-capable model. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B, Claude Haiku (via Bedrock).
 
 ### Remote inference / authentication
 
@@ -349,7 +350,7 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
 
 Both agents stream output in real time:
 
-- **Local agent**: SSE from OpenAI-compat API (`stream: true`)
+- **Local agent**: SSE from OpenAI-compat API (`stream: true`), or AWS binary event-stream from Bedrock Converse API (provider-specific frame decoder)
 - **Claude agent**: NDJSON from `--output-format stream-json`, parsed line by line
 
 milk relays tokens to stdout as they arrive.

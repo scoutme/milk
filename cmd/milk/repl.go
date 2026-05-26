@@ -798,7 +798,7 @@ func (m *model) welcomeScreen() string {
 
 	lines := []string{
 		pulseColors[8] + "◈" + ansiReset + " " + "\033[1;38;2;255;208;96mmilk\033[0m",
-		dim("local-first agentic orchestrator"),
+		dim("switch models, not context."),
 		"",
 	}
 
@@ -996,8 +996,8 @@ func (m *model) headerBar() string {
 		frame = m.spinnerFrame
 	}
 	logo := headerLogo(frame)
-	tagline := dim("local-first agentic orchestrator")
-	taglinePlain := "local-first agentic orchestrator"
+	tagline := dim("switch models, not context.")
+	taglinePlain := "switch models, not context."
 
 	sessID := m.st.sess.ID
 	if len(sessID) > 8 {

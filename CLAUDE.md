@@ -1,6 +1,6 @@
 # milk
 
-Local-first agentic orchestrator CLI. Routes prompts between a local LLM (any OpenAI-compatible inference server) and Claude Code CLI, with session-aware state management and real-time streaming.
+Switch models, not context. Routes prompts between a local LLM (any OpenAI-compatible inference server) and Claude Code CLI, with session-aware state management and real-time streaming.
 
 ## Quick orientation
 
@@ -92,7 +92,7 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 
 - Go 1.21+, Cobra CLI
 - charmbracelet/bubbletea, bubbles/viewport, bubbles/textarea, lipgloss
-- OpenAI-compatible inference API (default `http://localhost:8080`)
+- Local agent: OpenAI-compatible inference API **or** AWS Bedrock Converse API (native, not OpenAI-compat)
 - `claude` CLI binary (Claude Code)
 - OpenTelemetry Go SDK with custom file exporters
 

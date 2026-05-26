@@ -1,8 +1,12 @@
 # milk
 
-Local-first agentic orchestrator CLI. Routes prompts between a local LLM and Claude Code, maintaining session state across turns and promoting context on escalation.
+<p align="center">
+  <img src="docs/images/milk.png" alt="milk" width="200"/>
+</p>
 
-The local agent speaks the OpenAI-compatible API — any compliant inference server works, local or remote (llama.cpp, Ollama, LM Studio, vLLM, or any hosted endpoint). Tested models: Qwen2.5-Coder (7B / 3B) and Gemma 4 E4B.
+Switch models, not context.
+
+Start cheap. Go deep when you need it. Switch mid-workflow — the full conversation goes with you.
 
 ## Installation
 
@@ -34,27 +38,15 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 
 | Dependency | Purpose | Required |
 | --- | --- | --- |
-| Inference server | local LLM inference | no (degrades to Claude-only) |
+| Local agent (inference server or cloud) | local LLM inference | no (degrades to Claude-only) |
 | [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
 | Go 1.21+ | build only | yes |
 
-milk communicates with the local model via the OpenAI-compatible API (default `http://localhost:8080`). Any compatible server works — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any hosted endpoint — as long as the loaded model supports function/tool calling.
+The local agent supports multiple backends and auth transports — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and other OpenAI-compatible servers, plus cloud providers via native protocols: AWS Bedrock (SigV4 + Converse API), OpenRouter, Together.ai, Groq (Bearer token). The only requirement is that the model supports function/tool calling.
+
+If no local agent is configured, milk starts and shows setup guidance. Use `/provider add` to configure a backend interactively, or edit `~/.milk/config.json` directly.
 
 For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md).
-
-## Install
-
-```sh
-go install github.com/scoutme/milk/cmd/milk@latest
-```
-
-Or build from source:
-
-```sh
-git clone https://github.com/scoutme/milk
-cd milk
-go build -o milk ./cmd/milk
-```
 
 ## Usage
 
@@ -77,13 +69,18 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 
 | Command | Description |
 | --- | --- |
-| `/escalate` | Force next turn to Claude |
-| `/local` | Force next turn to local model |
+| `/escalate` | Pin all subsequent turns to Claude (until `/local`) |
+| `/escalate <msg>` | Force this single turn to Claude, then resume normal routing |
+| `/local` | Pin all subsequent turns to local model (until `/escalate`) |
+| `/local <msg>` | Force this single turn to local model, then resume routing |
 | `/learn <fact>` | Store a persistent memory (`Core=true`, W=1.0, global scope) |
 | `/memory` | List all Percepts (global + session), sorted by confidence weight |
 | `/memory global` | List only global Percepts |
 | `/memory session` | List only session-scoped Percepts |
 | `/memory <pattern>` | List Percepts whose content matches a substring |
+| `/memory show <pat\|#id>` | Show full details of matching Percepts |
+| `/panel memory` | Toggle the memory panel (right-side Percept viewer) |
+| `/forget <pat>` | Delete a Percept by description or `#id` (confirms before deleting) |
 | `/export` | Print the current session transcript |
 | `/export json` | Print the current session as raw JSON |
 | `/export <path>` | Write the session transcript to a file |
@@ -94,6 +91,12 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 | `/history` | Show current history mode and entry counts |
 | `/history global` | Switch input navigation to global history (all sessions) |
 | `/history session` | Switch input navigation to session history (default) |
+| `/skip-permissions` | Show current `dangerously_skip_permissions` state |
+| `/skip-permissions on\|off` | Enable / disable permission skip for this session |
+| `/provider` | Show active local-agent provider (URL, model, auth) |
+| `/provider list` | List all configured local-agent backends |
+| `/provider switch <name>` | Switch active local agent to a named backend |
+| `/provider add` | Add a new backend interactively (prompts for missing fields) |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
@@ -106,7 +109,7 @@ The prompt label reflects the current routing state: `[local]` (local model), `[
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+C` | Cancel running turn (if busy); clear `/escalate`/`/local` flag; or exit |
+| `Ctrl+C` | Cancel running turn (if busy); or exit (press twice on empty input) |
 | `Ctrl+D` | Exit (on empty input) |
 | `Ctrl+R` | Reverse incremental search through input history |
 | `Ctrl+S` | Forward incremental search through input history |
@@ -168,8 +171,28 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 
 ```json
 {
-  "llama_url": "http://localhost:8080",
-  "llama_model": "qwen2.5-coder",
+  "local_agent": "my-local",
+  "local_agents": [
+    {
+      "name": "my-local",
+      "url": "http://localhost:8080",
+      "model": "qwen2.5-coder"
+    },
+    {
+      "name": "haiku",
+      "url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
+      "model": "arn:aws:bedrock:...",
+      "provider": "bedrock",
+      "aws_region": "eu-central-1"
+    },
+    {
+      "name": "openrouter",
+      "url": "https://openrouter.ai/api/v1",
+      "model": "meta-llama/llama-3-70b-instruct",
+      "provider": "bearer",
+      "api_key": "sk-or-..."
+    }
+  ],
   "claude_bin": "claude",
   "default_route": "local",
   "otel": {
@@ -195,6 +218,10 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
   }
 }
 ```
+
+`local_agent` names the active backend from the `local_agents` list. Use `/provider switch <name>` to change it at runtime. `/provider add` configures a new backend interactively.
+
+Supported `provider` values: omit (or `""`) for no-auth/local, `"bedrock"` (AWS SigV4), `"bearer"` (API key). For Azure OpenAI, omit `provider` and pass `"api-key": "..."` under `headers`.
 
 **`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 
@@ -242,12 +269,13 @@ The local model has access to these built-in tools:
 
 ## Graceful degradation
 
-| Inference server | claude CLI | behaviour |
+| Local agent | claude CLI | behaviour |
 | --- | --- | --- |
-| running | installed | normal routing |
-| unreachable | installed | warns once, routes all turns to Claude |
-| running | not installed | warns once, stays local-only |
-| unreachable | not installed | exits with error |
+| available | installed | normal routing |
+| unavailable | installed | warns once, routes all turns to Claude |
+| available | not installed | warns once, stays local-only |
+| not configured | not installed | starts in setup mode — splash shows `/provider add` guidance |
+| unavailable | not installed | starts in setup mode — splash shows `/provider add` guidance |
 
 ## Documentation
 
