@@ -233,6 +233,9 @@ func Load() (Config, error) {
 	path := filepath.Join(dir, "config.json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		// First launch: scaffold ~/.milk/ and write defaults so the file is
+		// discoverable and self-documenting from the start.
+		_ = Save(cfg)
 		return cfg, nil
 	}
 	if err != nil {
