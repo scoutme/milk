@@ -7,10 +7,78 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
+
+// tokenCmdTransport runs a shell command to obtain a Bearer token, caches it,
+// and re-runs the command when the server returns a 401/403. This supports
+// providers that use short-lived tokens refreshed via a CLI command
+// (e.g. "gh auth token --hostname org.ghe.com").
+type tokenCmdTransport struct {
+	inner http.RoundTripper
+	cmd   string // shell command whose stdout is the token
+
+	mu    sync.Mutex
+	token string
+}
+
+func (t *tokenCmdTransport) fetchToken() (string, error) {
+	out, err := exec.Command("sh", "-c", t.cmd).Output()
+	if err != nil {
+		return "", fmt.Errorf("token_cmd: %w", err)
+	}
+	tok := strings.TrimSpace(string(out))
+	if tok == "" {
+		return "", fmt.Errorf("token_cmd: empty output")
+	}
+	return tok, nil
+}
+
+func (t *tokenCmdTransport) getToken() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.token != "" {
+		return t.token, nil
+	}
+	tok, err := t.fetchToken()
+	if err != nil {
+		return "", err
+	}
+	t.token = tok
+	return tok, nil
+}
+
+func (t *tokenCmdTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tok, err := t.getToken()
+	if err != nil {
+		return nil, err
+	}
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := t.inner.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// Token may have expired — refresh and retry once.
+		t.mu.Lock()
+		t.token = ""
+		t.mu.Unlock()
+		newTok, ferr := t.getToken()
+		if ferr != nil {
+			return resp, nil // return original response; caller sees the 401/403
+		}
+		resp.Body.Close()
+		r2 := req.Clone(req.Context())
+		r2.Header.Set("Authorization", "Bearer "+newTok)
+		return t.inner.RoundTrip(r2)
+	}
+	return resp, nil
+}
 
 // headerTransport injects static HTTP headers on every request.
 // Wraps an inner RoundTripper (usually http.DefaultTransport).

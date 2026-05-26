@@ -55,7 +55,7 @@ type chatRequest struct {
 	Tools       []map[string]any `json:"tools,omitempty"`
 	Stream      bool             `json:"stream"`
 	Temperature float64          `json:"temperature"`
-	Seed        int64            `json:"seed"`
+	Seed        int64            `json:"seed,omitempty"`
 }
 
 type streamChunk struct {
@@ -73,11 +73,28 @@ type streamChunk struct {
 type Agent struct {
 	baseURL          string
 	model            string
+	chatPath         string // inference path; defaults to "/v1/chat/completions"
 	otelDir          string
 	skipHealthCheck  bool // true for remote providers that have no /health endpoint (e.g. Bedrock)
-	useBedrockNative bool // true when llama_provider = "bedrock"; uses Converse API instead of /v1/chat/completions
+	useBedrockNative bool // true when provider = "bedrock"; uses Converse API instead of /v1/chat/completions
 	client           *http.Client
-	detectedFormat   ToolFormat // confirmed format from last tool-bearing turn
+	detectedFormat   ToolFormat         // confirmed format from last tool-bearing turn
+	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
+}
+
+// HasTokenCmd reports whether this agent uses a token_cmd for authentication.
+func (a *Agent) HasTokenCmd() bool { return a.tokenCmd != nil }
+
+// WarmToken eagerly pre-fetches the Bearer token when token_cmd is configured.
+// It returns an error if the command fails, nil otherwise (including when no
+// token_cmd is set). Calling it in a background goroutine lets the TUI start
+// immediately while the token is fetched concurrently.
+func (a *Agent) WarmToken() error {
+	if a.tokenCmd == nil {
+		return nil
+	}
+	_, err := a.tokenCmd.getToken()
+	return err
 }
 
 func New(baseURL, model string) *Agent {
@@ -86,6 +103,19 @@ func New(baseURL, model string) *Agent {
 		model:   model,
 		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
+}
+
+// inferenceURL returns the full URL for the chat/completions endpoint.
+// chatPath defaults to "/v1/chat/completions" when empty.
+func (a *Agent) inferenceURL() string {
+	p := a.chatPath
+	if p == "" {
+		p = "/v1/chat/completions"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return a.baseURL + p
 }
 
 // NewFromConfig creates an Agent from the active LocalAgentConfig.
@@ -134,6 +164,7 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 		return &Agent{
 			baseURL:          strings.TrimRight(ac.URL, "/"),
 			model:            ac.Model,
+			chatPath:         ac.ChatPath,
 			skipHealthCheck:  true,
 			useBedrockNative: true,
 			client:           &http.Client{Timeout: 5 * time.Minute, Transport: transport},
@@ -141,7 +172,7 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 	case "", "local":
 		// plain transport; extra headers may still apply
 	default:
-		// treat as Bearer-token provider (OpenRouter, Together.ai, Groq, GitHub Copilot, …)
+		// treat as Bearer-token provider (OpenRouter, Together.ai, Groq, GitHub Models, …)
 		//
 		// Azure OpenAI workaround: Azure uses "api-key" header + a non-standard URL path instead
 		// of Bearer auth. Use provider="" or "local", set url to the full deployment endpoint,
@@ -149,22 +180,34 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 		// templating is tracked in GitHub Issues.
 	}
 
-	// Layer headerTransport if there are extra headers or an API key.
-	headers := make(map[string]string)
-	for k, v := range ac.Headers {
-		headers[k] = v
+	// Layer token refresh or static Bearer, then extra headers.
+	var tct *tokenCmdTransport
+	if ac.TokenCmd != "" && provider != "bedrock" {
+		// token_cmd takes precedence: use a refreshing transport so short-lived
+		// tokens (e.g. "gh auth token") are re-fetched on 401/403.
+		tct = &tokenCmdTransport{inner: transport, cmd: ac.TokenCmd}
+		transport = tct
+	} else if ac.APIKey != "" && provider != "bedrock" {
+		transport = &headerTransport{
+			inner:   transport,
+			headers: map[string]string{"Authorization": "Bearer " + ac.APIKey},
+		}
 	}
-	if ac.APIKey != "" && provider != "bedrock" {
-		headers["Authorization"] = "Bearer " + ac.APIKey
-	}
-	if len(headers) > 0 {
+	// Extra headers (e.g. Copilot editor headers, Azure api-key) on top.
+	if len(ac.Headers) > 0 {
+		headers := make(map[string]string)
+		for k, v := range ac.Headers {
+			headers[k] = v
+		}
 		transport = &headerTransport{inner: transport, headers: headers}
 	}
 
 	return &Agent{
-		baseURL: strings.TrimRight(ac.URL, "/"),
-		model:   ac.Model,
-		client:  &http.Client{Timeout: 5 * time.Minute, Transport: transport},
+		baseURL:  strings.TrimRight(ac.URL, "/"),
+		model:    ac.Model,
+		chatPath: ac.ChatPath,
+		tokenCmd: tct,
+		client:   &http.Client{Timeout: 5 * time.Minute, Transport: transport},
 	}
 }
 
@@ -387,7 +430,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		a.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -538,9 +581,9 @@ func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
 	if a.useBedrockNative {
 		return a.bedrockClassify(ctx, prompt)
 	}
-	classifyPrompt := `You are a routing classifier. Respond with exactly one word: "local" or "escalate".
-Respond "escalate" only if the task clearly requires: complex multi-file refactoring, architectural design decisions, or tasks that require deep reasoning beyond coding assistance.
-Respond "local" for: shell commands, file reading, grep, simple code questions, debugging, writing small functions.
+	classifyPrompt := `Respond with exactly one word: "local" or "escalate".
+Use "escalate" only when the task clearly requires complex multi-file refactoring, architectural design decisions, or deep reasoning beyond coding assistance.
+Use "local" for shell commands, file reading, grep, simple code questions, debugging, and writing small functions.
 
 Task: ` + prompt
 
@@ -559,7 +602,7 @@ Task: ` + prompt
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		a.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
@@ -607,8 +650,11 @@ func (a *Agent) Ping(ctx context.Context) error {
 	}
 
 	// Best-effort: query /v1/models to pre-seed the format detector.
-	// Errors are silently ignored — detection still works on the first tool turn.
-	a.seedFormatFromModels(ctx)
+	// Skip for Bedrock native path — it doesn't expose /v1/models and the
+	// Converse API doesn't use the stream format detector at all.
+	if !a.useBedrockNative {
+		a.seedFormatFromModels(ctx)
+	}
 	return nil
 }
 

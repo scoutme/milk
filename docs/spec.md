@@ -79,21 +79,25 @@ The classifier uses the same model instance as the local coding agent. No second
 
 ### Remote inference / authentication
 
-Set `llama_provider` in `~/.milk/config.json` to select the auth transport:
+The `provider` field in a `local_agents` entry selects the auth transport:
 
-| `llama_provider` | Auth mechanism | Required fields |
+| `provider` | Auth mechanism | Required fields |
 |---|---|---|
-| `""` or `"local"` | None (plain HTTP) | — |
-| `"bedrock"` | AWS SigV4 | `llama_aws_region` + credentials (config or env vars) |
-| any other string | `Authorization: Bearer <llama_api_key>` | `llama_api_key` |
+| `""` / `"local"` | None (plain HTTP) | — |
+| `"bedrock"` | AWS SigV4 | `aws_region` + credentials (config or env vars) |
+| `"bearer"` or any other string | `Authorization: Bearer <api_key>` | `api_key` |
 
-Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injected via `llama_headers`.
+Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injected via `headers`.
 
-**AWS Bedrock credential resolution** (in order): explicit config fields → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_REGION` env vars.
+**Dynamic tokens (`token_cmd`)**: set `token_cmd` to a shell command whose stdout is the Bearer token. milk runs it at startup and retries it automatically on 401/403. Takes precedence over `api_key`. Example: `"gh auth token --hostname myorg.ghe.com"`.
 
-**TLS overrides**: `llama_tls_skip_verify: true` disables cert verification (dev/self-signed only); `llama_tls_ca_cert: "/path/to/ca.pem"` trusts a private CA.
+**Custom inference path (`chat_path`)**: override the endpoint path when the server does not follow the `/v1` prefix convention. Example: `"chat_path": "/chat/completions"`.
 
-**Azure OpenAI workaround**: Azure uses a non-standard URL path and an `api-key` header rather than Bearer auth. Use `llama_provider: ""`, set `llama_url` to the full deployment endpoint, and add `"api-key": "<key>"` to `llama_headers`. A dedicated `azure` provider with URL templating is tracked in GitHub Issues. See ADR 27.
+**AWS Bedrock credential resolution** (in order): explicit `aws_key_id` / `aws_secret` / `aws_token` config fields → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars → region parsed from `url` when `aws_region` is empty.
+
+**TLS overrides**: `tls_skip_verify: true` disables cert verification (dev/self-signed only); `tls_ca_cert: "/path/to/ca.pem"` trusts a private CA.
+
+**Azure OpenAI workaround**: Azure uses a non-standard URL path and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint, add `{"api-key": "<key>"}` to `headers`, and leave `provider` empty. A dedicated Azure provider with URL templating is tracked in GitHub Issues. See ADR 27.
 - Tool loop: standard agentic loop — call → check tool calls → execute → feed result → repeat until final answer
 - Built-in tools (implemented in Go, exposed as OpenAI function schemas):
   - `bash(command string) → stdout, stderr, exit_code`
@@ -311,7 +315,7 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
 }
 ```
 
-`local_agent` names the active backend from `local_agents`. If empty, the first entry is used. Flat `llama_*` fields at the root are accepted for backward compatibility when `local_agents` is absent.
+`local_agent` names the active backend from `local_agents`. If empty, the first entry is used.
 
 ### `local_agents` entry fields
 
@@ -321,7 +325,9 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
 | `url` | string | Base URL of the inference server |
 | `model` | string | Model name or ARN |
 | `provider` | string | Auth transport: `""` / `"local"` = none; `"bedrock"` = AWS SigV4; anything else = Bearer token |
-| `api_key` | string | Bearer token (used when provider is not `""`, `"local"`, or `"bedrock"`) |
+| `api_key` | string | Static Bearer token; superseded by `token_cmd` when both are set |
+| `token_cmd` | string | Shell command whose stdout is the Bearer token; re-run on 401/403 |
+| `chat_path` | string | Override inference path (default `/v1/chat/completions`) |
 | `headers` | object | Extra HTTP headers (e.g. `"api-key"` for Azure, `"HTTP-Referer"` for OpenRouter) |
 | `tls_skip_verify` | bool | Disable TLS cert verification (dev/self-signed only) |
 | `tls_ca_cert` | string | Path to PEM CA cert for private endpoints |

@@ -44,7 +44,7 @@ The local agent supports multiple backends and auth transports — [llama.cpp](h
 
 If no local agent is configured, milk starts and shows setup guidance. Use `/provider add` to configure a backend interactively, or edit `~/.milk/config.json` directly.
 
-For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md).
+For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md). For cloud providers (Bedrock, OpenRouter, Together.ai, Groq, Azure) see [docs/providers.md](docs/providers.md).
 
 ## Usage
 

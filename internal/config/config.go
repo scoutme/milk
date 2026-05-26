@@ -52,7 +52,6 @@ type OtelConfig struct {
 // LocalAgentConfig holds configuration for a single local-agent backend.
 // Multiple backends can be listed under local_agents; the active one is
 // selected by name via the local_agent field (defaults to the first entry).
-// Flat llama_* fields at the Config root are accepted for backward compatibility.
 type LocalAgentConfig struct {
 	Name string `json:"name"` // display name, used as selector key
 
@@ -68,6 +67,11 @@ type LocalAgentConfig struct {
 	// APIKey is a Bearer token / API key used when Provider is not "" or "bedrock".
 	APIKey string `json:"api_key,omitempty"`
 
+	// TokenCmd is a shell command whose stdout is used as the Bearer token,
+	// evaluated once at startup. Takes precedence over APIKey when non-empty.
+	// Example: "gh auth token --hostname myorg.ghe.com"
+	TokenCmd string `json:"token_cmd,omitempty"`
+
 	// Headers are extra HTTP headers injected on every request (e.g. "api-key" for Azure,
 	// "HTTP-Referer" for OpenRouter).
 	//
@@ -75,6 +79,11 @@ type LocalAgentConfig struct {
 	// of Bearer auth. Set url to the full deployment endpoint and add {"api-key": "<key>"} here.
 	// A dedicated azure provider with URL templating is tracked in GitHub Issues.
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// ChatPath overrides the inference endpoint path (default "/v1/chat/completions").
+	// Use when the server does not follow the standard /v1 prefix
+	// (e.g. some enterprise proxies expose "/chat/completions" directly).
+	ChatPath string `json:"chat_path,omitempty"`
 
 	// TLSSkipVerify disables TLS certificate verification. Use only for dev/self-signed certs.
 	TLSSkipVerify bool `json:"tls_skip_verify,omitempty"`
@@ -92,61 +101,26 @@ type LocalAgentConfig struct {
 type Config struct {
 	// LocalAgent is the name of the active backend from LocalAgents.
 	// If empty, the first entry in LocalAgents is used.
-	LocalAgent  string             `json:"local_agent"`
-	LocalAgents []LocalAgentConfig `json:"local_agents"`
+	LocalAgent  string             `json:"local_agent,omitempty"`
+	LocalAgents []LocalAgentConfig `json:"local_agents,omitempty"`
 
-	// Flat llama_* fields are kept for backward compatibility.
-	// When LocalAgents is non-empty the flat fields are ignored.
-	LlamaURL   string `json:"llama_url"`
-	LlamaModel string `json:"llama_model"`
-
-	// LlamaProvider selects the auth transport.
-	// "" or "local" = no auth (default)
-	// "bedrock"     = AWS SigV4 signing
-	// anything else = Bearer token via LlamaAPIKey
-	LlamaProvider string `json:"llama_provider"`
-
-	// LlamaAPIKey is a Bearer token / API key used when LlamaProvider is not "" or "bedrock".
-	// Injected as "Authorization: Bearer <key>".
-	LlamaAPIKey string `json:"llama_api_key"`
-
-	// LlamaHeaders are extra HTTP headers injected on every request.
-	LlamaHeaders map[string]string `json:"llama_headers"`
-
-	// LlamaTLSSkipVerify disables TLS certificate verification. Use only for local dev/self-signed certs.
-	LlamaTLSSkipVerify bool `json:"llama_tls_skip_verify"`
-
-	// LlamaTLSCACert is a path to a PEM-encoded CA certificate file.
-	LlamaTLSCACert string `json:"llama_tls_ca_cert"`
-
-	// AWS credentials for LlamaProvider = "bedrock".
-	LlamaAWSRegion  string `json:"llama_aws_region"`
-	LlamaAWSKeyID   string `json:"llama_aws_key_id"`
-	LlamaAWSSecret  string `json:"llama_aws_secret"`
-	LlamaAWSToken   string `json:"llama_aws_token"`   // optional session token
-	LlamaAWSService string `json:"llama_aws_service"` // default "bedrock"
-
-	ClaudeBin                  string   `json:"claude_bin"`
-	DefaultRoute               string   `json:"default_route"`
-	DangerouslySkipPermissions bool     `json:"dangerously_skip_permissions"`
-	AllowedTools               []string `json:"allowed_tools"`
-	AddDirs                    []string `json:"add_dirs"`
-	// PermissionPhrases and DirRestrictionPhrases are merged with built-in
-	// defaults (EN + IT). Add extra phrases here for other languages.
-	PermissionPhrases     []string   `json:"permission_phrases"`
-	DirRestrictionPhrases []string   `json:"dir_restriction_phrases"`
-	Rules                 Rules      `json:"rules"`
-	Otel                  OtelConfig `json:"otel"`
+	ClaudeBin                  string     `json:"claude_bin,omitempty"`
+	DefaultRoute               string     `json:"default_route,omitempty"`
+	DangerouslySkipPermissions bool       `json:"dangerously_skip_permissions,omitempty"`
+	AllowedTools               []string   `json:"allowed_tools,omitempty"`
+	AddDirs                    []string   `json:"add_dirs,omitempty"`
+	Rules                      Rules      `json:"rules"`
+	Otel                       OtelConfig `json:"otel"`
 	// DebugClaudeCode writes every raw NDJSON line from the claude subprocess to
 	// ~/.milk/claude_debug.ndjson — useful for understanding stream protocol issues.
-	DebugClaudeCode bool `json:"debug_claude_code"`
+	DebugClaudeCode bool `json:"debug_claude_code,omitempty"`
 	// AWSAuthRefresh enables AWS credential injection for the claude subprocess.
 	// When true, milk reads the awsAuthRefresh command from ~/.claude/settings.json,
 	// runs it, and injects the resulting credentials as explicit AWS_* env vars.
 	// This prevents stale or wrong-account credentials in the shell environment
 	// from overriding the correct ones. Requires awsAuthRefresh to be set in
 	// ~/.claude/settings.json (it is set automatically by claude-code-with-bedrock).
-	AWSAuthRefresh bool `json:"aws_auth_refresh"`
+	AWSAuthRefresh bool `json:"aws_auth_refresh,omitempty"`
 }
 
 func defaults() Config {
@@ -184,111 +158,27 @@ func defaults() Config {
 	}
 }
 
-// builtinPermissionPhrases are language-specific substrings that appear when
-// Claude explains it cannot proceed due to a tool permission restriction.
-var builtinPermissionPhrases = []string{
-	// English
-	"approve the", "approve this", "need permission",
-	"require permission", "waiting for approval",
-	"permission to", "grant permission", "allow me to",
-	"tool was blocked", "tool call was blocked",
-	"blocked by", "is blocked", "being blocked",
-	// Italian
-	"viene bloccato", "è bloccato", "è stata bloccata",
-	"bloccato dalle", "bloccata dalle",
-	"di permesso", "impostazioni di permesso",
-	"autorizzazione necessaria", "richiede autorizzazione",
-	"non autorizzato", "non ho i permessi",
-	"permesso negato", "accesso negato allo strumento",
-}
-
-// builtinDirRestrictionPhrases are language-specific substrings that appear
-// when Claude refuses due to directory access restrictions.
-var builtinDirRestrictionPhrases = []string{
-	// English
-	"is restricted", "outside the allowed", "not within the allowed",
-	"only list files within", "cannot access",
-	"outside of the", "not allowed to access", "directory is not",
-	// Italian
-	"accesso limitato", "fuori dalla directory",
-	"non posso accedere alla directory", "non posso accedere a",
-	"directory non consentita", "percorso non autorizzato",
-	"non è consentito accedere", "directory limitata",
-	"cartella non accessibile",
-}
-
 // ActiveLocalAgent returns the resolved LocalAgentConfig to use.
-// Priority: local_agents list (selected by local_agent name, or first entry)
-// → backward-compat flat llama_* fields → built-in defaults.
+// Selects by name from local_agents (case-insensitive), falls back to the first
+// entry, or returns an empty config when the list is empty.
 func (c Config) ActiveLocalAgent() LocalAgentConfig {
-	if len(c.LocalAgents) > 0 {
-		if c.LocalAgent != "" {
-			for _, a := range c.LocalAgents {
-				if strings.EqualFold(a.Name, c.LocalAgent) {
-					return a
-				}
-			}
-		}
-		return c.LocalAgents[0]
-	}
-	// Backward compat: promote flat fields only when explicitly set.
-	if c.LlamaURL == "" {
+	if len(c.LocalAgents) == 0 {
 		return LocalAgentConfig{} // no provider configured
 	}
-	return LocalAgentConfig{
-		Name:          "local",
-		URL:           c.LlamaURL,
-		Model:         c.LlamaModel,
-		Provider:      c.LlamaProvider,
-		APIKey:        c.LlamaAPIKey,
-		Headers:       c.LlamaHeaders,
-		TLSSkipVerify: c.LlamaTLSSkipVerify,
-		TLSCACert:     c.LlamaTLSCACert,
-		AWSRegion:     c.LlamaAWSRegion,
-		AWSKeyID:      c.LlamaAWSKeyID,
-		AWSSecret:     c.LlamaAWSSecret,
-		AWSToken:      c.LlamaAWSToken,
-		AWSService:    c.LlamaAWSService,
+	if c.LocalAgent != "" {
+		for _, a := range c.LocalAgents {
+			if strings.EqualFold(a.Name, c.LocalAgent) {
+				return a
+			}
+		}
 	}
+	return c.LocalAgents[0]
 }
 
 // HasLocalAgentConfig reports whether the user has explicitly configured a
-// local-agent backend beyond the built-in defaults (localhost:8080 / qwen2.5-coder).
-// Used by the TUI to decide whether to show setup hints on the welcome screen.
+// local-agent backend. Used by the TUI to decide whether to show setup hints.
 func (c Config) HasLocalAgentConfig() bool {
-	if len(c.LocalAgents) > 0 {
-		return true
-	}
-	// Flat fields: any explicitly-set URL counts.
-	return c.LlamaURL != ""
-}
-
-// EffectivePermissionPhrases merges built-in phrases with any user-supplied extras.
-func (c Config) EffectivePermissionPhrases() []string {
-	return mergeStrings(builtinPermissionPhrases, c.PermissionPhrases)
-}
-
-// EffectiveDirRestrictionPhrases merges built-in phrases with any user-supplied extras.
-func (c Config) EffectiveDirRestrictionPhrases() []string {
-	return mergeStrings(builtinDirRestrictionPhrases, c.DirRestrictionPhrases)
-}
-
-func mergeStrings(base, extra []string) []string {
-	if len(extra) == 0 {
-		return base
-	}
-	seen := make(map[string]bool, len(base))
-	for _, s := range base {
-		seen[s] = true
-	}
-	out := make([]string, len(base), len(base)+len(extra))
-	copy(out, base)
-	for _, s := range extra {
-		if !seen[s] {
-			out = append(out, s)
-		}
-	}
-	return out
+	return len(c.LocalAgents) > 0
 }
 
 // ClaudeDebugLogPath returns the path for the Claude raw NDJSON debug log.

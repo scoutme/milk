@@ -1,8 +1,11 @@
 package local
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net/http"
 	"testing"
 )
 
@@ -249,4 +252,51 @@ func init() {
 	// io.ErrUnexpectedEOF when partial, or returns io.EOF when zero bytes are read.
 	// Our test frame is complete so no EOF is hit during parsing.
 	_ = struct{}{}
+}
+
+// --- inferenceURL ---
+
+func TestInferenceURL_Default(t *testing.T) {
+	a := &Agent{baseURL: "http://localhost:8080"}
+	want := "http://localhost:8080/v1/chat/completions"
+	if got := a.inferenceURL(); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func TestInferenceURL_CustomChatPath(t *testing.T) {
+	a := &Agent{baseURL: "https://proxy.example.com", chatPath: "/chat/completions"}
+	want := "https://proxy.example.com/chat/completions"
+	if got := a.inferenceURL(); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// --- WarmToken ---
+
+func TestWarmToken_NilTransport(t *testing.T) {
+	a := &Agent{} // no tokenCmd set
+	if err := a.WarmToken(); err != nil {
+		t.Errorf("expected nil error with no token_cmd, got %v", err)
+	}
+}
+
+func TestWarmToken_FetchesEagerly(t *testing.T) {
+	tr := &tokenCmdTransport{inner: noopRoundTripper{}, cmd: "echo warmtoken"}
+	a := &Agent{tokenCmd: tr}
+	if err := a.WarmToken(); err != nil {
+		t.Fatalf("WarmToken failed: %v", err)
+	}
+	tr.mu.Lock()
+	cached := tr.token
+	tr.mu.Unlock()
+	if cached != "warmtoken" {
+		t.Errorf("expected token 'warmtoken' after WarmToken, got %q", cached)
+	}
+}
+
+type noopRoundTripper struct{}
+
+func (noopRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 }

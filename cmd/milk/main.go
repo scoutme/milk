@@ -116,7 +116,7 @@ func run(cmd *cobra.Command, args []string) error {
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 	claudeAgent = applyAWSCreds(cfg, claudeAgent)
 	if dbg, err := openClaudeDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
@@ -160,6 +160,26 @@ func run(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+}
+
+// needsAWSRefresh reports whether an async background credential refresh is
+// required for the active local agent.
+func needsAWSRefresh(cfg config.Config) bool {
+	if !cfg.AWSAuthRefresh {
+		return false
+	}
+	ac := cfg.ActiveLocalAgent()
+	if strings.ToLower(strings.TrimSpace(ac.Provider)) != "bedrock" {
+		return false
+	}
+	return ac.AWSKeyID == "" // explicit config takes precedence
+}
+
+// needsTokenCmdRefresh reports whether the active local agent uses token_cmd
+// and should show a status bar hint while the first token is fetched.
+func needsTokenCmdRefresh(cfg config.Config) bool {
+	ac := cfg.ActiveLocalAgent()
+	return ac.TokenCmd != "" && strings.ToLower(strings.TrimSpace(ac.Provider)) != "bedrock"
 }
 
 // applyFreshAWSCreds refreshes AWS credentials in ac when aws_auth_refresh is
@@ -343,7 +363,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			escalateAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs, cfg.EffectivePermissionPhrases(), cfg.EffectiveDirRestrictionPhrases())
+			escalateAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
 			escalateAgent = applyAWSCreds(cfg, escalateAgent)
 			var localCs *claudesettings.Store
 			if cwd, err := os.Getwd(); err == nil {
@@ -499,13 +519,8 @@ func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Ag
 
 // handlePermissionDenials checks the result for permission issues and retries if the user approves.
 func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
-	switch {
-	case len(res.PermissionDenials) > 0:
+	if len(res.PermissionDenials) > 0 {
 		return handleStructuredDenials(ctx, sess, agent, res, input, out, pc, nonce)
-	case res.PermissionDenied:
-		return handlePhrasePermission(ctx, sess, agent, res, input, out, nonce)
-	case res.DirRestricted:
-		return handlePhraseDir(ctx, sess, agent, input, out, nonce)
 	}
 	return res
 }
@@ -600,34 +615,6 @@ func applyDirGrant(d claude.PermissionDenialRecord, input inputReader, pc permCo
 	return true
 }
 
-// handlePhrasePermission handles a tool permission denial detected via phrase scanning.
-// Asks the user y/n and retries via --resume with the tool added to allowed list.
-func handlePhrasePermission(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, nonce string) claude.ParseResult {
-	tool := res.DeniedTool
-	var prompt string
-	if tool != "" {
-		prompt = fmt.Sprintf("%s Claude needs permission to use %s. Allow? [y/n] ", milkTag(), bold(tool))
-	} else {
-		prompt = fmt.Sprintf("%s Claude needs a tool permission. Allow? [y/n] ", milkTag())
-	}
-	yn, _ := input.readLine(prompt)
-	if !strings.EqualFold(yn, "y") {
-		return res
-	}
-	var retryAgent *claude.Agent
-	if tool != "" {
-		retryAgent = agent.WithExtraAllowedTool(tool)
-	} else {
-		retryAgent = agent
-	}
-	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permission.", out)
-	if err != nil {
-		return res
-	}
-	return retried
-}
-
 // suggestDir extracts a suggested directory from a tool input map.
 // Checks common path keys ("path", "file_path"), then scans "command" for the
 // first absolute path token.
@@ -679,20 +666,6 @@ func drainFuture(futures map[string]chan string, toolName string) string {
 		yn = "y"
 	}
 	return yn
-}
-
-func handlePhraseDir(ctx context.Context, sess *session.Session, agent *claude.Agent, input inputReader, out io.Writer, nonce string) claude.ParseResult {
-	dir := askDir(input, "")
-	if dir == "" {
-		return claude.ParseResult{}
-	}
-	retryAgent := agent.WithExtraDir(dir)
-	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), fmt.Sprintf("Access to %q has been granted. Please continue.", dir), out)
-	if err != nil {
-		return claude.ParseResult{}
-	}
-	return retried
 }
 
 // makePermissionHandler returns a PermissionHandler for single-shot (non-TUI)
@@ -890,8 +863,10 @@ var configCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Printf("llama_url:      %s\n", cfg.LlamaURL)
-		fmt.Printf("llama_model:    %s\n", cfg.LlamaModel)
+		ac := cfg.ActiveLocalAgent()
+		fmt.Printf("local_agent:    %s\n", cfg.LocalAgent)
+		fmt.Printf("agent_url:      %s\n", ac.URL)
+		fmt.Printf("agent_model:    %s\n", ac.Model)
 		fmt.Printf("claude_bin:     %s\n", cfg.ClaudeBin)
 		fmt.Printf("default_route:  %s\n", cfg.DefaultRoute)
 		fmt.Printf("escalate_above_tokens: %d\n", cfg.Rules.EscalateAboveTokens)
