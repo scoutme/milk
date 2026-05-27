@@ -7,6 +7,13 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+// identityBlock is injected at the top of every system context passed to Claude
+// so it understands it is operating as a milk-hosted agent, not a standalone session.
+const identityBlock = "[Milk agent context]\n" +
+	"You are Claude Code hosted by milk (multi-agent router). " +
+	"You share session history and memory with the local LLM agent. " +
+	"Expect mid-conversation hand-offs and multi-turn resumes.\n\n"
+
 // BuildContext formats the local session history into a system prompt context
 // block for Claude. Claude receives this via --append-system-prompt and
 // orients itself without a separate reformulation step.
@@ -14,10 +21,11 @@ import (
 // percepts contains content strings of remembered facts to inject for Claude; may be nil.
 func BuildContext(sess *session.Session, nonce string, percepts []string) string {
 	if len(sess.History) == 0 {
-		return MemoryInstruction(nonce) + formatPercepts(percepts)
+		return identityBlock + MemoryInstruction(nonce) + formatPercepts(percepts)
 	}
 
 	var b strings.Builder
+	b.WriteString(identityBlock)
 	b.WriteString("[Context from local agent session]\n")
 
 	for _, turn := range sess.History {
@@ -74,15 +82,9 @@ func MemoryInstruction(nonce string) string {
 	openTag := "<milk:percept:" + nonce + ">"
 	closeTag := "</milk:percept:" + nonce + ">"
 	return "[Milk shared memory]\n" +
-		"When you identify an atomic fact that is worth persisting across sessions — a\n" +
-		"decision made, a constraint learned, a preference stated, a key finding — emit\n" +
-		"it as a self-closing tag anywhere in your response:\n\n" +
-		"  " + openTag + "concise, standalone fact in one sentence" + closeTag + "\n\n" +
-		"Rules:\n" +
-		"- One fact per tag; split compound facts into separate tags.\n" +
-		"- Only emit facts that are non-obvious, session-independent, and reusable.\n" +
-		"- Do NOT emit facts about transient state, current file content, or the current task.\n" +
-		"- These tags are intercepted by milk and never shown to the user.\n" +
-		"- To target a specific agent, prefix the fact: @local: <fact> (local model only) or @claude: <fact> (Claude only).\n" +
-		"  Example: " + openTag + "@local: escalate to Claude for architecture questions" + closeTag + "\n"
+		"Emit reusable, non-obvious, session-independent facts as:\n" +
+		"  " + openTag + "one fact" + closeTag + "\n" +
+		"One fact per tag. Skip transient state or current-task details. " +
+		"Tags are intercepted by milk, never shown. " +
+		"Prefix @local: or @claude: to target a specific agent.\n"
 }
