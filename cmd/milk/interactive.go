@@ -30,9 +30,10 @@ const cmdForget = "/forget"
 const cmdSkipPerms = "/skip-permissions"
 const cmdProvider = "/provider"
 const cmdColorize = "/colorize"
+const cmdThink = "/think"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider, cmdColorize,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider, cmdColorize, cmdThink,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -77,6 +78,9 @@ const interactiveHelp = `Slash commands:
   /colorize fenced       highlight fenced code blocks only (default)
   /colorize balanced     fenced code + inline markdown (bold, headings, bullets)
   /colorize full         full glamour markdown rendering (experimental)
+  /think                 show current reasoning visibility (on/off)
+  /think on              show thinking/reasoning tokens in the transcript
+  /think off             hide thinking/reasoning tokens (show "[thinking…]" placeholder)
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -209,6 +213,10 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		return false, prompt, output
 	case cmdSkipPerms:
 		output = execSkipPerms(prompt, st)
+	case cmdThink:
+		// execThink is handled in repl.go where it can toggle model.showThinking.
+		// This case is a no-op here; the TUI intercepts cmdThink before it reaches
+		// handleSlashCommand. Guard to prevent "unknown command" output.
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}

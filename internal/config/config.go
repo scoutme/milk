@@ -128,6 +128,11 @@ type Config struct {
 	// from overriding the correct ones. Requires awsAuthRefresh to be set in
 	// ~/.claude/settings.json (it is set automatically by claude-code-with-bedrock).
 	AWSAuthRefresh bool `json:"aws_auth_refresh,omitempty"`
+
+	// ShowReasoning controls whether thinking/reasoning tokens are visible in the
+	// transcript by default. Can be toggled live with /think on|off.
+	// true (default) = show reasoning; false = show "[thinking…]" placeholder.
+	ShowReasoning *bool `json:"show_reasoning,omitempty"`
 }
 
 func defaults() Config {
@@ -164,6 +169,15 @@ func defaults() Config {
 			EscalateVerbs: []string{"architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"},
 		},
 	}
+}
+
+// ShowReasoningDefault returns the configured default for reasoning visibility
+// (true when unset, i.e. show reasoning by default).
+func (c Config) ShowReasoningDefault() bool {
+	if c.ShowReasoning == nil {
+		return true
+	}
+	return *c.ShowReasoning
 }
 
 // ActiveLocalAgent returns the resolved LocalAgentConfig to use.

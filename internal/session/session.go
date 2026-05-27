@@ -36,6 +36,7 @@ type Turn struct {
 	Role      Role       `json:"role"`
 	Agent     Agent      `json:"agent,omitempty"`
 	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	Timestamp time.Time  `json:"timestamp"`
 }

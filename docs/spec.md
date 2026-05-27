@@ -190,6 +190,7 @@ User: <final prompt that triggered escalation>
       "role": "user | assistant | tool_result",
       "agent": "local | claude",
       "content": "...",
+      "thinking": "...",
       "tool_calls": [],
       "timestamp": "2026-05-05T10:01:00Z"
     }
@@ -232,7 +233,7 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/colorize`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/colorize`, `/think`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
@@ -265,6 +266,16 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
 | `/colorize full` | Full glamour Markdown render — experimental |
 
 The mode is persisted to `~/.milk/config.json` immediately and takes effect on the next render (no restart needed). Default is `balanced`.
+
+**/think** controls reasoning/thinking token visibility:
+
+| Subcommand | Action |
+|---|---|
+| `/think` | Show current reasoning visibility (on/off) |
+| `/think on` | Show thinking/reasoning tokens inline in the transcript |
+| `/think off` | Hide thinking tokens; a `[thinking…]` placeholder is shown instead |
+
+The toggle is retroactive — both transcript variants (full and no-think) are maintained in parallel during streaming, so switching is instantaneous with no rebuild. The default is configurable via `show_reasoning` in `~/.milk/config.json` (default: `true`). Applies to both local model `<think>` blocks and Claude extended thinking tokens.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -311,6 +322,7 @@ The mode is persisted to `~/.milk/config.json` immediately and takes effect on t
   "claude_bin": "claude",
   "default_route": "local",
   "colorization": "balanced",
+  "show_reasoning": true,
   "aws_auth_refresh": false,
   "rules": {
     "escalate_above_tokens": 2000,
@@ -362,6 +374,10 @@ Controls transcript syntax and Markdown rendering. Applied per turn to avoid ANS
 | `"fenced"` | Syntax-highlight fenced code blocks only (chroma); default |
 | `"balanced"` | Fenced blocks + inline Markdown: bold, inline code, headings, bullets, blockquotes, HR |
 | `"full"` | Full Markdown render via glamour (reflows prose, all Markdown elements) |
+
+### `show_reasoning` field
+
+Controls whether thinking/reasoning tokens are shown in the transcript by default. Can be overridden live with `/think on|off`. When `false`, thinking blocks are replaced with a `[thinking…]` placeholder. Omit or set to `true` to show reasoning (default).
 
 **Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 
