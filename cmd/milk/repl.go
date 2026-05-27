@@ -280,6 +280,19 @@ type model struct {
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasLocalAgentConfig bool
 
+	colorizeMode ColorizeMode
+
+	// colorize cache: avoid re-running chroma/glamour on every streamed token.
+	// The cache is invalidated when the transcript grows by ≥ colorizeLineThresh
+	// new lines, or when the viewport offset/width changes, or when the caller
+	// explicitly sets colorizeForce = true (e.g. after agentDoneMsg, scroll, resize).
+	colorizeCached    string // last colorized output
+	colorizeTransLen  int    // transcript byte length when cache was built
+	colorizeVPOffset  int    // vp.YOffset when cache was built
+	colorizeVPWidth   int    // vpWidth when cache was built
+	colorizeForce     bool   // if true, bypass cache on next render
+	colorizeLinesSeen int    // new lines since last full re-colorize
+
 	// injected dependencies
 	ctx    context.Context
 	st     *interactiveState
@@ -338,12 +351,12 @@ func (m *model) refreshPrompt() {
 		if m.searchForward {
 			dir = "f"
 		}
-		label = yellow("("+dir+"-search)") + " > "
+		label = yellow("("+dir+"-search)") + " ❯ "
 	} else {
 		label = promptLabel(m.st)
 	}
 	plain := stripANSI(label)
-	m.promptWidth = len(plain)
+	m.promptWidth = rw.StringWidth(plain)
 
 	m.ta.SetPromptFunc(m.promptWidth, func(lineIdx int) string {
 		if lineIdx == 0 {
@@ -446,6 +459,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 	}
 	m.appendTranscript("\n")
+	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
 	m.syncLayout()
 	return m, nil
@@ -897,6 +911,11 @@ func (m *model) appendTranscript(text string) {
 	}
 }
 
+// colorizeLineThresh is the number of new lines that must accumulate before
+// a mid-stream re-colorization is triggered. Keeps chroma/glamour from running
+// on every individual streamed token.
+const colorizeLineThresh = 8
+
 // wrappedTranscript returns the transcript (or welcome screen) word-wrapped to
 // the viewport content width. When a selection range is active, the selected
 // text region is highlighted with an inverted background, respecting column
@@ -910,8 +929,48 @@ func (m *model) wrappedTranscript() string {
 	if vw <= 0 {
 		return raw
 	}
-	wrapped := ansi.Wrap(raw, vw, "")
-	return m.applySelectionHighlight(wrapped)
+	if m.colorizeMode == ColorizeOff {
+		return m.applySelectionHighlight(ansi.Wrap(raw, vw, ""))
+	}
+
+	txLen := m.transcript.Len()
+	vpOffset := m.vp.YOffset
+
+	// Check cache validity: skip heavy colorization if viewport and content
+	// position haven't changed significantly since the last full render.
+	vpChanged := vw != m.colorizeVPWidth || vpOffset != m.colorizeVPOffset
+	txGrew := txLen - m.colorizeTransLen
+
+	// Count new lines since last re-colorize to decide if threshold is met.
+	newLines := 0
+	if txGrew > 0 {
+		newLines = strings.Count(raw[m.colorizeTransLen:], "\n")
+		m.colorizeLinesSeen += newLines
+	}
+
+	if !m.colorizeForce && !vpChanged && m.colorizeCached != "" && m.colorizeLinesSeen < colorizeLineThresh {
+		// Return cached result — append plain-wrapped new text as a fast suffix
+		// so the user sees new content immediately even without re-colorizing.
+		if txGrew > 0 {
+			newText := ansi.Wrap(raw[m.colorizeTransLen:], vw, "")
+			return m.applySelectionHighlight(m.colorizeCached + newText)
+		}
+		return m.applySelectionHighlight(m.colorizeCached)
+	}
+
+	// Full re-colorize.
+	m.colorizeForce = false
+	m.colorizeLinesSeen = 0
+	plainWrapped := ansi.Wrap(raw, vw, "")
+	colorized := colorizeTranscriptWrapped(plainWrapped, m.colorizeMode)
+
+	// Update cache.
+	m.colorizeCached = colorized
+	m.colorizeTransLen = txLen
+	m.colorizeVPOffset = vpOffset
+	m.colorizeVPWidth = vw
+
+	return m.applySelectionHighlight(colorized)
 }
 
 // applySelectionHighlight applies the selection background highlight to the
@@ -991,6 +1050,7 @@ func (m *model) syncLayout() {
 	atBottom := m.vp.AtBottom()
 	if m.vp.Width != vw {
 		m.vp.Width = vw
+		m.colorizeForce = true // width changed — rewrap and re-colorize
 	}
 	if m.vp.Height != vpH {
 		m.vp.Height = vpH
@@ -1558,18 +1618,39 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdProvider {
 		return m.handleProviderCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdColorize {
+		return m.handleColorizeCmd(strings.TrimSpace(rest)), nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
 		return m, tea.Quit
 	}
 	if output != "" {
+		m.colorizeForce = true // slash command output may be large — force full re-colorize
 		m.appendTranscript(output + "\n")
 	}
 	if dispatch != "" {
 		return m.dispatchAgent(dispatch)
 	}
 	return m, nil
+}
+
+// handleColorizeCmd handles `/colorize [off|fenced|balanced|full]`.
+// With no arg: shows the current mode. With a valid mode: switches live and saves config.
+func (m model) handleColorizeCmd(arg string) model {
+	output := execColorize(arg, m.st)
+	if arg != "" {
+		// Update the live model colorize mode so the change takes effect immediately
+		// (only for valid modes; invalid args are reported by execColorize).
+		validModes := map[string]bool{"off": true, "fenced": true, "balanced": true, "full": true}
+		if validModes[arg] {
+			m.colorizeMode = ParseColorizeMode(arg)
+			m.colorizeForce = true
+		}
+	}
+	m.appendTranscript(output + "\n")
+	return m
 }
 
 // handleForgetCmd starts a /forget flow: searches for candidates and
@@ -2657,14 +2738,14 @@ func (m *model) colorizeInput(view string) string {
 		return view
 	}
 
-	// Strip ANSI from line 0 to find the visual position of "> ".
+	// Strip ANSI from line 0 to find the visual position of "❯ ".
 	// line0Plain is used for measurement only; line 0 itself is re-written below.
 	line0Plain := ansi.Strip(lines[0])
-	promptEnd := strings.Index(line0Plain, "> ")
+	promptEnd := strings.Index(line0Plain, "❯ ")
 	if promptEnd < 0 {
 		return view
 	}
-	// indentVisual is the number of visible columns up to and including "> ".
+	// indentVisual is the number of visible columns up to and including "❯ ".
 	indentVisual := promptEnd + 2
 
 	// For line 0: find the byte offset in the raw (ANSI-containing) line that
@@ -2705,7 +2786,9 @@ func (m *model) colorizeInput(view string) string {
 		if i == 0 {
 			split := line0ByteSplit(line, indentVisual)
 			prefix = line[:split]
-			inputPart = plain[indentVisual:]
+			// promptEnd is a byte offset in plain; len("❯ ") is the byte width.
+			// Using indentVisual here would slice mid-rune for multi-byte prompt chars.
+			inputPart = plain[promptEnd+len("❯ "):]
 		} else {
 			// Continuation lines have indentVisual plain spaces as indent.
 			if len(plain) <= indentVisual {
@@ -3148,6 +3231,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.hasLocalAgentConfig = cfg.HasLocalAgentConfig()
+	m.colorizeMode = ParseColorizeMode(cfg.Colorization)
 	if needsAWSRefresh(cfg) {
 		m.credRefreshing = true
 		m.credLabel = "AWS"

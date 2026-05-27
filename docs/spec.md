@@ -230,9 +230,9 @@ milk [flags] <prompt>         # single-prompt mode
 
 ### Interactive mode
 
-`milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) is embedded in the textarea and reflects the current routing state, updated after each turn.
+`milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/colorize`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
@@ -251,6 +251,18 @@ milk [flags] <prompt>         # single-prompt mode
 | `/provider add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
 
 New backends are appended to `local_agents` in `~/.milk/config.json` immediately. Use `/provider switch` to activate a newly added backend in the current session.
+
+**/colorize** controls transcript syntax and Markdown rendering:
+
+| Subcommand | Action |
+|---|---|
+| `/colorize` | Show current mode |
+| `/colorize off` | Disable all colorization |
+| `/colorize fenced` | Highlight fenced code blocks only (chroma) |
+| `/colorize balanced` | Fenced blocks + inline Markdown (bold, headings, bullets, inline code) |
+| `/colorize full` | Full glamour Markdown render — experimental |
+
+The mode is persisted to `~/.milk/config.json` immediately and takes effect on the next render (no restart needed). Default is `balanced`.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -296,6 +308,7 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
   ],
   "claude_bin": "claude",
   "default_route": "local",
+  "colorization": "balanced",
   "aws_auth_refresh": false,
   "rules": {
     "escalate_above_tokens": 2000,
@@ -336,6 +349,17 @@ New backends are appended to `local_agents` in `~/.milk/config.json` immediately
 | `aws_secret` | string | AWS secret key (fallback: `AWS_SECRET_ACCESS_KEY` env) |
 | `aws_token` | string | AWS session token (fallback: `AWS_SESSION_TOKEN` env) |
 | `aws_service` | string | SigV4 service name (default `"bedrock"`) |
+
+### `colorization` field
+
+Controls transcript syntax and Markdown rendering. Applied per turn to avoid ANSI contamination across turns.
+
+| Value | Behavior |
+|---|---|
+| `"off"` | No colorization — raw text, ANSI from agent labels preserved |
+| `"fenced"` | Syntax-highlight fenced code blocks only (chroma); default |
+| `"balanced"` | Fenced blocks + inline Markdown: bold, inline code, headings, bullets, blockquotes, HR |
+| `"full"` | Full Markdown render via glamour (reflows prose, all Markdown elements) |
 
 **Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 

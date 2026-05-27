@@ -29,14 +29,15 @@ const cmdPanel = "/panel"
 const cmdForget = "/forget"
 const cmdSkipPerms = "/skip-permissions"
 const cmdProvider = "/provider"
+const cmdColorize = "/colorize"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider,
+	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider, cmdColorize,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
 func promptLabel(_ *interactiveState) string {
-	return "> "
+	return "❯ "
 }
 
 const interactiveHelp = `Slash commands:
@@ -71,6 +72,11 @@ const interactiveHelp = `Slash commands:
   /provider switch <name>  switch the active local agent to the named backend
   /provider add            add a new backend interactively (prompts for missing fields)
   /provider add name=... url=... model=... [provider=...] [api_key=...] [aws_region=...]  add inline
+  /colorize              show current colorization mode
+  /colorize off          disable colorization
+  /colorize fenced       highlight fenced code blocks only (default)
+  /colorize balanced     fenced code + inline markdown (bold, headings, bullets)
+  /colorize full         full glamour markdown rendering (experimental)
   /new             start a fresh session
   /drop            delete current session
   /list            list sessions for current directory
@@ -385,6 +391,24 @@ func execSkipPerms(sub string, st *interactiveState) string {
 		}
 		return fmt.Sprintf("%s dangerously_skip_permissions is %s  (use /skip-permissions on|off)", milkTag(), state)
 	}
+}
+
+// execColorize handles /colorize [off|fenced|balanced|full].
+// With no arg: shows the current mode. With a valid mode: switches it live and saves to config.
+func execColorize(sub string, st *interactiveState) string {
+	sub = strings.TrimSpace(sub)
+	if sub == "" {
+		return fmt.Sprintf("%s colorization mode: %s  (off | fenced | balanced | full[experimental])", milkTag(), bold(string(ParseColorizeMode(st.cfg.Colorization))))
+	}
+	valid := map[string]bool{"off": true, "fenced": true, "balanced": true, "full": true}
+	if !valid[sub] {
+		return fmt.Sprintf("%s unknown mode %q — valid values: off, fenced, balanced, full (experimental)", milkTag(), sub)
+	}
+	st.cfg.Colorization = sub
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s set colorization to %s (config save failed: %v)", milkTag(), bold(sub), err)
+	}
+	return fmt.Sprintf("%s colorization set to %s", milkTag(), bold(sub))
 }
 
 // execProvider shows the active local-agent provider configuration (no credentials).
