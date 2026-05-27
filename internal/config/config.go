@@ -111,6 +111,13 @@ type Config struct {
 	AddDirs                    []string   `json:"add_dirs,omitempty"`
 	Rules                      Rules      `json:"rules"`
 	Otel                       OtelConfig `json:"otel"`
+	// Colorization controls transcript syntax highlighting.
+	// "off"      — no colorization
+	// "fenced"   — fenced code blocks only
+	// "balanced" — fenced blocks + inline Markdown (bold, italic, headings, bullets, inline code) (default)
+	// "full"    — full Markdown render via glamour
+	Colorization string `json:"colorization,omitempty"`
+
 	// DebugClaudeCode writes every raw NDJSON line from the claude subprocess to
 	// ~/.milk/claude_debug.ndjson — useful for understanding stream protocol issues.
 	DebugClaudeCode bool `json:"debug_claude_code,omitempty"`
@@ -127,6 +134,7 @@ func defaults() Config {
 	return Config{
 		ClaudeBin:    "claude",
 		DefaultRoute: "local",
+		Colorization: "balanced",
 		Otel: OtelConfig{
 			Enabled:             true,
 			LogLevel:            "INFO",
