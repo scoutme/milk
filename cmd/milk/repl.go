@@ -212,7 +212,7 @@ type model struct {
 	showThinking bool
 	// currentTurnThinking accumulates thinking text for the current in-progress
 	// turn so it can be stored in session.Turn.Thinking when the turn completes.
-	currentTurnThinking strings.Builder
+	currentTurnThinking *strings.Builder
 
 	// spinner state
 	busy         bool
@@ -228,7 +228,7 @@ type model struct {
 	// ctrl+r / ctrl+s incremental search state
 	searching     bool
 	searchForward bool // false = reverse (ctrl+r), true = forward (ctrl+s)
-	searchQuery   strings.Builder
+	searchQuery   *strings.Builder
 	searchIdx     int // position in activeHistory() we last matched
 
 	// tab completion
@@ -325,22 +325,24 @@ type model struct {
 func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
 	return model{
-		histIdx:            -1,
-		ctx:                ctx,
-		st:                 st,
-		rtr:                rtr,
-		agents:             agents,
-		ta:                 ta,
-		transcript:        &strings.Builder{},
-		transcriptNoThink: &strings.Builder{},
-		showThinking:      st.cfg.ShowReasoningDefault(),
-		mem:                mem,
-		panelMemory:        true,
-		selAnchorLine:      -1,
-		selEndLine:         -1,
-		taSelAnchor:        -1,
-		taSelEnd:           -1,
-		lastUndoValue:      "\x00", // sentinel: never equals real textarea value, so first push always succeeds
+		histIdx:             -1,
+		ctx:                 ctx,
+		st:                  st,
+		rtr:                 rtr,
+		agents:              agents,
+		ta:                  ta,
+		transcript:          &strings.Builder{},
+		transcriptNoThink:   &strings.Builder{},
+		currentTurnThinking: &strings.Builder{},
+		searchQuery:         &strings.Builder{},
+		showThinking:        st.cfg.ShowReasoningDefault(),
+		mem:                 mem,
+		panelMemory:         true,
+		selAnchorLine:       -1,
+		selEndLine:          -1,
+		taSelAnchor:         -1,
+		taSelEnd:            -1,
+		lastUndoValue:       "\x00", // sentinel: never equals real textarea value, so first push always succeeds
 	}
 }
 
