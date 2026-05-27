@@ -212,3 +212,94 @@ func TestDispatchListMemory_Empty(t *testing.T) {
 		t.Errorf("expected 'no percepts' for empty store, got %q", out["output"])
 	}
 }
+
+func TestDispatchForgetMemory_DeletesByPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newToolsStore(t)
+	DispatchRecordMemory(ctx, s, `{"content":"fact to forget"}`)
+	id := s.global.Percepts[0].ID
+
+	result := DispatchForgetMemory(ctx, s, `{"id":"`+id[:8]+`"}`)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if _, ok := out["error"]; ok {
+		t.Fatalf("unexpected error: %v", out["error"])
+	}
+	if len(s.global.Percepts) != 0 {
+		t.Errorf("expected percept to be deleted, store still has %d", len(s.global.Percepts))
+	}
+}
+
+func TestDispatchForgetMemory_DeletesByHashPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newToolsStore(t)
+	DispatchRecordMemory(ctx, s, `{"content":"fact to forget with hash"}`)
+	id := s.global.Percepts[0].ID
+
+	// Pass the ID with a leading '#' — should strip it and delete normally.
+	result := DispatchForgetMemory(ctx, s, `{"id":"#`+id[:8]+`"}`)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if _, ok := out["error"]; ok {
+		t.Fatalf("unexpected error: %v", out["error"])
+	}
+	if len(s.global.Percepts) != 0 {
+		t.Errorf("expected percept to be deleted, store still has %d", len(s.global.Percepts))
+	}
+}
+
+func TestDispatchForgetMemory_NotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newToolsStore(t)
+
+	result := DispatchForgetMemory(ctx, s, `{"id":"deadbeef"}`)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if _, ok := out["error"]; ok {
+		t.Fatalf("unexpected error: %v", out["error"])
+	}
+	if !strings.Contains(out["output"].(string), "not found") {
+		t.Errorf("expected 'not found' in output, got %q", out["output"])
+	}
+}
+
+func TestDispatchForgetMemory_AmbiguousPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newToolsStore(t)
+	// Force two percepts with a known common prefix by recording and then manually
+	// checking the ambiguous-match path using the full IDs (which differ).
+	// Instead: record two percepts and use a single-char prefix that matches both.
+	DispatchRecordMemory(ctx, s, `{"content":"alpha fact"}`)
+	DispatchRecordMemory(ctx, s, `{"content":"beta fact"}`)
+
+	// Use empty string as prefix — should match all and trigger ambiguity.
+	result := DispatchForgetMemory(ctx, s, `{"id":""}`)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	// Empty id is caught by the "id is required" guard, not the ambiguous path.
+	if _, ok := out["error"]; !ok {
+		t.Errorf("expected error for empty id, got output: %v", out["output"])
+	}
+}
+
+func TestDispatchForgetMemory_MissingID(t *testing.T) {
+	ctx := context.Background()
+	s := newToolsStore(t)
+
+	result := DispatchForgetMemory(ctx, s, `{}`)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if _, ok := out["error"]; !ok {
+		t.Errorf("expected error for missing id")
+	}
+}

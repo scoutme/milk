@@ -236,6 +236,8 @@ milk [flags] <prompt>         # single-prompt mode
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
+The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–64 chars). The `#` prefix is optional — bare hex like `a1b2c3d4` also works. The local agent can also delete percepts directly via the `forget_memory` tool (same short-ID resolution, same `#` handling).
+
 **Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
 
 **/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes Claude auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.

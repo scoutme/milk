@@ -263,6 +263,11 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 			return memory.DispatchListMemory(ctx, mem, argsJSON), false
 		}
 		return toolResult{Error: errMemUnavailable}.String(), false
+	case "forget_memory":
+		if mem != nil {
+			return memory.DispatchForgetMemory(ctx, mem, argsJSON), false
+		}
+		return toolResult{Error: errMemUnavailable}.String(), false
 	case "get_metrics":
 		if otelDir != "" {
 			return obs.DispatchGetMetrics(otelDir), false
