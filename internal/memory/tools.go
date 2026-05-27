@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Schemas returns OpenAI function schemas for record_memory, get_memory, and list_memory.
+// Schemas returns OpenAI function schemas for record_memory, get_memory, list_memory, and forget_memory.
 func Schemas() []map[string]any {
 	return []map[string]any{
 		{
@@ -98,6 +98,62 @@ func Schemas() []map[string]any {
 				},
 			},
 		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "forget_memory",
+				"description": "Delete a stored Percept by its ID or 8-char prefix. Use when the user explicitly asks to forget or remove a specific memory.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{
+							"type":        "string",
+							"description": "Full Percept ID or the 8-character prefix shown by list_memory.",
+						},
+					},
+					"required": []string{"id"},
+				},
+			},
+		},
+	}
+}
+
+// DispatchForgetMemory handles a forget_memory tool call.
+func DispatchForgetMemory(_ context.Context, store *Store, argsJSON string) string {
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return errResult(invalidArgs + err.Error())
+	}
+	if strings.TrimSpace(args.ID) == "" {
+		return errResult("id is required")
+	}
+
+	// Strip optional leading '#' so both "#abc123" and "abc123" work.
+	id := strings.TrimPrefix(args.ID, "#")
+
+	// Support prefix matching via FindByIDPrefix.
+	candidates := store.FindByIDPrefix(id)
+	switch len(candidates) {
+	case 0:
+		return okResult(fmt.Sprintf("percept %s not found", id))
+	case 1:
+		ok, err := store.Delete(candidates[0].ID)
+		if err != nil {
+			return errResult("failed to delete: " + err.Error())
+		}
+		if !ok {
+			return okResult(fmt.Sprintf("percept %s not found", id))
+		}
+		return okResult(fmt.Sprintf("percept %s deleted", candidates[0].ID[:8]))
+	default:
+		var b strings.Builder
+		fmt.Fprintf(&b, "ambiguous prefix %q matches %d percepts — use a longer prefix:\n", id, len(candidates))
+		for _, p := range candidates {
+			fmt.Fprintf(&b, "  %s  %s\n", p.ID[:8], p.Content)
+		}
+		return errResult(b.String())
 	}
 }
 

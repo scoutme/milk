@@ -1673,11 +1673,20 @@ func (m model) handleForgetCmd(pat string) model {
 		return m
 	}
 
+	// Strip optional '#' prefix so both "#abc123" and "abc123" work as ID lookups.
+	idPat := strings.TrimPrefix(pat, "#")
+
 	var candidates []memory.Percept
 	if strings.HasPrefix(pat, "#") {
-		candidates = m.mem.FindByIDPrefix(pat[1:])
+		candidates = m.mem.FindByIDPrefix(idPat)
 	} else {
-		candidates = m.mem.List(memory.ListOpts{Pattern: pat})
+		// Try ID prefix first (hex-looking input without '#'), fall back to text search.
+		if isHexPrefix(idPat) {
+			candidates = m.mem.FindByIDPrefix(idPat)
+		}
+		if len(candidates) == 0 {
+			candidates = m.mem.List(memory.ListOpts{Pattern: pat})
+		}
 	}
 
 	if len(candidates) == 0 {
@@ -2007,6 +2016,19 @@ func (m model) commitAddProvider(ac config.LocalAgentConfig) model {
 	return m
 }
 
+// isHexPrefix returns true when s looks like a percept ID prefix (4-64 hex chars).
+func isHexPrefix(s string) bool {
+	if len(s) < 4 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // forgetCandidateList formats the candidate list for display.
 func forgetCandidateList(candidates []memory.Percept) string {
 	var b strings.Builder
@@ -2056,8 +2078,8 @@ func (m model) resolveForget(answer string) model {
 		return m
 	case len(candidates) == 1 && (strings.ToLower(answer) == "y" || strings.ToLower(answer) == "yes"):
 		target = &candidates[0]
-	case strings.HasPrefix(answer, "#"):
-		prefix := answer[1:]
+	case strings.HasPrefix(answer, "#") || isHexPrefix(answer):
+		prefix := strings.TrimPrefix(answer, "#")
 		for i := range candidates {
 			if strings.HasPrefix(candidates[i].ID, prefix) {
 				target = &candidates[i]

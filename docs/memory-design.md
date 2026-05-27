@@ -149,7 +149,7 @@ Promotion to global is the milk equivalent of the RFC's REM phase — long-term 
 
 ### Local agent tools
 
-Four tools added to `internal/agent/local/tools.go` via `memory.Schemas()`:
+Five tools added to `internal/agent/local/tools.go` via `memory.Schemas()`:
 
 **`record_memory`** — agent explicitly records a Percept:
 ```json
@@ -181,6 +181,14 @@ The optional `producer` field accepts `"user"` | `"local"` | `"claude"` | `"syst
 }
 ```
 
+**`forget_memory`** — agent removes a Percept by ID:
+```json
+{
+  "id": "a1b2c3d4"
+}
+```
+The `id` field accepts a short prefix (4–64 hex chars) with or without a leading `#`. Returns an error if the prefix matches multiple Percepts (ambiguous) or none.
+
 **`export_session`** — agent exports the current session transcript (metadata + full history):
 ```json
 {
@@ -192,7 +200,7 @@ Format `text` (default) produces a human-readable transcript; `json` produces ra
 
 System prompt addition in `local.go`:
 ```
-- Use get_memory before answering questions that reference past context or stated preferences. Use record_memory when the user states a preference, makes a decision, or shares a fact worth remembering across sessions. Use list_memory when the user asks what is stored in memory. Use export_session when the user asks to save or view the full session.
+- Use get_memory before answering questions that reference past context or stated preferences. Use record_memory when the user states a preference, makes a decision, or shares a fact worth remembering across sessions. Use list_memory when the user asks what is stored in memory. Use forget_memory when the user asks to forget or remove a specific percept (accepts short ID with or without leading #). Use export_session when the user asks to save or view the full session.
 ```
 
 ### Auto-recording
