@@ -70,6 +70,10 @@ type dispatchAgents struct {
 // chunkMsg carries a chunk of streamed agent output.
 type chunkMsg struct{ text string }
 
+// thinkChunkMsg carries a chunk of streamed thinking/reasoning output, kept
+// separate from regular content so it can be shown or hidden independently.
+type thinkChunkMsg struct{ text string }
+
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
@@ -193,8 +197,22 @@ type model struct {
 	height int
 	ready  bool
 
-	// transcript accumulator (pointer — strings.Builder must not be copied by value)
+	// transcript accumulator (pointer — strings.Builder must not be copied by value).
+	// Always contains the full content including thinking (dim-wrapped).
 	transcript *strings.Builder
+	// transcriptNoThink mirrors transcript but replaces thinking blocks with a
+	// "[thinking…]" placeholder. Both are maintained in parallel so toggling is
+	// instantaneous — no rebuild required.
+	transcriptNoThink *strings.Builder
+	// thinkingActiveInTurn is true while thinking tokens are arriving for the
+	// current turn. The placeholder is flushed to transcriptNoThink when the
+	// first regular content chunk or turn-end arrives.
+	thinkingActiveInTurn bool
+	// showThinking controls whether thinking content is visible in the viewport.
+	showThinking bool
+	// currentTurnThinking accumulates thinking text for the current in-progress
+	// turn so it can be stored in session.Turn.Thinking when the turn completes.
+	currentTurnThinking strings.Builder
 
 	// spinner state
 	busy         bool
@@ -307,20 +325,22 @@ type model struct {
 func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
 	return model{
-		histIdx:       -1,
-		ctx:           ctx,
-		st:            st,
-		rtr:           rtr,
-		agents:        agents,
-		ta:            ta,
-		transcript:    &strings.Builder{},
-		mem:           mem,
-		panelMemory:   true,
-		selAnchorLine: -1,
-		selEndLine:    -1,
-		taSelAnchor:   -1,
-		taSelEnd:      -1,
-		lastUndoValue: "\x00", // sentinel: never equals real textarea value, so first push always succeeds
+		histIdx:            -1,
+		ctx:                ctx,
+		st:                 st,
+		rtr:                rtr,
+		agents:             agents,
+		ta:                 ta,
+		transcript:        &strings.Builder{},
+		transcriptNoThink: &strings.Builder{},
+		showThinking:      st.cfg.ShowReasoningDefault(),
+		mem:                mem,
+		panelMemory:        true,
+		selAnchorLine:      -1,
+		selEndLine:         -1,
+		taSelAnchor:        -1,
+		taSelEnd:           -1,
+		lastUndoValue:      "\x00", // sentinel: never equals real textarea value, so first push always succeeds
 	}
 }
 
@@ -456,6 +476,19 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.activeToolUse = ""
 	m.cancelTurn = nil
 	m.busyHint = ""
+
+	// Attach accumulated thinking to the last assistant turn in the session.
+	if thinking := m.currentTurnThinking.String(); thinking != "" {
+		hist := m.st.sess.History
+		for i := len(hist) - 1; i >= 0; i-- {
+			if hist[i].Role == session.RoleAssistant {
+				hist[i].Thinking = thinking
+				break
+			}
+		}
+		m.currentTurnThinking.Reset()
+	}
+
 	if m.interrupted {
 		m.interrupted = false
 		m.appendTranscript(dim("[interrupted]") + "\n")
@@ -902,10 +935,32 @@ func (m *model) welcomeScreen() string {
 	return sb.String()
 }
 
-// appendTranscript adds text to the transcript.
+// appendTranscript adds text to both transcript variants and refreshes the viewport.
 // Sticky-bottom: only auto-scrolls when already at the bottom.
 func (m *model) appendTranscript(text string) {
 	m.transcript.WriteString(text)
+	m.transcriptNoThink.WriteString(text)
+	// If regular content arrives after thinking, mark that the think block ended
+	// (the placeholder was already written when the block started).
+	m.thinkingActiveInTurn = false
+	if m.ready {
+		atBottom := m.vp.AtBottom()
+		m.setViewportContent()
+		if atBottom {
+			m.vp.GotoBottom()
+		}
+	}
+}
+
+// appendThinking adds thinking/reasoning text to the full transcript (dim-styled)
+// and a single "[thinking…]" placeholder to transcriptNoThink (only on the first
+// chunk of a new thinking block, to avoid repeated placeholders per token).
+func (m *model) appendThinking(text string) {
+	m.transcript.WriteString(dim(text))
+	if !m.thinkingActiveInTurn {
+		m.transcriptNoThink.WriteString(dim("[thinking…]"))
+		m.thinkingActiveInTurn = true
+	}
 	if m.ready {
 		atBottom := m.vp.AtBottom()
 		m.setViewportContent()
@@ -920,16 +975,25 @@ func (m *model) appendTranscript(text string) {
 // on every individual streamed token.
 const colorizeLineThresh = 8
 
+// activeTranscript returns the transcript variant to render based on showThinking.
+func (m *model) activeTranscript() *strings.Builder {
+	if m.showThinking {
+		return m.transcript
+	}
+	return m.transcriptNoThink
+}
+
 // wrappedTranscript returns the transcript (or welcome screen) word-wrapped to
 // the viewport content width. When a selection range is active, the selected
 // text region is highlighted with an inverted background, respecting column
 // boundaries on the first and last lines.
 func (m *model) wrappedTranscript() string {
-	if m.transcript.Len() == 0 {
+	tx := m.activeTranscript()
+	if tx.Len() == 0 {
 		return m.applySelectionHighlight(m.welcomeScreen())
 	}
 	vw := m.vpWidth()
-	raw := m.transcript.String()
+	raw := tx.String()
 	if vw <= 0 {
 		return raw
 	}
@@ -937,7 +1001,7 @@ func (m *model) wrappedTranscript() string {
 		return m.applySelectionHighlight(ansi.Wrap(raw, vw, ""))
 	}
 
-	txLen := m.transcript.Len()
+	txLen := tx.Len()
 	vpOffset := m.vp.YOffset
 
 	// Check cache validity: skip heavy colorization if viewport and content
@@ -1259,6 +1323,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chunkMsg:
 		m.appendTranscript(msg.text)
+		return m, nil
+
+	case thinkChunkMsg:
+		m.currentTurnThinking.WriteString(msg.text)
+		m.appendThinking(msg.text)
 		return m, nil
 
 	case agentDoneMsg:
@@ -1629,6 +1698,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdColorize {
 		return m.handleColorizeCmd(strings.TrimSpace(rest)), nil
 	}
+	if cmd == cmdThink {
+		return m.handleThinkCmd(strings.TrimSpace(rest)), nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -1658,6 +1730,40 @@ func (m model) handleColorizeCmd(arg string) model {
 		}
 	}
 	m.appendTranscript(output + "\n")
+	return m
+}
+
+// handleThinkCmd handles `/think [on|off]`.
+// With no arg: shows the current reasoning visibility. With on/off: toggles it.
+// The toggle is retroactive — switching between transcript variants is instantaneous
+// because both are maintained in parallel during streaming.
+func (m model) handleThinkCmd(arg string) model {
+	switch arg {
+	case "on":
+		if m.showThinking {
+			m.appendTranscript(milkTag() + " reasoning visibility: already on\n")
+			return m
+		}
+		m.showThinking = true
+		m.colorizeForce = true // switch transcript variant — invalidate cache
+		m.colorizeTransLen = 0
+		m.appendTranscript(milkTag() + " reasoning visibility: on\n")
+	case "off":
+		if !m.showThinking {
+			m.appendTranscript(milkTag() + " reasoning visibility: already off\n")
+			return m
+		}
+		m.showThinking = false
+		m.colorizeForce = true // switch transcript variant — invalidate cache
+		m.colorizeTransLen = 0
+		m.appendTranscript(milkTag() + " reasoning visibility: off — thinking blocks hidden ([thinking…])\n")
+	default:
+		state := "off"
+		if m.showThinking {
+			state = "on"
+		}
+		m.appendTranscript(fmt.Sprintf("%s reasoning visibility: %s  (use /think on|off)\n", milkTag(), bold(state)))
+	}
 	return m
 }
 
@@ -2214,6 +2320,8 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
+	m.currentTurnThinking.Reset()
+	m.thinkingActiveInTurn = false
 
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.cancelTurn = cancel
@@ -2242,7 +2350,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 			}
 			send(chunkMsg{text: hint})
 		}).
-		WithOnThinking(func(text string) { send(chunkMsg{text: dim(text)}) }).
+		WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs))
 	return m, tea.Batch(
 		spinnerTick(),
