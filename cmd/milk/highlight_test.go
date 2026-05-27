@@ -183,6 +183,50 @@ func TestColorizeMarkdown_PreservesFencedBlocks(t *testing.T) {
 	}
 }
 
+func TestApplyInlineMarkdown_DimPreservedThroughInlineCode(t *testing.T) {
+	// A dim-wrapped thinking block whose lines contain inline code spans.
+	// The dim should survive the ansiReset emitted by the inline code replacement.
+	dimText := ansiDim + "thinking: use `fmt.Println` here\nand this line too" + ansiReset
+	got := applyInlineMarkdown(dimText)
+
+	// Both lines must retain dim styling.
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines, got: %q", got)
+	}
+	// First line starts with ansiDim (injected at start or from carry-over).
+	if !strings.HasPrefix(lines[0], ansiDim) {
+		t.Errorf("line 0 should start with ansiDim, got: %q", lines[0])
+	}
+	// Second line must also start with ansiDim (carry-over through inline code reset).
+	if !strings.HasPrefix(lines[1], ansiDim) {
+		t.Errorf("line 1 should start with ansiDim (carry-over), got: %q", lines[1])
+	}
+	// Inline code content must be preserved.
+	if !strings.Contains(got, "fmt.Println") {
+		t.Errorf("inline code content lost: %q", got)
+	}
+}
+
+func TestApplyInlineMarkdown_DimPreservedNoInlineSpans(t *testing.T) {
+	// Multi-line dim block with no inline spans — carry-over must still work.
+	dimText := ansiDim + "line one\nline two\nline three" + ansiReset
+	got := applyInlineMarkdown(dimText)
+	lines := strings.Split(got, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected 3 lines, got: %q", got)
+	}
+	if !strings.HasPrefix(lines[0], ansiDim) {
+		t.Errorf("line 0: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], ansiDim) {
+		t.Errorf("line 1 should carry dim: %q", lines[1])
+	}
+	if !strings.HasPrefix(lines[2], ansiDim) {
+		t.Errorf("line 2 should carry dim: %q", lines[2])
+	}
+}
+
 func TestColorizeMarkdown_ApostrophesSafe(t *testing.T) {
 	// Apostrophes must not trigger false positives in any markdown pattern
 	inputs := []string{

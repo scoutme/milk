@@ -293,6 +293,10 @@ type model struct {
 	colorizeForce     bool   // if true, bypass cache on next render
 	colorizeLinesSeen int    // new lines since last full re-colorize
 
+	// credRefreshInit, if non-nil, is returned by Init() to start background
+	// credential refresh only after the bubbletea event loop is running.
+	credRefreshInit tea.Cmd
+
 	// injected dependencies
 	ctx    context.Context
 	st     *interactiveState
@@ -1217,6 +1221,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.panelMemory {
 		cmds = append(cmds, memoryPollTick())
+	}
+	if m.credRefreshInit != nil {
+		cmds = append(cmds, m.credRefreshInit)
 	}
 	return tea.Batch(cmds...)
 }
@@ -3247,27 +3254,29 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		m.sessionHistory = readHistoryFile(sp)
 	}
 
+	// Credential refresh is deferred to Init() via credRefreshInit so that
+	// the tea.Cmd runs only after the bubbletea event loop is fully started.
+	// Goroutines that call p.Send() before p.Run() race with TUI init and
+	// can corrupt the layout (duplicate prompts / status bars).
+	if needsAWSRefresh(cfg) {
+		awsCmd := claudesettings.AWSAuthRefreshCommand()
+		m.credRefreshInit = func() tea.Msg {
+			refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			creds, err := claude.ResolveAWSCredsContext(refreshCtx, awsCmd)
+			return credRefreshReadyMsg{label: "AWS", creds: creds, err: err}
+		}
+	} else if needsTokenCmdRefresh(cfg) {
+		m.credRefreshInit = func() tea.Msg {
+			err := localAgent.WarmToken()
+			return credRefreshReadyMsg{label: "token", err: err}
+		}
+	}
+
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 	)
 	st.program = p
-
-	// Refresh credentials in the background so the TUI starts immediately.
-	// A 30-second timeout prevents indefinite blocking on network errors.
-	if needsAWSRefresh(cfg) {
-		go func() {
-			cmd := claudesettings.AWSAuthRefreshCommand()
-			refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			creds, err := claude.ResolveAWSCredsContext(refreshCtx, cmd)
-			p.Send(credRefreshReadyMsg{label: "AWS", creds: creds, err: err})
-		}()
-	} else if needsTokenCmdRefresh(cfg) {
-		go func() {
-			err := localAgent.WarmToken()
-			p.Send(credRefreshReadyMsg{label: "token", err: err})
-		}()
-	}
 
 	// Mode 1002+1006: button-motion + SGR extension.
 	// Reports drag coordinates while a button is held, enabling live selection

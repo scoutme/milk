@@ -371,18 +371,61 @@ func colorizeMarkdown(text string) string {
 // and inline code on a plain-text (no fenced blocks) segment.
 // It carries unclosed ANSI state across newlines so that dim-wrapped blocks
 // (e.g. thinking output written as dim(text)) are preserved on every line.
+// When an outer ANSI context is active (e.g. dim from a thinking block), any
+// ansiReset produced by an inline span (e.g. inline code) is followed by a
+// re-injection of the outer context so the dim is not lost within the line or
+// across subsequent lines.
 func applyInlineMarkdown(text string) string {
 	lines := strings.Split(text, "\n")
 	activeANSI := ""
 	for i, line := range lines {
+		originalLine := line // keep a copy before we prepend activeANSI
 		if activeANSI != "" {
 			line = activeANSI + line
 		}
 		styled := styleLine(line)
+		// If we're inside an outer ANSI context, patch every ansiReset produced
+		// by inline spans so the outer dim is restored after each one.
+		if activeANSI != "" {
+			styled = injectANSIAfterResets(styled, activeANSI)
+		}
 		lines[i] = styled
-		activeANSI = trailingOpenANSI(styled)
+		// Carry-over: compute from the ORIGINAL (pre-prepend) line so that
+		// inline span replacements (which emit their own ansiReset) do not
+		// affect the carry-over decision. Only a true ansiReset from the
+		// source text closes the outer context.
+		activeANSI = trailingOpenANSI(originalLine)
+		// If the original line had no ANSI at all, check whether styleLine
+		// opened a new context (e.g. a dim heading).
+		if activeANSI == "" {
+			activeANSI = trailingOpenANSI(styled)
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// injectANSIAfterResets re-injects context after every ansiReset in s.
+// This preserves the outer ANSI context (e.g. dim) when inline span
+// replacements emit their own ansiReset within a dim-wrapped block.
+func injectANSIAfterResets(s, context string) string {
+	if !strings.Contains(s, ansiReset) {
+		return s
+	}
+	resetLen := len(ansiReset)
+	var sb strings.Builder
+	offset := 0
+	for {
+		idx := strings.Index(s[offset:], ansiReset)
+		if idx == -1 {
+			sb.WriteString(s[offset:])
+			break
+		}
+		abs := offset + idx
+		sb.WriteString(s[offset : abs+resetLen])
+		sb.WriteString(context)
+		offset = abs + resetLen
+	}
+	return sb.String()
 }
 
 // trailingOpenANSI returns the last un-reset ANSI escape code in s, or ""
