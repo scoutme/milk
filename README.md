@@ -88,6 +88,8 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/provider list` | List all configured local-agent backends |
 | `/provider switch <name>` | Switch active local agent to a named backend |
 | `/provider add` | Add a new backend interactively (prompts for missing fields) |
+| `/colorize` | Show current transcript colorization mode |
+| `/colorize off\|fenced\|balanced\|full` | Switch colorization mode live (`balanced` = default; `full` = experimental glamour) |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
