@@ -12,12 +12,34 @@ Start cheap. Go deep when you need it. Switch mid-workflow — the full conversa
 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 ```
 
-Requires Go 1.21+ and Git. Installs the `milk` binary to `~/.local/bin/milk`.
+Downloads a pre-built binary for your OS/arch and installs it to `~/.local/bin/milk`. No Go required.
 
 To install a specific version:
 
 ```sh
-MILK_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+MILK_VERSION=v0.2.0 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+```
+
+### Windows (native)
+
+```powershell
+irm https://raw.githubusercontent.com/scoutme/milk/main/install.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\milk\bin\milk.exe` and adds it to your user PATH.
+
+### From source
+
+Requires Go 1.21+ and Git.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh
+```
+
+Or with `go install`:
+
+```sh
+go install github.com/scoutme/milk/cmd/milk@latest
 ```
 
 ## How it works
@@ -38,7 +60,7 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 | --- | --- | --- |
 | Local agent (inference server or cloud) | local LLM inference | no (degrades to Claude-only) |
 | [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
-| Go 1.21+ | build only | yes |
+| Go 1.21+ | build from source only | no (pre-built binaries available) |
 
 The local agent supports multiple backends and auth transports — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and other OpenAI-compatible servers, plus cloud providers via native protocols: AWS Bedrock (SigV4 + Converse API), OpenRouter, Together.ai, Groq (Bearer token). The only requirement is that the model supports function/tool calling.
 

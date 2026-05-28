@@ -3,8 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 #
 # Environment variables:
-#   MILK_INSTALL_DIR - Installation directory (default: ~/.local/share/milk)
-#   MILK_VERSION     - Git tag/branch to install (default: main)
+#   MILK_VERSION - Release tag to install, e.g. v0.2.0 (default: latest)
 
 set -e
 
@@ -21,81 +20,97 @@ warn()    { printf "${YELLOW}Warning:${NC} %s\n" "$1"; }
 error()   { printf "${RED}Error:${NC} %s\n" "$1" >&2; exit 1; }
 check_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-detect_os() {
-    case "$(uname -s)" in
-        Linux*)  OS_TYPE="linux";;
-        Darwin*) OS_TYPE="macos";;
+REPO="scoutme/milk"
+BIN_DIR="$HOME/.local/bin"
+
+detect_platform() {
+    OS="$(uname -s)"
+    ARCH="$(uname -m)"
+
+    case "$OS" in
+        Linux*)  GOOS="linux";;
+        Darwin*) GOOS="darwin";;
         CYGWIN*|MINGW*|MSYS*)
-            error "Windows is not natively supported. Please use WSL2 instead.";;
-        *)
-            error "Unsupported operating system: $(uname -s)";;
+            warn "Native Windows is not fully supported. Using WSL2 is recommended."
+            GOOS="windows";;
+        *) error "Unsupported operating system: $OS";;
     esac
+
+    case "$ARCH" in
+        x86_64|amd64) GOARCH="amd64";;
+        aarch64|arm64) GOARCH="arm64";;
+        *) error "Unsupported architecture: $ARCH";;
+    esac
+
+    EXT=""
+    [ "$GOOS" = "windows" ] && EXT=".exe"
 }
 
-check_go() {
-    info "Checking Go installation..."
-    if ! check_cmd go; then
-        error "Go is required but not installed.
-
-    Installation instructions:
-    - macOS: brew install go
-    - Ubuntu/Debian: sudo apt install golang-go   (or https://go.dev/dl/)
-    - Fedora: sudo dnf install golang"
+resolve_version() {
+    if [ -n "$MILK_VERSION" ]; then
+        VERSION="$MILK_VERSION"
+        return
     fi
-    GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-    GO_MAJOR=$(echo "$GO_VERSION" | cut -d. -f1)
-    GO_MINOR=$(echo "$GO_VERSION" | cut -d. -f2)
-    if [ "$GO_MAJOR" -lt 1 ] || { [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 21 ]; }; then
-        error "Go 1.21 or higher is required (found $GO_VERSION). Please upgrade: https://go.dev/dl/"
-    fi
-    success "Found Go $GO_VERSION"
-}
-
-check_git() {
-    info "Checking Git installation..."
-    if check_cmd git; then
-        success "Found Git"
+    info "Resolving latest release..."
+    if check_cmd curl; then
+        VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    elif check_cmd wget; then
+        VERSION=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     else
-        error "Git is required but not installed.
-
-    Installation instructions:
-    - macOS: xcode-select --install
-    - Ubuntu/Debian: sudo apt install git
-    - Fedora: sudo dnf install git"
+        error "curl or wget is required to download milk."
     fi
+    [ -n "$VERSION" ] || error "Could not determine latest release version. Set MILK_VERSION explicitly."
 }
 
-clone_repository() {
-    VERSION="${MILK_VERSION:-main}"
-    REPO_URL="https://github.com/scoutme/milk.git"
+download_binary() {
+    BINARY_NAME="milk-${GOOS}-${GOARCH}${EXT}"
+    BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+    BINARY_URL="${BASE_URL}/${BINARY_NAME}"
+    CHECKSUM_URL="${BASE_URL}/${BINARY_NAME}.sha256"
+    TMP_DIR="$(mktemp -d)"
+    TMP_BIN="${TMP_DIR}/milk${EXT}"
+    TMP_SHA="${TMP_DIR}/milk.sha256"
 
-    if [ -d "$INSTALL_DIR/.git" ]; then
-        info "Updating existing installation..."
-        cd "$INSTALL_DIR"
-        git fetch origin
-        git checkout "$VERSION"
-        git pull origin "$VERSION" 2>/dev/null || true
-    else
-        info "Cloning milk repository..."
-        mkdir -p "$(dirname "$INSTALL_DIR")"
-        git clone --branch "$VERSION" "$REPO_URL" "$INSTALL_DIR"
-        cd "$INSTALL_DIR"
+    info "Downloading milk ${VERSION} (${GOOS}/${GOARCH})..."
+
+    if check_cmd curl; then
+        curl -fsSL "$BINARY_URL" -o "$TMP_BIN" || return 1
+        curl -fsSL "$CHECKSUM_URL" -o "$TMP_SHA" 2>/dev/null || true
+    elif check_cmd wget; then
+        wget -qO "$TMP_BIN" "$BINARY_URL" || return 1
+        wget -qO "$TMP_SHA" "$CHECKSUM_URL" 2>/dev/null || true
     fi
 
-    success "Repository ready at $INSTALL_DIR"
+    # Verify checksum when sha256sum/shasum is available and we got a checksum file.
+    if [ -s "$TMP_SHA" ]; then
+        EXPECTED=$(awk '{print $1}' "$TMP_SHA")
+        if check_cmd sha256sum; then
+            ACTUAL=$(sha256sum "$TMP_BIN" | awk '{print $1}')
+        elif check_cmd shasum; then
+            ACTUAL=$(shasum -a 256 "$TMP_BIN" | awk '{print $1}')
+        else
+            ACTUAL=""
+        fi
+        if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            rm -rf "$TMP_DIR"
+            error "Checksum mismatch for $BINARY_NAME (expected $EXPECTED, got $ACTUAL)."
+        fi
+        [ -n "$ACTUAL" ] && success "Checksum verified"
+    fi
+
+    mkdir -p "$BIN_DIR"
+    mv "$TMP_BIN" "$BIN_DIR/milk${EXT}"
+    chmod +x "$BIN_DIR/milk${EXT}"
+    rm -rf "$TMP_DIR"
+    success "Installed milk ${VERSION} to ${BIN_DIR}/milk${EXT}"
 }
 
-build_and_install() {
-    info "Building milk..."
-    cd "$INSTALL_DIR"
-    go build -o "$BIN_DIR/milk" ./cmd/milk/
-    chmod +x "$BIN_DIR/milk"
-    success "Installed milk to $BIN_DIR/milk"
-}
+# ── success message ───────────────────────────────────────────────────────────
 
 print_success() {
     SHELL_NAME="$(basename "$SHELL")"
-
     echo ""
     printf "${GREEN}${BOLD}"
     echo "============================================"
@@ -116,7 +131,7 @@ print_success() {
         *)    printf "   ${BLUE}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}\n";;
     esac
     echo ""
-    echo "2. Ensure llama.cpp is running (default: http://localhost:8080)"
+    echo "2. Ensure your local inference server is running (or configure a cloud provider)."
     echo "   and the claude CLI is available in PATH."
     echo ""
     echo "3. Start milk:"
@@ -126,27 +141,22 @@ print_success() {
     echo ""
     echo "Config file: ~/.milk/config.json (created on first run)"
     echo ""
-    echo "For more information:"
-    echo "https://github.com/scoutme/milk"
+    echo "For more information: https://github.com/${REPO}"
     echo ""
 }
 
+# ── main ──────────────────────────────────────────────────────────────────────
+
 main() {
-    detect_os
+    detect_platform
+    resolve_version
 
-    INSTALL_DIR="${MILK_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/milk}"
-    BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$BIN_DIR"
+    if ! download_binary; then
+        error "Pre-built binary not available for ${GOOS}/${GOARCH}.
+To build from source instead, run:
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install-from-source.sh | sh"
+    fi
 
-    info "Installing milk..."
-    echo "  Source directory: $INSTALL_DIR"
-    echo "  Binary:           $BIN_DIR/milk"
-    echo ""
-
-    check_git
-    check_go
-    clone_repository
-    build_and_install
     print_success
 }
 
