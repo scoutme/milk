@@ -95,6 +95,8 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
 
 **AWS Bedrock credential resolution** (in order): explicit `aws_key_id` / `aws_secret` / `aws_token` config fields → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars → region parsed from `url` when `aws_region` is empty.
 
+**Automatic credential renewal (`aws_refresh_cmd`)**: set `aws_refresh_cmd` to a `credential_process`-compatible shell command (e.g. `aws sts get-session-token --duration-seconds 3600`). When a Bedrock request returns 403, the SigV4 transport runs the command, parses its `AccessKeyId` / `SecretAccessKey` / `SessionToken` JSON output, swaps the credentials atomically, and retries the request once — no agent restart needed. In TUI mode, the status bar shows `[refreshing AWS credentials…]` while the renewal is in flight, then `[AWS creds: ok]` or `[AWS creds failed: <error>]` on completion.
+
 **TLS overrides**: `tls_skip_verify: true` disables cert verification (dev/self-signed only); `tls_ca_cert: "/path/to/ca.pem"` trusts a private CA.
 
 **Azure OpenAI workaround**: Azure uses a non-standard URL path and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint, add `{"api-key": "<key>"}` to `headers`, and leave `provider` empty. A dedicated Azure provider with URL templating is tracked in GitHub Issues. See ADR 27.
@@ -363,6 +365,7 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 | `aws_secret` | string | AWS secret key (fallback: `AWS_SECRET_ACCESS_KEY` env) |
 | `aws_token` | string | AWS session token (fallback: `AWS_SESSION_TOKEN` env) |
 | `aws_service` | string | SigV4 service name (default `"bedrock"`) |
+| `aws_refresh_cmd` | string | `credential_process`-compatible command; on 403 the SigV4 transport runs it, swaps credentials, and retries once |
 
 ### `colorization` field
 
