@@ -10,6 +10,15 @@ import (
 	"github.com/scoutme/milk/internal/memory"
 )
 
+// sessionBricks holds the summary-brick fields from the active session for
+// display in the memory panel.
+type sessionBricks struct {
+	currentNeed       string
+	lastLocalSummary  string
+	lastClaudeSummary string
+	escalationBrief   string
+}
+
 const recentThreshold = 60 * time.Second
 
 var (
@@ -29,7 +38,13 @@ func (m *model) renderMemoryPanel(h int) string {
 		return strings.Repeat("\n", h)
 	}
 
-	all := buildPanelLines(m.mem, inner)
+	bricks := sessionBricks{
+		currentNeed:       m.st.sess.CurrentNeed,
+		lastLocalSummary:  m.st.sess.LastLocalSummary,
+		lastClaudeSummary: m.st.sess.LastClaudeSummary,
+		escalationBrief:   m.st.sess.EscalationBrief,
+	}
+	all := buildPanelLines(m.mem, inner, bricks)
 	total := len(all)
 
 	// Clamp offset so we never scroll past the last screenful.
@@ -60,7 +75,13 @@ func (m *model) renderMemoryPanel(h int) string {
 // renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
 // a ▌ thumb when the panel content overflows, or a blank column otherwise.
 func (m *model) renderPanelScrollbar(h int) string {
-	all := buildPanelLines(m.mem, memoryPanelInner)
+	bricks := sessionBricks{
+		currentNeed:       m.st.sess.CurrentNeed,
+		lastLocalSummary:  m.st.sess.LastLocalSummary,
+		lastClaudeSummary: m.st.sess.LastClaudeSummary,
+		escalationBrief:   m.st.sess.EscalationBrief,
+	}
+	all := buildPanelLines(m.mem, memoryPanelInner, bricks)
 	total := len(all)
 	needsBar := total > h
 
@@ -95,7 +116,7 @@ func scrollThumb(h, total, offset int) (top, bot int) {
 	return top, bot
 }
 
-func buildPanelLines(mem *memory.Store, inner int) []string {
+func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []string {
 	var lines []string
 
 	addLine := func(s string) {
@@ -155,6 +176,14 @@ func buildPanelLines(mem *memory.Store, inner int) []string {
 		}
 	}
 
+	// --- CONTEXT BRICKS ---
+	addLine("")
+	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
+	addBrickLines(&lines, "need", bricks.currentNeed, inner)
+	addBrickLines(&lines, "local", bricks.lastLocalSummary, inner)
+	addBrickLines(&lines, "claude", bricks.lastClaudeSummary, inner)
+	addBrickLines(&lines, "brief", bricks.escalationBrief, inner)
+
 	return lines
 }
 
@@ -213,6 +242,27 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 	}
 }
 
+// addBrickLines appends lines for a single summary brick: a label line and up
+// to 3 wrapped content lines, or "(empty)" when value is blank.
+func addBrickLines(lines *[]string, label, value string, inner int) {
+	labelStr := dim("  " + label + ": ")
+	labelW := utf8.RuneCountInString("  " + label + ": ")
+	if value == "" {
+		*lines = append(*lines, labelStr+dim("—"))
+		return
+	}
+	firstW := max(inner-labelW, 8)
+	contW := max(inner-4, 8)
+	wrapped := wordWrap(value, firstW, contW, 3)
+	for i, line := range wrapped {
+		if i == 0 {
+			*lines = append(*lines, labelStr+line)
+		} else {
+			*lines = append(*lines, "    "+line)
+		}
+	}
+}
+
 // consumerBadge returns a short display badge for non-all consumers: "[L]" for
 // local-only percepts and "[C]" for Claude-only. Returns "" for ConsumerAll.
 func consumerBadge(p memory.Percept) string {
@@ -228,7 +278,7 @@ func consumerBadge(p memory.Percept) string {
 // buildPanelLineIDs returns one percept ID per line in the same order as
 // buildPanelLines. Non-percept lines (titles, section headers, blank lines)
 // get an empty string.
-func buildPanelLineIDs(mem *memory.Store) []string {
+func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	var ids []string
 	add := func(id string) { ids = append(ids, id) }
 
@@ -254,6 +304,21 @@ func buildPanelLineIDs(mem *memory.Store) []string {
 		wrapped := wordWrap(p.Content, firstW, contW, 2)
 		for range wrapped {
 			add(p.ID)
+		}
+	}
+
+	addBrick := func(label, value string) {
+		const inner = memoryPanelInner
+		labelW := utf8.RuneCountInString("  " + label + ": ")
+		if value == "" {
+			add("") // label + "—" is one line, not clickable
+			return
+		}
+		firstW := max(inner-labelW, 8)
+		contW := max(inner-4, 8)
+		wrapped := wordWrap(value, firstW, contW, 3)
+		for range wrapped {
+			add(label) // static brick ID makes lines clickable
 		}
 	}
 
@@ -297,7 +362,30 @@ func buildPanelLineIDs(mem *memory.Store) []string {
 		}
 	}
 
+	// CONTEXT BRICKS section
+	add("") // blank
+	add("") // CONTEXT BRICKS header
+	addBrick("need", bricks.currentNeed)
+	addBrick("local", bricks.lastLocalSummary)
+	addBrick("claude", bricks.lastClaudeSummary)
+	addBrick("brief", bricks.escalationBrief)
+
 	return ids
+}
+
+// brickContent returns the full text for a brick ID, or "" if unknown/empty.
+func brickContent(id string, bricks sessionBricks) string {
+	switch id {
+	case "need":
+		return bricks.currentNeed
+	case "local":
+		return bricks.lastLocalSummary
+	case "claude":
+		return bricks.lastClaudeSummary
+	case "brief":
+		return bricks.escalationBrief
+	}
+	return ""
 }
 
 // wordWrap splits text into at most maxLines lines. The first line has width

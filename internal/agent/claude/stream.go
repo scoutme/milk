@@ -144,6 +144,11 @@ type StreamOpts struct {
 	// PerceptNonce must be set to the same nonce used in the system prompt instruction.
 	OnPercept    func(content, consumerHint string)
 	PerceptNonce string // session-specific nonce; required when OnPercept is non-nil
+	// OnNeed is called when a <milk:need:NONCE>…</milk:need:NONCE> tag is found in the
+	// stream. The tag content (one-sentence user goal description) is stripped from the
+	// display output and passed to OnNeed. NeedNonce must match PerceptNonce.
+	OnNeed    func(content string)
+	NeedNonce string
 	// DebugLog receives every raw NDJSON line from the claude subprocess when non-nil.
 	DebugLog io.Writer
 }
@@ -195,6 +200,9 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	if onPermission == nil {
 		onPermission = denyAllHandler
 	}
+	if opts.OnNeed != nil {
+		out = &tagWriter{w: out, openPrefix: needOpenPrefix, onTag: func(body string) { opts.OnNeed(strings.TrimSpace(body)) }, recordNonce: opts.NeedNonce}
+	}
 	if opts.OnPercept != nil {
 		out = &perceptWriter{w: out, onPercept: opts.OnPercept, recordNonce: opts.PerceptNonce}
 	}
@@ -217,10 +225,16 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	if pw, ok := out.(*perceptWriter); ok {
 		pw.flush() //nolint:errcheck
 	}
+	if tw, ok := out.(*tagWriter); ok {
+		tw.flush() //nolint:errcheck
+	}
 
 	text := strings.TrimSpace(textBuf.String())
 	if opts.OnPercept != nil {
 		text = stripPerceptTags(text, opts.PerceptNonce)
+	}
+	if opts.OnNeed != nil {
+		text = stripTagsByPrefix(text, needOpenPrefix)
 	}
 	res.Text = text
 	res.EndsWithQ = strings.HasSuffix(text, "?")
@@ -363,47 +377,298 @@ func perceptTagPair(nonce string) (open, close_ string) {
 	return "<milk:percept:" + nonce + ">", "</milk:percept:" + nonce + ">"
 }
 
-// stripPerceptTags removes all <milk:percept:*>…</milk:percept:*> occurrences from s,
-// regardless of nonce. This prevents stale-nonce tags (from old injected context) from
-// leaking into the display output.
-func stripPerceptTags(s, _ string) string {
-	const openPrefix = "<milk:percept:"
-	const closePrefix = "</milk:percept:"
+const needOpenPrefix = "<milk:need:"
+
+// nextCodeSpanEnd returns the index in s just past the closing backtick sequence
+// that matches the opening sequence starting at s[start]. start must point at a
+// backtick. Returns -1 if no matching close is found.
+func nextCodeSpanEnd(s string, start int) int {
+	// Count opening backticks.
+	n := 0
+	for start+n < len(s) && s[start+n] == '`' {
+		n++
+	}
+	// Search for an equally-long run of backticks that closes the span.
+	close_ := strings.Repeat("`", n)
+	pos := start + n
 	for {
-		open := strings.Index(s, openPrefix)
-		if open < 0 {
+		idx := strings.Index(s[pos:], close_)
+		if idx < 0 {
+			return -1
+		}
+		idx += pos
+		// The run must be exactly n backticks (not longer).
+		end := idx + n
+		if end < len(s) && s[end] == '`' {
+			pos = idx + 1
+			continue
+		}
+		return end
+	}
+}
+
+// stripTagsByPrefix removes all tags matching <PREFIX:*>…</PREFIX:*> from s,
+// skipping over markdown code spans (backtick-delimited regions).
+func stripTagsByPrefix(s, openPrefix string) string {
+	closePrefix := "</" + openPrefix[1:]
+	var result strings.Builder
+	pos := 0
+	for pos < len(s) {
+		// Skip code spans — pass them through untouched.
+		if s[pos] == '`' {
+			end := nextCodeSpanEnd(s, pos)
+			if end < 0 {
+				result.WriteString(s[pos:])
+				return strings.TrimSpace(result.String())
+			}
+			result.WriteString(s[pos:end])
+			pos = end
+			continue
+		}
+		// Look for an open tag starting at or after pos.
+		rel := strings.Index(s[pos:], openPrefix)
+		if rel < 0 {
+			result.WriteString(s[pos:])
 			break
 		}
-		// Find the end of the open tag.
+		open := pos + rel
+		// Skip any code span that appears before the tag.
+		if bt := strings.IndexByte(s[pos:open], '`'); bt >= 0 {
+			end := nextCodeSpanEnd(s, pos+bt)
+			if end < 0 {
+				result.WriteString(s[pos:])
+				return strings.TrimSpace(result.String())
+			}
+			result.WriteString(s[pos:end])
+			pos = end
+			continue
+		}
 		openEnd := strings.Index(s[open:], ">")
 		if openEnd < 0 {
-			s = s[:open]
-			break
+			result.WriteString(s[pos:open])
+			return strings.TrimSpace(result.String())
 		}
-		openEnd += open + 1 // position after '>'
-		// Derive the expected close tag from the nonce inside the open tag.
-		noncePart := s[open+len(openPrefix) : openEnd-1] // text between "<milk:percept:" and ">"
+		openEnd += open + 1
+		noncePart := s[open+len(openPrefix) : openEnd-1]
 		closeTag := closePrefix + noncePart + ">"
 		closeIdx := strings.Index(s[openEnd:], closeTag)
 		if closeIdx < 0 {
-			// Also try any close tag as fallback.
+			result.WriteString(s[pos:open])
+			return strings.TrimSpace(result.String())
+		}
+		result.WriteString(s[pos:open])
+		pos = openEnd + closeIdx + len(closeTag)
+	}
+	return strings.TrimSpace(result.String())
+}
+
+// tagWriter is a generic single-prefix tag interceptor, used for <milk:need:NONCE> tags.
+// It strips all matching tags from the display output and calls onTag with the body
+// of tags whose nonce matches recordNonce.
+// Backtick-delimited code spans are passed through unchanged (no tag interception).
+type tagWriter struct {
+	w           io.Writer
+	openPrefix  string
+	onTag       func(body string)
+	recordNonce string
+	closeTag    string
+	buf         strings.Builder
+	inTag       bool
+	codeOpen    int // number of backticks that opened the current code span (0 = not in code)
+	codeBtCount int // backticks seen so far while scanning for a code-span opener/closer
+}
+
+func (tw *tagWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	closePrefix := "</" + tw.openPrefix[1:]
+	for _, b := range p {
+		// Code-span bypass: while inside a backtick span, pass bytes straight through.
+		if tw.codeOpen > 0 {
+			if b == '`' {
+				tw.codeBtCount++
+				if tw.codeBtCount == tw.codeOpen {
+					tw.codeOpen = 0
+					tw.codeBtCount = 0
+				}
+			} else {
+				tw.codeBtCount = 0
+			}
+			if _, err := tw.w.Write([]byte{b}); err != nil {
+				return n, err
+			}
+			continue
+		}
+		// Detect start of code span when not inside a tag.
+		if !tw.inTag && b == '`' {
+			// Flush buffer before entering code bypass.
+			if tw.buf.Len() > 0 {
+				s := tw.buf.String()
+				tw.buf.Reset()
+				if _, err := io.WriteString(tw.w, s); err != nil {
+					return n, err
+				}
+			}
+			tw.codeBtCount++
+			if _, err := tw.w.Write([]byte{b}); err != nil {
+				return n, err
+			}
+			continue
+		}
+		// After collecting backticks outside a span, the next non-backtick byte
+		// confirms the span depth and starts bypass mode.
+		if !tw.inTag && tw.codeBtCount > 0 {
+			tw.codeOpen = tw.codeBtCount
+			tw.codeBtCount = 0
+			if b == '`' {
+				tw.codeOpen++
+				if _, err := tw.w.Write([]byte{b}); err != nil {
+					return n, err
+				}
+				continue
+			}
+			// First non-backtick byte of span content — enter bypass.
+			if b != '`' {
+				tw.codeBtCount = 0
+				if _, err := tw.w.Write([]byte{b}); err != nil {
+					return n, err
+				}
+				continue
+			}
+		}
+		if tw.inTag {
+			tw.buf.WriteByte(b)
+			s := tw.buf.String()
+			if idx := strings.Index(s, tw.closeTag); idx >= 0 {
+				raw := strings.TrimSpace(s[:idx])
+				if tw.onTag != nil && raw != "" && tw.closeTag == closePrefix+tw.recordNonce+">" {
+					tw.onTag(raw)
+				}
+				tail := s[idx+len(tw.closeTag):]
+				tw.buf.Reset()
+				tw.closeTag = ""
+				tw.inTag = false
+				if tail != "" {
+					if _, err := io.WriteString(tw.w, tail); err != nil {
+						return n, err
+					}
+				}
+			}
+		} else {
+			tw.buf.WriteByte(b)
+			s := tw.buf.String()
+			if idx := strings.Index(s, tw.openPrefix); idx >= 0 {
+				afterPrefix := s[idx+len(tw.openPrefix):]
+				closeAngle := strings.Index(afterPrefix, ">")
+				if closeAngle < 0 {
+					before := s[:idx]
+					if before != "" {
+						if _, err := io.WriteString(tw.w, before); err != nil {
+							return n, err
+						}
+						tw.buf.Reset()
+						tw.buf.WriteString(s[idx:])
+					}
+					continue
+				}
+				nonce := afterPrefix[:closeAngle]
+				tw.closeTag = closePrefix + nonce + ">"
+				before := s[:idx]
+				if before != "" {
+					if _, err := io.WriteString(tw.w, before); err != nil {
+						return n, err
+					}
+				}
+				tw.buf.Reset()
+				tw.inTag = true
+			} else if !strings.HasPrefix(tw.openPrefix, s) {
+				if _, err := io.WriteString(tw.w, s); err != nil {
+					return n, err
+				}
+				tw.buf.Reset()
+			}
+		}
+	}
+	return n, nil
+}
+
+func (tw *tagWriter) flush() error {
+	if tw.inTag || tw.buf.Len() == 0 {
+		tw.buf.Reset()
+		return nil
+	}
+	s := tw.buf.String()
+	tw.buf.Reset()
+	_, err := io.WriteString(tw.w, s)
+	return err
+}
+
+// stripPerceptTags removes all <milk:percept:*>…</milk:percept:*> occurrences from s,
+// regardless of nonce. This prevents stale-nonce tags (from old injected context) from
+// leaking into the display output. Markdown code spans (backtick-delimited) are skipped.
+func stripPerceptTags(s, _ string) string {
+	const openPrefix = "<milk:percept:"
+	const closePrefix = "</milk:percept:"
+	var result strings.Builder
+	pos := 0
+	for pos < len(s) {
+		// Skip code spans — pass them through untouched.
+		if s[pos] == '`' {
+			end := nextCodeSpanEnd(s, pos)
+			if end < 0 {
+				result.WriteString(s[pos:])
+				return strings.TrimSpace(result.String())
+			}
+			result.WriteString(s[pos:end])
+			pos = end
+			continue
+		}
+		rel := strings.Index(s[pos:], openPrefix)
+		if rel < 0 {
+			result.WriteString(s[pos:])
+			break
+		}
+		open := pos + rel
+		// Skip any code span that appears before the tag.
+		if bt := strings.IndexByte(s[pos:open], '`'); bt >= 0 {
+			end := nextCodeSpanEnd(s, pos+bt)
+			if end < 0 {
+				result.WriteString(s[pos:])
+				return strings.TrimSpace(result.String())
+			}
+			result.WriteString(s[pos:end])
+			pos = end
+			continue
+		}
+		openEnd := strings.Index(s[open:], ">")
+		if openEnd < 0 {
+			result.WriteString(s[pos:open])
+			return strings.TrimSpace(result.String())
+		}
+		openEnd += open + 1
+		noncePart := s[open+len(openPrefix) : openEnd-1]
+		closeTag := closePrefix + noncePart + ">"
+		closeIdx := strings.Index(s[openEnd:], closeTag)
+		if closeIdx < 0 {
+			// Fallback: match any close tag.
 			closeAny := strings.Index(s[openEnd:], closePrefix)
 			if closeAny < 0 {
-				s = s[:open]
-				break
+				result.WriteString(s[pos:open])
+				return strings.TrimSpace(result.String())
 			}
 			closeAny += openEnd
 			closeEnd := strings.Index(s[closeAny:], ">")
 			if closeEnd < 0 {
-				s = s[:open]
-				break
+				result.WriteString(s[pos:open])
+				return strings.TrimSpace(result.String())
 			}
-			s = s[:open] + s[closeAny+closeEnd+1:]
+			result.WriteString(s[pos:open])
+			pos = closeAny + closeEnd + 1
 		} else {
-			s = s[:open] + s[openEnd+closeIdx+len(closeTag):]
+			result.WriteString(s[pos:open])
+			pos = openEnd + closeIdx + len(closeTag)
 		}
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(result.String())
 }
 
 // perceptWriter wraps an io.Writer and intercepts <milk:percept:*>…</milk:percept:*>
@@ -426,6 +691,8 @@ type perceptWriter struct {
 	closeTag    string          // set once an open tag is fully parsed; cleared on close
 	buf         strings.Builder // accumulates bytes while inside or possibly inside a tag
 	inTag       bool            // true once the open tag is confirmed
+	codeOpen    int             // backtick depth of current code span (0 = not in code)
+	codeBtCount int             // backticks collected while scanning for span opener/closer
 }
 
 // consumerHintFrom strips an optional "@local: " or "@claude: " prefix from s
@@ -448,6 +715,46 @@ const perceptCloseLegacy = "</milk:percept>"
 func (pw *perceptWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	for _, b := range p {
+		// Code-span bypass: while inside a backtick span, pass bytes straight through.
+		if pw.codeOpen > 0 {
+			if b == '`' {
+				pw.codeBtCount++
+				if pw.codeBtCount == pw.codeOpen {
+					pw.codeOpen = 0
+					pw.codeBtCount = 0
+				}
+			} else {
+				pw.codeBtCount = 0
+			}
+			if _, err := pw.w.Write([]byte{b}); err != nil {
+				return n, err
+			}
+			continue
+		}
+		// Detect start of code span when not inside a tag.
+		if !pw.inTag && b == '`' {
+			if pw.buf.Len() > 0 {
+				s := pw.buf.String()
+				pw.buf.Reset()
+				if _, err := io.WriteString(pw.w, s); err != nil {
+					return n, err
+				}
+			}
+			pw.codeBtCount++
+			if _, err := pw.w.Write([]byte{b}); err != nil {
+				return n, err
+			}
+			continue
+		}
+		// First non-backtick after collecting backticks: confirm span depth and enter bypass.
+		if !pw.inTag && pw.codeBtCount > 0 {
+			pw.codeOpen = pw.codeBtCount
+			pw.codeBtCount = 0
+			if _, err := pw.w.Write([]byte{b}); err != nil {
+				return n, err
+			}
+			continue
+		}
 		if pw.inTag {
 			// Accumulate until we see the close tag.
 			pw.buf.WriteByte(b)
