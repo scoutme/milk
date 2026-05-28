@@ -140,9 +140,9 @@ func pathRefScore(prompt string, weight int) (int, string) {
 }
 
 func looksLikePath(s string) bool {
-	return strings.HasPrefix(s, "/") ||
+	return filepath.IsAbs(s) ||
 		strings.HasPrefix(s, "./") ||
 		strings.HasPrefix(s, "../") ||
 		strings.HasPrefix(s, "~/") ||
-		strings.Contains(s, "/")
+		strings.ContainsAny(s, "/\\")
 }

@@ -2762,12 +2762,12 @@ func buildTabMatches(input, cwd string) ([]string, int) {
 
 func expandPath(prefix, cwd string) []string {
 	base := prefix
-	if !strings.HasPrefix(base, "/") {
-		base = cwd + "/" + base
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(cwd, base)
 	}
 	dir := filepath.Dir(base)
 	namePrefix := filepath.Base(base)
-	if strings.HasSuffix(prefix, "/") {
+	if strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, string(filepath.Separator)) {
 		dir = base
 		namePrefix = ""
 	}

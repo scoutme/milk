@@ -34,6 +34,13 @@ var (
 	flagDrop     bool
 )
 
+// Set via -ldflags at build time.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 const errGettingCWD = "getting cwd: %w"
 
 func main() {
@@ -51,6 +58,7 @@ inference server works, local or remote (llama.cpp, Ollama, LM Studio, vLLM, or
 any hosted endpoint).`,
 	Args:         cobra.ArbitraryArgs,
 	SilenceUsage: true,
+	Version:      fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 	RunE:         run,
 }
 
@@ -638,7 +646,7 @@ func suggestDir(input map[string]any) string {
 	}
 	if cmd, ok := input["command"].(string); ok {
 		for token := range strings.FieldsSeq(cmd) {
-			if strings.HasPrefix(token, "/") {
+			if filepath.IsAbs(token) {
 				return filepath.Dir(token)
 			}
 		}

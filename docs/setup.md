@@ -13,6 +13,7 @@
 | Go 1.21+ | yes | build only |
 | Inference server or cloud provider | no | OpenAI-compat server or AWS Bedrock; degrades to Claude-only if absent |
 | claude CLI | no | degrades to local-only if absent |
+| Git Bash or WSL2 (Windows only) | yes (Windows) | milk's local agent uses `sh`, `find`, `grep`; cmd.exe / PowerShell are not supported |
 
 ---
 
