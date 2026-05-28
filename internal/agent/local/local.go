@@ -80,6 +80,7 @@ type Agent struct {
 	client           *http.Client
 	detectedFormat   ToolFormat         // confirmed format from last tool-bearing turn
 	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
+	sigv4            *sigv4Transport    // non-nil for Bedrock; used to wire the onRefresh callback
 }
 
 // HasTokenCmd reports whether this agent uses a token_cmd for authentication.
@@ -95,6 +96,15 @@ func (a *Agent) WarmToken() error {
 	}
 	_, err := a.tokenCmd.getToken()
 	return err
+}
+
+// WithOnSigV4Refresh registers a callback that is called after each automatic
+// mid-turn Bedrock credential renewal attempt. err is nil on success.
+// No-op when the agent is not a Bedrock/SigV4 agent.
+func (a *Agent) WithOnSigV4Refresh(fn func(err error)) {
+	if a.sigv4 != nil {
+		a.sigv4.onRefresh = fn
+	}
 }
 
 func New(baseURL, model string) *Agent {
@@ -153,13 +163,12 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 		if region == "" {
 			region = regionFromBedrockURL(ac.URL)
 		}
-		transport = &sigv4Transport{
-			inner:   inner,
-			region:  region,
-			service: service,
-			keyID:   keyID,
-			secret:  secret,
-			token:   token,
+		sv4 := &sigv4Transport{
+			inner:      inner,
+			region:     region,
+			service:    service,
+			refreshCmd: ac.AWSRefreshCmd,
+			creds:      sigv4Creds{keyID: keyID, secret: secret, token: token},
 		}
 		return &Agent{
 			baseURL:          strings.TrimRight(ac.URL, "/"),
@@ -167,7 +176,8 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 			chatPath:         ac.ChatPath,
 			skipHealthCheck:  true,
 			useBedrockNative: true,
-			client:           &http.Client{Timeout: 5 * time.Minute, Transport: transport},
+			client:           &http.Client{Timeout: 5 * time.Minute, Transport: sv4},
+			sigv4:            sv4,
 		}
 	case "", "local":
 		// plain transport; extra headers may still apply

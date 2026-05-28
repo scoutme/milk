@@ -1361,7 +1361,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.credOK = true
 			if msg.creds != nil {
 				// AWS: apply fresh credentials and rebuild the local agent.
-				ac := m.st.cfg.ActiveLocalAgent()
+				ac := activeLocalAgentConfig(m.st.cfg)
 				ac.AWSKeyID = msg.creds.AccessKeyID
 				ac.AWSSecret = msg.creds.SecretAccessKey
 				ac.AWSToken = msg.creds.SessionToken
@@ -1369,6 +1369,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if od, err := config.OtelDir(); err == nil {
 					newAgent.WithOtelDir(od)
 				}
+				prog := m.st.program
+				newAgent.WithOnSigV4Refresh(func(err error) {
+					prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
+				})
 				m.agents.local = newAgent
 				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 				m.rtr = router.New(m.st.cfg, newAgent)
@@ -1862,10 +1866,14 @@ func (m model) handleProviderCmd(arg string) (model, tea.Cmd) {
 			m.appendTranscript(fmt.Sprintf("%s warning: could not persist provider switch: %v\n", milkTag(), err))
 		}
 		// Build agent without blocking — creds are fetched async below.
-		newAgent := local.NewFromConfig(m.st.cfg.ActiveLocalAgent())
+		newAgent := local.NewFromConfig(activeLocalAgentConfig(m.st.cfg))
 		if od, err := config.OtelDir(); err == nil {
 			newAgent.WithOtelDir(od)
 		}
+		prog := m.st.program
+		newAgent.WithOnSigV4Refresh(func(err error) {
+			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
+		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 		// Clear stale credential status from the previous provider.
@@ -2101,11 +2109,15 @@ func (m model) commitAddProvider(ac config.LocalAgentConfig) model {
 	}
 	m.hasLocalAgentConfig = true
 	if isFirst {
-		freshAC := applyFreshAWSCreds(m.st.cfg, m.st.cfg.ActiveLocalAgent())
+		freshAC := applyFreshAWSCreds(m.st.cfg, activeLocalAgentConfig(m.st.cfg))
 		newAgent := local.NewFromConfig(freshAC)
 		if od, err := config.OtelDir(); err == nil {
 			newAgent.WithOtelDir(od)
 		}
+		prog := m.st.program
+		newAgent.WithOnSigV4Refresh(func(err error) {
+			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
+		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 		m.rtr = router.New(m.st.cfg, newAgent)
@@ -3332,7 +3344,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Build the local agent without blocking on credential refresh. If
 	// aws_auth_refresh is enabled, the agent starts with no/stale credentials
 	// and a background goroutine refreshes them after the TUI is running.
-	baseAC := cfg.ActiveLocalAgent()
+	baseAC := activeLocalAgentConfig(cfg)
 	localAgent := local.NewFromConfig(baseAC)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
@@ -3409,6 +3421,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+	localAgent.WithOnSigV4Refresh(func(err error) {
+		p.Send(credRefreshReadyMsg{label: "AWS", err: err})
+	})
 
 	// Mode 1002+1006: button-motion + SGR extension.
 	// Reports drag coordinates while a button is held, enabling live selection

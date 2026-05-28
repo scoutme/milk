@@ -30,6 +30,7 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 ## Key design decisions
 
 - **OpenAI-compat local agent**: any compliant inference server works (llama.cpp, Ollama, LM Studio, vLLM, or remote cloud providers). Auth transports: none (local), AWS SigV4 (Bedrock), Bearer token (OpenRouter, Together.ai, Groq, …), dynamic tokens via `token_cmd`, arbitrary extra headers. Set `provider` in the `local_agents` entry to select. Bedrock also uses a native Converse API path (not OpenAI-compat). Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
+- **Bedrock credential renewal**: `aws_refresh_cmd` wires a `credential_process`-compatible command into the SigV4 transport; on 403 it refreshes credentials atomically and retries once, with TUI status-bar feedback.
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API
 - **Context handoff**: local transcript passed via `--append-system-prompt`; Claude orients itself

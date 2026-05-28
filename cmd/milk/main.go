@@ -111,7 +111,7 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	ac := applyFreshAWSCreds(cfg, cfg.ActiveLocalAgent())
+	ac := applyFreshAWSCreds(cfg, activeLocalAgentConfig(cfg))
 	localAgent := local.NewFromConfig(ac)
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
@@ -160,6 +160,18 @@ func run(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+}
+
+// activeLocalAgentConfig returns the active LocalAgentConfig with AWSRefreshCmd
+// populated from ~/.claude/settings.json when aws_auth_refresh is enabled.
+// All NewFromConfig call sites should use this instead of cfg.ActiveLocalAgent()
+// directly so the transport gets the refresh command wired in.
+func activeLocalAgentConfig(cfg config.Config) config.LocalAgentConfig {
+	ac := cfg.ActiveLocalAgent()
+	if cfg.AWSAuthRefresh && strings.ToLower(strings.TrimSpace(ac.Provider)) == "bedrock" {
+		ac.AWSRefreshCmd = claudesettings.AWSAuthRefreshCommand()
+	}
+	return ac
 }
 
 // needsAWSRefresh reports whether an async background credential refresh is

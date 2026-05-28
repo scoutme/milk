@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"os"
 	"testing"
 )
 
@@ -130,8 +131,7 @@ func TestSigV4Transport_AddsAuthorizationHeader(t *testing.T) {
 		inner:   mock,
 		region:  "us-east-1",
 		service: "bedrock",
-		keyID:   "AKIAIOSFODNN7EXAMPLE",
-		secret:  "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		creds:   sigv4Creds{keyID: "AKIAIOSFODNN7EXAMPLE", secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
 	}
 	req, _ := http.NewRequest(http.MethodPost, "http://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse", bytes.NewReader([]byte(`{}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -151,7 +151,7 @@ func TestSigV4Transport_AddsDateAndContentSHA256(t *testing.T) {
 		gotReq = r
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 	})
-	tr := &sigv4Transport{inner: mock, region: "us-east-1", service: "bedrock", keyID: "K", secret: "S"}
+	tr := &sigv4Transport{inner: mock, region: "us-east-1", service: "bedrock", creds: sigv4Creds{keyID: "K", secret: "S"}}
 	req, _ := http.NewRequest(http.MethodPost, "http://example.amazonaws.com/model/x/converse", bytes.NewReader([]byte(`{}`)))
 	tr.RoundTrip(req) //nolint:errcheck
 	if gotReq.Header.Get("x-amz-date") == "" {
@@ -168,11 +168,59 @@ func TestSigV4Transport_SessionTokenHeader(t *testing.T) {
 		gotReq = r
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 	})
-	tr := &sigv4Transport{inner: mock, region: "us-east-1", service: "bedrock", keyID: "K", secret: "S", token: "MYTOKEN"}
+	tr := &sigv4Transport{inner: mock, region: "us-east-1", service: "bedrock", creds: sigv4Creds{keyID: "K", secret: "S", token: "MYTOKEN"}}
 	req, _ := http.NewRequest(http.MethodPost, "http://example.amazonaws.com/model/x/converse", nil)
 	tr.RoundTrip(req) //nolint:errcheck
 	if gotReq.Header.Get("x-amz-security-token") != "MYTOKEN" {
 		t.Error("x-amz-security-token header missing or wrong")
+	}
+}
+
+func TestSigV4Transport_RefreshOn403(t *testing.T) {
+	callCount := 0
+	var lastAuth string
+	mock := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callCount++
+		lastAuth = r.Header.Get("Authorization")
+		statusCode := http.StatusForbidden
+		if callCount > 1 {
+			statusCode = http.StatusOK
+		}
+		return &http.Response{StatusCode: statusCode, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	})
+
+	// Write a tiny credential_process script to a temp file.
+	script := `#!/bin/sh
+echo '{"AccessKeyId":"NEWKEY","SecretAccessKey":"NEWSECRET","SessionToken":"NEWTOKEN"}'`
+	f, err := os.CreateTemp("", "aws-creds-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	f.WriteString(script) //nolint:errcheck
+	f.Close()
+	os.Chmod(f.Name(), 0o700) //nolint:errcheck
+
+	tr := &sigv4Transport{
+		inner:      mock,
+		region:     "us-east-1",
+		service:    "bedrock",
+		refreshCmd: f.Name(),
+		creds:      sigv4Creds{keyID: "OLDKEY", secret: "OLDSECRET"},
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.amazonaws.com/model/x/converse", bytes.NewReader([]byte(`{}`)))
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 after refresh, got %d", resp.StatusCode)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 round trips (initial + retry), got %d", callCount)
+	}
+	if !containsString(lastAuth, "NEWKEY") {
+		t.Errorf("retry should use refreshed credentials, got Authorization: %s", lastAuth)
 	}
 }
 

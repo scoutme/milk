@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,17 +97,83 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.inner.RoundTrip(r)
 }
 
+// sigv4Creds holds the mutable credential fields so sigv4Transport can swap
+// them atomically under mu when a refresh command updates them.
+type sigv4Creds struct {
+	keyID  string
+	secret string
+	token  string
+}
+
 // sigv4Transport signs each request with AWS Signature Version 4 before sending.
+// When refreshCmd is non-empty it runs the credential_process command on a 403
+// and retries the request once with the fresh credentials.
 type sigv4Transport struct {
-	inner   http.RoundTripper
-	region  string
-	service string
-	keyID   string
-	secret  string
-	token   string // optional session token
+	inner      http.RoundTripper
+	region     string
+	service    string
+	refreshCmd string          // optional; credential_process JSON command
+	onRefresh  func(err error) // optional; called after each automatic renewal attempt
+
+	mu    sync.Mutex
+	creds sigv4Creds
+}
+
+// awsCredsJSON is the subset of credential_process JSON output we care about.
+type awsCredsJSON struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	SessionToken    string `json:"SessionToken"`
+}
+
+// refresh runs refreshCmd and updates the stored credentials.
+func (t *sigv4Transport) refresh() error {
+	parts := strings.Fields(t.refreshCmd)
+	if len(parts) == 0 {
+		return fmt.Errorf("sigv4: empty refresh command")
+	}
+	out, err := exec.Command(parts[0], parts[1:]...).Output()
+	if err != nil {
+		return fmt.Errorf("sigv4 refresh: %w", err)
+	}
+	var c awsCredsJSON
+	if err := json.Unmarshal(out, &c); err != nil {
+		return fmt.Errorf("sigv4 refresh: invalid JSON: %w", err)
+	}
+	if c.AccessKeyID == "" {
+		return fmt.Errorf("sigv4 refresh: AccessKeyId missing")
+	}
+	t.mu.Lock()
+	t.creds = sigv4Creds{keyID: c.AccessKeyID, secret: c.SecretAccessKey, token: c.SessionToken}
+	t.mu.Unlock()
+	return nil
 }
 
 func (t *sigv4Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.roundTripWithCreds(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusForbidden && t.refreshCmd != "" {
+		// Token may have expired — refresh and retry once.
+		rerr := t.refresh()
+		if t.onRefresh != nil {
+			t.onRefresh(rerr)
+		}
+		if rerr != nil {
+			return resp, nil // return original 403; caller sees the error
+		}
+		resp.Body.Close()
+		return t.roundTripWithCreds(req)
+	}
+	return resp, nil
+}
+
+func (t *sigv4Transport) roundTripWithCreds(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	creds := t.creds
+	t.mu.Unlock()
+
 	r := req.Clone(req.Context())
 
 	// Buffer the body so we can hash it
@@ -127,8 +194,8 @@ func (t *sigv4Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	r.Header.Set("x-amz-date", dateTime)
 	r.Header.Set("x-amz-content-sha256", payloadHash)
-	if t.token != "" {
-		r.Header.Set("x-amz-security-token", t.token)
+	if creds.token != "" {
+		r.Header.Set("x-amz-security-token", creds.token)
 	}
 	r.Header.Set("host", r.URL.Host)
 
@@ -152,12 +219,12 @@ func (t *sigv4Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	stringToSign := "AWS4-HMAC-SHA256\n" + dateTime + "\n" + credScope + "\n" + hexSHA256([]byte(canonicalRequest))
 
 	// Signing key
-	signingKey := deriveSigningKey(t.secret, date, t.region, t.service)
+	signingKey := deriveSigningKey(creds.secret, date, t.region, t.service)
 	signature := hmacHex(signingKey, stringToSign)
 
 	r.Header.Set("Authorization", fmt.Sprintf(
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		t.keyID, credScope, signedHeaders, signature,
+		creds.keyID, credScope, signedHeaders, signature,
 	))
 
 	return t.inner.RoundTrip(r)

@@ -96,6 +96,11 @@ type LocalAgentConfig struct {
 	AWSSecret  string `json:"aws_secret,omitempty"`
 	AWSToken   string `json:"aws_token,omitempty"`   // optional session token
 	AWSService string `json:"aws_service,omitempty"` // default "bedrock"
+	// AWSRefreshCmd is a credential_process-compatible command whose JSON output
+	// (AccessKeyId / SecretAccessKey / SessionToken) is used to refresh expired
+	// STS session tokens mid-request. When set, the SigV4 transport retries
+	// automatically on 403 without requiring an agent rebuild.
+	AWSRefreshCmd string `json:"aws_refresh_cmd,omitempty"`
 }
 
 type Config struct {
