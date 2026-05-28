@@ -209,6 +209,58 @@ escalate_keywords:     [architect refactor entire design explain why]
 
 ---
 
+## Windows and WSL2
+
+milk's Go core is cross-platform (config paths use `os.UserHomeDir()`, TUI uses bubbletea, no PTY or Unix-only syscalls), but the local-agent `bash` tool hard-codes `sh -c` and will not work on native Windows. **WSL2 is the recommended path.**
+
+### Recommended: WSL2
+
+1. **Install WSL2** — from PowerShell (Admin):
+   ```powershell
+   wsl --install
+   ```
+   This installs Ubuntu. Reboot when prompted. See the [Microsoft WSL2 install guide](https://learn.microsoft.com/en-us/windows/wsl/install) for other distros.
+
+2. **Install Claude Code on Windows** — download and run the [Claude Code Windows installer](https://claude.ai/code). After installation, `claude.exe` is available in your Windows PATH. WSL2 can invoke Windows binaries directly, so from inside WSL2:
+   ```sh
+   claude --version   # calls claude.exe via WSL2 interop
+   ```
+   If `claude` is not found, add the Claude Code install directory to `$PATH` in your WSL2 shell profile, e.g.:
+   ```sh
+   export PATH="$PATH:/mnt/c/Users/<YourUser>/AppData/Local/Programs/claude"
+   ```
+
+3. **Install Go inside WSL2**:
+   ```sh
+   sudo apt update && sudo apt install -y golang-go git
+   ```
+   Or follow the [official Go install instructions](https://go.dev/doc/install) for a newer version.
+
+4. **Install milk** inside WSL2 using the standard Linux steps:
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+   ```
+
+5. **GPU inference (optional)** — NVIDIA drivers installed on Windows are surfaced inside WSL2 via `/dev/dxg`. No separate Linux driver needed. The [reference llama.cpp setup](#reference-setup-nvidia-gpu-ubuntuwsl2-llamacpp-from-source) works as-is inside WSL2.
+
+### What works on native Windows (no WSL2)
+
+If you build milk with `go build ./cmd/milk/` on native Windows:
+
+| Feature | Status |
+| --- | --- |
+| Config load / session storage | Works — paths resolve via `os.UserHomeDir()` |
+| TUI (transcript, input, status bar) | Works — bubbletea + Windows Terminal VT support |
+| Cloud providers (Bedrock, OpenRouter, Groq) | Works — HTTP/HTTPS only |
+| Claude escalation via CLI subprocess | Works if `claude.exe` is on PATH |
+| Local agent `bash` tool | **Broken** — hard-codes `sh -c`; `cmd.exe`/PowerShell not supported yet |
+| `scripts/llama-serve.sh` | **Broken** — no PowerShell equivalent |
+| `install.sh` | **Broken** — requires POSIX shell |
+
+Native Windows support (fixing the `bash` tool and providing a PowerShell installer) is tracked in [issue #38](https://github.com/scoutme/milk/issues/38).
+
+---
+
 ## Local testing procedure
 
 ### Automated tests (no dependencies)
