@@ -399,8 +399,9 @@ func (m *model) refreshPrompt() {
 func (m *model) inputLocked() bool { return m.busy }
 
 // handleBusyKey handles key events while an agent turn is running.
-// Enter is blocked (with a one-time hint); ctrl+c cancels; all other keys
-// are forwarded to the textarea so the user can pre-compose the next message.
+// Enter is blocked (with a one-time hint); ctrl+c cancels; page-up/down scroll
+// the viewport (consistent with normal mode); all other keys are forwarded to
+// the textarea so the user can pre-compose the next message.
 func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -413,6 +414,12 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "ctrl+m":
 		m.busyHint = "agent is responding — Ctrl+C to interrupt"
 		return m, busyHintClearCmd()
+	case "pgup", "ctrl+u":
+		m.vp.HalfPageUp()
+		return m, nil
+	case "pgdown", "ctrl+f":
+		m.vp.HalfPageDown()
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.undoPush(true)
