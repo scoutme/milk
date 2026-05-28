@@ -8,6 +8,8 @@ Start cheap. Go deep when you need it. Switch mid-workflow — the full conversa
 
 ## Installation
 
+### Linux / macOS
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 ```
@@ -19,6 +21,21 @@ To install a specific version:
 ```sh
 MILK_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 ```
+
+### Windows
+
+Native Windows is not yet fully supported. The recommended path is **WSL2** (Windows Subsystem for Linux), which gives you a full Linux environment where milk runs without modification.
+
+1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and a Linux distribution (Ubuntu 22.04 or 24.04 recommended)
+2. Install [Claude Code](https://claude.ai/code) — the Windows installer places the `claude` CLI in a location accessible from WSL2
+3. Inside a WSL2 terminal, follow the Linux installation steps above
+
+**Known limitations on native Windows (without WSL2):**
+- `go build ./...` compiles, but the `bash` local-agent tool hard-codes `sh -c` and will fail
+- `install.sh` requires a POSIX shell; there is no `.ps1` equivalent yet
+- `scripts/llama-serve.sh` has no PowerShell equivalent
+
+See [docs/setup.md](docs/setup.md#windows-and-wsl2) for the full Windows/WSL2 setup walkthrough.
 
 ## How it works
 
