@@ -49,8 +49,7 @@ go install github.com/scoutme/milk/cmd/milk@latest
 Native Windows is not yet fully supported. The recommended path is **WSL2** (Windows Subsystem for Linux), which gives you a full Linux environment where milk runs without modification.
 
 1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and a Linux distribution (Ubuntu 22.04 or 24.04 recommended)
-2. Install [Claude Code](https://claude.ai/code) — the Windows installer places the `claude` CLI in a location accessible from WSL2
-3. Inside a WSL2 terminal, follow the Linux installation steps above
+2. Inside a WSL2 terminal, follow the Linux installation steps above
 
 **Known limitations on native Windows (without WSL2):**
 - `go build ./...` compiles, but the `bash` local-agent tool hard-codes `sh -c` and will fail
@@ -63,8 +62,8 @@ See [docs/setup.md](docs/setup.md#windows-and-wsl2) for the full Windows/WSL2 se
 
 Each prompt is routed through a decision chain:
 
-1. Explicit flags (`--escalate`, `--local`) override everything
-2. Session state — if Claude asked a follow-up question, the next turn goes directly back to Claude
+1. Explicit flags (`--escalate`, `--primary`) override everything
+2. Session state — if the escalation agent asked a follow-up question, the next turn goes directly back to it
 3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
 4. Local model classifier — the local model decides `local` or `escalate` when the scorer is inconclusive
 5. Default: local
@@ -75,15 +74,15 @@ When the local model cannot handle a task, it calls `escalate(reason)` and milk 
 
 | Dependency | Purpose | Required |
 | --- | --- | --- |
-| Local agent (inference server or cloud) | local LLM inference | no (degrades to Claude-only) |
-| [claude CLI](https://claude.ai/code) | rich agent | no (degrades to local-only) |
+| Local agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
+| Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
 | Go 1.21+ | build from source only | no (pre-built binaries available) |
 
-The local agent supports multiple backends and auth transports — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and other OpenAI-compatible servers, plus cloud providers via native protocols: AWS Bedrock (SigV4 + Converse API), OpenRouter, Together.ai, Groq (Bearer token). The only requirement is that the model supports function/tool calling.
+The primary agent supports multiple backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, and any OpenAI-compatible server. The escalation agent can be any of the above, or the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`) — a powerful option when available but not required.
 
-If no local agent is configured, milk starts and shows setup guidance. Use `/agent add` to configure a backend interactively, or edit `~/.milk/config.json` directly.
+If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
 
-For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md). For cloud providers (Bedrock, OpenRouter, Together.ai, Groq, Azure) see [docs/providers.md](docs/providers.md).
+For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For cloud providers see [docs/providers.md](docs/providers.md).
 
 ## Usage
 
@@ -93,16 +92,16 @@ For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local
 milk
 ```
 
-Starts an interactive session. The status bar shows the current routing state, active provider, and agent availability.
+Starts an interactive session. The status bar shows the current routing state, active agent, and availability.
 
 **Slash commands:**
 
 | Command | Description |
 | --- | --- |
-| `/escalate` | Pin all subsequent turns to Claude (until `/local`) |
-| `/escalate <msg>` | Force this single turn to Claude, then resume normal routing |
-| `/local` | Pin all subsequent turns to local model (until `/escalate`) |
-| `/local <msg>` | Force this single turn to local model, then resume routing |
+| `/escalate` | Pin all subsequent turns to escalation agent (until `/primary`) |
+| `/escalate <msg>` | Force this single turn to escalation agent, then resume routing |
+| `/primary` | Pin all subsequent turns to primary agent (until `/escalate`) |
+| `/primary <msg>` | Force this single turn to primary agent, then resume routing |
 | `/learn <fact>` | Store a persistent memory (`Core=true`, W=1.0, global scope) |
 | `/memory` | List all Percepts (global + session), sorted by confidence weight |
 | `/memory global` | List only global Percepts |
@@ -122,17 +121,18 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/history global` | Switch input navigation to global history (all sessions) |
 | `/history session` | Switch input navigation to session history (default) |
 | `/skip-permissions` | Show current `dangerously_skip_permissions` state |
-| `/skip-permissions on\|off` | Enable / disable permission skip for this session |
-| `/agent` | Show active local-agent provider (URL, model, auth) |
-| `/agent list` | List all configured local-agent backends |
-| `/agent switch <name>` | Switch active local agent to a named backend |
-| `/agent add` | Add a new backend interactively (prompts for missing fields) |
+| `/skip-permissions on\|off` | Enable / disable permission skip for this session (all agents) |
+| `/agent` | Show active primary and escalation agents |
+| `/agent list` | List all configured agents (`[P]` = primary, `[E]` = escalation) |
+| `/agent switch <name> [as primary\|escalation]` | Switch agent role (prompts if args missing) |
+| `/agent add` | Add a new agent backend interactively |
 | `/colorize` | Show current transcript colorization mode |
 | `/colorize off\|fenced\|balanced\|full` | Switch colorization mode live (`balanced` = default; `full` = experimental glamour) |
+| `/think on\|off` | Show or hide reasoning/thinking tokens in transcript |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
-| `/help` | Show command reference |
+| `/help` | Show categorised command reference |
 | `/exit` | Quit |
 
 **Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory (e.g. `@src/main.go`).
@@ -163,13 +163,12 @@ milk [flags] <prompt>
 
 | Flag | Description |
 | --- | --- |
-| `--escalate` | Force this turn to Claude |
-| `--local` | Force this turn to the local model; breaks a CLAUDE_WAITING session |
+| `--escalate` | Force this turn to the escalation agent |
+| `--local` | Force this turn to the primary agent |
 | `--new` | Start a fresh session for the current directory |
 | `--session <name>` | Resume or create a named session |
 | `--list` | List sessions for the current directory |
-| `--list --all` | List all sessions across all directories (use with `--list`) |
-| `--all` | Modifier for `--list`: show sessions for all directories |
+| `--list --all` | List all sessions across all directories |
 | `--drop` | Delete the current session |
 
 ### Examples
@@ -178,19 +177,19 @@ milk [flags] <prompt>
 # Interactive session
 milk
 
-# Simple shell automation — routed to local model
+# Simple shell automation — routed to primary (local) model
 milk "list all Go files modified in the last week"
 
-# Force Claude for architecture decisions
+# Force escalation agent for architecture decisions
 milk --escalate "design a caching layer for this service"
 
 # Named session for a specific feature
 milk --session auth-refactor "what does the current middleware do?"
 
-# Continue a session after Claude asks a follow-up
+# Continue after escalation agent asks a follow-up
 milk "yes, use Redis"
 
-# Break out of a Claude conversation back to local
+# Force back to primary agent
 milk --local "grep for TODO comments"
 
 # Inspect all active sessions
@@ -255,9 +254,9 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 }
 ```
 
-`agent` names the active primary backend from the `agents` list. Use `/agent switch <name> as primary` to change it at runtime. `/agent add` configures a new backend interactively.
+`agent` names the active primary backend. `escalation_agent` names which backend handles escalated turns — any entry in `agents`, not necessarily the Claude CLI. Use `/agent switch <name> as primary|escalation` to change roles at runtime.
 
-Supported `provider` values: omit (or `""`) for no-auth/local, `"bedrock"` (AWS SigV4), `"bearer"` (API key). For Azure OpenAI, omit `provider` and pass `"api-key": "..."` under `headers`.
+Supported `provider` values: omit (or `""`) for no-auth/local, `"bedrock"` (AWS SigV4), `"bearer"` (API key), `"claude-cli"` (Claude Code CLI subprocess). For Azure OpenAI, omit `provider` and pass `"api-key": "..."` under `headers`.
 
 **`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 
@@ -283,7 +282,7 @@ Use `/otel` to inspect sizes and `/otel trim` to archive and reset. Use `/metric
 
 ## Local agent tools
 
-The local model has access to these built-in tools:
+The primary agent has access to these built-in tools:
 
 | Tool | Description |
 | --- | --- |
@@ -303,20 +302,22 @@ The local model has access to these built-in tools:
 | `search_signals` | Search OTel signal files (logs/traces/metrics) for a pattern |
 | `escalate` | Hand off the current task to the escalation agent with a reason |
 
+Side-effecting tools (`bash`, `write_file`, `edit_file`, `http_get`) require user approval on first use per project. Grants persist to `~/.milk/permissions/<project-hash>.json`. Use `/skip-permissions on` to bypass all prompts.
+
 ## Graceful degradation
 
-| Local agent | claude CLI | behaviour |
+| Primary agent | Escalation agent | Behaviour |
 | --- | --- | --- |
-| available | installed | normal routing |
-| unavailable | installed | warns once, routes all turns to Claude |
-| available | not installed | warns once, stays local-only |
-| not configured | not installed | starts in setup mode — splash shows `/agent add` guidance |
-| unavailable | not installed | starts in setup mode — splash shows `/agent add` guidance |
+| available | available | normal routing |
+| unavailable | available | warns once, routes all turns to escalation agent |
+| available | unavailable | warns once, stays primary-only |
+| not configured | not configured | setup mode — splash shows `/agent add` guidance |
 
 ## Documentation
 
 - [docs/setup.md](docs/setup.md) — full setup guide and local testing procedure
 - [docs/spec.md](docs/spec.md) — full architecture and design spec
+- [docs/providers.md](docs/providers.md) — provider configuration guides
 - [docs/memory-design.md](docs/memory-design.md) — memory system design and phases
 - [docs/observability-design.md](docs/observability-design.md) — OTel observability strategy
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records
