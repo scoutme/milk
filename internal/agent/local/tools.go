@@ -165,7 +165,7 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 					"properties": map[string]any{
 						"last_n":  map[string]any{"type": "integer", "description": "Return only the last N turns. Omit to return all."},
 						"pattern": map[string]any{"type": "string", "description": "Case-insensitive substring filter — only turns whose content contains this string are returned."},
-						"agent":   map[string]any{"type": "string", "enum": []string{"local", "claude"}, "description": "Restrict to turns from a specific agent. Omit for both."},
+						"agent":   map[string]any{"type": "string", "enum": []string{"local", "escalation"}, "description": "Restrict to turns from a specific agent role. Use \"local\" for the primary agent, \"escalation\" for the escalation agent. Omit for all turns."},
 					},
 					"required": []string{},
 				},
@@ -174,8 +174,8 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 		{
 			"type": "function",
 			"function": map[string]any{
-				"name":        "escalate_to_claude",
-				"description": "Signal that this task exceeds local model capabilities and should be handled by Claude.",
+				"name":        "escalate",
+				"description": "Signal that this task exceeds local model capabilities and should be handed off to the escalation agent.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -280,7 +280,7 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return toolResult{Error: "observability not available"}.String(), false
 	case "export_session":
 		return dispatchExportSession(sess, argsJSON), false
-	case "escalate_to_claude":
+	case "escalate":
 		return "", true // caller checks the bool
 	default:
 		return toolResult{Error: "unknown tool: " + name}.String(), false
@@ -328,7 +328,7 @@ func dispatchExportSession(sess *session.Session, argsJSON string) string {
 }
 
 // runGetSessionContext formats session history with optional filters:
-// last_n, pattern (substring), agent ("local"|"claude").
+// last_n, pattern (substring), agent ("local"|"escalation").
 func runGetSessionContext(sess *session.Session, args map[string]any) string {
 	if sess == nil || len(sess.History) == 0 {
 		return toolResult{Output: "(no session history yet)"}.String()
@@ -435,8 +435,23 @@ func runBash(ctx context.Context, args map[string]any) (string, bool) {
 	}.String(), false
 }
 
+// expandTilde replaces a leading "~" with the user's home directory.
+// Returns the path unchanged when it doesn't start with "~" or the home
+// directory cannot be determined.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return home + path[1:]
+}
+
 func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
+	path = expandTilde(path)
 	pattern, _ := args["pattern"].(string)
 	cmd := exec.CommandContext(ctx, "find", path,
 		"-not", "-path", "*/.git/*",
@@ -461,6 +476,7 @@ func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
 func runGrep(ctx context.Context, args map[string]any) (string, bool) {
 	pattern, _ := args["pattern"].(string)
 	path, _ := args["path"].(string)
+	path = expandTilde(path)
 	recursive, _ := args["recursive"].(bool)
 
 	// Always exclude hidden/binary directories and skip binary files.
@@ -500,7 +516,7 @@ func runGrep(ctx context.Context, args map[string]any) (string, bool) {
 func runWriteFile(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
-	path = filepath.Clean(path)
+	path = filepath.Clean(expandTilde(path))
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return toolResult{Error: err.Error()}.String(), false
@@ -513,7 +529,7 @@ func runWriteFile(args map[string]any) (string, bool) {
 
 func runReadFile(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
-	path = filepath.Clean(path)
+	path = filepath.Clean(expandTilde(path))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -560,7 +576,7 @@ func runEditFile(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
-	path = filepath.Clean(path)
+	path = filepath.Clean(expandTilde(path))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -588,7 +604,7 @@ func runListDir(args map[string]any) (string, bool) {
 	if path == "" {
 		path = "."
 	}
-	path = filepath.Clean(path)
+	path = filepath.Clean(expandTilde(path))
 
 	entries, err := os.ReadDir(path)
 	if err != nil {

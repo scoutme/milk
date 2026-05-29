@@ -161,13 +161,13 @@ func TestList_PatternFilter(t *testing.T) {
 
 func TestList_ConsumerFilter(t *testing.T) {
 	s := newTestStore(t, false)
-	s.Record(context.Background(), "for all", ProducerUser, ConsumerAll, Roles{}, false)        //nolint:errcheck
-	s.Record(context.Background(), "local only", ProducerUser, ConsumerLocal, Roles{}, false)   //nolint:errcheck
-	s.Record(context.Background(), "claude only", ProducerUser, ConsumerClaude, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "for all", ProducerUser, ConsumerAll, Roles{}, false)            //nolint:errcheck
+	s.Record(context.Background(), "local only", ProducerUser, ConsumerLocal, Roles{}, false)       //nolint:errcheck
+	s.Record(context.Background(), "claude only", ProducerUser, ConsumerEscalation, Roles{}, false) //nolint:errcheck
 
 	localResults := s.List(ListOpts{Consumer: ConsumerLocal})
 	for _, p := range localResults {
-		if p.Consumer == ConsumerClaude {
+		if p.Consumer == ConsumerEscalation {
 			t.Errorf("local filter returned Claude-only percept: %q", p.Content)
 		}
 	}
@@ -175,7 +175,7 @@ func TestList_ConsumerFilter(t *testing.T) {
 		t.Errorf("expected 2 results for local filter, got %d", len(localResults))
 	}
 
-	claudeResults := s.List(ListOpts{Consumer: ConsumerClaude})
+	claudeResults := s.List(ListOpts{Consumer: ConsumerEscalation})
 	for _, p := range claudeResults {
 		if p.Consumer == ConsumerLocal {
 			t.Errorf("claude filter returned local-only percept: %q", p.Content)
@@ -234,7 +234,7 @@ func TestInitialWeight(t *testing.T) {
 		{ProducerUser, true, 1.0},
 		{ProducerSystem, false, 0.4},
 		{ProducerLocal, false, 0.7},
-		{ProducerClaude, false, 0.7},
+		{ProducerEscalation, false, 0.7},
 	}
 	for _, c := range cases {
 		got := initialWeight(c.producer, c.core)

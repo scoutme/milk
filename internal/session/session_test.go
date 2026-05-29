@@ -11,13 +11,13 @@ func TestTransition_ValidPaths(t *testing.T) {
 		want bool
 	}{
 		{StateRouting, StateLocal, true},
-		{StateRouting, StateClaude, true},
-		{StateLocal, StateClaude, true},
+		{StateRouting, StateEscalation, true},
+		{StateLocal, StateEscalation, true},
 		{StateLocal, StateRouting, true},
-		{StateClaude, StateClaudeWaiting, true},
-		{StateClaude, StateRouting, true},
-		{StateClaudeWaiting, StateClaude, true},
-		{StateClaudeWaiting, StateRouting, true},
+		{StateEscalation, StateEscalationWaiting, true},
+		{StateEscalation, StateRouting, true},
+		{StateEscalationWaiting, StateEscalation, true},
+		{StateEscalationWaiting, StateRouting, true},
 	}
 	for _, tc := range cases {
 		s := &Session{State: tc.from}
@@ -30,9 +30,9 @@ func TestTransition_ValidPaths(t *testing.T) {
 
 func TestTransition_InvalidPaths(t *testing.T) {
 	cases := []struct{ from, to State }{
-		{StateRouting, StateClaudeWaiting},
-		{StateLocal, StateClaudeWaiting},
-		{StateClaudeWaiting, StateLocal},
+		{StateRouting, StateEscalationWaiting},
+		{StateLocal, StateEscalationWaiting},
+		{StateEscalationWaiting, StateLocal},
 	}
 	for _, tc := range cases {
 		s := &Session{State: tc.from}
@@ -55,8 +55,8 @@ func TestRebuildSummaryBricks_LocalOnly(t *testing.T) {
 	if !contains(s.LastLocalSummary, "fix typo") {
 		t.Errorf("expected local turn in LastLocalSummary, got %q", s.LastLocalSummary)
 	}
-	if s.LastClaudeSummary != "" {
-		t.Errorf("expected empty LastClaudeSummary with no Claude turns, got %q", s.LastClaudeSummary)
+	if s.LastEscalationSummary != "" {
+		t.Errorf("expected empty LastEscalationSummary with no Claude turns, got %q", s.LastEscalationSummary)
 	}
 }
 
@@ -64,8 +64,8 @@ func TestRebuildSummaryBricks_LocalSinceLastClaude(t *testing.T) {
 	s := &Session{History: []Turn{
 		mkTurn(RoleUser, AgentLocal, "old local turn"),
 		mkTurn(RoleAssistant, AgentLocal, "old answer"),
-		mkTurn(RoleUser, AgentClaude, "escalated"),
-		mkTurn(RoleAssistant, AgentClaude, "claude reply with enough text to count"),
+		mkTurn(RoleUser, AgentEscalation, "escalated"),
+		mkTurn(RoleAssistant, AgentEscalation, "claude reply with enough text to count"),
 		mkTurn(RoleUser, AgentLocal, "new local turn"),
 		mkTurn(RoleAssistant, AgentLocal, "new answer"),
 	}}
@@ -80,15 +80,15 @@ func TestRebuildSummaryBricks_LocalSinceLastClaude(t *testing.T) {
 
 func TestRebuildSummaryBricks_ClaudeEmptySessionNotUpdated(t *testing.T) {
 	s := &Session{
-		LastClaudeSummary: "previous summary",
+		LastEscalationSummary: "previous summary",
 		History: []Turn{
-			mkTurn(RoleUser, AgentClaude, "hi"),
-			mkTurn(RoleAssistant, AgentClaude, "ok"), // < 200 chars, no tool calls
+			mkTurn(RoleUser, AgentEscalation, "hi"),
+			mkTurn(RoleAssistant, AgentEscalation, "ok"), // < 200 chars, no tool calls
 		},
 	}
 	s.RebuildSummaryBricks(12000)
-	if s.LastClaudeSummary != "previous summary" {
-		t.Errorf("empty Claude session should not update LastClaudeSummary, got %q", s.LastClaudeSummary)
+	if s.LastEscalationSummary != "previous summary" {
+		t.Errorf("empty Claude session should not update LastEscalationSummary, got %q", s.LastEscalationSummary)
 	}
 }
 

@@ -12,8 +12,8 @@ import (
 type Target string
 
 const (
-	TargetLocal  Target = "local"
-	TargetClaude Target = "claude"
+	TargetLocal      Target = "local"
+	TargetEscalation Target = "claude"
 )
 
 type Decision struct {
@@ -37,15 +37,15 @@ func New(cfg config.Config, localAgent *local.Agent) *Router {
 func (r *Router) Route(ctx context.Context, sess *session.Session, prompt string, explicitEscalate, explicitLocal bool) (Decision, error) {
 	// 1. Explicit flags always win
 	if explicitEscalate {
-		return Decision{Target: TargetClaude, Conclusive: true, Reason: "--escalate flag"}, nil
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "--escalate flag"}, nil
 	}
 	if explicitLocal {
 		return Decision{Target: TargetLocal, Conclusive: true, Reason: "--local flag"}, nil
 	}
 
-	// 2. Session state: CLAUDE_WAITING means the conversation is mid-flight with Claude
-	if sess.State == session.StateClaudeWaiting {
-		return Decision{Target: TargetClaude, Conclusive: true, Reason: "session state CLAUDE_WAITING"}, nil
+	// 2. Session state: ESCALATION_WAITING means the conversation is mid-flight with the escalation agent
+	if sess.State == session.StateEscalationWaiting {
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "session state ESCALATION_WAITING"}, nil
 	}
 
 	// 3. Rules layer
@@ -56,14 +56,14 @@ func (r *Router) Route(ctx context.Context, sess *session.Session, prompt string
 	// 4. Configurable fallback: local LLM classifier or direct Claude escalation
 	switch r.cfg.Rules.ClassifierFallback {
 	case "claude":
-		return Decision{Target: TargetClaude, Conclusive: true, Reason: "classifier-fallback=claude"}, nil
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "classifier-fallback=claude"}, nil
 	default: // "local" or unset
 		if r.localAgent != nil {
 			escalate, err := r.localAgent.Classify(ctx, prompt)
 			if err != nil {
 				fmt.Printf("[router] classifier error: %v — defaulting to local\n", err)
 			} else if escalate {
-				return Decision{Target: TargetClaude, Conclusive: true, Reason: "model classifier"}, nil
+				return Decision{Target: TargetEscalation, Conclusive: true, Reason: "model classifier"}, nil
 			}
 		}
 	}

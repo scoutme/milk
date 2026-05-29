@@ -13,10 +13,10 @@ import (
 // sessionBricks holds the summary-brick fields from the active session for
 // display in the memory panel.
 type sessionBricks struct {
-	currentNeed       string
-	lastLocalSummary  string
-	lastClaudeSummary string
-	escalationBrief   string
+	currentNeed           string
+	lastLocalSummary      string
+	lastEscalationSummary string
+	escalationBrief       string
 }
 
 const recentThreshold = 60 * time.Second
@@ -39,10 +39,10 @@ func (m *model) renderMemoryPanel(h int) string {
 	}
 
 	bricks := sessionBricks{
-		currentNeed:       m.st.sess.CurrentNeed,
-		lastLocalSummary:  m.st.sess.LastLocalSummary,
-		lastClaudeSummary: m.st.sess.LastClaudeSummary,
-		escalationBrief:   m.st.sess.EscalationBrief,
+		currentNeed:           m.st.sess.CurrentNeed,
+		lastLocalSummary:      m.st.sess.LastLocalSummary,
+		lastEscalationSummary: m.st.sess.LastEscalationSummary,
+		escalationBrief:       m.st.sess.EscalationBrief,
 	}
 	all := buildPanelLines(m.mem, inner, bricks)
 	total := len(all)
@@ -76,10 +76,10 @@ func (m *model) renderMemoryPanel(h int) string {
 // a ▌ thumb when the panel content overflows, or a blank column otherwise.
 func (m *model) renderPanelScrollbar(h int) string {
 	bricks := sessionBricks{
-		currentNeed:       m.st.sess.CurrentNeed,
-		lastLocalSummary:  m.st.sess.LastLocalSummary,
-		lastClaudeSummary: m.st.sess.LastClaudeSummary,
-		escalationBrief:   m.st.sess.EscalationBrief,
+		currentNeed:           m.st.sess.CurrentNeed,
+		lastLocalSummary:      m.st.sess.LastLocalSummary,
+		lastEscalationSummary: m.st.sess.LastEscalationSummary,
+		escalationBrief:       m.st.sess.EscalationBrief,
 	}
 	all := buildPanelLines(m.mem, memoryPanelInner, bricks)
 	total := len(all)
@@ -181,7 +181,7 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
 	addBrickLines(&lines, "need", bricks.currentNeed, inner)
 	addBrickLines(&lines, "local", bricks.lastLocalSummary, inner)
-	addBrickLines(&lines, "claude", bricks.lastClaudeSummary, inner)
+	addBrickLines(&lines, "claude", bricks.lastEscalationSummary, inner)
 	addBrickLines(&lines, "brief", bricks.escalationBrief, inner)
 
 	return lines
@@ -269,7 +269,7 @@ func consumerBadge(p memory.Percept) string {
 	switch p.Consumer {
 	case memory.ConsumerLocal:
 		return dim("[L]")
-	case memory.ConsumerClaude:
+	case memory.ConsumerEscalation:
 		return dim("[C]")
 	}
 	return ""
@@ -367,7 +367,7 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	add("") // CONTEXT BRICKS header
 	addBrick("need", bricks.currentNeed)
 	addBrick("local", bricks.lastLocalSummary)
-	addBrick("claude", bricks.lastClaudeSummary)
+	addBrick("claude", bricks.lastEscalationSummary)
 	addBrick("brief", bricks.escalationBrief)
 
 	return ids
@@ -381,7 +381,7 @@ func brickContent(id string, bricks sessionBricks) string {
 	case "local":
 		return bricks.lastLocalSummary
 	case "claude":
-		return bricks.lastClaudeSummary
+		return bricks.lastEscalationSummary
 	case "brief":
 		return bricks.escalationBrief
 	}

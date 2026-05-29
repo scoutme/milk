@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk lets you switch between a local LLM agent and a rich cloud agent (Claude Code CLI) mid-workflow, maintaining full session context across the switch. The local agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
+milk lets you switch between a local LLM agent and a configurable escalation agent (Claude Code CLI or another inference backend) mid-workflow, maintaining full session context across the switch. The local agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
 
 The primary use case is code assistance and shell automation for a single user.
 
@@ -18,38 +18,37 @@ milk [prompt | flags]
        ▼
 ┌─────────────────────────────────────────────────────┐
 │  Session State Machine                              │
-│  ROUTING → LOCAL | CLAUDE | CLAUDE_WAITING          │
+│  ROUTING → LOCAL | ESCALATION | ESCALATION_WAITING  │
 └──────────┬──────────────────────────────────────────┘
            │
            ▼
 ┌──────────────────────────┐
 │  Router                  │
 │  1. Explicit flags       │  --escalate, --local
-│  2. Session state check  │  CLAUDE_WAITING → bypass
+│  2. Session state check  │  ESCALATION_WAITING → bypass
 │  3. Rules layer          │  heuristics + weighted scorer
 │  4. Local model          │  local model self-classification
 │  5. Default: try local   │
 └────────┬─────────────────┘
          │
-    ┌────┴─────┐
-    ▼           ▼
-LOCAL           CLAUDE
+    ┌────┴──────────┐
+    ▼               ▼
+PRIMARY         ESCALATION
 agent           agent
-OpenAI API      claude --print
-OpenAI API      --output-format stream-json
-tool loop       --session-id / --resume
+OpenAI API      (any AgentConfig)
+tool loop       claude-cli / bedrock / …
 ```
 
 ### Session state machine
 
 ```
-States: ROUTING | LOCAL | CLAUDE | CLAUDE_WAITING
+States: ROUTING | LOCAL | ESCALATION | ESCALATION_WAITING
 
-ROUTING        → rules + local model decision → LOCAL or CLAUDE
-LOCAL          → --escalate OR local model escalate_to_claude() → CLAUDE
-CLAUDE         → Claude ends turn with question → CLAUDE_WAITING
-CLAUDE_WAITING → next user input bypasses router → direct --resume to Claude
-CLAUDE_WAITING → user --local flag → back to ROUTING
+ROUTING            → rules + local model decision → LOCAL or ESCALATION
+LOCAL              → --escalate OR local model escalate() → ESCALATION
+ESCALATION         → escalation agent ends turn with question → ESCALATION_WAITING
+ESCALATION_WAITING → next user input bypasses router → direct --resume to escalation agent
+ESCALATION_WAITING → user --local flag → back to ROUTING
 ```
 
 ---
@@ -58,14 +57,14 @@ CLAUDE_WAITING → user --local flag → back to ROUTING
 
 Decision order per turn:
 
-1. **Explicit flags** — `--escalate` forces Claude; `--local` forces local (always wins)
-2. **Session state** — if `CLAUDE_WAITING`, bypass router, send directly to `claude --resume`
+1. **Explicit flags** — `--escalate` forces escalation agent; `--local` forces local (always wins)
+2. **Session state** — if `ESCALATION_WAITING`, bypass router, send directly to escalation agent `--resume`
 3. **Rules layer** — layered scorer:
-   - Hard rules: token length above `escalate_above_tokens` → Claude; keyword match → Claude
+   - Hard rules: token length above `escalate_above_tokens` → escalation; keyword match → escalation
    - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
    - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open questions each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`
 4. **Local model classification** — when scorer is inconclusive, ask the local model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
-5. **Default** — attempt local; escalate if local returns `escalate_to_claude(reason)`
+5. **Default** — attempt local; escalate if local returns `escalate(reason)`
 
 The classifier uses the same model instance as the local coding agent. No second model or second inference server instance.
 
@@ -73,19 +72,20 @@ The classifier uses the same model instance as the local coding agent. No second
 
 ## Local Agent
 
-- Backend: configurable via `local_agents` in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/provider switch <name>`
+- Backend: configurable via `agents` in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/agent switch <name> as primary`
 - Protocols: OpenAI-compatible Chat Completions API (llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, Together.ai, Groq, Azure OpenAI) **or** AWS Bedrock Converse API natively (binary event-stream, SigV4 signing — not OpenAI-compat)
 - Model: any tool-calling-capable model. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B, Claude Haiku (via Bedrock).
 
 ### Remote inference / authentication
 
-The `provider` field in a `local_agents` entry selects the auth transport:
+The `provider` field in an `agents` entry selects the backend type and auth transport:
 
-| `provider` | Auth mechanism | Required fields |
-|---|---|---|
-| `""` / `"local"` | None (plain HTTP) | — |
-| `"bedrock"` | AWS SigV4 | `aws_region` + credentials (config or env vars) |
-| `"bearer"` or any other string | `Authorization: Bearer <api_key>` | `api_key` |
+| `provider` | Backend | Auth mechanism | Required fields |
+|---|---|---|---|
+| `""` / `"local"` | OpenAI-compat HTTP | None (plain HTTP) | `url`, `model` |
+| `"bedrock"` | AWS Bedrock Converse | AWS SigV4 | `url`, `model`, `aws_region` + credentials |
+| `"claude-cli"` | Claude Code CLI subprocess | n/a | `bin` (optional, default `"claude"`) |
+| any other string | OpenAI-compat HTTP | `Authorization: Bearer <api_key>` | `url`, `model`, `api_key` |
 
 Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injected via `headers`.
 
@@ -105,18 +105,25 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
   - `bash(command string) → stdout, stderr, exit_code`
   - `grep(pattern string, path string, recursive bool) → matches`
   - `read_file(path string, offset int, limit int) → content`
-  - `write_file(path string, content string) → ok` — creates parent directories
-  - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches
-  - `list_dir(path string) → entries` — names, types, sizes
+  - `write_file(path string, content string) → ok` — creates parent directories; expands `~`
+  - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches; expands `~`
+  - `list_dir(path string) → entries` — names, types, sizes; expands `~`
   - `http_get(url string, max_bytes int) → body` — bounded HTTP fetch
-  - `get_session_context() → history` — returns the full shared session history (both agents) so the local model can see prior Claude turns
-- Self-escalation: local model may return `escalate_to_claude(reason string)` as a tool call to trigger promotion
+  - `get_session_context() → history` — returns the full shared session history (both agents) so the local model can see prior escalation turns
+- Self-escalation: local model may return `escalate(reason string)` as a tool call to trigger promotion
+- Role-aware system prompt: primary agent sees the `escalate` tool and is told to use it for tasks beyond its capabilities; escalation agent does not see the `escalate` tool and is told it is the escalation target
 
 ---
 
-## Claude Agent
+## Escalation Agent
 
-- Interface: `claude` CLI subprocess
+The escalation agent is any entry in `agents` whose name matches `escalation_agent` in the config. It defaults to the built-in `claude-cli` entry (named `"claude"`). It can be:
+
+- **Claude Code CLI** (`provider: "claude-cli"`): `claude --print --output-format stream-json`
+- **Any inference-server backend**: same OpenAI-compat or Bedrock path as the primary agent, but with a role-aware system prompt (no `escalate` tool, knows it is the escalation target)
+
+### Claude CLI escalation
+
 - **AWS credential injection**: when `aws_auth_refresh: true` in `~/.milk/config.json`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn to obtain fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped from the inherited environment to prevent wrong-account overrides. See ADR 23.
 - First escalation turn:
   ```
@@ -127,15 +134,15 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
 - Subsequent turns in same escalation:
   ```
   claude --print --output-format stream-json \
-         --resume <claude-session-id> \
+         --resume <escalation-session-id> \
          "<user prompt>"
   ```
 - `session_id` is extracted from the first NDJSON message and persisted to the milk session file
-- Claude orients itself from the appended context — no separate reformulation step
+- The escalation agent orients itself from the appended context — no separate reformulation step
 
 ### Permission prompt flow
 
-milk passes `--permission-prompt-tool stdio` on every Claude invocation. When Claude wants to use a tool that has not been pre-approved, it emits a `control_request` NDJSON event on stdout and pauses. milk intercepts this event and, in TUI mode, routes a blocking prompt through the bubbletea message queue (see ADR-0015):
+milk passes `--permission-prompt-tool stdio` on every Claude CLI invocation. When Claude wants to use a tool that has not been pre-approved, it emits a `control_request` NDJSON event on stdout and pauses. milk intercepts this event and, in TUI mode, routes a blocking prompt through the bubbletea message queue (see ADR-0015):
 
 1. The agent goroutine calls `tuiInputReader.readLine(prompt)` and blocks on a channel.
 2. The TUI appends the prompt to the transcript and switches key events to `handlePermKey`.
@@ -144,13 +151,13 @@ milk passes `--permission-prompt-tool stdio` on every Claude invocation. When Cl
 
 The prompt shows the tool name, key arguments, and — for `workingDir` blocks — the restricted path. The session stays alive throughout; no `--resume` round-trip is needed.
 
-`dangerously_skip_permissions` (config field) bypasses this flow entirely: Claude auto-approves all tool uses. `/skip-permissions on|off` overrides this setting per session without restarting.
+`dangerously_skip_permissions` (field on the `claude-cli` AgentConfig entry) bypasses this flow entirely: Claude auto-approves all tool uses. `/skip-permissions on|off` overrides this setting per session without restarting.
 
-Pre-approved tools and directories can be listed in `allowed_tools` and `add_dirs` config fields; they are passed as `--allowedTools` / `--add-dir` flags and never trigger a prompt.
+Pre-approved tools and directories can be listed in `allowed_tools` and `add_dirs` fields on the `claude-cli` entry; they are passed as `--allowedTools` / `--add-dir` flags and never trigger a prompt.
 
 ### Context handoff (escalation)
 
-When promoting from local to Claude, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt`. Format:
+When promoting from local to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt` (for Claude CLI) or as the first system message (for inference-server escalation). Format:
 
 ```
 [Context from local agent session]
@@ -185,8 +192,8 @@ User: <final prompt that triggered escalation>
   "cwd": "/absolute/path/to/project",
   "created_at": "2026-05-05T10:00:00Z",
   "last_used": "2026-05-05T11:32:00Z",
-  "state": "CLAUDE_WAITING",
-  "claude_session_id": "abc123",
+  "state": "ESCALATION_WAITING",
+  "escalation_session_id": "abc123",
   "history": [
     {
       "role": "user | assistant | tool_result",
@@ -235,7 +242,7 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/local`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/provider`, `/colorize`, `/think`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
@@ -243,19 +250,19 @@ The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–6
 
 **Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
 
-**/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes Claude auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
+**/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
 
-**/provider** manages local-agent backends at runtime:
+**/agent** manages agent backends at runtime:
 
 | Subcommand | Action |
 |---|---|
-| `/provider` | Show active backend (URL, model, auth method) |
-| `/provider list` | List all configured backends; active marked with `*` |
-| `/provider switch <name>` | Switch to the named backend (rebuilds agent, pings) |
-| `/provider add` | Add a backend via interactive wizard (prompts for each field) |
-| `/provider add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
+| `/agent` | Show active primary and escalation backends |
+| `/agent list` | List all configured backends; active marked with `*` |
+| `/agent switch <name> as primary\|escalation` | Switch role to the named backend (prompts if args missing) |
+| `/agent add` | Add a backend via interactive wizard (prompts for each field) |
+| `/agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
 
-New backends are appended to `local_agents` in `~/.milk/config.json` immediately. Use `/provider switch` to activate a newly added backend in the current session.
+New backends are appended to `agents` in `~/.milk/config.json` immediately. Use `/agent switch` to assign a role to a newly added backend in the current session.
 
 **/colorize** controls transcript syntax and Markdown rendering:
 
@@ -289,8 +296,8 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 
 | Flag | Description |
 |------|-------------|
-| `--escalate` | Force route to Claude for this turn |
-| `--local` | Force route to local model for this turn; breaks CLAUDE_WAITING state |
+| `--escalate` | Force route to escalation agent for this turn |
+| `--local` | Force route to primary agent for this turn; breaks ESCALATION_WAITING state |
 | `--new` | Start a new session (old sessions for cwd untouched) |
 | `--session <name>` | Target session by name (resume or create) |
 | `--continue` | Alias for default resume behavior (explicit) |
@@ -306,22 +313,28 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 
 ```json
 {
-  "local_agent": "haiku",
-  "local_agents": [
+  "agent": "local",
+  "agents": [
     {
-      "name": "haiku",
+      "name": "local",
+      "url": "http://localhost:8080",
+      "model": "qwen2.5-coder",
+      "provider": "local"
+    },
+    {
+      "name": "haiku-aws",
       "url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
       "model": "arn:aws:bedrock:...:application-inference-profile/...",
       "provider": "bedrock",
       "aws_region": "eu-central-1"
     },
     {
-      "name": "local",
-      "url": "http://localhost:8080",
-      "model": "gemma4"
+      "name": "claude",
+      "provider": "claude-cli",
+      "bin": "claude"
     }
   ],
-  "claude_bin": "claude",
+  "escalation_agent": "claude",
   "default_route": "local",
   "colorization": "balanced",
   "show_reasoning": true,
@@ -344,9 +357,15 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 }
 ```
 
-`local_agent` names the active backend from `local_agents`. If empty, the first entry is used.
+`agent` names the active primary backend from `agents`. If empty, the first non-`claude-cli` entry is used.
 
-### `local_agents` entry fields
+`escalation_agent` selects which `agents` entry handles escalated turns. Defaults to `"claude"` (the built-in `claude-cli` entry). Set to the name of any `agents` entry — including another inference-server backend — to route escalated turns there instead. Change at runtime with `/agent switch <name> as escalation`.
+
+A built-in `claude-cli` entry named `"claude"` is always available even if not listed explicitly in `agents`. When absent from the file, it is injected in-memory with `bin: "claude"`. Existing sessions are automatically migrated from the old `local_agents` / `claude_bin` / `dangerously_skip_permissions` shape on first load; the migrated config is written back to disk.
+
+### `agents` entry fields
+
+#### Inference-server fields (all providers except `claude-cli`)
 
 | Field | Type | Description |
 |---|---|---|
@@ -366,6 +385,17 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 | `aws_token` | string | AWS session token (fallback: `AWS_SESSION_TOKEN` env) |
 | `aws_service` | string | SigV4 service name (default `"bedrock"`) |
 | `aws_refresh_cmd` | string | `credential_process`-compatible command; on 403 the SigV4 transport runs it, swaps credentials, and retries once |
+
+#### Claude CLI fields (`provider: "claude-cli"`)
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Display name; used as selector key |
+| `provider` | string | Must be `"claude-cli"` |
+| `bin` | string | Path to the `claude` binary (default `"claude"`) |
+| `dangerously_skip_permissions` | bool | Auto-approve all tool uses without prompting |
+| `allowed_tools` | array of string | Tools pre-approved; passed as `--allowedTools` |
+| `add_dirs` | array of string | Extra directories; passed as `--add-dir` |
 
 ### `colorization` field
 
@@ -388,11 +418,11 @@ Controls whether thinking/reasoning tokens are shown in the transcript by defaul
 
 ## Graceful Degradation
 
-| Inference server | claude CLI | behavior |
+| Primary agent | Escalation agent | behavior |
 | --- | --- | --- |
-| up | available | normal routing |
-| down | available | warn once per session, route all to Claude |
-| up | unavailable/not installed | warn once per session, stay local-only |
+| up | available (any provider) | normal routing |
+| down | available | warn once per session, route all to escalation agent |
+| up | unavailable/not installed | warn once per session, stay primary-only |
 | down | unavailable | error + exit |
 
 ---
@@ -411,7 +441,7 @@ milk relays tokens to stdout as they arrive.
 ## Backlog
 
 - Planning mode (offline, no LLM execution)
-- Demotion from Claude back to local mid-session
+- Demotion from escalation back to primary mid-session
 - Web UI / TUI
 - MCP server integration for local tools
 - Multi-user / daemon mode

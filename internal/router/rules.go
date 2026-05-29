@@ -37,13 +37,13 @@ func rulesDecision(prompt string, cfg config.Config) Decision {
 
 	// Long prompt → escalate
 	if approxTokens > r.EscalateAboveTokens {
-		return Decision{Target: TargetClaude, Conclusive: true, Reason: "prompt exceeds token threshold"}
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "prompt exceeds token threshold"}
 	}
 
 	// Escalate keyword hit
 	for _, kw := range r.EscalateKeywords {
 		if strings.Contains(lower, strings.ToLower(kw)) {
-			return Decision{Target: TargetClaude, Conclusive: true, Reason: "escalate keyword: " + kw}
+			return Decision{Target: TargetEscalation, Conclusive: true, Reason: "escalate keyword: " + kw}
 		}
 	}
 
@@ -63,7 +63,7 @@ func rulesDecision(prompt string, cfg config.Config) Decision {
 	reason := strings.Join(reasons, ", ")
 
 	if result.TotalScore >= r.EscalateThreshold {
-		return Decision{Target: TargetClaude, Conclusive: true, Reason: "signals: " + reason}
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "signals: " + reason}
 	}
 	if result.TotalScore <= r.LocalThreshold {
 		return Decision{Target: TargetLocal, Conclusive: true, Reason: "signals: " + reason}

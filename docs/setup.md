@@ -21,7 +21,7 @@
 
 milk supports two local agent protocols:
 
-- **OpenAI-compatible Chat Completions** (default): any compliant server — llama.cpp, [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm), or remote cloud providers (OpenRouter, Together.ai, Groq, Azure OpenAI). Configure via `local_agents` in `~/.milk/config.json`.
+- **OpenAI-compatible Chat Completions** (default): any compliant server — llama.cpp, [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm), or remote cloud providers (OpenRouter, Together.ai, Groq, Azure OpenAI). Configure via `agents` in `~/.milk/config.json`.
 - **AWS Bedrock Converse API** (native): SigV4-signed requests with binary event-stream responses. Set `provider: "bedrock"` in the agent config entry. No OpenAI-compat layer required.
 
 For either protocol, the model must support function/tool calling.
@@ -111,7 +111,7 @@ The reference model is **Qwen2.5-Coder-7B-Instruct**, chosen for its reliable fu
 | Q3_K_M | ~3.2 GB | 4 GB VRAM (with headroom) |
 | Q8_0 | ~7.2 GB | 8 GB VRAM |
 
-Larger VRAM or a different GPU architecture may accommodate the 14B variant. Any Qwen2.5-Coder GGUF with tool calling support can be substituted by adjusting the `model` field of the active entry in `local_agents` in `~/.milk/config.json`.
+Larger VRAM or a different GPU architecture may accommodate the 14B variant. Any Qwen2.5-Coder GGUF with tool calling support can be substituted by adjusting the `model` field of the active entry in `agents` in `~/.milk/config.json`.
 
 ```sh
 pip3 install hf-xet huggingface_hub[hf_xet,cli]
@@ -197,10 +197,10 @@ A custom destination is also supported:
 task build DEST=/usr/local/bin/milk
 ```
 
-Expected output (will reflect your current `local_agents` config):
+Expected output (will reflect your current `agents` config):
 
 ```text
-local_agent:    local
+agent:          local
 claude_bin:     claude
 default_route:  local
 escalate_above_tokens: 2000
@@ -302,10 +302,10 @@ All tests run without an inference server or claude. They use temp directories a
 # Force escalation via flag
 ./milk --escalate "explain the session state machine design"
 
-# Self-escalation: model should call escalate_to_claude()
+# Self-escalation: model should call escalate()
 ./milk "design a plugin architecture for milk"
 
-# CLAUDE_WAITING: Claude asks a follow-up; next turn bypasses router
+# ESCALATION_WAITING: escalation agent asks a follow-up; next turn bypasses router
 ./milk --escalate "what would you need to know to refactor the router?"
 ./milk "focus on the rules layer"   # goes directly to --resume, no routing
 

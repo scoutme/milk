@@ -138,7 +138,7 @@ func initialWeight(producer Producer, core bool) float64 {
 		return 0.9 // promotes after one session (0.9−0.10 = 0.80 == promoteThreshold)
 	case ProducerSystem:
 		return 0.4 // low-confidence hint; pruned after two sessions
-	default: // ProducerLocal, ProducerClaude
+	default: // ProducerLocal, ProducerEscalation
 		return 0.7 // inference; decays over ~5 sessions; needs edge boost to promote
 	}
 }

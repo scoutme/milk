@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
@@ -17,7 +18,7 @@ import (
 )
 
 const cmdEscalate = "/escalate"
-const cmdLocal = "/local"
+const cmdPrimary = "/primary"
 const cmdPaste = "/paste"
 const cmdLearn = "/learn"
 const cmdOtel = "/otel"
@@ -28,12 +29,12 @@ const cmdHistory = "/history"
 const cmdPanel = "/panel"
 const cmdForget = "/forget"
 const cmdSkipPerms = "/skip-permissions"
-const cmdProvider = "/provider"
+const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
 
 var slashCommands = []string{
-	cmdEscalate, cmdLocal, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdProvider, cmdColorize, cmdThink,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -41,72 +42,81 @@ func promptLabel(_ *interactiveState) string {
 	return "❯ "
 }
 
-const interactiveHelp = `Slash commands:
-  /escalate        pin all subsequent turns to Claude (until /local clears it)
-  /escalate <msg>  force this single turn to Claude, then return to normal routing
-  /local           pin all subsequent turns to local model (until /escalate clears it)
-  /local <msg>     force this single turn to local model, then return to normal routing
-  /learn <fact>    store a persistent memory (e.g. /learn prefer JSON output)
-  /metrics         show most recent metric values (memory stats, otel sizes)
-  /otel            show observability file sizes and record counts
-  /export          print current session transcript (text)
-  /export json     print session as JSON
-  /export <path>   write session transcript to file
-  /memory          list all percepts (global + session)
-  /memory global   list only global percepts
-  /memory session  list only session percepts
-  /memory <pat>    list percepts whose content contains <pat>
-  /memory show <pat|#id>  show full details of matching percepts
-  /otel trim       archive current otel files and start fresh
-  /otel off        disable OTel for this session
-  /otel on         re-enable OTel for this session
-  /history         show current history mode (session or global)
-  /history global  switch input navigation to global history
-  /history session switch input navigation to session history (default)
-  /panel memory    toggle the memory panel (right-side percept viewer)
-  /forget <pat>    delete a percept by description or #id (asks for confirmation)
-  /skip-permissions        show current dangerously_skip_permissions state
-  /skip-permissions on     enable skip-permissions for this session (Claude auto-approves all tools)
-  /skip-permissions off    disable skip-permissions for this session (Claude prompts for tool use)
-  /provider                show active local-agent provider (URL, model, auth method)
-  /provider list           list all configured local-agent backends
-  /provider switch <name>  switch the active local agent to the named backend
-  /provider add            add a new backend interactively (prompts for missing fields)
-  /provider add name=... url=... model=... [provider=...] [api_key=...] [aws_region=...]  add inline
+const interactiveHelp = `
+── Routing ──────────────────────────────────────────────────────────────
+  /escalate              pin all turns to escalation agent (/primary to unpin)
+  /escalate <msg>        force this turn to escalation agent, then resume routing
+  /primary               pin all turns to primary agent (/escalate to unpin)
+  /primary <msg>         force this turn to primary agent, then resume routing
+
+── Sessions ─────────────────────────────────────────────────────────────
+  /list                  list sessions for current directory
+  /new                   start a fresh session
+  /drop                  delete current session
+  /export                print session transcript (text)
+  /export json           print session transcript as JSON
+  /export <path>         write session transcript to file
+
+── Agents ───────────────────────────────────────────────────────────────
+  /agent                 show active primary and escalation agents
+  /agent list            list all configured agents (* = active)
+  /agent add             add a new agent interactively
+  /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]
+  /agent switch <name> [as primary|escalation]   (prompts if args missing)
+  /skip-permissions      show current skip-permissions state
+  /skip-permissions on   all agents auto-approve tool uses (no prompts)
+  /skip-permissions off  agents prompt before running side-effecting tools
+
+── Memory ───────────────────────────────────────────────────────────────
+  /learn <fact>          store a persistent memory
+  /memory                list all percepts (session + global)
+  /memory global         list only global percepts
+  /memory session        list only session percepts
+  /memory <pat>          list percepts whose content matches <pat>
+  /memory show <pat|#id> show full details of matching percepts
+  /forget <pat|#id>      delete a percept (asks for confirmation)
+  /panel memory          toggle the memory panel (right side)
+
+── Display ──────────────────────────────────────────────────────────────
   /colorize              show current colorization mode
-  /colorize off          disable colorization
-  /colorize fenced       highlight fenced code blocks only (default)
-  /colorize balanced     fenced code + inline markdown (bold, headings, bullets)
-  /colorize full         full glamour markdown rendering (experimental)
-  /think                 show current reasoning visibility (on/off)
-  /think on              show thinking/reasoning tokens in the transcript
-  /think off             hide thinking/reasoning tokens (show "[thinking…]" placeholder)
-  /new             start a fresh session
-  /drop            delete current session
-  /list            list sessions for current directory
-  /help            show commands and key bindings
-  /exit            quit
+  /colorize off          no colorization
+  /colorize fenced       highlight fenced code blocks only
+  /colorize balanced     fenced blocks + inline markdown (default)
+  /colorize full         full glamour markdown render (experimental)
+  /think                 show current reasoning visibility
+  /think on              show thinking/reasoning tokens inline
+  /think off             hide thinking tokens ([thinking…] placeholder)
+  /history               show current history navigation mode
+  /history global        navigate global input history
+  /history session       navigate session input history (default)
 
-Scrolling:
-  Mouse wheel       scroll transcript
-  PgUp/PgDn         scroll transcript half page
-  Ctrl+U/Ctrl+F     scroll transcript half page
+── Observability ────────────────────────────────────────────────────────
+  /metrics               show latest metric values
+  /otel                  show OTel file sizes and record counts
+  /otel on               enable OTel for this session
+  /otel off              disable OTel for this session
+  /otel trim             archive current OTel files and start fresh
 
-History:
-  Up/Down (single-line)   navigate input history
-  Ctrl+Up/Ctrl+Down       navigate input history
-  Ctrl+R                  reverse search through input history (type to filter, Ctrl+R again for older, Ctrl+S for newer, Enter to accept, Esc to cancel)
-  Ctrl+S                  forward search through input history
+── General ──────────────────────────────────────────────────────────────
+  /help                  show this help
+  /exit  /quit           quit
 
-Multi-line input:
-  Ctrl+N              insert a newline (most reliable)
-  Shift+Alt+Enter     insert a newline
-  AltGr+Enter         insert a newline
-  Alt+Enter           insert a newline (Windows Terminal may capture this)
-  Paste               multi-line pastes are sent as a single block automatically
+── Keyboard ─────────────────────────────────────────────────────────────
+  Scrolling
+    Mouse wheel / PgUp/PgDn / Ctrl+U / Ctrl+F   scroll transcript
 
-@ prefix:
-  @path       reference a file path`
+  Input history
+    Up / Down (single-line input)   navigate history
+    Ctrl+Up / Ctrl+Down             navigate history
+    Ctrl+R                          reverse incremental search
+    Ctrl+S                          forward incremental search
+
+  Multi-line input
+    Ctrl+N / Shift+Alt+Enter / Alt+Enter   insert newline
+    Paste                                  multi-line paste sent as one block
+
+  @ prefix
+    @path   reference a file path (Tab-completes)`
 
 const errFmt = "error: %v\n"
 
@@ -114,26 +124,32 @@ const errFmt = "error: %v\n"
 type interactiveState struct {
 	sess          *session.Session
 	forceEscalate bool
-	forceLocal    bool
+	forcePrimary  bool
 	// stickyEscalate is set when the user explicitly calls /escalate with no
-	// prompt. It causes every subsequent turn to route to Claude until the user
-	// calls /local or closes the session. forceEscalate is reset after each
+	// prompt. It causes every subsequent turn to route to the escalation agent
+	// until the user calls /primary or closes the session. forceEscalate is reset after each
 	// turn; stickyEscalate persists across turns.
 	stickyEscalate bool
-	// stickyLocal mirrors stickyEscalate for the local model.
-	stickyLocal bool
-	cwd         string
-	cfg         config.Config
-	mem         *memory.Store
-	cs          *claudesettings.Store // Claude project settings (permissions persistence)
-	program     *tea.Program          // set after tea.NewProgram, before Run
+	// stickyPrimary mirrors stickyEscalate for the local model.
+	stickyPrimary bool
+	cwd           string
+	cfg           config.Config
+	mem           *memory.Store
+	cs            *claudesettings.Store // Claude project settings (permissions persistence)
+	program       *tea.Program          // set after tea.NewProgram, before Run
 
 	// toolFutures caches per-tool answer channels created by OnToolUse as soon
 	// as each tool call is detected in the stream. The user is asked immediately
 	// via the TUI; handleStructuredDenials reads the answer (blocking briefly if
 	// the user hasn't responded yet). Keyed by tool name.
 	toolFutures     map[string]chan string
-	skipPermissions bool // session-level override for DangerouslySkipPermissions
+	skipPermissions bool             // session-level override for DangerouslySkipPermissions
+	localPerms      *local.PermStore // persisted tool grants for the primary local agent
+}
+
+// escalationAgentName returns the display name of the configured escalation agent.
+func (st *interactiveState) escalationAgentName() string {
+	return st.cfg.EscalationAgentConfig().Name
 }
 
 // extractSlashCommand scans input for a known slash command token anywhere in
@@ -160,7 +176,7 @@ func extractSlashCommand(input string) (cmd, rest string, found bool) {
 // promptFriendly is the set of slash commands that can be combined with a prompt.
 var promptFriendly = map[string]bool{
 	cmdEscalate: true,
-	cmdLocal:    true,
+	cmdPrimary:  true,
 	cmdLearn:    true,
 	cmdOtel:     true,
 }
@@ -186,29 +202,29 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdExport:
 		output = execExport(prompt, st)
 	case cmdEscalate:
-		st.forceLocal = false
-		st.stickyLocal = false
+		st.forcePrimary = false
+		st.stickyPrimary = false
 		if prompt == "" {
-			// No inline prompt: pin all subsequent turns to Claude.
+			// No inline prompt: pin all subsequent turns to escalation agent.
 			st.stickyEscalate = true
 			st.forceEscalate = false
-			output = milkTag() + " pinned to " + blue("Claude") + " (use /local to unpin)"
+			output = milkTag() + " pinned to " + blue(st.escalationAgentName()) + " (use /primary to unpin)"
 		} else {
 			// Inline prompt: single-turn override only.
 			st.forceEscalate = true
 		}
 		return false, prompt, output
-	case cmdLocal:
+	case cmdPrimary:
 		st.forceEscalate = false
 		st.stickyEscalate = false
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.
-			st.stickyLocal = true
-			st.forceLocal = false
+			st.stickyPrimary = true
+			st.forcePrimary = false
 			output = milkTag() + " pinned to " + green("local model") + " (use /escalate to unpin)"
 		} else {
 			// Inline prompt: single-turn override only.
-			st.forceLocal = true
+			st.forcePrimary = true
 		}
 		return false, prompt, output
 	case cmdSkipPerms:
@@ -388,10 +404,10 @@ func execSkipPerms(sub string, st *interactiveState) string {
 	switch strings.TrimSpace(sub) {
 	case "on":
 		st.skipPermissions = true
-		return milkTag() + " " + red("dangerously_skip_permissions ON") + " — Claude will auto-approve all tool uses"
+		return milkTag() + " " + red("dangerously_skip_permissions ON") + " — all agents will auto-approve tool uses"
 	case "off":
 		st.skipPermissions = false
-		return milkTag() + " dangerously_skip_permissions OFF — Claude will prompt for tool permissions"
+		return milkTag() + " dangerously_skip_permissions OFF — agents will prompt before running tools"
 	default:
 		state := "off"
 		if st.skipPermissions {
@@ -419,10 +435,10 @@ func execColorize(sub string, st *interactiveState) string {
 	return fmt.Sprintf("%s colorization set to %s", milkTag(), bold(sub))
 }
 
-// execProvider shows the active local-agent provider configuration (no credentials).
-// arg is the remainder after "/provider" — empty for status display.
-func execProvider(st *interactiveState) string {
-	ac := st.cfg.ActiveLocalAgent()
+// execAgent shows the active local-agent provider configuration (no credentials).
+// arg is the remainder after "/agent" — empty for status display.
+func execAgent(st *interactiveState) string {
+	ac := st.cfg.ActiveAgent()
 
 	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
 	var authDesc string

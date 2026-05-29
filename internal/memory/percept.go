@@ -6,10 +6,10 @@ import "time"
 type Producer string
 
 const (
-	ProducerUser   Producer = "user"
-	ProducerLocal  Producer = "local"
-	ProducerClaude Producer = "claude"
-	ProducerSystem Producer = "system"
+	ProducerUser       Producer = "user"
+	ProducerLocal      Producer = "local"
+	ProducerEscalation Producer = "claude"
+	ProducerSystem     Producer = "system"
 )
 
 // Consumer identifies which agent(s) should receive a Percept at injection time.
@@ -17,9 +17,9 @@ const (
 type Consumer string
 
 const (
-	ConsumerAll    Consumer = ""       // default — injected for both agents
-	ConsumerLocal  Consumer = "local"  // only injected for the local agent
-	ConsumerClaude Consumer = "claude" // only injected for Claude
+	ConsumerAll        Consumer = ""       // default — injected for both agents
+	ConsumerLocal      Consumer = "local"  // only injected for the local agent
+	ConsumerEscalation Consumer = "claude" // only injected for Claude
 )
 
 // Roles holds Neo-Davidsonian semantic roles extracted from a Percept's content.

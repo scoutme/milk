@@ -6,25 +6,25 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
-// identityBlock is injected at the top of every system context passed to Claude
+// identityBlock is injected at the top of every system context passed to the CLI escalation agent
 // so it understands it is operating as a milk-hosted agent, not a standalone session.
 const identityBlock = "[Milk agent context]\n" +
 	"You are Claude Code hosted by milk (multi-agent router). " +
 	"You share session history and memory with the local LLM agent. " +
 	"Expect mid-conversation hand-offs and multi-turn resumes.\n\n"
 
-// BuildContext assembles the system-prompt context block for a Claude escalation.
+// BuildContext assembles the system-prompt context block for a CLI escalation.
 //
 // On the first escalation (not a resume), it injects:
 //   - identity block
-//   - escalation brief (if agent-triggered via escalate_to_claude)
+//   - escalation brief (if agent-triggered via escalate)
 //   - current need (what the user is working towards)
 //   - last local summary (what the local model did since the last Claude session)
 //   - memory instruction (percept tag format)
 //   - remembered facts
 //
 // On a resume, only identity + current need + last local summary + memory instruction
-// are included — Claude already has its own conversation history.
+// are included — the escalation agent already has its own conversation history.
 func BuildContext(sess *session.Session, nonce string, percepts []string, resuming bool) string {
 	var b strings.Builder
 	b.WriteString(identityBlock)
@@ -81,13 +81,13 @@ func NeedInstruction(nonce string) string {
 		"Tags are intercepted by milk, never shown to the user.\n\n"
 }
 
-// MemoryInstruction returns a system-prompt fragment that instructs Claude to
+// MemoryInstruction returns a system-prompt fragment that instructs the escalation agent to
 // emit atomic facts worth persisting using session-specific nonce tags.
 // nonce is a short alphanumeric string generated fresh each session so that
 // only live responses — not explanations or code examples about the tag format —
 // are captured by the stream layer.
 // Milk's stream layer intercepts and strips these tags, recording each fact into
-// the shared memory store with ProducerClaude — they never appear in the output.
+// the shared memory store with ProducerEscalation — they never appear in the output.
 func MemoryInstruction(nonce string) string {
 	openTag := "<milk:percept:" + nonce + ">"
 	closeTag := "</milk:percept:" + nonce + ">"

@@ -58,11 +58,16 @@ const memoryPanelInner = 32 // usable inner chars; scrollbar is a separate colum
 const memoryPollInterval = 5 * time.Second
 
 // dispatchAgents holds the agents and their availability for a turn.
+// escalationLocal is non-nil when the escalation target is a second local
+// provider (cfg.EscalationAgent names a agents entry); in that case
+// cliAgent may be nil. When escalation goes to the Claude CLI, escalationLocal
+// is nil and claude is non-nil (the default).
 type dispatchAgents struct {
-	local       *local.Agent
-	claude      *claude.Agent
-	localAvail  bool
-	claudeAvail bool
+	local           *local.Agent
+	cliAgent        *claude.Agent
+	escalationLocal *local.Agent // non-nil when escalation target is a local provider
+	localAvail      bool
+	escalationAvail bool
 }
 
 // --- TUI message types ---
@@ -115,17 +120,33 @@ type forgetState struct {
 	candidates []memory.Percept // matched percepts shown to the user
 }
 
-// addProviderState tracks state for the multi-step /provider add wizard.
-// Fields are filled one at a time when the user doesn't supply them inline.
-type addProviderState struct {
-	ac   config.LocalAgentConfig
-	step addProviderStep
+// switchAgentState tracks state for the /agent switch wizard.
+// Both name and role may be supplied inline; missing ones are prompted.
+type switchAgentState struct {
+	name string // agent name chosen (may be set from inline args)
+	role string // "primary" or "escalation" (may be set from inline args)
+	step switchAgentStep
 }
 
-type addProviderStep int
+type switchAgentStep int
 
 const (
-	addStepName addProviderStep = iota
+	switchStepName switchAgentStep = iota
+	switchStepRole
+	switchStepDone
+)
+
+// addAgentState tracks state for the multi-step /agent add wizard.
+// Fields are filled one at a time when the user doesn't supply them inline.
+type addAgentState struct {
+	ac   config.AgentConfig
+	step addAgentStep
+}
+
+type addAgentStep int
+
+const (
+	addStepName addAgentStep = iota
 	addStepURL
 	addStepModel
 	addStepProvider
@@ -166,6 +187,26 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 	respCh := make(chan string, 1)
 	r.send(permRequestMsg{prompt: prompt, respCh: respCh})
 	return <-respCh, nil
+}
+
+// makeLocalPermAsk returns the permAsk callback for the local agent.
+// It reuses the existing TUI permRequestMsg flow: the goroutine blocks on a
+// channel while the TUI displays a yellow permission prompt to the user.
+// Grants are persisted to ps (may be nil). Session-level skipPermissions is
+// handled by the caller via WithSkipPermissions before this is ever called.
+func makeLocalPermAsk(ir *tuiInputReader, ps *local.PermStore) func(tool, summary string) bool {
+	return func(tool, summary string) bool {
+		prompt := fmt.Sprintf("\n%s permission request — local agent tool: %s", milkTag(), bold(tool))
+		if summary != "" {
+			prompt += fmt.Sprintf("  (%s)", dim(summary))
+		}
+		prompt += fmt.Sprintf("\n%s Allow? [Y/n] ", milkTag())
+		yn, _ := ir.readLine(prompt)
+		if yn == "" || strings.EqualFold(yn, "y") {
+			return true
+		}
+		return false
+	}
 }
 
 // --- Styles ---
@@ -247,7 +288,7 @@ type model struct {
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
 
-	// active tool use — non-empty while Claude is executing a tool call
+	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
 
 	// memory panel
@@ -260,8 +301,11 @@ type model struct {
 	// pending /forget confirmation
 	pendingForget *forgetState
 
-	// pending /provider add wizard
-	pendingAdd *addProviderState
+	// pending /agent add wizard
+	pendingAdd *addAgentState
+
+	// pending /agent switch wizard
+	pendingSwitch *switchAgentState
 
 	// prompt width (visual columns) set by the most recent refreshPrompt call;
 	// used by taRows() to compute the exact content wrap width.
@@ -294,9 +338,9 @@ type model struct {
 	// quit confirmation state
 	quitPending bool
 
-	// hasLocalAgentConfig is true when the user has explicitly configured a
+	// hasInferenceAgent is true when the user has explicitly configured a
 	// local-agent backend. Used to show setup hints on the welcome screen.
-	hasLocalAgentConfig bool
+	hasInferenceAgent bool
 
 	colorizeMode ColorizeMode
 
@@ -881,7 +925,7 @@ func (m *model) welcomeScreen() string {
 		vpH = m.viewportHeight()
 	}
 	localAvail := m.agents.localAvail
-	claudeAvail := m.agents.claudeAvail
+	escalationAvail := m.agents.escalationAvail
 
 	lines := []string{
 		pulseColors[8] + "◈" + ansiReset + " " + "\033[1;38;2;255;208;96mmilk\033[0m",
@@ -890,49 +934,50 @@ func (m *model) welcomeScreen() string {
 	}
 
 	switch {
-	case !m.hasLocalAgentConfig:
+	case !m.hasInferenceAgent:
 		// No provider configured at all — show setup guidance regardless of Claude.
 		lines = append(lines,
 			yellow("no local agent configured"),
 			"",
-			dim("quickstart — add a backend with /provider add:"),
+			dim("quickstart — add a backend with /agent add:"),
 			"",
 			dim("llama.cpp · Ollama"),
-			"› /provider add url=http://localhost:8080 provider=local model=qwen2.5-coder",
+			"› /agent add url=http://localhost:8080 provider=local model=qwen2.5-coder",
 			"",
 			dim("AWS Bedrock"),
-			"› /provider add url=https://bedrock-runtime.<region>.amazonaws.com provider=bedrock model=<arn>",
+			"› /agent add url=https://bedrock-runtime.<region>.amazonaws.com provider=bedrock model=<arn>",
 			"",
 			dim("OpenRouter · Together · Groq"),
-			"› /provider add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
+			"› /agent add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
 			"",
 		)
-		if !claudeAvail {
+		if !escalationAvail {
+			escName := m.st.escalationAgentName()
 			lines = append(lines,
-				dim("claude CLI not found — install Claude Code to enable escalation"),
+				dim(escName+" not available — escalation disabled"),
 				"",
 			)
 		}
 		lines = append(lines, dim("/help for all commands"))
-	case !localAvail && !claudeAvail:
+	case !localAvail && !escalationAvail:
 		lines = append(lines,
 			yellow("no agents available"),
 			"",
-			dim("local agent unreachable — check your provider config with /provider"),
-			dim("claude CLI not found — install Claude Code to enable escalation"),
+			dim("local agent unreachable — check your provider config with /agent"),
+			dim(m.st.escalationAgentName()+" not available — escalation disabled"),
 			"",
 			dim("/help for available commands"),
 		)
 	case !localAvail:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim("local agent unreachable — use /provider to check or switch backends"),
+			dim("local agent unreachable — use /agent to check or switch backends"),
 			dim("/help for available commands"),
 		)
-	case !claudeAvail:
+	case !escalationAvail:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim("claude CLI not found — escalation unavailable"),
+			dim(m.st.escalationAgentName()+" not available — escalation disabled"),
 			dim("/help for available commands"),
 		)
 	default:
@@ -1168,7 +1213,7 @@ func (m *model) headerBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	ac := m.st.cfg.ActiveLocalAgent()
+	ac := m.st.cfg.ActiveAgent()
 	model := ac.Name
 	if model == "" {
 		model = ac.Model
@@ -1268,21 +1313,25 @@ func (m *model) statusAgent() string {
 }
 
 func agentLabel(st *interactiveState) string {
-	localName := st.cfg.ActiveLocalAgent().Name
+	localName := st.cfg.ActiveAgent().Name
 	if localName == "" {
 		localName = "local"
 	}
+	escalationName := st.cfg.EscalationAgentConfig().Name
+	if escalationName == "" {
+		escalationName = "escalation"
+	}
 	switch {
 	case st.stickyEscalate:
-		return "claude (pinned)"
+		return escalationName + " (pinned)"
 	case st.forceEscalate:
-		return "claude (forced)"
-	case st.stickyLocal:
+		return escalationName + " (forced)"
+	case st.stickyPrimary:
 		return localName + " (pinned)"
-	case st.forceLocal:
+	case st.forcePrimary:
 		return localName + " (forced)"
-	case st.sess.State == session.StateClaude || st.sess.State == session.StateClaudeWaiting:
-		return "claude"
+	case st.sess.State == session.StateEscalation || st.sess.State == session.StateEscalationWaiting:
+		return escalationName
 	default:
 		return localName
 	}
@@ -1330,7 +1379,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleForgetKey(msg)
 		}
 		if m.pendingAdd != nil {
-			return m.handleAddProviderKey(msg)
+			return m.handleAddAgentKey(msg)
+		}
+		if m.pendingSwitch != nil {
+			return m.handleSwitchAgentKey(msg)
 		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
@@ -1719,8 +1771,8 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdForget {
 		return m.handleForgetCmd(strings.TrimSpace(rest)), nil
 	}
-	if cmd == cmdProvider {
-		return m.handleProviderCmd(strings.TrimSpace(rest))
+	if cmd == cmdAgent {
+		return m.handleAgentCmd(strings.TrimSpace(rest))
 	}
 	if cmd == cmdColorize {
 		return m.handleColorizeCmd(strings.TrimSpace(rest)), nil
@@ -1842,149 +1894,99 @@ func (m model) handleForgetCmd(pat string) model {
 	return m
 }
 
-// handleProviderCmd handles `/provider [list|switch <name>|add [key=val ...]]`.
-func (m model) handleProviderCmd(arg string) (model, tea.Cmd) {
+// handleAgentCmd handles `/agent [list|switch <name>|add [key=val ...]]`.
+func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 	// Re-read config so externally added providers are visible.
 	if fresh, err := config.Load(); err == nil {
 		// Preserve the in-session active selection if the user hasn't changed it.
-		if m.st.cfg.LocalAgent != "" {
-			fresh.LocalAgent = m.st.cfg.LocalAgent
+		if m.st.cfg.Agent != "" {
+			fresh.Agent = m.st.cfg.Agent
 		}
 		m.st.cfg = fresh
 	}
 
 	switch {
 	case arg == "" || arg == "status":
-		m.appendTranscript(execProvider(m.st) + "\n")
+		m.appendTranscript(execAgent(m.st) + "\n")
 
 	case arg == "list":
-		m.appendTranscript(execProviderList(m.st) + "\n")
+		m.appendTranscript(execAgentList(m.st) + "\n")
 
-	case strings.HasPrefix(arg, "switch "):
-		name := strings.TrimSpace(arg[len("switch "):])
-		if name == "" {
-			m.appendTranscript(milkTag() + " usage: /provider switch <name>\n")
-			return m, nil
-		}
-		found := false
-		for _, a := range m.st.cfg.LocalAgents {
-			if strings.EqualFold(a.Name, name) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			var names []string
-			for _, a := range m.st.cfg.LocalAgents {
-				names = append(names, a.Name)
-			}
-			m.appendTranscript(fmt.Sprintf("%s unknown agent %q — available: %s\n",
-				milkTag(), name, strings.Join(names, ", ")))
-			return m, nil
-		}
-		m.st.cfg.LocalAgent = name
-		if err := config.Save(m.st.cfg); err != nil {
-			m.appendTranscript(fmt.Sprintf("%s warning: could not persist provider switch: %v\n", milkTag(), err))
-		}
-		// Build agent without blocking — creds are fetched async below.
-		newAgent := local.NewFromConfig(activeLocalAgentConfig(m.st.cfg))
-		if od, err := config.OtelDir(); err == nil {
-			newAgent.WithOtelDir(od)
-		}
-		prog := m.st.program
-		newAgent.WithOnSigV4Refresh(func(err error) {
-			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
-		})
-		m.agents.local = newAgent
-		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
-		// Clear stale credential status from the previous provider.
-		m.credStatus = ""
-		m.credLabel = ""
-		m.credOK = false
-		m.appendTranscript(execProvider(m.st) + "\n")
-		if newAgent.HasTokenCmd() {
-			m.credRefreshing = true
-			m.credLabel = "token"
-			return m, func() tea.Msg {
-				err := newAgent.WarmToken()
-				return credRefreshReadyMsg{label: "token", err: err}
-			}
-		}
-		if needsAWSRefresh(m.st.cfg) {
-			m.credRefreshing = true
-			m.credLabel = "AWS"
-			ctx := m.ctx
-			return m, func() tea.Msg {
-				cmd := claudesettings.AWSAuthRefreshCommand()
-				refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				defer cancel()
-				creds, err := claude.ResolveAWSCredsContext(refreshCtx, cmd)
-				return credRefreshReadyMsg{label: "AWS", creds: creds, err: err}
-			}
-		}
-		m.credRefreshing = false
-		return m, nil
+	case arg == "switch", strings.HasPrefix(arg, "switch "):
+		inline := strings.TrimSpace(strings.TrimPrefix(arg, "switch"))
+		return m.startSwitchAgent(inline)
 
 	case strings.HasPrefix(arg, "add"):
 		inline := strings.TrimSpace(arg[len("add"):])
-		return m.startAddProvider(inline), nil
+		return m.startAddAgent(inline), nil
 
 	default:
-		m.appendTranscript(milkTag() + " usage: /provider [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
+		m.appendTranscript(milkTag() + " usage: /agent [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
 	}
 	return m, nil
 }
 
-// execProviderList formats all configured local-agent backends.
-func execProviderList(st *interactiveState) string {
-	agents := st.cfg.LocalAgents
+// execAgentList formats all configured agent backends, marking the active
+// primary agent with "P" and the active escalation agent with "E".
+func execAgentList(st *interactiveState) string {
+	agents := st.cfg.Agents
 	if len(agents) == 0 {
-		// show the single backward-compat entry
-		agents = []config.LocalAgentConfig{st.cfg.ActiveLocalAgent()}
+		agents = []config.AgentConfig{st.cfg.ActiveAgent()}
 	}
-	active := strings.ToLower(strings.TrimSpace(st.cfg.ActiveLocalAgent().Name))
+	primaryName := strings.ToLower(strings.TrimSpace(st.cfg.ActiveAgent().Name))
+	escalationName := strings.ToLower(strings.TrimSpace(st.cfg.EscalationAgentConfig().Name))
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s local agents (%d):\n", milkTag(), len(agents))
-	for _, a := range agents {
-		marker := "  "
-		if strings.EqualFold(a.Name, active) {
-			marker = bold("* ")
+	fmt.Fprintf(&b, "%s agents (%d):\n", milkTag(), len(agents))
+	for i, a := range agents {
+		nameLower := strings.ToLower(a.Name)
+		isPrimary := strings.EqualFold(nameLower, primaryName) && !a.IsCLI()
+		isEscalation := strings.EqualFold(nameLower, escalationName)
+		var marker string
+		switch {
+		case isPrimary && isEscalation:
+			marker = bold("PE")
+		case isPrimary:
+			marker = bold("P ")
+		case isEscalation:
+			marker = bold(" E")
+		default:
+			marker = "  "
 		}
 		provider := a.Provider
 		if provider == "" {
 			provider = "local"
 		}
-		fmt.Fprintf(&b, "%s%s  %s  %s  [%s]", marker, bold(a.Name), dim(a.URL), dim(a.Model), provider)
-		if a.Name != agents[len(agents)-1].Name {
+		fmt.Fprintf(&b, "[%s] %s  %s  %s  [%s]", marker, bold(a.Name), dim(a.URL), dim(a.Model), provider)
+		if i < len(agents)-1 {
 			b.WriteByte('\n')
 		}
 	}
 	return b.String()
 }
 
-// startAddProvider handles `/provider add [key=val ...]`.
+// startAddAgent handles `/agent add [key=val ...]`.
 // Known keys: name, url, model, provider, api_key, aws_region.
 // Missing required fields (name, url, model) are prompted interactively.
-func (m model) startAddProvider(inline string) model {
-	ac := parseProviderInlineArgs(inline)
+func (m model) startAddAgent(inline string) model {
+	ac := parseAgentInlineArgs(inline)
 
 	// If all required fields are present, add immediately.
 	if ac.Name != "" && ac.URL != "" && ac.Model != "" {
-		return m.commitAddProvider(ac)
+		return m.commitAddAgent(ac)
 	}
 
 	// Otherwise start the wizard from the first missing required field.
-	st := &addProviderState{ac: ac}
+	st := &addAgentState{ac: ac}
 	st.step = firstMissingStep(ac)
 	m.pendingAdd = st
-	m.appendTranscript(addProviderPrompt(st.step) + " ")
+	m.appendTranscript(addAgentPrompt(st.step) + " ")
 	m.ta.Reset()
 	return m
 }
 
-// parseProviderInlineArgs parses "key=val key2=val2 ..." into a LocalAgentConfig.
-func parseProviderInlineArgs(s string) config.LocalAgentConfig {
-	var ac config.LocalAgentConfig
+// parseAgentInlineArgs parses "key=val key2=val2 ..." into a LocalAgentConfig.
+func parseAgentInlineArgs(s string) config.AgentConfig {
+	var ac config.AgentConfig
 	for _, tok := range strings.Fields(s) {
 		k, v, ok := strings.Cut(tok, "=")
 		if !ok {
@@ -2009,7 +2011,7 @@ func parseProviderInlineArgs(s string) config.LocalAgentConfig {
 }
 
 // firstMissingStep returns the first wizard step that still needs input.
-func firstMissingStep(ac config.LocalAgentConfig) addProviderStep {
+func firstMissingStep(ac config.AgentConfig) addAgentStep {
 	if ac.Name == "" {
 		return addStepName
 	}
@@ -2032,8 +2034,8 @@ func firstMissingStep(ac config.LocalAgentConfig) addProviderStep {
 	return addStepDone
 }
 
-// addProviderPrompt returns the prompt string for a wizard step.
-func addProviderPrompt(step addProviderStep) string {
+// addAgentPrompt returns the prompt string for a wizard step.
+func addAgentPrompt(step addAgentStep) string {
 	switch step {
 	case addStepName:
 		return milkTag() + " name:"
@@ -2052,8 +2054,8 @@ func addProviderPrompt(step addProviderStep) string {
 	}
 }
 
-// handleAddProviderKey handles keypresses during the /provider add wizard.
-func (m model) handleAddProviderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleAddAgentKey handles keypresses during the /agent add wizard.
+func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingAdd = nil
@@ -2069,19 +2071,19 @@ func (m model) handleAddProviderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch st.step {
 		case addStepName:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " name is required\n" + addProviderPrompt(addStepName) + " ")
+				m.appendTranscript(milkTag() + " name is required\n" + addAgentPrompt(addStepName) + " ")
 				return m, nil
 			}
 			st.ac.Name = answer
 		case addStepURL:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " url is required\n" + addProviderPrompt(addStepURL) + " ")
+				m.appendTranscript(milkTag() + " url is required\n" + addAgentPrompt(addStepURL) + " ")
 				return m, nil
 			}
 			st.ac.URL = answer
 		case addStepModel:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " model is required\n" + addProviderPrompt(addStepModel) + " ")
+				m.appendTranscript(milkTag() + " model is required\n" + addAgentPrompt(addStepModel) + " ")
 				return m, nil
 			}
 			st.ac.Model = answer
@@ -2097,9 +2099,9 @@ func (m model) handleAddProviderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		st.step = firstMissingStep(st.ac)
 		if st.step == addStepDone {
 			m.pendingAdd = nil
-			m = m.commitAddProvider(st.ac)
+			m = m.commitAddAgent(st.ac)
 		} else {
-			m.appendTranscript(addProviderPrompt(st.step) + " ")
+			m.appendTranscript(addAgentPrompt(st.step) + " ")
 		}
 		return m, nil
 	}
@@ -2109,26 +2111,26 @@ func (m model) handleAddProviderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// commitAddProvider appends the new agent to config, saves, and confirms.
-func (m model) commitAddProvider(ac config.LocalAgentConfig) model {
+// commitAddAgent appends the new agent to config, saves, and confirms.
+func (m model) commitAddAgent(ac config.AgentConfig) model {
 	// Check for name collision.
-	for _, existing := range m.st.cfg.LocalAgents {
+	for _, existing := range m.st.cfg.Agents {
 		if strings.EqualFold(existing.Name, ac.Name) {
-			m.appendTranscript(fmt.Sprintf("%s agent %q already exists — use /provider switch %s to activate it\n",
+			m.appendTranscript(fmt.Sprintf("%s agent %q already exists — use /agent switch %s to activate it\n",
 				milkTag(), ac.Name, ac.Name))
 			return m
 		}
 	}
-	isFirst := len(m.st.cfg.LocalAgents) == 0
-	m.st.cfg.LocalAgents = append(m.st.cfg.LocalAgents, ac)
+	isFirst := len(m.st.cfg.Agents) == 0
+	m.st.cfg.Agents = append(m.st.cfg.Agents, ac)
 	if isFirst {
-		m.st.cfg.LocalAgent = ac.Name
+		m.st.cfg.Agent = ac.Name
 	}
 	if err := config.Save(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
-	m.hasLocalAgentConfig = true
+	m.hasInferenceAgent = true
 	if isFirst {
 		freshAC := applyFreshAWSCreds(m.st.cfg, activeLocalAgentConfig(m.st.cfg))
 		newAgent := local.NewFromConfig(freshAC)
@@ -2152,9 +2154,234 @@ func (m model) commitAddProvider(ac config.LocalAgentConfig) model {
 	if isFirst {
 		m.appendTranscript(milkTag() + " activated as the default provider\n")
 	} else {
-		m.appendTranscript(milkTag() + " use /provider switch " + ac.Name + " to activate it\n")
+		m.appendTranscript(milkTag() + " use /agent switch " + ac.Name + " to activate it\n")
 	}
 	return m
+}
+
+// parseSwitchInlineArgs parses "name [as role]" or "name role" inline args.
+// Returns name and role (either may be empty).
+func parseSwitchInlineArgs(s string) (name, role string) {
+	// Accept "name as role" or just "name" or "name role"
+	fields := strings.Fields(s)
+	switch len(fields) {
+	case 0:
+	case 1:
+		name = fields[0]
+	case 2:
+		name = fields[0]
+		role = strings.ToLower(fields[1])
+	case 3:
+		name = fields[0]
+		// "name as role"
+		if strings.ToLower(fields[1]) == "as" {
+			role = strings.ToLower(fields[2])
+		}
+	}
+	return
+}
+
+// switchAgentPrompt returns the prompt string for the given switch wizard step.
+func switchAgentPrompt(step switchAgentStep, names []string) string {
+	switch step {
+	case switchStepName:
+		return milkTag() + " agent name [" + strings.Join(names, ", ") + "]:"
+	case switchStepRole:
+		return milkTag() + " role [primary/escalation]:"
+	}
+	return ""
+}
+
+// startSwitchAgent starts or immediately executes /agent switch.
+// inline is everything after "switch" — may contain name and/or "as role".
+func (m model) startSwitchAgent(inline string) (model, tea.Cmd) {
+	name, role := parseSwitchInlineArgs(inline)
+
+	// Validate name if provided.
+	if name != "" {
+		found := false
+		for _, a := range m.st.cfg.Agents {
+			if strings.EqualFold(a.Name, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var names []string
+			for _, a := range m.st.cfg.Agents {
+				names = append(names, a.Name)
+			}
+			m.appendTranscript(fmt.Sprintf("%s unknown agent %q — available: %s\n",
+				milkTag(), name, strings.Join(names, ", ")))
+			return m, nil
+		}
+	}
+	// Validate role if provided.
+	if role != "" && role != "primary" && role != "escalation" {
+		m.appendTranscript(fmt.Sprintf("%s unknown role %q — use primary or escalation\n", milkTag(), role))
+		return m, nil
+	}
+
+	st := &switchAgentState{name: name, role: role}
+	// Determine which step to start from.
+	if name == "" {
+		st.step = switchStepName
+	} else if role == "" {
+		st.step = switchStepRole
+	} else {
+		st.step = switchStepDone
+		return m.commitSwitchAgent(st)
+	}
+
+	var names []string
+	for _, a := range m.st.cfg.Agents {
+		names = append(names, a.Name)
+	}
+	m.pendingSwitch = st
+	m.appendTranscript(switchAgentPrompt(st.step, names) + " ")
+	m.ta.Reset()
+	m.syncLayout()
+	return m, nil
+}
+
+// handleSwitchAgentKey handles keypresses during the /agent switch wizard.
+func (m model) handleSwitchAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingSwitch = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript(answer + "\n")
+
+		st := m.pendingSwitch
+		switch st.step {
+		case switchStepName:
+			if answer == "" {
+				var names []string
+				for _, a := range m.st.cfg.Agents {
+					names = append(names, a.Name)
+				}
+				m.appendTranscript(switchAgentPrompt(switchStepName, names) + " ")
+				return m, nil
+			}
+			found := false
+			for _, a := range m.st.cfg.Agents {
+				if strings.EqualFold(a.Name, answer) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				var names []string
+				for _, a := range m.st.cfg.Agents {
+					names = append(names, a.Name)
+				}
+				m.appendTranscript(fmt.Sprintf("%s unknown agent %q — available: %s\n", milkTag(), answer, strings.Join(names, ", ")))
+				m.appendTranscript(switchAgentPrompt(switchStepName, names) + " ")
+				return m, nil
+			}
+			st.name = answer
+			st.step = switchStepRole
+			m.appendTranscript(switchAgentPrompt(switchStepRole, nil) + " ")
+			return m, nil
+
+		case switchStepRole:
+			role := strings.ToLower(answer)
+			if role != "primary" && role != "escalation" {
+				m.appendTranscript(fmt.Sprintf("%s unknown role %q — use primary or escalation\n", milkTag(), answer))
+				m.appendTranscript(switchAgentPrompt(switchStepRole, nil) + " ")
+				return m, nil
+			}
+			st.role = role
+			st.step = switchStepDone
+			m.pendingSwitch = nil
+			return m.commitSwitchAgent(st)
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
+
+// commitSwitchAgent applies the name+role switch: updates config and rebuilds the live agent.
+func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
+	m.pendingSwitch = nil
+	name := st.name
+	role := st.role
+
+	switch role {
+	case "primary":
+		m.st.cfg.Agent = name
+		if err := config.Save(m.st.cfg); err != nil {
+			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
+		}
+		newAgent := local.NewFromConfig(activeLocalAgentConfig(m.st.cfg))
+		if od, err := config.OtelDir(); err == nil {
+			newAgent.WithOtelDir(od)
+		}
+		prog := m.st.program
+		newAgent.WithOnSigV4Refresh(func(err error) {
+			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
+		})
+		m.agents.local = newAgent
+		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+		m.rtr = router.New(m.st.cfg, newAgent)
+		m.credStatus = ""
+		m.credLabel = ""
+		m.credOK = false
+		m.appendTranscript(fmt.Sprintf("%s primary agent → %s\n", milkTag(), bold(name)))
+		m.appendTranscript(execAgent(m.st) + "\n")
+		if newAgent.HasTokenCmd() {
+			m.credRefreshing = true
+			m.credLabel = "token"
+			return m, func() tea.Msg {
+				err := newAgent.WarmToken()
+				return credRefreshReadyMsg{label: "token", err: err}
+			}
+		}
+		if needsAWSRefresh(m.st.cfg) {
+			m.credRefreshing = true
+			m.credLabel = "AWS"
+			ctx := m.ctx
+			return m, func() tea.Msg {
+				cmd := claudesettings.AWSAuthRefreshCommand()
+				refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				creds, err := claude.ResolveAWSCredsContext(refreshCtx, cmd)
+				return credRefreshReadyMsg{label: "AWS", creds: creds, err: err}
+			}
+		}
+		m.credRefreshing = false
+
+	case "escalation":
+		m.st.cfg.EscalationAgent = name
+		if err := config.Save(m.st.cfg); err != nil {
+			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
+		}
+		escAC := applyFreshAWSCreds(m.st.cfg, m.st.cfg.EscalationAgentConfig())
+		if escAC.IsCLI() {
+			// claude-cli: no local.Agent needed, just update config.
+			m.agents.escalationLocal = nil
+			m.agents.escalationAvail = true
+		} else if escAC.URL != "" {
+			newEsc := local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
+			if od, err := config.OtelDir(); err == nil {
+				newEsc.WithOtelDir(od)
+			}
+			m.agents.escalationLocal = newEsc
+			m.agents.escalationAvail = newEsc.Ping(m.ctx) == nil
+		}
+		m.appendTranscript(fmt.Sprintf("%s escalation agent → %s\n", milkTag(), bold(name)))
+		m.appendTranscript(execAgent(m.st) + "\n")
+	}
+
+	return m, nil
 }
 
 // isHexPrefix returns true when s looks like a percept ID prefix (4-64 hex chars).
@@ -2370,13 +2597,13 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	tuiAgents := agents
 	ir0 := &tuiInputReader{send: send}
-	tuiAgents.claude = agents.claude.
+	tuiAgents.cliAgent = agents.cliAgent.
 		WithSkipPermissions(st.skipPermissions).
 		WithOnToolUse(func(name string) {
 			send(toolUseMsg{name: name})
 		}).
 		WithOnToolUseReady(func(name string, input map[string]any) {
-			summary := claudeToolArgSummary(input)
+			summary := cliToolArgSummary(input)
 			var hint string
 			if summary != "" {
 				hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
@@ -2387,6 +2614,20 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		}).
 		WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs))
+
+	// Wire local-agent permissions: persistent store + TUI ask callback.
+	// Both the primary and escalation-local agents share the same store and ask
+	// callback — they operate in the same cwd and grants should be shared.
+	localPermStore := st.localPerms
+	localPermAsk := makeLocalPermAsk(ir0, localPermStore)
+	tuiAgents.local = agents.local.
+		WithSkipPermissions(st.skipPermissions).
+		WithPermissions(localPermStore, localPermAsk)
+	if agents.escalationLocal != nil {
+		tuiAgents.escalationLocal = agents.escalationLocal.
+			WithSkipPermissions(st.skipPermissions).
+			WithPermissions(localPermStore, localPermAsk)
+	}
 	return m, tea.Batch(
 		spinnerTick(),
 		func() tea.Msg {
@@ -3136,12 +3377,14 @@ func wrapLineIntoRows(runes []rune, width int) [][]rune {
 // of the inputPart section of a colorized display line (after indentVisual prefix chars).
 func applyInputHighlight(line string, indentVisual, selLo, selHi int) string {
 	// Re-split at indentVisual to isolate the input part.
-	plainLine := ansi.Strip(line)
-	if len([]rune(plainLine)) <= indentVisual {
+	// Work exclusively in runes: indentVisual is a visual column count, not a
+	// byte offset. Using plainLine[indentVisual:] would slice mid-rune for
+	// multi-byte prompt characters (e.g. ❯ is 3 bytes but 1 column/rune).
+	plainRunes := []rune(ansi.Strip(line))
+	if len(plainRunes) <= indentVisual {
 		return line
 	}
-	// Find the byte split for the indent in the colorized line.
-	inputRunes := []rune(plainLine[indentVisual:])
+	inputRunes := plainRunes[indentVisual:]
 	if selLo >= len(inputRunes) || selHi <= 0 {
 		return line
 	}
@@ -3160,9 +3403,8 @@ func applyInputHighlight(line string, indentVisual, selLo, selHi int) string {
 	sb.WriteString(string(inputRunes[selLo:selHi]))
 	sb.WriteString("\x1b[49m") // reset background only
 	sb.WriteString(string(inputRunes[selHi:]))
-	// Reconstruct with original prefix.
-	prefix := string([]rune(plainLine)[:indentVisual])
-	return prefix + sb.String()
+	// Reconstruct with original prefix (rune-safe).
+	return string(plainRunes[:indentVisual]) + sb.String()
 }
 
 // highlightMatch bolds and yellows the first occurrence of query inside s.
@@ -3241,28 +3483,29 @@ func stripANSI(s string) string {
 // runTurn routes a prompt to the appropriate agent, writing output to out.
 func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
 	localAgent := agents.local
-	claudeAgent := agents.claude
+	cliAgent := agents.cliAgent
+	escalationLocalAgent := agents.escalationLocal
 	localAvail := agents.localAvail
-	claudeAvail := agents.claudeAvail
+	escalationAvail := agents.escalationAvail
 
 	turnCtx, cancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
 	defer cancel()
 
 	forceEscalate := st.forceEscalate || st.stickyEscalate
-	forceLocal := st.forceLocal || st.stickyLocal
-	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forceLocal)
+	forcePrimary := st.forcePrimary || st.stickyPrimary
+	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forcePrimary)
 	if routeErr != nil {
 		return fmt.Errorf("routing: %w", routeErr)
 	}
 	st.forceEscalate = false
-	st.forceLocal = false
-	// stickyEscalate/stickyLocal persist until explicitly cleared.
+	st.forcePrimary = false
+	// stickyEscalate/stickyPrimary persist until explicitly cleared.
 
 	target := decision.Target
 	if target == router.TargetLocal && !localAvail {
-		target = router.TargetClaude
+		target = router.TargetEscalation
 	}
-	if target == router.TargetClaude && !claudeAvail {
+	if target == router.TargetEscalation && !escalationAvail {
 		target = router.TargetLocal
 	}
 
@@ -3276,12 +3519,16 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	switch target {
 	case router.TargetLocal:
 		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
-	case router.TargetClaude:
+	case router.TargetEscalation:
+		if escalationLocalAgent != nil {
+			// Escalation is routed to a second local provider, not the Claude CLI.
+			return runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+		}
 		// Refresh credentials before each turn so expiring tokens are renewed.
 		// The credential-process handles its own cache and returns immediately
 		// when the token is still fresh, so this is cheap in the common case.
-		claudeAgent = applyAWSCreds(st.cfg, claudeAgent)
-		return runClaudeWith(turnCtx, st.cfg, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
+		cliAgent = applyAWSCreds(st.cfg, cliAgent)
+		return runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
 	}
 	return nil
 }
@@ -3370,19 +3617,54 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
-	claudeAgent = applyAWSCreds(cfg, claudeAgent)
-	if dbg, err := openClaudeDebugLog(cfg); err != nil {
+
+	// Build the escalation-local agent when the escalation target is a second
+	// local provider rather than the Claude CLI.
+	var escalationLocalAgent *local.Agent
+	if !cfg.EscalationAgentConfig().IsCLI() {
+		escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())
+		if escAC.URL != "" {
+			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
+			if od, err := config.OtelDir(); err == nil {
+				escalationLocalAgent.WithOtelDir(od)
+			}
+			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			if lp, err := local.OpenPermStore(cwd); err == nil {
+				escalationLocalAgent.WithPermissions(lp, nil)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
+		}
+	}
+
+	cliAgent := newCLIAgent(cliAgentConfig(cfg))
+	cliAgent = applyAWSCreds(cfg, cliAgent)
+	if dbg, err := openCLIDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
 		defer dbg.Close()
-		claudeAgent = claudeAgent.WithDebugLog(dbg)
+		cliAgent = cliAgent.WithDebugLog(dbg)
 	}
 
 	ctx := context.Background()
 	// TUI mode continues even when both agents are unavailable so the user can
-	// add providers via /provider commands without re-launching.
-	localAvail, claudeAvail, _ := checkAgentAvailability(ctx, localAgent, claudeAgent)
+	// add providers via /agent commands without re-launching.
+	//
+	// When escalation is routed to a second local provider, "escalationAvail" really
+	// means "escalation agent available" — ping that instead of the Claude CLI.
+	var localAvail, escalationAvail bool
+	if escalationLocalAgent != nil {
+		localAvail = localAgent.Ping(ctx) == nil
+		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
+		if !localAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to escalation agent")
+		}
+		if !escalationAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — local only")
+		}
+	} else {
+		localAvail, escalationAvail, _ = checkAgentAvailability(ctx, localAgent, cliAgent)
+	}
 
 	var routeLocalAgent *local.Agent
 	if localAvail {
@@ -3390,8 +3672,8 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 	rtr := router.New(cfg, routeLocalAgent)
 
-	if cfg.DangerouslySkipPermissions {
-		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — Claude will auto-approve all tool uses without prompting"))
+	if cliAgentConfig(cfg).DangerouslySkipPermissions {
+		fmt.Fprintf(os.Stderr, "%s\n", red("warning: dangerously_skip_permissions is enabled — all agents will auto-approve tool uses without prompting"))
 	}
 
 	var cs *claudesettings.Store
@@ -3399,11 +3681,22 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		cs = store
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, toolFutures: map[string]chan string{}, skipPermissions: cfg.DangerouslySkipPermissions}
-	agents := dispatchAgents{localAgent, claudeAgent, localAvail, claudeAvail}
+	var localPerms *local.PermStore
+	if lp, err := local.OpenPermStore(cwd); err == nil {
+		localPerms = lp
+	}
+
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions}
+	agents := dispatchAgents{
+		local:           localAgent,
+		cliAgent:        cliAgent,
+		escalationLocal: escalationLocalAgent,
+		localAvail:      localAvail,
+		escalationAvail: escalationAvail,
+	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
-	m.hasLocalAgentConfig = cfg.HasLocalAgentConfig()
+	m.hasInferenceAgent = cfg.HasInferenceAgent()
 	m.colorizeMode = ParseColorizeMode(cfg.Colorization)
 	if needsAWSRefresh(cfg) {
 		m.credRefreshing = true

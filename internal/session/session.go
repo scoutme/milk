@@ -9,17 +9,17 @@ import (
 type State string
 
 const (
-	StateRouting       State = "ROUTING"
-	StateLocal         State = "LOCAL"
-	StateClaude        State = "CLAUDE"
-	StateClaudeWaiting State = "CLAUDE_WAITING"
+	StateRouting           State = "ROUTING"
+	StateLocal             State = "LOCAL"
+	StateEscalation        State = "CLAUDE"
+	StateEscalationWaiting State = "CLAUDE_WAITING"
 )
 
 type Agent string
 
 const (
-	AgentLocal  Agent = "local"
-	AgentClaude Agent = "claude"
+	AgentLocal      Agent = "local"
+	AgentEscalation Agent = "escalation"
 )
 
 type Role string
@@ -46,52 +46,52 @@ type Turn struct {
 }
 
 type Session struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name,omitempty"`
-	CWD             string    `json:"cwd"`
-	CreatedAt       time.Time `json:"created_at"`
-	LastUsed        time.Time `json:"last_used"`
-	State           State     `json:"state"`
-	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
-	History         []Turn    `json:"history"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name,omitempty"`
+	CWD                 string    `json:"cwd"`
+	CreatedAt           time.Time `json:"created_at"`
+	LastUsed            time.Time `json:"last_used"`
+	State               State     `json:"state"`
+	EscalationSessionID string    `json:"claude_session_id,omitempty"`
+	History             []Turn    `json:"history"`
 
 	// Summary bricks — maintained eagerly after each turn.
 	// CurrentNeed tracks what the user is trying to accomplish; updated by
 	// <milk:need:NONCE> tags emitted by either agent when context switches.
 	CurrentNeed string `json:"current_need,omitempty"`
-	// EscalationBrief is set when the local model calls escalate_to_claude(reason).
+	// EscalationBrief is set when the local model calls escalate(reason).
 	// It is tactical and ephemeral: overwritten on each agent-triggered escalation.
 	EscalationBrief string `json:"escalation_brief,omitempty"`
 	// LastLocalSummary is a pre-rendered, sanitized, budget-capped summary of
-	// local-agent turns since the last Claude turn. Injected when escalating to Claude.
+	// local-agent turns since the last escalation turn. Injected when escalating to Claude.
 	LastLocalSummary string `json:"last_local_summary,omitempty"`
-	// LastClaudeSummary is a pre-rendered, sanitized, budget-capped summary of
-	// Claude turns. Reserved for future demotion back to local.
-	LastClaudeSummary string `json:"last_claude_summary,omitempty"`
+	// LastEscalationSummary is a pre-rendered, sanitized, budget-capped summary of
+	// Escalation turns. Reserved for future demotion back to local.
+	LastEscalationSummary string `json:"last_claude_summary,omitempty"`
 }
 
-// emptyClaudeSession returns true when a Claude session produced no real work:
+// emptyEscalationSession returns true when a Claude session produced no real work:
 // zero tool calls and response text under the character threshold.
-func emptyClaudeSession(turns []Turn, charThreshold int) bool {
+func emptyEscalationSession(turns []Turn, charThreshold int) bool {
 	var totalChars int
 	for _, t := range turns {
-		if t.Role == RoleAssistant && t.Agent == AgentClaude {
+		if t.Role == RoleAssistant && t.Agent == AgentEscalation {
 			totalChars += len(t.Content)
 		}
-		if t.Role == RoleUser && t.Agent == AgentClaude && len(t.ToolCalls) > 0 {
+		if t.Role == RoleUser && t.Agent == AgentEscalation && len(t.ToolCalls) > 0 {
 			return false // had tool calls
 		}
 	}
 	return totalChars < charThreshold
 }
 
-// lastClaudeBoundary returns the index of the first turn after the most recent
+// lastEscalationBoundary returns the index of the first turn after the most recent
 // Claude session ends (i.e. the first local or user turn after the last Claude
 // assistant turn). Returns 0 when there are no Claude turns.
-func lastClaudeBoundary(history []Turn) int {
+func lastEscalationBoundary(history []Turn) int {
 	last := -1
 	for i, t := range history {
-		if t.Agent == AgentClaude {
+		if t.Agent == AgentEscalation {
 			last = i
 		}
 	}
@@ -198,20 +198,20 @@ func buildBrick(history []Turn, agent Agent, budgetChars int) string {
 	return ""
 }
 
-// RebuildSummaryBricks recomputes LastLocalSummary and LastClaudeSummary from
+// RebuildSummaryBricks recomputes LastLocalSummary and LastEscalationSummary from
 // History. Call after every turn completes. budgetChars is the per-brick limit.
-// LastLocalSummary covers local turns since the last Claude turn (+ budget cap).
-// LastClaudeSummary covers all Claude turns (+ budget cap).
-// An empty Claude session (0 tool calls, < 200 chars) does not update LastClaudeSummary.
+// LastLocalSummary covers local turns since the last escalation turn (+ budget cap).
+// LastEscalationSummary covers all escalation agent turns (+ budget cap).
+// An empty escalation session (0 tool calls, < 200 chars) does not update LastEscalationSummary.
 func (s *Session) RebuildSummaryBricks(budgetChars int) {
 	// Local brick: only turns since the last Claude boundary.
-	boundary := lastClaudeBoundary(s.History)
+	boundary := lastEscalationBoundary(s.History)
 	s.LastLocalSummary = buildBrick(s.History[boundary:], AgentLocal, budgetChars)
 
-	// Claude brick: all Claude turns, but skip if the session was empty.
-	claudeTurns := s.History
-	if !emptyClaudeSession(claudeTurns, 200) {
-		s.LastClaudeSummary = buildBrick(claudeTurns, AgentClaude, budgetChars)
+	// Escalation brick: all escalation agent turns, but skip if the session was empty.
+	escalationTurns := s.History
+	if !emptyEscalationSession(escalationTurns, 200) {
+		s.LastEscalationSummary = buildBrick(escalationTurns, AgentEscalation, budgetChars)
 	}
 }
 
@@ -225,13 +225,13 @@ func (s *Session) AddTurn(t Turn) {
 func (s *Session) Transition(next State) bool {
 	switch s.State {
 	case StateRouting:
-		return next == StateLocal || next == StateClaude
+		return next == StateLocal || next == StateEscalation
 	case StateLocal:
-		return next == StateClaude || next == StateRouting
-	case StateClaude:
-		return next == StateClaudeWaiting || next == StateRouting
-	case StateClaudeWaiting:
-		return next == StateClaude || next == StateRouting
+		return next == StateEscalation || next == StateRouting
+	case StateEscalation:
+		return next == StateEscalationWaiting || next == StateRouting
+	case StateEscalationWaiting:
+		return next == StateEscalation || next == StateRouting
 	}
 	return false
 }

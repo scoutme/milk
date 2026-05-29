@@ -33,21 +33,21 @@ func testCfg() config.Config {
 func TestRulesDecision_AboveTokenThreshold(t *testing.T) {
 	long := string(make([]byte, 500)) // ~125 tokens
 	d := rulesDecision(long, testCfg())
-	if !d.Conclusive || d.Target != TargetClaude {
+	if !d.Conclusive || d.Target != TargetEscalation {
 		t.Errorf("long prompt should escalate, got conclusive=%v target=%s", d.Conclusive, d.Target)
 	}
 }
 
 func TestRulesDecision_EscalateKeyword(t *testing.T) {
 	d := rulesDecision("please architect a new service", testCfg())
-	if !d.Conclusive || d.Target != TargetClaude {
+	if !d.Conclusive || d.Target != TargetEscalation {
 		t.Errorf("escalate keyword should be conclusive Claude, got %+v", d)
 	}
 }
 
 func TestRulesDecision_EscalateKeywordCaseInsensitive(t *testing.T) {
 	d := rulesDecision("ARCHITECT the system", testCfg())
-	if !d.Conclusive || d.Target != TargetClaude {
+	if !d.Conclusive || d.Target != TargetEscalation {
 		t.Errorf("escalate keyword case-insensitive should be conclusive Claude, got %+v", d)
 	}
 }
@@ -86,7 +86,7 @@ func TestRulesDecision_TwoLocalSignalsConclusive(t *testing.T) {
 func TestRulesDecision_OpenQuestion(t *testing.T) {
 	// "Why does this fail?" → open-question(+3); score=3 < 6 → inconclusive
 	d := rulesDecision("Why does this function fail?", testCfg())
-	if d.Conclusive && d.Target == TargetClaude {
+	if d.Conclusive && d.Target == TargetEscalation {
 		// if somehow conclusive it must be Claude
 	} else if !d.Conclusive {
 		// expected
@@ -96,7 +96,7 @@ func TestRulesDecision_OpenQuestion(t *testing.T) {
 func TestRulesDecision_OpenQuestionPlusEscalateVerb(t *testing.T) {
 	// "Why should we evaluate this approach?" → open-question(+3) + evaluate(+4) = 7 ≥ 6 → Claude
 	d := rulesDecision("Why should we evaluate this approach?", testCfg())
-	if !d.Conclusive || d.Target != TargetClaude {
+	if !d.Conclusive || d.Target != TargetEscalation {
 		t.Errorf("open-question + escalate-verb should be conclusive Claude, got %+v", d)
 	}
 }

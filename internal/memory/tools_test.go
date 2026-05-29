@@ -72,8 +72,8 @@ func TestDispatchRecordMemory_ClaudeProducer(t *testing.T) {
 	if len(s.global.Percepts) != 1 {
 		t.Fatalf("expected 1 percept, got %d", len(s.global.Percepts))
 	}
-	if s.global.Percepts[0].Producer != ProducerClaude {
-		t.Errorf("expected ProducerClaude, got %q", s.global.Percepts[0].Producer)
+	if s.global.Percepts[0].Producer != ProducerEscalation {
+		t.Errorf("expected ProducerEscalation, got %q", s.global.Percepts[0].Producer)
 	}
 }
 
@@ -167,11 +167,11 @@ func TestDispatchGetMemory_EmptyQuery(t *testing.T) {
 
 func TestDispatchGetMemory_ConsumerFilter(t *testing.T) {
 	s := newToolsStore(t)
-	s.Record(context.Background(), "local only fact", ProducerUser, ConsumerLocal, Roles{}, false)   //nolint:errcheck
-	s.Record(context.Background(), "claude only fact", ProducerUser, ConsumerClaude, Roles{}, false) //nolint:errcheck
+	s.Record(context.Background(), "local only fact", ProducerUser, ConsumerLocal, Roles{}, false)       //nolint:errcheck
+	s.Record(context.Background(), "claude only fact", ProducerUser, ConsumerEscalation, Roles{}, false) //nolint:errcheck
 
 	// Claude caller should only see the claude-targeted fact.
-	result := DispatchGetMemory(context.Background(), s, `{"query":"fact"}`, ConsumerClaude)
+	result := DispatchGetMemory(context.Background(), s, `{"query":"fact"}`, ConsumerEscalation)
 	var out map[string]any
 	if err := json.Unmarshal([]byte(result), &out); err != nil {
 		t.Fatalf("unmarshal result: %v", err)

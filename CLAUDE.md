@@ -1,6 +1,6 @@
 # milk
 
-Switch models, not context. Routes prompts between a local LLM (any OpenAI-compatible inference server) and Claude Code CLI, with session-aware state management and real-time streaming.
+Switch models, not context. Routes prompts between a local LLM (any OpenAI-compatible inference server) and a configurable escalation agent (Claude Code CLI or another inference backend), with session-aware state management and real-time streaming.
 
 ## Quick orientation
 
@@ -22,20 +22,22 @@ internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)
 internal/agent/local/         # OpenAI-compat client + Bedrock Converse native path + auth transports (SigV4, Bearer, custom headers) + tool loop + stream detector
 internal/agent/claude/        # claude CLI subprocess + stream-json parser
-internal/escalation/          # context builder (local transcript → Claude prompt)
+internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 ```
 
 ## Key design decisions
 
-- **OpenAI-compat local agent**: any compliant inference server works (llama.cpp, Ollama, LM Studio, vLLM, or remote cloud providers). Auth transports: none (local), AWS SigV4 (Bedrock), Bearer token (OpenRouter, Together.ai, Groq, …), dynamic tokens via `token_cmd`, arbitrary extra headers. Set `provider` in the `local_agents` entry to select. Bedrock also uses a native Converse API path (not OpenAI-compat). Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
+- **Unified agent config**: all backends — local inference servers and the Claude CLI — are entries in the `agents` array in `~/.milk/config.json`. Each entry has a `provider` field: `""` / `"local"` (plain HTTP), `"bedrock"` (AWS SigV4), `"claude-cli"` (Claude Code subprocess), or any string for Bearer-token providers. Auth transports: none (local), AWS SigV4 (Bedrock), Bearer token (OpenRouter, Together.ai, Groq, …), dynamic tokens via `token_cmd`, arbitrary extra headers. Bedrock also uses a native Converse API path (not OpenAI-compat). Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B.
 - **Bedrock credential renewal**: `aws_refresh_cmd` wires a `credential_process`-compatible command into the SigV4 transport; on 403 it refreshes credentials atomically and retries once, with TUI status-bar feedback.
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
-- **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API
-- **Context handoff**: local transcript passed via `--append-system-prompt`; Claude orients itself
-- **CLAUDE_WAITING state**: once Claude asks a follow-up, next turn bypasses router → `--resume`
-- **Self-escalation**: local model can call `escalate_to_claude(reason)` as a function call
+- **Escalation agent**: any `agents` entry can be the escalation target — set `escalation_agent` to its name. Defaults to the built-in `claude-cli` entry. Use `/agent switch <name> as escalation` to change it at runtime.
+- **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API. Configured as `provider: "claude-cli"` in `agents`.
+- **Context handoff**: local transcript passed via `--append-system-prompt`; escalation agent orients itself
+- **ESCALATION_WAITING state**: once the escalation agent asks a follow-up, next turn bypasses router → `--resume`
+- **Self-escalation**: local model can call `escalate(reason)` as a function call
+- **Role-aware system prompt**: primary agent and escalation agent receive different system prompts — the escalation agent knows it is the escalation target and should not escalate further
 - **Streaming tool-format detector**: FSM detects tool-call markup format from the stream; handles Qwen fenced JSON, `<tool_call>` tags, Gemma special tokens, bare JSON without pre-configuration
 - **Persistent TUI**: bubbletea alt-screen with viewport (transcript) + textarea (input) + status bar; agent turns run in goroutines, output streamed via `p.Send()`
 - **Input history**: per-session (`~/.milk/sessions/<id>.history`) and global (`~/.milk/input_history`); Ctrl+R/Ctrl+S incremental search
@@ -45,27 +47,27 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 ## Session states
 
 ```text
-ROUTING → LOCAL | CLAUDE
-LOCAL   → CLAUDE (on --escalate or escalate_to_claude())
-CLAUDE  → CLAUDE_WAITING (when Claude asks a question)
-CLAUDE_WAITING → ROUTING (on --local)
-CLAUDE_WAITING → CLAUDE (default: next turn goes via --resume)
+ROUTING          → LOCAL | ESCALATION
+LOCAL            → ESCALATION (on --escalate or escalate())
+ESCALATION       → ESCALATION_WAITING (when escalation agent asks a question)
+ESCALATION_WAITING → ROUTING (on --primary)
+ESCALATION_WAITING → ESCALATION (default: next turn goes via --resume)
 ```
 
-### Sticky mode (`/escalate` / `/local` without a prompt)
+### Sticky mode (`/escalate` / `/primary` without a prompt)
 
-Typing `/escalate` alone (no inline prompt) sets `stickyEscalate = true`: every subsequent turn is routed to Claude, bypassing the router, until the user types `/local` or presses Ctrl+C. The prompt label switches to `[claude]` immediately.
+Typing `/escalate` alone (no inline prompt) sets `stickyEscalate = true`: every subsequent turn is routed to the configured escalation agent, bypassing the router, until the user types `/primary` or presses Ctrl+C. The prompt label switches to the escalation agent name immediately.
 
-Symmetrically, `/local` alone sets `stickyLocal = true`: every turn goes to the local model until `/escalate` or Ctrl+C.
+Symmetrically, `/primary` alone sets `stickyPrimary = true`: every turn goes to the primary agent until `/escalate` or Ctrl+C.
 
-Typing `/escalate <prompt>` or `/local <prompt>` is a **single-turn override** (`forceEscalate` / `forceLocal`): the flag is reset to false after the turn completes, and normal routing resumes.
+Typing `/escalate <prompt>` or `/primary <prompt>` is a **single-turn override** (`forceEscalate` / `forcePrimary`): the flag is reset to false after the turn completes, and normal routing resumes.
 
 Ctrl+C on an empty input clears both sticky and force flags before quitting — so it acts as a "reset mode" shortcut.
 
 ## Routing order (per turn)
 
 1. Explicit flags (`--escalate`, `--local`)
-2. Session state (`CLAUDE_WAITING` → bypass)
+2. Session state (`ESCALATION_WAITING` → bypass)
 3. Rules layer (hard thresholds → short-prompt shortcut → weighted signal scorer)
 4. Local model (classification call, when scorer is inconclusive)
 5. Default: local
@@ -74,7 +76,7 @@ Ctrl+C on an empty input clears both sticky and force flags before quitting — 
 
 ```text
 ~/.milk/sessions/index.json        # cwd → [{id, name, last_used}]
-~/.milk/sessions/<uuid>.json       # full session (history, state, claude_session_id)
+~/.milk/sessions/<uuid>.json       # full session (history, state, escalation_session_id)
 ~/.milk/sessions/<uuid>.history    # per-session input history (plain text, one entry/line)
 ~/.milk/input_history              # global input history across all sessions
 ```
@@ -83,11 +85,11 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 
 ## Graceful degradation
 
-| Inference server | claude CLI | behavior |
+| Primary agent | Escalation agent | behavior |
 | --- | --- | --- |
 | up | available | normal routing |
-| down | available | warn, route all to Claude |
-| up | unavailable | warn, local-only |
+| down | available | warn, route all to escalation agent |
+| up | unavailable | warn, primary-only |
 | down | unavailable | error + exit |
 
 ## Tech stack
@@ -95,12 +97,12 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 - Go 1.21+, Cobra CLI
 - charmbracelet/bubbletea, bubbles/viewport, bubbles/textarea, lipgloss
 - Local agent: OpenAI-compatible inference API **or** AWS Bedrock Converse API (native, not OpenAI-compat)
-- `claude` CLI binary (Claude Code)
+- `claude` CLI binary (Claude Code) — configured as `provider: "claude-cli"` in `agents`
 - OpenTelemetry Go SDK with custom file exporters
 
 ## Backlog
 
 - Planning mode (offline)
-- Demotion from Claude back to local mid-session
+- Demotion from escalation back to primary mid-session
 - MCP server integration for local tools
 - TUI: app-managed drag selection (currently terminal-native; selection highlight sticks to screen coords during scroll — Claude Code works around this with non-native selection)

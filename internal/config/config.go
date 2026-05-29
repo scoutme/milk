@@ -16,7 +16,7 @@ type Rules struct {
 	LocalBelowTokens    int      `json:"local_below_tokens"`
 
 	// Weighted scoring (soft signals)
-	// Score >= EscalateThreshold → conclusive Claude
+	// Score >= EscalateThreshold → conclusive escalation
 	// Score <= LocalThreshold    → conclusive local
 	// Otherwise                  → inconclusive (LLM classifier)
 	EscalateThreshold int `json:"escalate_threshold"`
@@ -49,22 +49,26 @@ type OtelConfig struct {
 	MetricsFlushMinutes int    `json:"metrics_flush_minutes"` // periodic flush interval (0 = session-end only)
 }
 
-// LocalAgentConfig holds configuration for a single local-agent backend.
-// Multiple backends can be listed under local_agents; the active one is
-// selected by name via the local_agent field (defaults to the first entry).
-type LocalAgentConfig struct {
+// AgentConfig holds configuration for a single agent backend.
+// Multiple backends can be listed under agents; the active one is
+// selected by name via the agent field (defaults to the first non-cli entry).
+//
+// Provider values:
+//
+//	"" or "local"  — plain HTTP, no auth (OpenAI-compat inference server)
+//	"bedrock"      — AWS SigV4 signing, native Converse API
+//	"claude-cli"   — Claude Code CLI subprocess (not an HTTP backend)
+//	anything else  — Bearer token via APIKey or TokenCmd
+type AgentConfig struct {
 	Name string `json:"name"` // display name, used as selector key
 
-	URL   string `json:"url"`   // base URL of the inference server
-	Model string `json:"model"` // model name or ARN
+	URL   string `json:"url,omitempty"`   // base URL of the inference server (unused for claude-cli)
+	Model string `json:"model,omitempty"` // model name or ARN (unused for claude-cli)
 
-	// Provider selects the auth transport.
-	// "" or "local" = no auth (default)
-	// "bedrock"     = AWS SigV4 signing (native Converse API)
-	// anything else = Bearer token via APIKey
+	// Provider selects the backend type / auth transport.
 	Provider string `json:"provider,omitempty"`
 
-	// APIKey is a Bearer token / API key used when Provider is not "" or "bedrock".
+	// APIKey is a Bearer token / API key used when Provider is not "", "local", "bedrock", or "claude-cli".
 	APIKey string `json:"api_key,omitempty"`
 
 	// TokenCmd is a shell command whose stdout is used as the Bearer token,
@@ -74,15 +78,9 @@ type LocalAgentConfig struct {
 
 	// Headers are extra HTTP headers injected on every request (e.g. "api-key" for Azure,
 	// "HTTP-Referer" for OpenRouter).
-	//
-	// Azure OpenAI workaround: Azure uses a non-standard URL path and "api-key" header instead
-	// of Bearer auth. Set url to the full deployment endpoint and add {"api-key": "<key>"} here.
-	// A dedicated azure provider with URL templating is tracked in GitHub Issues.
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// ChatPath overrides the inference endpoint path (default "/v1/chat/completions").
-	// Use when the server does not follow the standard /v1 prefix
-	// (e.g. some enterprise proxies expose "/chat/completions" directly).
 	ChatPath string `json:"chat_path,omitempty"`
 
 	// TLSSkipVerify disables TLS certificate verification. Use only for dev/self-signed certs.
@@ -98,40 +96,62 @@ type LocalAgentConfig struct {
 	AWSService string `json:"aws_service,omitempty"` // default "bedrock"
 	// AWSRefreshCmd is a credential_process-compatible command whose JSON output
 	// (AccessKeyId / SecretAccessKey / SessionToken) is used to refresh expired
-	// STS session tokens mid-request. When set, the SigV4 transport retries
-	// automatically on 403 without requiring an agent rebuild.
+	// STS session tokens mid-request.
 	AWSRefreshCmd string `json:"aws_refresh_cmd,omitempty"`
+
+	// Fields for Provider = "claude-cli".
+	// Bin is the path to the claude binary (default "claude").
+	Bin string `json:"bin,omitempty"`
+	// DangerouslySkipPermissions passes --dangerously-skip-permissions to the CLI.
+	DangerouslySkipPermissions bool `json:"dangerously_skip_permissions,omitempty"`
+	// AllowedTools is a list of tools pre-approved for this CLI agent.
+	AllowedTools []string `json:"allowed_tools,omitempty"`
+	// AddDirs is a list of extra directories to pass with --add-dir.
+	AddDirs []string `json:"add_dirs,omitempty"`
+}
+
+// IsCLI reports whether this agent uses the Claude Code CLI backend.
+func (a AgentConfig) IsCLI() bool {
+	return strings.ToLower(strings.TrimSpace(a.Provider)) == "claude-cli"
+}
+
+// defaultCLIAgent is the built-in claude-cli entry added when no agent
+// named "claude" exists. It is never written to disk unless the user edits it.
+func defaultCLIAgent() AgentConfig {
+	return AgentConfig{
+		Name:     "claude",
+		Provider: "claude-cli",
+		Bin:      "claude",
+	}
 }
 
 type Config struct {
-	// LocalAgent is the name of the active backend from LocalAgents.
-	// If empty, the first entry in LocalAgents is used.
-	LocalAgent  string             `json:"local_agent,omitempty"`
-	LocalAgents []LocalAgentConfig `json:"local_agents,omitempty"`
+	// Agent is the name of the active primary backend from Agents.
+	// If empty, the first non-claude-cli entry is used.
+	Agent  string        `json:"agent,omitempty"`
+	Agents []AgentConfig `json:"agents,omitempty"`
 
-	ClaudeBin                  string     `json:"claude_bin,omitempty"`
-	DefaultRoute               string     `json:"default_route,omitempty"`
-	DangerouslySkipPermissions bool       `json:"dangerously_skip_permissions,omitempty"`
-	AllowedTools               []string   `json:"allowed_tools,omitempty"`
-	AddDirs                    []string   `json:"add_dirs,omitempty"`
-	Rules                      Rules      `json:"rules"`
-	Otel                       OtelConfig `json:"otel"`
+	// EscalationAgent selects which backend handles escalated turns.
+	// Defaults to "claude" (the built-in claude-cli entry).
+	// Set to the name of any agents entry to route escalated turns there.
+	EscalationAgent string `json:"escalation_agent,omitempty"`
+
+	DefaultRoute string     `json:"default_route,omitempty"`
+	Rules        Rules      `json:"rules"`
+	Otel         OtelConfig `json:"otel"`
+
 	// Colorization controls transcript syntax highlighting.
 	// "off"      — no colorization
 	// "fenced"   — fenced code blocks only
-	// "balanced" — fenced blocks + inline Markdown (bold, italic, headings, bullets, inline code) (default)
-	// "full"    — full Markdown render via glamour
+	// "balanced" — fenced blocks + inline Markdown (default)
+	// "full"     — full Markdown render via glamour
 	Colorization string `json:"colorization,omitempty"`
 
-	// DebugClaudeCode writes every raw NDJSON line from the claude subprocess to
-	// ~/.milk/claude_debug.ndjson — useful for understanding stream protocol issues.
-	DebugClaudeCode bool `json:"debug_claude_code,omitempty"`
+	// DebugCLILog writes every raw NDJSON line from the claude subprocess to
+	// ~/.milk/claude_debug.ndjson.
+	DebugCLILog bool `json:"debug_claude_code,omitempty"`
+
 	// AWSAuthRefresh enables AWS credential injection for the claude subprocess.
-	// When true, milk reads the awsAuthRefresh command from ~/.claude/settings.json,
-	// runs it, and injects the resulting credentials as explicit AWS_* env vars.
-	// This prevents stale or wrong-account credentials in the shell environment
-	// from overriding the correct ones. Requires awsAuthRefresh to be set in
-	// ~/.claude/settings.json (it is set automatically by claude-code-with-bedrock).
 	AWSAuthRefresh bool `json:"aws_auth_refresh,omitempty"`
 
 	// ShowReasoning controls whether thinking/reasoning tokens are visible in the
@@ -148,7 +168,6 @@ type Config struct {
 
 func defaults() Config {
 	return Config{
-		ClaudeBin:    "claude",
 		DefaultRoute: "local",
 		Colorization: "balanced",
 		Otel: OtelConfig{
@@ -200,31 +219,69 @@ func (c Config) ShowReasoningDefault() bool {
 	return *c.ShowReasoning
 }
 
-// ActiveLocalAgent returns the resolved LocalAgentConfig to use.
-// Selects by name from local_agents (case-insensitive), falls back to the first
-// entry, or returns an empty config when the list is empty.
-func (c Config) ActiveLocalAgent() LocalAgentConfig {
-	if len(c.LocalAgents) == 0 {
-		return LocalAgentConfig{} // no provider configured
+// effectiveAgents returns Agents with the built-in claude-cli entry appended
+// if no entry named "claude" already exists. This ensures there is always a
+// claude-cli agent available without requiring it to be in every config file.
+func (c Config) effectiveAgents() []AgentConfig {
+	for _, a := range c.Agents {
+		if strings.EqualFold(a.Name, "claude") {
+			return c.Agents
+		}
 	}
-	if c.LocalAgent != "" {
-		for _, a := range c.LocalAgents {
-			if strings.EqualFold(a.Name, c.LocalAgent) {
+	return append(c.Agents, defaultCLIAgent())
+}
+
+// ActiveAgent returns the resolved AgentConfig to use as the primary agent.
+// Skips claude-cli entries — the primary agent must be an inference-server backend.
+// Selects by name from agents (case-insensitive), falls back to the first
+// non-claude-cli entry, or returns an empty config when none exists.
+func (c Config) ActiveAgent() AgentConfig {
+	agents := c.effectiveAgents()
+	if c.Agent != "" {
+		for _, a := range agents {
+			if strings.EqualFold(a.Name, c.Agent) && !a.IsCLI() {
 				return a
 			}
 		}
 	}
-	return c.LocalAgents[0]
+	for _, a := range agents {
+		if !a.IsCLI() {
+			return a
+		}
+	}
+	return AgentConfig{}
 }
 
-// HasLocalAgentConfig reports whether the user has explicitly configured a
-// local-agent backend. Used by the TUI to decide whether to show setup hints.
-func (c Config) HasLocalAgentConfig() bool {
-	return len(c.LocalAgents) > 0
+// EscalationAgentConfig returns the AgentConfig for the escalation backend.
+// Defaults to the built-in claude-cli entry when EscalationAgent is empty or "claude".
+func (c Config) EscalationAgentConfig() AgentConfig {
+	name := strings.TrimSpace(c.EscalationAgent)
+	if name == "" {
+		name = "claude"
+	}
+	for _, a := range c.effectiveAgents() {
+		if strings.EqualFold(a.Name, name) {
+			return a
+		}
+	}
+	// Named agent not found — fall back to claude-cli default.
+	return defaultCLIAgent()
 }
 
-// ClaudeDebugLogPath returns the path for the Claude raw NDJSON debug log.
-func ClaudeDebugLogPath() (string, error) {
+// HasInferenceAgent reports whether the user has configured at least one
+// non-claude-cli agent backend. Used by the TUI to decide whether to show
+// setup hints.
+func (c Config) HasInferenceAgent() bool {
+	for _, a := range c.Agents {
+		if !a.IsCLI() {
+			return true
+		}
+	}
+	return false
+}
+
+// CLIDebugLogPath returns the path for the Claude raw NDJSON debug log.
+func CLIDebugLogPath() (string, error) {
 	d, err := Dir()
 	if err != nil {
 		return "", err
@@ -250,7 +307,6 @@ func OtelDir() (string, error) {
 }
 
 // HistoryPath returns the readline history file path for the given cwd.
-// Each working directory gets its own file so prompts don't mix across projects.
 func HistoryPath(cwd string) (string, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -275,8 +331,6 @@ func Load() (Config, error) {
 	path := filepath.Join(dir, "config.json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		// First launch: scaffold ~/.milk/ and write defaults so the file is
-		// discoverable and self-documenting from the start.
 		_ = Save(cfg)
 		return cfg, nil
 	}

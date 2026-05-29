@@ -180,14 +180,14 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 	case "user":
 		producer = ProducerUser
 	case "claude":
-		producer = ProducerClaude
+		producer = ProducerEscalation
 	}
 	var consumer Consumer
 	switch args.Consumer {
 	case "local":
 		consumer = ConsumerLocal
 	case "claude":
-		consumer = ConsumerClaude
+		consumer = ConsumerEscalation
 	}
 	id, err := store.Record(ctx, args.Content, producer, consumer, roles, false)
 	if dup, ok := IsDuplicate(err); ok {
