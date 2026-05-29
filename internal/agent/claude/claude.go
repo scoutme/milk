@@ -25,6 +25,8 @@ type Agent struct {
 	onThinking        func(string)                 // called on thinking_delta tokens
 	onPercept         func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
 	perceptNonce      string                       // session-specific nonce matching the system-prompt instruction
+	onNeed            func(string)                 // called for each <milk:need:NONCE> tag; arg: new current-need text
+	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
 }
 
@@ -102,6 +104,17 @@ func (a *Agent) WithOnPercept(fn func(content, consumerHint string), nonce strin
 	c := *a
 	c.onPercept = fn
 	c.perceptNonce = nonce
+	return &c
+}
+
+// WithOnNeed returns a copy of the agent that calls fn for each
+// <milk:need:NONCE>…</milk:need:NONCE> tag intercepted in the response stream.
+// fn receives the new current-need description. nonce must match the value
+// passed to escalation.NeedInstruction(nonce).
+func (a *Agent) WithOnNeed(fn func(content string), nonce string) *Agent {
+	c := *a
+	c.onNeed = fn
+	c.needNonce = nonce
 	return &c
 }
 
@@ -254,6 +267,8 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		OnThinking:     a.onThinking,
 		OnPercept:      a.onPercept,
 		PerceptNonce:   a.perceptNonce,
+		OnNeed:         a.onNeed,
+		NeedNonce:      a.needNonce,
 		DebugLog:       a.debugLog,
 	})
 

@@ -533,14 +533,28 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if inPanel && ev.Action == tea.MouseActionPress {
 			const panelRowStart = 2 // same header offset as the main viewport
 			panelLine := m.panelOffset + (ev.Y - panelRowStart)
-			ids := buildPanelLineIDs(m.mem)
+			ids := buildPanelLineIDs(m.mem, sessionBricks{
+				currentNeed:      m.st.sess.CurrentNeed,
+				lastLocalSummary: m.st.sess.LastLocalSummary,
+				escalationBrief:  m.st.sess.EscalationBrief,
+			})
 			if panelLine >= 0 && panelLine < len(ids) {
 				id := ids[panelLine]
 				if id != "" {
 					now := time.Now()
 					if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-						// Double-click: show full percept details in the transcript.
-						result := execMemoryShow("#"+id[:min(6, len(id))], m.st)
+						// Double-click: print brick or percept details to transcript.
+						bricks := sessionBricks{
+							currentNeed:      m.st.sess.CurrentNeed,
+							lastLocalSummary: m.st.sess.LastLocalSummary,
+							escalationBrief:  m.st.sess.EscalationBrief,
+						}
+						var result string
+						if content := brickContent(id, bricks); content != "" {
+							result = milkTag() + " [" + id + "]\n" + content
+						} else {
+							result = execMemoryShow("#"+id[:min(6, len(id))], m.st)
+						}
 						m.appendTranscript(result + "\n")
 						m.vp.GotoBottom()
 						m.lastPanelClickID = ""
@@ -3267,7 +3281,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		// The credential-process handles its own cache and returns immediately
 		// when the token is still fresh, so this is cheap in the common case.
 		claudeAgent = applyAWSCreds(st.cfg, claudeAgent)
-		return runClaudeWith(turnCtx, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
+		return runClaudeWith(turnCtx, st.cfg, st.sess, claudeAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, out)
 	}
 	return nil
 }

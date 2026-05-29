@@ -3,138 +3,124 @@ package escalation
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/scoutme/milk/internal/session"
 )
 
-func turn(role session.Role, agent session.Agent, content string) session.Turn {
-	return session.Turn{Role: role, Agent: agent, Content: content, Timestamp: time.Now()}
-}
-
-func TestBuildContext_Empty(t *testing.T) {
+func TestBuildContext_EmptySession(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "testnonce", nil)
+	got := BuildContext(sess, "testnonce", nil, false)
 	if !strings.Contains(got, "milk:percept:testnonce") {
-		t.Errorf("empty history should still include memory instruction with nonce, got %q", got)
+		t.Errorf("expected percept nonce in output, got %q", got)
+	}
+	if !strings.Contains(got, "milk:need:testnonce") {
+		t.Errorf("expected need nonce in output, got %q", got)
 	}
 }
 
-func TestBuildContext_ContainsHeader(t *testing.T) {
-	sess := &session.Session{History: []session.Turn{
-		turn(session.RoleUser, session.AgentLocal, "hello"),
-	}}
-	got := BuildContext(sess, "testnonce", nil)
-	if !strings.Contains(got, "[Context from local agent session]") {
-		t.Error("missing header")
+func TestBuildContext_CurrentNeed(t *testing.T) {
+	sess := &session.Session{CurrentNeed: "implement JWT auth"}
+	got := BuildContext(sess, "n1", nil, false)
+	if !strings.Contains(got, "implement JWT auth") {
+		t.Errorf("expected CurrentNeed in output, got %q", got)
 	}
-	if !strings.Contains(got, "[End of local context") {
-		t.Error("missing footer")
+	if !strings.Contains(got, "[Current user goal]") {
+		t.Errorf("expected goal header in output, got %q", got)
 	}
 }
 
-func TestBuildContext_UserAndAssistantTurns(t *testing.T) {
-	sess := &session.Session{History: []session.Turn{
-		turn(session.RoleUser, session.AgentLocal, "what files are here?"),
-		turn(session.RoleAssistant, session.AgentLocal, "I can check that."),
-		turn(session.RoleToolResult, "", `{"output":"main.go\n","exit_code":0}`),
-	}}
-	got := BuildContext(sess, "testnonce", nil)
-	if !strings.Contains(got, "User: what files are here?") {
-		t.Error("missing user turn")
-	}
-	if !strings.Contains(got, "Assistant (local): I can check that.") {
-		t.Error("missing assistant turn")
-	}
-	if !strings.Contains(got, "[Tool result]") {
-		t.Error("missing tool result")
+func TestBuildContext_NoNeedWhenEmpty(t *testing.T) {
+	sess := &session.Session{}
+	got := BuildContext(sess, "n1", nil, false)
+	if strings.Contains(got, "[Current user goal]") {
+		t.Error("empty CurrentNeed should not produce goal block")
 	}
 }
 
-func TestBuildContext_ToolResultTruncation(t *testing.T) {
-	long := strings.Repeat("x", 600)
-	sess := &session.Session{History: []session.Turn{
-		turn(session.RoleToolResult, "", long),
-	}}
-	got := BuildContext(sess, "testnonce", nil)
-	if !strings.Contains(got, "... (truncated)") {
-		t.Error("expected truncation marker")
-	}
-	if strings.Contains(got, long) {
-		t.Error("expected content to be truncated, found full string")
+func TestBuildContext_EscalationBrief_FirstEscalation(t *testing.T) {
+	sess := &session.Session{EscalationBrief: "stuck on nil pointer in auth.go"}
+	got := BuildContext(sess, "n1", nil, false)
+	if !strings.Contains(got, "stuck on nil pointer in auth.go") {
+		t.Errorf("expected EscalationBrief in first-escalation output, got %q", got)
 	}
 }
 
-func TestBuildContext_ToolResultNoTruncation(t *testing.T) {
-	short := strings.Repeat("x", 499)
-	sess := &session.Session{History: []session.Turn{
-		turn(session.RoleToolResult, "", short),
-	}}
-	got := BuildContext(sess, "testnonce", nil)
-	if strings.Contains(got, "... (truncated)") {
-		t.Error("short content should not be truncated")
+func TestBuildContext_EscalationBrief_SkippedOnResume(t *testing.T) {
+	sess := &session.Session{EscalationBrief: "stuck on nil pointer in auth.go"}
+	got := BuildContext(sess, "n1", nil, true)
+	if strings.Contains(got, "stuck on nil pointer in auth.go") {
+		t.Error("EscalationBrief should not appear on resume")
 	}
 }
 
-func TestMemoryInstruction_NonceInTag(t *testing.T) {
-	nonce := "abc123"
-	got := MemoryInstruction(nonce)
-	if !strings.Contains(got, "<milk:percept:abc123>") {
-		t.Errorf("MemoryInstruction should contain nonce open tag, got %q", got)
+func TestBuildContext_LastLocalSummary(t *testing.T) {
+	sess := &session.Session{LastLocalSummary: "User: fix typo\nAssistant (local): done"}
+	got := BuildContext(sess, "n1", nil, false)
+	if !strings.Contains(got, "fix typo") {
+		t.Errorf("expected LastLocalSummary in output, got %q", got)
 	}
-	if !strings.Contains(got, "</milk:percept:abc123>") {
-		t.Errorf("MemoryInstruction should contain nonce close tag, got %q", got)
+	if !strings.Contains(got, "[Recent local agent activity]") {
+		t.Errorf("expected local activity header, got %q", got)
 	}
-	// Verify plain <milk:percept> (without nonce) does NOT appear
-	if strings.Contains(got, "<milk:percept>") {
-		t.Errorf("MemoryInstruction must not contain legacy tag without nonce, got %q", got)
+}
+
+func TestBuildContext_NoLocalSummaryBlock_WhenEmpty(t *testing.T) {
+	sess := &session.Session{}
+	got := BuildContext(sess, "n1", nil, false)
+	if strings.Contains(got, "[Recent local agent activity]") {
+		t.Error("empty LastLocalSummary should not produce activity block")
 	}
 }
 
 func TestBuildContext_WithPercepts(t *testing.T) {
 	sess := &session.Session{}
-	percepts := []string{"user prefers Go", "escalate to claude for architecture"}
-	got := BuildContext(sess, "testnonce", percepts)
-
+	got := BuildContext(sess, "n1", []string{"user prefers Go", "use flat files"}, false)
 	if !strings.Contains(got, "[Remembered facts]") {
-		t.Error("expected [Remembered facts] header when percepts are provided")
+		t.Errorf("expected [Remembered facts] block, got %q", got)
 	}
-	for _, p := range percepts {
-		if !strings.Contains(got, p) {
-			t.Errorf("expected percept %q in output, got %q", p, got)
-		}
+	if !strings.Contains(got, "user prefers Go") {
+		t.Errorf("expected percept in output, got %q", got)
 	}
 }
 
-func TestBuildContext_NilPerceptsOmitsBlock(t *testing.T) {
+func TestBuildContext_NilPercepts(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "testnonce", nil)
+	got := BuildContext(sess, "n1", nil, false)
 	if strings.Contains(got, "[Remembered facts]") {
-		t.Error("nil percepts should not produce [Remembered facts] block")
+		t.Error("nil percepts should not produce facts block")
 	}
 }
 
-func TestBuildContext_EmptyPerceptsOmitsBlock(t *testing.T) {
-	sess := &session.Session{}
-	got := BuildContext(sess, "testnonce", []string{})
-	if strings.Contains(got, "[Remembered facts]") {
-		t.Error("empty percepts slice should not produce [Remembered facts] block")
+func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
+	sess := &session.Session{
+		LastLocalSummary: "User: run tests",
+		CurrentNeed:      "fix failing tests",
+	}
+	got := BuildContext(sess, "n1", nil, true)
+	if !strings.Contains(got, "fix failing tests") {
+		t.Errorf("expected CurrentNeed on resume, got %q", got)
+	}
+	if !strings.Contains(got, "run tests") {
+		t.Errorf("expected LastLocalSummary on resume, got %q", got)
 	}
 }
 
-func TestBuildContext_WithHistoryAndPercepts(t *testing.T) {
-	sess := &session.Session{History: []session.Turn{
-		turn(session.RoleUser, session.AgentLocal, "what is the plan?"),
-	}}
-	got := BuildContext(sess, "testnonce", []string{"use flat files"})
+func TestMemoryInstruction_NonceInTag(t *testing.T) {
+	got := MemoryInstruction("abc123")
+	if !strings.Contains(got, "<milk:percept:abc123>") {
+		t.Errorf("expected nonce open tag, got %q", got)
+	}
+	if !strings.Contains(got, "</milk:percept:abc123>") {
+		t.Errorf("expected nonce close tag, got %q", got)
+	}
+}
 
-	if !strings.Contains(got, "[Context from local agent session]") {
-		t.Error("missing context header")
+func TestNeedInstruction_NonceInTag(t *testing.T) {
+	got := NeedInstruction("abc123")
+	if !strings.Contains(got, "<milk:need:abc123>") {
+		t.Errorf("expected need open tag, got %q", got)
 	}
-	if !strings.Contains(got, "[Remembered facts]") {
-		t.Error("expected [Remembered facts] after history")
-	}
-	if !strings.Contains(got, "use flat files") {
-		t.Error("expected percept content in output")
+	if !strings.Contains(got, "</milk:need:abc123>") {
+		t.Errorf("expected need close tag, got %q", got)
 	}
 }

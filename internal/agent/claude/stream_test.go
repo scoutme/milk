@@ -492,6 +492,146 @@ func TestConsumerHintFrom(t *testing.T) {
 	}
 }
 
+func TestStream_OnNeedCallback(t *testing.T) {
+	const nonce = "testneed1"
+	var needs []string
+	openTag := "<milk:need:" + nonce + ">"
+	closeTag := "</milk:need:" + nonce + ">"
+	text := "Working on it. " + openTag + "implement JWT auth" + closeTag
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"`+text+`"}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
+		OnNeed:    func(s string) { needs = append(needs, s) },
+		NeedNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(needs) != 1 || needs[0] != "implement JWT auth" {
+		t.Errorf("OnNeed: want [implement JWT auth], got %v", needs)
+	}
+	if strings.Contains(res.Text, "milk:need") {
+		t.Errorf("need tag must not appear in res.Text, got %q", res.Text)
+	}
+	if strings.Contains(out.String(), "milk:need") {
+		t.Errorf("need tag must not appear in output, got %q", out.String())
+	}
+}
+
+func TestStream_OnNeedWrongNonceIgnored(t *testing.T) {
+	const nonce = "testneed2"
+	var needs []string
+	// Tag uses a different nonce
+	text := "<milk:need:othernonce>some goal</milk:need:othernonce>"
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"`+text+`"}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	_, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
+		OnNeed:    func(s string) { needs = append(needs, s) },
+		NeedNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(needs) != 0 {
+		t.Errorf("wrong-nonce need tag should not be captured, got %v", needs)
+	}
+}
+
+func TestStripPerceptTags_CodeSpanPreserved(t *testing.T) {
+	const nonce = "xtest2"
+	open := "<milk:percept:" + nonce + ">"
+	close_ := "</milk:percept:" + nonce + ">"
+	cases := []struct{ in, want string }{
+		// Tag inside backtick code span must pass through unchanged.
+		{"`" + open + "fact" + close_ + "`", "`" + open + "fact" + close_ + "`"},
+		// Tag outside code span is still stripped.
+		{"before `code` " + open + "fact" + close_ + " after", "before `code`  after"},
+		// Tag before and after code span are both stripped; span content preserved.
+		{open + "f1" + close_ + " `code` " + open + "f2" + close_, "`code`"},
+		// Triple-backtick fence.
+		{"```\n" + open + "fact" + close_ + "\n```", "```\n" + open + "fact" + close_ + "\n```"},
+	}
+	for _, tc := range cases {
+		got := strings.TrimSpace(stripPerceptTags(tc.in, nonce))
+		want := strings.TrimSpace(tc.want)
+		if got != want {
+			t.Errorf("stripPerceptTags code-span(%q): want %q, got %q", tc.in, want, got)
+		}
+	}
+}
+
+func TestStripTagsByPrefix_CodeSpanPreserved(t *testing.T) {
+	const nonce = "xtest3"
+	openPrefix := needOpenPrefix
+	open := openPrefix + nonce + ">"
+	close_ := "</" + openPrefix[1:] + nonce + ">"
+	cases := []struct{ in, want string }{
+		{"`" + open + "need" + close_ + "`", "`" + open + "need" + close_ + "`"},
+		{"before `code` " + open + "need" + close_ + " after", "before `code`  after"},
+	}
+	for _, tc := range cases {
+		got := strings.TrimSpace(stripTagsByPrefix(tc.in, openPrefix))
+		want := strings.TrimSpace(tc.want)
+		if got != want {
+			t.Errorf("stripTagsByPrefix code-span(%q): want %q, got %q", tc.in, want, got)
+		}
+	}
+}
+
+func TestPerceptWriter_CodeSpanPreserved(t *testing.T) {
+	const nonce = "n9901"
+	open, close_ := perceptTagPair(nonce)
+	var out strings.Builder
+	var percepts []string
+	pw := newTestPerceptWriter(&out, nonce, &percepts)
+
+	// Tag wrapped in backticks must pass through unchanged and NOT be recorded.
+	input := "before `" + open + "fact" + close_ + "` after"
+	pw.Write([]byte(input)) //nolint:errcheck
+	pw.flush()              //nolint:errcheck
+
+	if len(percepts) != 0 {
+		t.Errorf("tag inside code span should not be captured, got %v", percepts)
+	}
+	if !strings.Contains(out.String(), open) {
+		t.Errorf("tag inside code span should pass through, got %q", out.String())
+	}
+}
+
+func TestTagWriter_CodeSpanPreserved(t *testing.T) {
+	const nonce = "n9902"
+	openPrefix := needOpenPrefix
+	open := openPrefix + nonce + ">"
+	closeTag := "</" + openPrefix[1:] + nonce + ">"
+	var out strings.Builder
+	var needs []string
+	tw := &tagWriter{
+		w:           &out,
+		openPrefix:  openPrefix,
+		onTag:       func(s string) { needs = append(needs, s) },
+		recordNonce: nonce,
+	}
+
+	input := "before `" + open + "need" + closeTag + "` after"
+	tw.Write([]byte(input)) //nolint:errcheck
+	tw.flush()              //nolint:errcheck
+
+	if len(needs) != 0 {
+		t.Errorf("tag inside code span should not be captured, got %v", needs)
+	}
+	if !strings.Contains(out.String(), open) {
+		t.Errorf("tag inside code span should pass through, got %q", out.String())
+	}
+}
+
 func TestStream_PermissionDenialsInResult(t *testing.T) {
 	input := ndjson(
 		`{"type":"system","session_id":"s1"}`,

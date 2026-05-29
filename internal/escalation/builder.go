@@ -1,7 +1,6 @@
 package escalation
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/scoutme/milk/internal/session"
@@ -14,45 +13,41 @@ const identityBlock = "[Milk agent context]\n" +
 	"You share session history and memory with the local LLM agent. " +
 	"Expect mid-conversation hand-offs and multi-turn resumes.\n\n"
 
-// BuildContext formats the local session history into a system prompt context
-// block for Claude. Claude receives this via --append-system-prompt and
-// orients itself without a separate reformulation step.
-// nonce is passed through to MemoryInstruction so the tag format is session-specific.
-// percepts contains content strings of remembered facts to inject for Claude; may be nil.
-func BuildContext(sess *session.Session, nonce string, percepts []string) string {
-	if len(sess.History) == 0 {
-		return identityBlock + MemoryInstruction(nonce) + formatPercepts(percepts)
-	}
-
+// BuildContext assembles the system-prompt context block for a Claude escalation.
+//
+// On the first escalation (not a resume), it injects:
+//   - identity block
+//   - escalation brief (if agent-triggered via escalate_to_claude)
+//   - current need (what the user is working towards)
+//   - last local summary (what the local model did since the last Claude session)
+//   - memory instruction (percept tag format)
+//   - remembered facts
+//
+// On a resume, only identity + current need + last local summary + memory instruction
+// are included — Claude already has its own conversation history.
+func BuildContext(sess *session.Session, nonce string, percepts []string, resuming bool) string {
 	var b strings.Builder
 	b.WriteString(identityBlock)
-	b.WriteString("[Context from local agent session]\n")
 
-	for _, turn := range sess.History {
-		switch turn.Role {
-		case session.RoleUser:
-			fmt.Fprintf(&b, "User: %s\n", turn.Content)
-
-		case session.RoleAssistant:
-			if len(turn.ToolCalls) > 0 {
-				for _, tc := range turn.ToolCalls {
-					fmt.Fprintf(&b, "[Tool call: %s] %s\n", tc.Name, tc.Arguments)
-				}
-			} else {
-				fmt.Fprintf(&b, "Assistant (%s): %s\n", turn.Agent, turn.Content)
-			}
-
-		case session.RoleToolResult:
-			content := turn.Content
-			if len(content) > 500 {
-				content = content[:500] + "\n... (truncated)"
-			}
-			fmt.Fprintf(&b, "[Tool result] %s\n", content)
-		}
+	if !resuming && sess.EscalationBrief != "" {
+		b.WriteString("[Escalation brief from local agent]\n")
+		b.WriteString(sess.EscalationBrief)
+		b.WriteString("\n\n")
 	}
 
-	b.WriteString("[End of local context — continue from here]\n")
-	b.WriteString("\n")
+	if sess.CurrentNeed != "" {
+		b.WriteString("[Current user goal]\n")
+		b.WriteString(sess.CurrentNeed)
+		b.WriteString("\n\n")
+	}
+
+	if sess.LastLocalSummary != "" {
+		b.WriteString("[Recent local agent activity]\n")
+		b.WriteString(sess.LastLocalSummary)
+		b.WriteString("\n")
+	}
+
+	b.WriteString(NeedInstruction(nonce))
 	b.WriteString(MemoryInstruction(nonce))
 	b.WriteString(formatPercepts(percepts))
 	return b.String()
@@ -66,9 +61,24 @@ func formatPercepts(percepts []string) string {
 	var b strings.Builder
 	b.WriteString("\n[Remembered facts]\n")
 	for _, p := range percepts {
-		fmt.Fprintf(&b, "- %s\n", p)
+		b.WriteString("- ")
+		b.WriteString(p)
+		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// NeedInstruction returns the system-prompt fragment that instructs both agents
+// to emit a <milk:need:NONCE> tag when the user switches context, so milk can
+// keep CurrentNeed up to date across the session.
+func NeedInstruction(nonce string) string {
+	openTag := "<milk:need:" + nonce + ">"
+	closeTag := "</milk:need:" + nonce + ">"
+	return "[Milk current-need tracking]\n" +
+		"When the user switches to a new topic or goal, emit:\n" +
+		"  " + openTag + "one-sentence description of what the user is now trying to accomplish" + closeTag + "\n" +
+		"Also emit this tag for the very first user message if no goal has been set yet. " +
+		"Tags are intercepted by milk, never shown to the user.\n\n"
 }
 
 // MemoryInstruction returns a system-prompt fragment that instructs Claude to

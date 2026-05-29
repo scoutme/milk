@@ -164,7 +164,7 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
 	case router.TargetClaude:
-		return runClaude(ctx, sess, claudeAgent, prompt, cs, mem)
+		return runClaude(ctx, cfg, sess, claudeAgent, prompt, cs, mem)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
@@ -379,8 +379,11 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			fmt.Fprintf(out, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
-			// Commit the user turn before escalating so Claude has context
+			// Commit the user turn before escalating so Claude has context.
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+			// Set brief before rebuild so the brick includes it.
+			sess.EscalationBrief = esc.Reason
+			sess.RebuildSummaryBricks(cfg.ContextBudget())
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
 			escalateAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
@@ -389,7 +392,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			if cwd, err := os.Getwd(); err == nil {
 				localCs, _ = claudesettings.Open(cwd)
 			}
-			return runClaudeWith(ctx, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
+			return runClaudeWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
 		}
 		return err
 	}
@@ -411,6 +414,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			Agent:   session.AgentLocal,
 			Content: assistantContent,
 		})
+		sess.RebuildSummaryBricks(cfg.ContextBudget())
 	}
 
 	sess.ForceState(session.StateRouting)
@@ -440,11 +444,11 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 	return "", io.EOF
 }
 
-func runClaude(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
-	return runClaudeWith(ctx, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
+func runClaude(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
+	return runClaudeWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
 }
 
-func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
+func runClaudeWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
@@ -456,9 +460,8 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 	sess.ForceState(session.StateClaude)
 
 	// Generate a fresh nonce for this Claude turn. The same nonce is embedded in
-	// the system-prompt instruction (via MemoryInstruction/BuildContext) and in the
-	// stream parser (via WithOnPercept), so only tags containing this nonce are
-	// captured — explanatory text about the tag format is ignored.
+	// the system-prompt instructions (BuildContext, MemoryInstruction, NeedInstruction)
+	// and in the stream parser, so only tags containing this nonce are captured.
 	nonce := claude.GenerateNonce()
 
 	agent = applyPersistedGrants(agent, pc)
@@ -482,6 +485,9 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 			_ = err
 		}, nonce)
 	}
+	agent = agent.WithOnNeed(func(content string) {
+		sess.CurrentNeed = content
+	}, nonce)
 
 	res, err := runClaudeAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForClaude(mem))
 	aw.Done()
@@ -494,6 +500,7 @@ func runClaudeWith(ctx context.Context, sess *session.Session, agent *claude.Age
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
+	sess.RebuildSummaryBricks(cfg.ContextBudget())
 	if res.EndsWithQ {
 		sess.ForceState(session.StateClaudeWaiting)
 	} else {
@@ -526,10 +533,10 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 // nonce is the session-specific percept nonce embedded in the system-prompt instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
 func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string) (claude.ParseResult, error) {
+	sysContext := escalation.BuildContext(sess, nonce, percepts, resuming)
 	if resuming {
-		return agent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), prompt, out)
+		return agent.RunResume(ctx, sess.ClaudeSessionID, sysContext, prompt, out)
 	}
-	sysContext := escalation.BuildContext(sess, nonce, percepts)
 	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, out)
 	if err == nil {
 		sess.ClaudeSessionID = claudeSessionID

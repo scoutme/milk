@@ -138,6 +138,12 @@ type Config struct {
 	// transcript by default. Can be toggled live with /think on|off.
 	// true (default) = show reasoning; false = show "[thinking…]" placeholder.
 	ShowReasoning *bool `json:"show_reasoning,omitempty"`
+
+	// ContextBudgetChars is the maximum number of characters injected per
+	// agent summary brick (last_local_summary / last_claude_summary) in the
+	// escalation system prompt. Turns are included newest-first until the
+	// budget is exhausted. Default: 12000.
+	ContextBudgetChars int `json:"context_budget_chars,omitempty"`
 }
 
 func defaults() Config {
@@ -174,6 +180,15 @@ func defaults() Config {
 			EscalateVerbs: []string{"architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"},
 		},
 	}
+}
+
+// ContextBudget returns the configured context budget in characters,
+// falling back to 12000 when unset.
+func (c Config) ContextBudget() int {
+	if c.ContextBudgetChars <= 0 {
+		return 12000
+	}
+	return c.ContextBudgetChars
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility
