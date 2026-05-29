@@ -21,7 +21,7 @@ import (
 
 const maxToolIterations = 10
 
-// EscalationSignal is returned when the local model requests escalation to Claude.
+// EscalationSignal is returned when the local model requests escalation to the escalation agent.
 type EscalationSignal struct {
 	Reason string
 }
@@ -75,12 +75,29 @@ type Agent struct {
 	model            string
 	chatPath         string // inference path; defaults to "/v1/chat/completions"
 	otelDir          string
-	skipHealthCheck  bool // true for remote providers that have no /health endpoint (e.g. Bedrock)
-	useBedrockNative bool // true when provider = "bedrock"; uses Converse API instead of /v1/chat/completions
+	skipHealthCheck  bool   // true for remote providers that have no /health endpoint (e.g. Bedrock)
+	useBedrockNative bool   // true when provider = "bedrock"; uses Converse API instead of /v1/chat/completions
+	skipRepeatCheck  bool   // true when acting as the escalation target: the repeated-prompt check must not fire
+	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
+	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
+	permStore        *PermStore
+	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
 	client           *http.Client
 	detectedFormat   ToolFormat         // confirmed format from last tool-bearing turn
 	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
 	sigv4            *sigv4Transport    // non-nil for Bedrock; used to wire the onRefresh callback
+}
+
+// AsEscalationTarget returns a shallow copy of the agent configured for the
+// escalation role: skipRepeatCheck is set (the escalation agent must handle
+// prompts the primary already tried) and escalationName is stored for the
+// role-aware system prompt. name is the human-readable escalation agent name
+// shown in the TUI (e.g. "haiku-aws").
+func (a *Agent) AsEscalationTarget(name string) *Agent {
+	copy := *a
+	copy.skipRepeatCheck = true
+	copy.escalationName = name
+	return &copy
 }
 
 // HasTokenCmd reports whether this agent uses a token_cmd for authentication.
@@ -128,8 +145,8 @@ func (a *Agent) inferenceURL() string {
 	return a.baseURL + p
 }
 
-// NewFromConfig creates an Agent from the active LocalAgentConfig.
-func NewFromConfig(ac config.LocalAgentConfig) *Agent {
+// NewFromConfig creates an Agent from an AgentConfig.
+func NewFromConfig(ac config.AgentConfig) *Agent {
 	inner := buildBaseTransport(ac)
 	var transport http.RoundTripper = inner
 
@@ -223,7 +240,7 @@ func NewFromConfig(ac config.LocalAgentConfig) *Agent {
 
 // buildBaseTransport returns an http.RoundTripper with TLS configured per ac.
 // Falls back to http.DefaultTransport when no TLS overrides are set.
-func buildBaseTransport(ac config.LocalAgentConfig) http.RoundTripper {
+func buildBaseTransport(ac config.AgentConfig) http.RoundTripper {
 	if !ac.TLSSkipVerify && ac.TLSCACert == "" {
 		return http.DefaultTransport
 	}
@@ -239,41 +256,81 @@ func buildBaseTransport(ac config.LocalAgentConfig) http.RoundTripper {
 	return &http.Transport{TLSClientConfig: tlsCfg}
 }
 
+// WithPermissions wires the permission store and ask callback into the agent.
+// permStore may be nil (no persistence). ask is called when a tool requires
+// a permission prompt; it returns true if the user allows. When ask is nil,
+// all prompts are denied (appropriate for non-interactive single-prompt mode).
+func (a *Agent) WithPermissions(ps *PermStore, ask func(tool, summary string) bool) *Agent {
+	a.permStore = ps
+	a.permAsk = ask
+	return a
+}
+
+// WithSkipPermissions returns a copy of the agent with the skip-permissions flag set.
+// When true, all tool permission checks are bypassed without prompting.
+func (a *Agent) WithSkipPermissions(skip bool) *Agent {
+	copy := *a
+	copy.skipPerms = skip
+	return &copy
+}
+
 // WithOtelDir sets the otel directory so the agent can offer get_metrics.
 func (a *Agent) WithOtelDir(dir string) *Agent {
 	a.otelDir = dir
 	return a
 }
 
-const systemPromptBase = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics, escalate_to_claude.
-
-Rules:
+// systemPromptShared is the role-independent core: tool rules, memory rules,
+// file/directory conventions, and git protocol. Both primary and escalation
+// agents receive this verbatim.
+const systemPromptShared = `Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - To find files by name or pattern (e.g. "*_test.go", "*.md", "Makefile") use find_files — never use grep for this. Use grep only to search inside file contents.
 - list_dir shows only the top level of a directory; never conclude that files or subdirectories are absent based solely on a list_dir result. To check whether files of a given type exist anywhere in the project, use find_files with the working directory as root.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
-- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "claude" to see only Claude's prior turns. Only omit all filters when you genuinely need the full history.
 **MANDATORY — memory tool actions**: The following require immediate tool calls with NO preamble or confirmation:
   - User asks about past context or preferences → call get_memory NOW before responding.
   - User states a preference, decision, or fact → call record_memory NOW.
   - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. Strip any leading "#" from the ID before passing it. Never say "done" or confirm the action without actually calling the tool.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
-- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without naming one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
-- Use escalate_to_claude only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "claude" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by Claude, immediately respond "That was done by Claude — do you want me to escalate so Claude can continue with full context?" and offer escalate_to_claude. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.
+- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
+- For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:
 1. Call bash with "git status" and "git diff --stat HEAD" to see what is staged or changed.
-2. Call get_session_context with agent: "local" (your role key — fixed regardless of which provider or model name you are running as) to check whether YOU performed those changes in this session.
-3. If you find no matching work in your own context, call get_session_context with agent: "claude" to check whether Claude made those changes.
+2. Call get_session_context with agent: "local" to check whether the primary local agent performed those changes in this session.
+3. Call get_session_context with agent: "escalation" to check whether the escalation agent made those changes.
 4. Only proceed with a commit if step 2 OR step 3 returned clear context that explains the changes and their purpose. Use that context to write an accurate commit message.
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.`
 
-func buildSystemPrompt(cwd string) string {
-	if cwd == "" {
-		return systemPromptBase
+// systemPromptPrimary is prepended for the primary (local) role.
+const systemPromptPrimary = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics, escalate.
+
+` + systemPromptShared + `
+- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
+- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+// systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
+// %s is the escalation agent name (e.g. "haiku-aws").
+const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary local agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history. Tools available: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics.
+
+` + systemPromptShared + `
+- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "local" to see what the primary agent did, or agent: "escalation" for your own prior turns.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "local" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+func buildSystemPrompt(cwd, escalationName string) string {
+	var base string
+	if escalationName != "" {
+		base = fmt.Sprintf(systemPromptEscalationFmt, escalationName)
+	} else {
+		base = systemPromptPrimary
 	}
-	return systemPromptBase + "\n\nWorking directory: " + cwd
+	if cwd == "" {
+		return base
+	}
+	return base + "\n\nWorking directory: " + cwd
 }
 
 func cwdContext(cwd string) string {
@@ -286,8 +343,24 @@ func normalizePrompt(s string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(s), " ")))
 }
 
-// isRepeatedPrompt returns true if userPrompt already appears in history as a
-// user message, meaning the user is asking the same question a second time.
+// repetitionScore scores how much the user is repeating userPrompt in recent
+// history and returns whether escalation should trigger.
+//
+// Algorithm: collect the last 10 user messages from history. For each one that
+// matches the current prompt, add 1/distance to the score, where distance is
+// the 1-based position counting back from the current turn through user turns
+// only (the immediately preceding user turn has distance 1, the one before
+// that distance 2, etc.). If the accumulated score ≥ 1.0, escalation fires.
+//
+// Examples (→ = match, · = no match, rightmost = most recent user turn):
+//
+//	· → · ·   score = 1/2 = 0.5  → no escalation
+//	· · → ·   score = 1/3       → no escalation
+//	· → → ·   score = 1/2 + 1/3 = 0.83  → no escalation
+//	→ · → ·   score = 1/2 + 1/4 = 0.75  → no escalation
+//	· → · →   score = 1/1 + 1/3 = 1.33  → escalate
+//	→ →       score = 1/1 + 1/2 = 1.5   → escalate
+//	· ·  →    score = 1/1 = 1.0  → escalate (immediate repeat)
 //
 // This check lives here rather than in the router because it requires []Message
 // history — the local agent's internal wire format. The router only sees the
@@ -295,14 +368,35 @@ func normalizePrompt(s string) string {
 // compare against.
 const minRepeatCheckLen = 20
 
+const repetitionWindow = 10     // number of recent user turns to consider
+const repetitionThreshold = 0.6 // escalate when score exceeds this
+
 func isRepeatedPrompt(history []Message, userPrompt string) bool {
 	norm := normalizePrompt(userPrompt)
 	if len(norm) < minRepeatCheckLen {
 		return false
 	}
+
+	// Collect the last repetitionWindow user messages, most-recent last.
+	var userMsgs []string
 	for _, m := range history {
-		if m.Role == "user" && normalizePrompt(m.Content) == norm {
-			return true
+		if m.Role == "user" {
+			userMsgs = append(userMsgs, normalizePrompt(m.Content))
+		}
+	}
+	if len(userMsgs) > repetitionWindow {
+		userMsgs = userMsgs[len(userMsgs)-repetitionWindow:]
+	}
+
+	// Walk backwards (distance 1 = most recent user turn).
+	var score float64
+	for i := len(userMsgs) - 1; i >= 0; i-- {
+		distance := len(userMsgs) - i // 1-based: 1 = most recent
+		if userMsgs[i] == norm {
+			score += 1.0 / float64(distance)
+			if score >= repetitionThreshold {
+				return true
+			}
 		}
 	}
 	return false
@@ -317,11 +411,13 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 
 	// Escalate immediately if the user is repeating the same question.
-	if isRepeatedPrompt(history, userPrompt) {
+	// Skipped when this agent is acting as the escalation target: by definition
+	// it must handle prompts the primary agent already tried.
+	if !a.skipRepeatCheck && isRepeatedPrompt(history, userPrompt) {
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
-	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD)}}
+	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD, a.escalationName)}}
 	msgs = append(msgs, history...)
 	if sess.CWD != "" {
 		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
@@ -372,6 +468,39 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxToolIterations)
 }
 
+// toolNeedsPermission reports whether a tool requires user approval before execution.
+// Read-only and internal tools are always permitted; side-effecting tools require a grant.
+func toolNeedsPermission(name string) bool {
+	switch name {
+	case "bash", "write_file", "edit_file", "http_get":
+		return true
+	}
+	return false
+}
+
+// checkPermission returns true if the tool may proceed. It checks skipPerms,
+// then the persistent store, then (if needed) asks the user interactively and
+// persists the answer. denied is returned as a toolResult string when false.
+func (a *Agent) checkPermission(tool, summary string) (allowed bool, denied string) {
+	if a.skipPerms {
+		return true, ""
+	}
+	if a.permStore != nil && a.permStore.IsAllowed(tool) {
+		return true, ""
+	}
+	if a.permAsk == nil {
+		// Non-interactive mode: deny and surface a clear error.
+		return false, toolResult{Error: "tool " + tool + " requires permission — run interactively or enable skip-permissions"}.String()
+	}
+	if a.permAsk(tool, summary) {
+		if a.permStore != nil {
+			a.permStore.Allow(tool) //nolint:errcheck
+		}
+		return true, ""
+	}
+	return false, toolResult{Error: "tool " + tool + " was denied by user"}.String()
+}
+
 // executeToolCalls dispatches all tool calls and appends the results to msgs.
 // Always uses the structured OpenAI tool_calls wire format — the server's chat
 // template renders it into the model-specific markup (<tool_call>, etc.) and
@@ -380,6 +509,17 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 	for _, tc := range toolCalls {
 		printToolLine(out, tc)
+
+		if toolNeedsPermission(tc.Function.Name) {
+			var argMap map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
+			summary := toolArgSummary(argMap)
+			if ok, denied := a.checkPermission(tc.Function.Name, summary); !ok {
+				msgs = append(msgs, Message{Role: "tool", Content: denied, ToolCallID: tc.ID})
+				continue
+			}
+		}
+
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 		if escalate {
 			var escalateArgs struct {
@@ -589,7 +729,7 @@ func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
 }
 
 // Classify asks the model to classify whether a prompt should be handled locally
-// or escalated to Claude. Routes to Bedrock Converse when useBedrockNative is set.
+// or escalated. Routes to Bedrock Converse when useBedrockNative is set.
 func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
 	if a.useBedrockNative {
 		return a.bedrockClassify(ctx, prompt)

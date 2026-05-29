@@ -50,7 +50,7 @@ func TestLoadRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.AddTurn(Turn{Role: RoleUser, Content: "hello"})
-	s.ClaudeSessionID = "claude-abc"
+	s.EscalationSessionID = "claude-abc"
 	if err := Save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +59,8 @@ func TestLoadRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ClaudeSessionID != "claude-abc" {
-		t.Errorf("claude_session_id: want claude-abc got %s", got.ClaudeSessionID)
+	if got.EscalationSessionID != "claude-abc" {
+		t.Errorf("claude_session_id: want claude-abc got %s", got.EscalationSessionID)
 	}
 	if len(got.History) != 1 {
 		t.Errorf("history length: want 1 got %d", len(got.History))

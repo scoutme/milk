@@ -2,7 +2,7 @@
 
 Date: 2026-05-25
 
-Status: accepted
+Status: Superseded by [ADR-0030](0030-agent-flavours-unified-config.md)
 
 ## Context
 
@@ -50,3 +50,7 @@ Replace the flat `llama_*` fields with a `local_agents` array and a `local_agent
 **Single-entry swap** — replace the flat fields with a single `local_agent` object (not a list). Simpler, but `/provider list` and multi-backend switching would require a second refactor.
 
 **Runtime-only switching without config persistence** — keep the single flat schema but allow in-memory override. The `/provider add` command's value (adding and persisting a new backend) would not be achievable.
+
+## Superseded by
+
+[ADR-0030](0030-agent-flavours-unified-config.md) extended this decision further: `local_agents` was renamed to `agents`, `local_agent` to `agent`, `LocalAgentConfig` to `AgentConfig`, and the Claude CLI was moved from root config fields (`claude_bin`, `dangerously_skip_permissions`, etc.) into a first-class `agents` entry with `provider: "claude-cli"`. The old schema is automatically migrated on first load.

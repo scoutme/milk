@@ -16,4 +16,4 @@ Use one Qwen2.5-Coder instance for both routing classification and local coding/
 
 ## Consequences
 
-Baseline RAM is higher than a dedicated tiny classifier would require. Mitigated by the rules layer running first, so the model is only invoked when rules are inconclusive. Qwen2.5-Coder supports function calling, which enables the `escalate_to_claude(reason)` self-escalation mechanism — a tiny model cannot reliably do this.
+Baseline RAM is higher than a dedicated tiny classifier would require. Mitigated by the rules layer running first, so the model is only invoked when rules are inconclusive. Qwen2.5-Coder supports function calling, which enables the `escalate(reason)` self-escalation mechanism — a tiny model cannot reliably do this.

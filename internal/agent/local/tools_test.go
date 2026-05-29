@@ -129,8 +129,8 @@ func TestReadFile_MissingFile(t *testing.T) {
 	}
 }
 
-func TestEscalateToClaudeReturnsSignal(t *testing.T) {
-	_, escalate := dispatchTool(context.Background(), "escalate_to_claude", `{"reason":"too complex"}`, nil, nil, "")
+func TestEscalateReturnsSignal(t *testing.T) {
+	_, escalate := dispatchTool(context.Background(), "escalate", `{"reason":"too complex"}`, nil, nil, "")
 	if !escalate {
 		t.Error("expected escalation signal")
 	}
@@ -193,14 +193,14 @@ func TestGetSessionContext_AgentFilter(t *testing.T) {
 	sess := &session.Session{}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Content: "question"})
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "local answer"})
-	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: "claude answer"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: "claude answer"})
 
-	result, _ := dispatchTool(context.Background(), "get_session_context", `{"agent":"claude"}`, sess, nil, "")
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"agent":"escalation"}`, sess, nil, "")
 	if !strings.Contains(result, "claude answer") {
-		t.Errorf("expected claude turn, got %q", result)
+		t.Errorf("expected escalation turn, got %q", result)
 	}
 	if strings.Contains(result, "local answer") {
-		t.Error("local turn should be excluded when agent=claude")
+		t.Error("local turn should be excluded when agent=escalation")
 	}
 }
 

@@ -24,7 +24,7 @@ The prompt label (`[local] >`, `[claude] >`, `[claude:waiting] >`) uses the same
 
 ### Slash commands for in-session control
 
-Force-mode flags (`--escalate`, `--local`) become `/escalate` and `/local` slash commands. Other commands: `/new`, `/drop`, `/list`, `/help`, `/exit`. Slash prefix is conventional for chat-style REPLs and avoids ambiguity with prompt text.
+Force-mode flags (`--escalate`, `--local`) become `/escalate` and `/primary` slash commands (`/local` was renamed to `/primary` in [ADR-0030](0030-agent-flavours-unified-config.md)). Other commands: `/new`, `/drop`, `/list`, `/help`, `/exit`. Slash prefix is conventional for chat-style REPLs and avoids ambiguity with prompt text.
 
 ### Tab completion
 

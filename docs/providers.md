@@ -1,8 +1,31 @@
 # Provider setup guides
 
-milk's local agent supports multiple inference backends. Use `/provider add` in the TUI to register them, `/provider list` to see what's configured, and `/provider switch <name>` to change the active one.
+milk supports multiple agent backends. Use `/agent add` in the TUI to register them, `/agent list` to see what's configured, and `/agent switch <name> as primary|escalation` to assign roles.
 
-Each backend is stored as a named entry under `local_agents` in `~/.milk/config.json`. Only one is active at a time (set by `local_agent`).
+Each backend is stored as a named entry under `agents` in `~/.milk/config.json`. The active primary agent is set by `agent`; the escalation agent is set by `escalation_agent`.
+
+---
+
+## Claude Code CLI
+
+**Provider**: `claude-cli` — runs the `claude` binary as a subprocess, not via HTTP.
+
+```json
+{
+  "name": "claude",
+  "provider": "claude-cli",
+  "bin": "claude"
+}
+```
+
+A built-in entry named `"claude"` with `provider: "claude-cli"` is always available even if not listed explicitly in `agents`. It is used as the default `escalation_agent`.
+
+| Field | Default | Description |
+|---|---|---|
+| `bin` | `"claude"` | Path to the `claude` binary |
+| `dangerously_skip_permissions` | `false` | Auto-approve all tool uses without prompting |
+| `allowed_tools` | — | Tools pre-approved; passed as `--allowedTools` |
+| `add_dirs` | — | Extra directories; passed as `--add-dir` |
 
 ---
 
@@ -135,7 +158,7 @@ Any model that supports tool/function calling works. Good options:
 |---|---|
 | `qwen/qwen-2.5-coder-32b-instruct` | Strong code model, reliable tool calls |
 | `meta-llama/llama-4-maverick` | Fast, good general use |
-| `anthropic/claude-haiku-4-5` | If you want Claude as the local agent |
+| `anthropic/claude-haiku-4-5` | Claude as the primary agent |
 | `deepseek/deepseek-coder-v2-instruct` | Strong code, competitive pricing |
 
 Full model list: [openrouter.ai/models](https://openrouter.ai/models)
@@ -255,11 +278,11 @@ The command is run with `sh -c`, so environment variables and shell syntax work.
 
 ## Full config reference
 
-All fields for a `local_agents` entry:
+### Inference-server `agents` entry fields
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | required | Unique backend name, used by `/provider switch` |
+| `name` | string | required | Unique backend name, used by `/agent switch` |
 | `url` | string | required | Base URL of the inference server |
 | `model` | string | required | Model name or ARN |
 | `provider` | string | `""` | Auth transport: `""` = none, `"bedrock"` = SigV4, `"bearer"` or any string = Bearer |
@@ -275,9 +298,21 @@ All fields for a `local_agents` entry:
 | `aws_token` | string | `AWS_SESSION_TOKEN` env | AWS session token for temporary credentials (Bedrock only) |
 | `aws_service` | string | `bedrock` | Override the SigV4 service name (Bedrock only) |
 
-### Root config fields related to providers
+### Claude CLI `agents` entry fields (`provider: "claude-cli"`)
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `local_agent` | string | first entry | Name of the active backend |
+| `name` | string | required | Unique backend name |
+| `provider` | string | required | Must be `"claude-cli"` |
+| `bin` | string | `"claude"` | Path to the `claude` binary |
+| `dangerously_skip_permissions` | bool | false | Auto-approve all tool uses |
+| `allowed_tools` | array | — | Pre-approved tools; passed as `--allowedTools` |
+| `add_dirs` | array | — | Extra directories; passed as `--add-dir` |
+
+### Root config fields related to agents
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `agent` | string | first non-cli entry | Name of the active primary backend |
+| `escalation_agent` | string | `"claude"` | Name of the escalation backend |
 | `aws_auth_refresh` | bool | false | Run the Claude Code credential-process command before each Bedrock call |

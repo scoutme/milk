@@ -69,7 +69,7 @@ Each prompt is routed through a decision chain:
 4. Local model classifier — the local model decides `local` or `escalate` when the scorer is inconclusive
 5. Default: local
 
-When the local model cannot handle a task, it calls `escalate_to_claude()` and milk reformats the local conversation history as context for Claude, which orients itself without a separate reformulation step.
+When the local model cannot handle a task, it calls `escalate(reason)` and milk reformats the local conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
 
 ## Prerequisites
 
@@ -81,7 +81,7 @@ When the local model cannot handle a task, it calls `escalate_to_claude()` and m
 
 The local agent supports multiple backends and auth transports — [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and other OpenAI-compatible servers, plus cloud providers via native protocols: AWS Bedrock (SigV4 + Converse API), OpenRouter, Together.ai, Groq (Bearer token). The only requirement is that the model supports function/tool calling.
 
-If no local agent is configured, milk starts and shows setup guidance. Use `/provider add` to configure a backend interactively, or edit `~/.milk/config.json` directly.
+If no local agent is configured, milk starts and shows setup guidance. Use `/agent add` to configure a backend interactively, or edit `~/.milk/config.json` directly.
 
 For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) and local testing procedure see [docs/setup.md](docs/setup.md). For cloud providers (Bedrock, OpenRouter, Together.ai, Groq, Azure) see [docs/providers.md](docs/providers.md).
 
@@ -123,10 +123,10 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/history session` | Switch input navigation to session history (default) |
 | `/skip-permissions` | Show current `dangerously_skip_permissions` state |
 | `/skip-permissions on\|off` | Enable / disable permission skip for this session |
-| `/provider` | Show active local-agent provider (URL, model, auth) |
-| `/provider list` | List all configured local-agent backends |
-| `/provider switch <name>` | Switch active local agent to a named backend |
-| `/provider add` | Add a new backend interactively (prompts for missing fields) |
+| `/agent` | Show active local-agent provider (URL, model, auth) |
+| `/agent list` | List all configured local-agent backends |
+| `/agent switch <name>` | Switch active local agent to a named backend |
+| `/agent add` | Add a new backend interactively (prompts for missing fields) |
 | `/colorize` | Show current transcript colorization mode |
 | `/colorize off\|fenced\|balanced\|full` | Switch colorization mode live (`balanced` = default; `full` = experimental glamour) |
 | `/new` | Start a fresh session |
@@ -203,8 +203,8 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 
 ```json
 {
-  "local_agent": "my-local",
-  "local_agents": [
+  "agent": "my-local",
+  "agents": [
     {
       "name": "my-local",
       "url": "http://localhost:8080",
@@ -223,9 +223,13 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
       "model": "meta-llama/llama-3-70b-instruct",
       "provider": "bearer",
       "api_key": "sk-or-..."
+    },
+    {
+      "name": "claude",
+      "provider": "claude-cli"
     }
   ],
-  "claude_bin": "claude",
+  "escalation_agent": "claude",
   "default_route": "local",
   "otel": {
     "enabled": true,
@@ -251,7 +255,7 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 }
 ```
 
-`local_agent` names the active backend from the `local_agents` list. Use `/provider switch <name>` to change it at runtime. `/provider add` configures a new backend interactively.
+`agent` names the active primary backend from the `agents` list. Use `/agent switch <name> as primary` to change it at runtime. `/agent add` configures a new backend interactively.
 
 Supported `provider` values: omit (or `""`) for no-auth/local, `"bedrock"` (AWS SigV4), `"bearer"` (API key). For Azure OpenAI, omit `provider` and pass `"api-key": "..."` under `headers`.
 
@@ -297,7 +301,7 @@ The local model has access to these built-in tools:
 | `export_session` | Export the current session transcript as text or JSON |
 | `get_metrics` | Show the latest observability metric values |
 | `search_signals` | Search OTel signal files (logs/traces/metrics) for a pattern |
-| `escalate_to_claude` | Hand off the current task to Claude with a reason |
+| `escalate` | Hand off the current task to the escalation agent with a reason |
 
 ## Graceful degradation
 
@@ -306,8 +310,8 @@ The local model has access to these built-in tools:
 | available | installed | normal routing |
 | unavailable | installed | warns once, routes all turns to Claude |
 | available | not installed | warns once, stays local-only |
-| not configured | not installed | starts in setup mode — splash shows `/provider add` guidance |
-| unavailable | not installed | starts in setup mode — splash shows `/provider add` guidance |
+| not configured | not installed | starts in setup mode — splash shows `/agent add` guidance |
+| unavailable | not installed | starts in setup mode — splash shows `/agent add` guidance |
 
 ## Documentation
 

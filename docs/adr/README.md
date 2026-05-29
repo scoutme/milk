@@ -27,4 +27,6 @@
 * [25. Memory Decay Constant Re-tuning](0025-memory-decay-constant-retuning.md)
 * [26. Tool-Usage UI: Inline ⚙ Hint Line](0026-tool-usage-ui-hint.md)
 * [27. Remote Inference Authentication Transports](0027-remote-inference-auth.md)
-* [28. Multi-Provider Local-Agent Configuration](0028-multi-provider-local-agent-config.md)
+* [28. Multi-Provider Local-Agent Configuration](0028-multi-provider-local-agent-config.md) *(superseded by 30)*
+* [29. Summary Bricks for Escalation Context](0029-summary-bricks-escalation-context.md)
+* [30. Agent Flavours: Unified Config and Escalation Refactor](0030-agent-flavours-unified-config.md)

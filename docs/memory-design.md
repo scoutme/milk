@@ -217,7 +217,7 @@ This mirrors the RFC's automatic ingestion path — the agent doesn't need to ex
 Claude participates in memory both as a reader and as a writer (see ADR-0022).
 
 **Read path.** At the start of each Claude turn, relevant Percepts (top-5, filtered to
-`ConsumerClaude` or `ConsumerAll`) are rendered as a `[Remembered facts]` block inside
+`ConsumerEscalation` or `ConsumerAll`) are rendered as a `[Remembered facts]` block inside
 `BuildContext` and injected via `--append-system-prompt`.
 
 **Write path.** Every Claude turn also receives a `MemoryInstruction` fragment (re-injected on
@@ -230,7 +230,7 @@ facts using session-specific nonce tags:
 
 The nonce is a 6-character alphanumeric string generated fresh per session by
 `claude.GenerateNonce()`. milk's stream layer (`perceptWriter`) intercepts and strips these tags,
-recording each fact into the store with `ProducerClaude`. The tags never appear in Claude's
+recording each fact into the store with `ProducerEscalation`. The tags never appear in Claude's
 displayed output.
 
 **Consumer hints.** Claude may prefix a tag body with `@local: ` or `@claude: ` to restrict which

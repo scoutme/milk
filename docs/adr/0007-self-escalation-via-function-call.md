@@ -12,7 +12,7 @@ Rules-based routing cannot cover all cases where a task exceeds the local model'
 
 ## Decision
 
-The local model can trigger escalation by returning a function call `escalate_to_claude(reason: string)` rather than a text response. This is exposed to the model as a standard OpenAI function schema alongside the other tools (bash, grep, read_file).
+The local model can trigger escalation by returning a function call `escalate(reason: string)` rather than a text response. This is exposed to the model as a standard OpenAI function schema alongside the other tools (bash, grep, read_file). The tool was originally named `escalate_to_claude`; it was renamed to `escalate` in [ADR-0030](0030-agent-flavours-unified-config.md) to reflect that the escalation target is not necessarily Claude.
 
 ## Consequences
 

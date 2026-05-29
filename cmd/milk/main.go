@@ -63,7 +63,7 @@ any hosted endpoint).`,
 }
 
 func init() {
-	rootCmd.Flags().BoolVar(&flagEscalate, "escalate", false, "Force route to Claude for this turn")
+	rootCmd.Flags().BoolVar(&flagEscalate, "escalate", false, "Force route to escalation agent for this turn")
 	rootCmd.Flags().BoolVar(&flagLocal, "local", false, "Force route to local model for this turn")
 	rootCmd.Flags().BoolVar(&flagNew, "new", false, "Start a new session")
 	rootCmd.Flags().StringVar(&flagSession, "session", "", "Target session by name")
@@ -124,13 +124,37 @@ func run(cmd *cobra.Command, args []string) error {
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
-	claudeAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
-	claudeAgent = applyAWSCreds(cfg, claudeAgent)
-	if dbg, err := openClaudeDebugLog(cfg); err != nil {
+	// Single-prompt mode: wire permissions (no interactive ask — tools are denied
+	// unless dangerously_skip_permissions is on or already granted in the store).
+	if lp, err := local.OpenPermStore(cwd); err == nil {
+		localAgent.WithPermissions(lp, nil)
+	}
+	localAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+
+	var escalationLocalAgent *local.Agent
+	if !cfg.EscalationAgentConfig().IsCLI() {
+		escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())
+		if escAC.URL != "" {
+			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
+			if od, err := config.OtelDir(); err == nil {
+				escalationLocalAgent.WithOtelDir(od)
+			}
+			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			if lp, err := local.OpenPermStore(cwd); err == nil {
+				escalationLocalAgent.WithPermissions(lp, nil)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
+		}
+	}
+
+	cliAgent := newCLIAgent(cliAgentConfig(cfg))
+	cliAgent = applyAWSCreds(cfg, cliAgent)
+	if dbg, err := openCLIDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
 		defer dbg.Close()
-		claudeAgent = claudeAgent.WithDebugLog(dbg)
+		cliAgent = cliAgent.WithDebugLog(dbg)
 	}
 
 	var cs *claudesettings.Store
@@ -138,9 +162,19 @@ func run(cmd *cobra.Command, args []string) error {
 		cs = store
 	}
 
-	localAvail, claudeAvail, err := checkAgentAvailabilityStrict(ctx, localAgent, claudeAgent)
-	if err != nil {
-		return err
+	// When escalation is a second local provider, ping it instead of the Claude CLI.
+	var localAvail, escalationAvail bool
+	if escalationLocalAgent != nil {
+		localAvail = localAgent.Ping(ctx) == nil
+		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
+		if !localAvail && !escalationAvail {
+			return fmt.Errorf("neither local inference server nor escalation agent is available")
+		}
+	} else {
+		localAvail, escalationAvail, err = checkAgentAvailabilityStrict(ctx, localAgent, cliAgent)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Router uses nil localAgent when the inference server is unreachable (skips classifier)
@@ -155,7 +189,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("routing: %w", err)
 	}
 
-	target := resolveTarget(decision.Target, localAvail, claudeAvail)
+	target := resolveTarget(decision.Target, localAvail, escalationAvail)
 
 	switch target {
 	case router.TargetLocal:
@@ -163,19 +197,42 @@ func run(cmd *cobra.Command, args []string) error {
 			defer mem.Consolidate() //nolint:errcheck
 		}
 		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
-	case router.TargetClaude:
-		return runClaude(ctx, cfg, sess, claudeAgent, prompt, cs, mem)
+	case router.TargetEscalation:
+		if escalationLocalAgent != nil {
+			return runEscalationLocal(ctx, cfg, sess, escalationLocalAgent, mem, prompt)
+		}
+		return runCLIEscalation(ctx, cfg, sess, cliAgent, prompt, cs, mem)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
 }
 
-// activeLocalAgentConfig returns the active LocalAgentConfig with AWSRefreshCmd
+// cliAgentConfig returns the AgentConfig for the claude-cli backend —
+// the first entry with Provider "claude-cli", or a built-in default.
+func cliAgentConfig(cfg config.Config) config.AgentConfig {
+	for _, a := range cfg.Agents {
+		if a.IsCLI() {
+			return a
+		}
+	}
+	return config.AgentConfig{Name: "claude", Provider: "claude-cli", Bin: "claude"}
+}
+
+// newCLIAgent constructs a claude.Agent from the claude-cli AgentConfig.
+func newCLIAgent(ac config.AgentConfig) *claude.Agent {
+	bin := ac.Bin
+	if bin == "" {
+		bin = "claude"
+	}
+	return claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, ac.AllowedTools, ac.AddDirs)
+}
+
+// activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd
 // populated from ~/.claude/settings.json when aws_auth_refresh is enabled.
-// All NewFromConfig call sites should use this instead of cfg.ActiveLocalAgent()
+// All NewFromConfig call sites should use this instead of cfg.ActiveAgent()
 // directly so the transport gets the refresh command wired in.
-func activeLocalAgentConfig(cfg config.Config) config.LocalAgentConfig {
-	ac := cfg.ActiveLocalAgent()
+func activeLocalAgentConfig(cfg config.Config) config.AgentConfig {
+	ac := cfg.ActiveAgent()
 	if cfg.AWSAuthRefresh && strings.ToLower(strings.TrimSpace(ac.Provider)) == "bedrock" {
 		ac.AWSRefreshCmd = claudesettings.AWSAuthRefreshCommand()
 	}
@@ -188,7 +245,7 @@ func needsAWSRefresh(cfg config.Config) bool {
 	if !cfg.AWSAuthRefresh {
 		return false
 	}
-	ac := cfg.ActiveLocalAgent()
+	ac := cfg.ActiveAgent()
 	if strings.ToLower(strings.TrimSpace(ac.Provider)) != "bedrock" {
 		return false
 	}
@@ -198,13 +255,13 @@ func needsAWSRefresh(cfg config.Config) bool {
 // needsTokenCmdRefresh reports whether the active local agent uses token_cmd
 // and should show a status bar hint while the first token is fetched.
 func needsTokenCmdRefresh(cfg config.Config) bool {
-	ac := cfg.ActiveLocalAgent()
+	ac := cfg.ActiveAgent()
 	return ac.TokenCmd != "" && strings.ToLower(strings.TrimSpace(ac.Provider)) != "bedrock"
 }
 
 // applyFreshAWSCreds refreshes AWS credentials in ac when aws_auth_refresh is
 // enabled and the provider is "bedrock" without explicit credentials already set.
-func applyFreshAWSCreds(cfg config.Config, ac config.LocalAgentConfig) config.LocalAgentConfig {
+func applyFreshAWSCreds(cfg config.Config, ac config.AgentConfig) config.AgentConfig {
 	if !cfg.AWSAuthRefresh {
 		return ac
 	}
@@ -251,14 +308,14 @@ func applyAWSCreds(cfg config.Config, agent *claude.Agent) *claude.Agent {
 	return agent
 }
 
-// openClaudeDebugLog opens (or creates/appends) the Claude raw NDJSON debug log
-// when cfg.DebugClaudeCode is true. Returns nil, nil when disabled.
+// openCLIDebugLog opens (or creates/appends) the Claude raw NDJSON debug log
+// when cfg.DebugCLILog is true. Returns nil, nil when disabled.
 // The caller is responsible for closing the returned file.
-func openClaudeDebugLog(cfg config.Config) (*os.File, error) {
-	if !cfg.DebugClaudeCode {
+func openCLIDebugLog(cfg config.Config) (*os.File, error) {
+	if !cfg.DebugCLILog {
 		return nil, nil
 	}
-	path, err := config.ClaudeDebugLogPath()
+	path, err := config.CLIDebugLogPath()
 	if err != nil {
 		return nil, err
 	}
@@ -304,55 +361,55 @@ func loadSessionForRun(cwd string) (*session.Session, error) {
 	return session.Resume(cwd, flagSession)
 }
 
-func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, claudeAgent *claude.Agent) (bool, bool, error) {
+func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, cliAgent *claude.Agent) (bool, bool, error) {
 	localAvail := localAgent.Ping(ctx) == nil
-	claudeAvail := claudeAgent.Ping() == nil
+	escalationAvail := cliAgent.Ping() == nil
 
 	if !localAvail {
-		fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to Claude")
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to escalation agent")
 	}
-	if !claudeAvail {
+	if !escalationAvail {
 		fmt.Fprintln(os.Stderr, milkTag()+" warning: claude CLI unavailable — local only")
 	}
 
-	return localAvail, claudeAvail, nil
+	return localAvail, escalationAvail, nil
 }
 
 // checkAgentAvailabilityStrict is like checkAgentAvailability but returns an
 // error when both agents are unavailable. Used by single-prompt mode where
 // starting without any agent makes no sense.
-func checkAgentAvailabilityStrict(ctx context.Context, localAgent *local.Agent, claudeAgent *claude.Agent) (bool, bool, error) {
-	localAvail, claudeAvail, err := checkAgentAvailability(ctx, localAgent, claudeAgent)
+func checkAgentAvailabilityStrict(ctx context.Context, localAgent *local.Agent, cliAgent *claude.Agent) (bool, bool, error) {
+	localAvail, escalationAvail, err := checkAgentAvailability(ctx, localAgent, cliAgent)
 	if err != nil {
 		return false, false, err
 	}
-	if !localAvail && !claudeAvail {
+	if !localAvail && !escalationAvail {
 		return false, false, fmt.Errorf("neither local inference server nor claude CLI is available")
 	}
-	return localAvail, claudeAvail, nil
+	return localAvail, escalationAvail, nil
 }
 
-func resolveTarget(target router.Target, localAvail, claudeAvail bool) router.Target {
+func resolveTarget(target router.Target, localAvail, escalationAvail bool) router.Target {
 	if target == router.TargetLocal && !localAvail {
-		return router.TargetClaude
+		return router.TargetEscalation
 	}
-	if target == router.TargetClaude && !claudeAvail {
+	if target == router.TargetEscalation && !escalationAvail {
 		return router.TargetLocal
 	}
 	return target
 }
 
-const claudeLabel = "claude:"
+const cliLabel = "claude:"
 
-func claudeLabelStyled(a *claude.Agent) string {
+func cliLabelStyled(a *claude.Agent) string {
 	if a.SkipPermissions() {
-		return bold(red(claudeLabel))
+		return bold(red(cliLabel))
 	}
-	return bold(blue(claudeLabel))
+	return bold(blue(cliLabel))
 }
 
 func localLabel(cfg config.Config) string {
-	ac := cfg.ActiveLocalAgent()
+	ac := cfg.ActiveAgent()
 	name := strings.ToLower(strings.TrimSpace(ac.Name))
 	if name == "" {
 		name = strings.ToLower(strings.TrimSpace(ac.Provider))
@@ -379,20 +436,32 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			fmt.Fprintf(out, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
-			// Commit the user turn before escalating so Claude has context.
+			// Dispatch to the configured escalation target (a second local provider, or Claude CLI).
+			if !cfg.EscalationAgentConfig().IsCLI() {
+				escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())
+				if escAC.URL != "" {
+					escAgent := local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
+					// runEscalationLocal adds the user turn and manages session state itself;
+					// pre-adding it here would create duplicate consecutive user messages,
+					// which Bedrock's Converse API rejects.
+					return runEscalationLocal(ctx, cfg, sess, escAgent, mem, prompt, out)
+				}
+			}
+			// For Claude CLI: pre-add the user turn so BuildContext includes it in the
+			// system-prompt context block sent to the CLI escalation agent.
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 			// Set brief before rebuild so the brick includes it.
 			sess.EscalationBrief = esc.Reason
 			sess.RebuildSummaryBricks(cfg.ContextBudget())
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
-			escalateAgent := claude.NewWithOpts(cfg.ClaudeBin, cfg.DangerouslySkipPermissions, cfg.AllowedTools, cfg.AddDirs)
+			escalateAgent := newCLIAgent(cliAgentConfig(cfg))
 			escalateAgent = applyAWSCreds(cfg, escalateAgent)
 			var localCs *claudesettings.Store
 			if cwd, err := os.Getwd(); err == nil {
 				localCs, _ = claudesettings.Open(cwd)
 			}
-			return runClaudeWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
+			return runCLIEscalationWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
 		}
 		return err
 	}
@@ -444,22 +513,101 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 	return "", io.EOF
 }
 
-func runClaude(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
-	return runClaudeWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
+func runCLIEscalation(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
+	return runCLIEscalationWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
 }
 
-func runClaudeWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
+// runEscalationLocal handles escalated turns routed to a second local provider
+// (when cfg.EscalationAgent names an agents entry with a non-claude-cli provider).
+// It injects the session context via the system prompt so the escalation agent
+// sees prior history, and stores turns under AgentEscalation so session state and
+// history-filtering logic work without modification.
+func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Session, agent *local.Agent, mem *memory.Store, prompt string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
 	}
-	fmt.Fprint(out, claudeLabelStyled(agent)+" ")
+	escName := strings.ToLower(strings.TrimSpace(cfg.EscalationAgentConfig().Name))
+	if escName == "" {
+		escName = "escalation"
+	}
+	fmt.Fprint(out, bold(blue(escName+":"))+" ")
 	aw := newActivityWriter(out)
-	resuming := sess.State == session.StateClaudeWaiting && sess.ClaudeSessionID != ""
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentClaude, Content: prompt})
-	sess.ForceState(session.StateClaude)
 
-	// Generate a fresh nonce for this Claude turn. The same nonce is embedded in
+	// Build history that the escalation agent should see: all turns, not just
+	// the primary-local ones, so it has full context.
+	history := escalationLocalHistory(sess, prompt)
+
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	sess.ForceState(session.StateEscalation)
+
+	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess, mem)
+	aw.Done()
+	if err != nil {
+		// Escalation-local agent cannot itself escalate further.
+		return err
+	}
+
+	assistantContent := ""
+	if len(updatedHistory) > 0 {
+		last := updatedHistory[len(updatedHistory)-1]
+		if last.Role == "assistant" {
+			assistantContent = last.Content
+		}
+	}
+	if assistantContent != "" {
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: assistantContent})
+	}
+
+	sess.ForceState(session.StateRouting)
+	return session.Save(sess)
+}
+
+// escalationLocalHistory converts session turns to local.Message format for
+// the escalation-local agent. Unlike sessionToMessages (which filters to local
+// turns only), this includes all prior turns so the escalation agent has full
+// context across both agents.
+//
+// prompt is the current user prompt being escalated. Any trailing unanswered
+// user turn matching prompt is stripped: it was added by runLocal's escalation
+// path and is about to be sent as the live prompt — including it in history
+// would trigger isRepeatedPrompt in Run and cause a spurious EscalationSignal.
+func escalationLocalHistory(sess *session.Session, prompt string) []local.Message {
+	var msgs []local.Message
+	for _, t := range sess.History {
+		switch t.Role {
+		case session.RoleUser:
+			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
+		case session.RoleAssistant:
+			if t.Content == "" {
+				continue
+			}
+			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
+		case session.RoleToolResult:
+			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+		}
+	}
+	// Strip a trailing unanswered user turn that matches the prompt being escalated.
+	// Such a turn has no following assistant turn and would cause isRepeatedPrompt to
+	// fire inside the escalation agent's Run, masking the real error.
+	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" && msgs[n-1].Content == prompt {
+		msgs = msgs[:n-1]
+	}
+	return msgs
+}
+
+func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
+	out := io.Writer(os.Stdout)
+	if len(outs) > 0 && outs[0] != nil {
+		out = outs[0]
+	}
+	fmt.Fprint(out, cliLabelStyled(agent)+" ")
+	aw := newActivityWriter(out)
+	resuming := sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != ""
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	sess.ForceState(session.StateEscalation)
+
+	// Generate a fresh nonce for this escalation turn. The same nonce is embedded in
 	// the system-prompt instructions (BuildContext, MemoryInstruction, NeedInstruction)
 	// and in the stream parser, so only tags containing this nonce are captured.
 	nonce := claude.GenerateNonce()
@@ -477,9 +625,9 @@ func runClaudeWith(ctx context.Context, cfg config.Config, sess *session.Session
 			case "local":
 				consumer = memory.ConsumerLocal
 			case "claude":
-				consumer = memory.ConsumerClaude
+				consumer = memory.ConsumerEscalation
 			}
-			_, err := mem.Record(ctx, content, memory.ProducerClaude, consumer, memory.Roles{}, false)
+			_, err := mem.Record(ctx, content, memory.ProducerEscalation, consumer, memory.Roles{}, false)
 			// DuplicateError is expected when Claude emits a percept similar to one
 			// already stored — silently drop it; any other error is also non-fatal.
 			_ = err
@@ -489,20 +637,20 @@ func runClaudeWith(ctx context.Context, cfg config.Config, sess *session.Session
 		sess.CurrentNeed = content
 	}, nonce)
 
-	res, err := runClaudeAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForClaude(mem))
+	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForEscalation(mem))
 	aw.Done()
 	if err != nil {
 		return err
 	}
 
-	if sess.ClaudeSessionID != "" {
+	if sess.EscalationSessionID != "" {
 		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc, nonce)
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentClaude, Content: res.Text})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
 	sess.RebuildSummaryBricks(cfg.ContextBudget())
 	if res.EndsWithQ {
-		sess.ForceState(session.StateClaudeWaiting)
+		sess.ForceState(session.StateEscalationWaiting)
 	} else {
 		sess.ForceState(session.StateRouting)
 	}
@@ -529,17 +677,17 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 	return agent
 }
 
-// runClaudeAgent runs one Claude turn (first or resume) and returns the result.
+// runCLIEscalationAgent runs one escalation turn (first or resume) and returns the result.
 // nonce is the session-specific percept nonce embedded in the system-prompt instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
-func runClaudeAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string) (claude.ParseResult, error) {
+func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string) (claude.ParseResult, error) {
 	sysContext := escalation.BuildContext(sess, nonce, percepts, resuming)
 	if resuming {
-		return agent.RunResume(ctx, sess.ClaudeSessionID, sysContext, prompt, out)
+		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
 	}
 	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, out)
 	if err == nil {
-		sess.ClaudeSessionID = claudeSessionID
+		sess.EscalationSessionID = claudeSessionID
 	}
 	return res, err
 }
@@ -552,22 +700,22 @@ func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *
 	return res
 }
 
-// permContext bundles the mutable permission state threaded through a Claude turn.
+// permContext bundles the mutable permission state threaded through a CLI escalation turn.
 type permContext struct {
 	cs          *claudesettings.Store
 	toolFutures map[string]chan string // tool name → buffered channel pre-filled by OnToolUse
 }
 
 // handleStructuredDenials handles permission_denials from the result event —
-// language-neutral, fires regardless of Claude's response language.
+// language-neutral, fires regardless of the escalation agent's response language.
 func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
-	fmt.Fprintf(out, "\n%s Claude was blocked from using:\n", milkTag())
+	fmt.Fprintf(out, "\n%s escalation agent was blocked from using:\n", milkTag())
 	retryAgent, changed := applyDenials(agent, dedupDenials(res.PermissionDenials), input, out, pc)
 	if !changed {
 		return res
 	}
-	fmt.Fprint(out, claudeLabelStyled(retryAgent)+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.ClaudeSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permissions.", out)
+	fmt.Fprint(out, cliLabelStyled(retryAgent)+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
 	}
@@ -697,7 +845,7 @@ func drainFuture(futures map[string]chan string, toolName string) string {
 
 // makePermissionHandler returns a PermissionHandler for single-shot (non-TUI)
 // mode. It asks y/n interactively and, on approval, persists the grant to the
-// Claude project settings so the tool is auto-allowed on future runs.
+// project settings so the tool is auto-allowed on future runs.
 // cs may be nil — persistence is best-effort.
 func makePermissionHandler(input inputReader, out io.Writer, cs *claudesettings.Store) claude.PermissionHandler {
 	return func(req claude.ControlRequest, stdinW io.Writer) {
@@ -722,9 +870,9 @@ func makePermissionHandler(input inputReader, out io.Writer, cs *claudesettings.
 	}
 }
 
-// claudeToolArgSummary picks the most informative single argument value for display,
+// cliToolArgSummary picks the most informative single argument value for display,
 // mirroring the local agent's toolArgSummary.
-func claudeToolArgSummary(args map[string]any) string {
+func cliToolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
 		if v, ok := args[key].(string); ok && v != "" {
 			if len(v) > 60 {
@@ -738,7 +886,7 @@ func claudeToolArgSummary(args map[string]any) string {
 
 // makeTUIPermissionHandler returns a PermissionHandler for TUI mode.
 // It blocks the stream goroutine by sending a permRequestMsg to the TUI and
-// waiting for the user's y/n reply before forwarding allow/deny to Claude.
+// waiting for the user's y/n reply before forwarding allow/deny to the CLI escalation agent.
 // cs may be nil — persistence is best-effort.
 func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claude.PermissionHandler {
 	return func(req claude.ControlRequest, stdinW io.Writer) {
@@ -776,7 +924,7 @@ func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claud
 	}
 }
 
-// printPermissionRequest shows the user what Claude is asking permission for.
+// printPermissionRequest shows the user what the escalation agent is asking permission for.
 func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 	b := req.Body
 	fmt.Fprintf(out, "%s permission request — tool: %s", milkTag(), bold(b.ToolName))
@@ -793,7 +941,7 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 }
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
-// Claude turns are excluded: the local model should only see its own prior conversation.
+// Escalation agent turns are excluded: the local model should only see its own prior conversation.
 func sessionToMessages(sess *session.Session) []local.Message {
 	msgs := []local.Message{}
 	for _, t := range sess.History {
@@ -861,17 +1009,17 @@ func runDrop() error {
 	return nil
 }
 
-// perceptsForClaude returns the content strings of all percepts that Claude
+// perceptsForEscalation returns the content strings of all percepts that Claude
 // should receive at session start: those not exclusively targeted at the local
 // agent and not already produced by Claude (to avoid echo loops).
-func perceptsForClaude(mem *memory.Store) []string {
+func perceptsForEscalation(mem *memory.Store) []string {
 	if mem == nil {
 		return nil
 	}
 	all := mem.List(memory.ListOpts{})
 	var out []string
 	for _, p := range all {
-		if p.Producer == memory.ProducerClaude {
+		if p.Producer == memory.ProducerEscalation {
 			continue // Claude wrote it; no need to echo it back
 		}
 		if p.Consumer == memory.ConsumerLocal {
@@ -890,11 +1038,12 @@ var configCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ac := cfg.ActiveLocalAgent()
-		fmt.Printf("local_agent:    %s\n", cfg.LocalAgent)
+		ac := cfg.ActiveAgent()
+		cac := cliAgentConfig(cfg)
+		fmt.Printf("agent:          %s\n", cfg.Agent)
 		fmt.Printf("agent_url:      %s\n", ac.URL)
 		fmt.Printf("agent_model:    %s\n", ac.Model)
-		fmt.Printf("claude_bin:     %s\n", cfg.ClaudeBin)
+		fmt.Printf("cli_bin:     %s\n", cac.Bin)
 		fmt.Printf("default_route:  %s\n", cfg.DefaultRoute)
 		fmt.Printf("escalate_above_tokens: %d\n", cfg.Rules.EscalateAboveTokens)
 		fmt.Printf("local_below_tokens:    %d\n", cfg.Rules.LocalBelowTokens)
