@@ -366,10 +366,10 @@ func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, cliAge
 	escalationAvail := cliAgent.Ping() == nil
 
 	if !localAvail {
-		fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to escalation agent")
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
 	}
 	if !escalationAvail {
-		fmt.Fprintln(os.Stderr, milkTag()+" warning: claude CLI unavailable — local only")
+		fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unavailable — primary only")
 	}
 
 	return localAvail, escalationAvail, nil
@@ -435,7 +435,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	aw.Done()
 	if err != nil {
 		if esc, ok := err.(*local.EscalationSignal); ok {
-			fmt.Fprintf(out, "\n%s local model requested escalation: %s\n", milkTag(), esc.Reason)
+			fmt.Fprintf(out, "\n%s primary model requested escalation: %s\n", milkTag(), esc.Reason)
 			// Dispatch to the configured escalation target (a second local provider, or Claude CLI).
 			if !cfg.EscalationAgentConfig().IsCLI() {
 				escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())

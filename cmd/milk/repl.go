@@ -196,7 +196,7 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 // handled by the caller via WithSkipPermissions before this is ever called.
 func makeLocalPermAsk(ir *tuiInputReader, ps *local.PermStore) func(tool, summary string) bool {
 	return func(tool, summary string) bool {
-		prompt := fmt.Sprintf("\n%s permission request — local agent tool: %s", milkTag(), bold(tool))
+		prompt := fmt.Sprintf("\n%s permission request — primary agent tool: %s", milkTag(), bold(tool))
 		if summary != "" {
 			prompt += fmt.Sprintf("  (%s)", dim(summary))
 		}
@@ -3657,10 +3657,10 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAvail = localAgent.Ping(ctx) == nil
 		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
 		if !localAvail {
-			fmt.Fprintln(os.Stderr, milkTag()+" warning: local inference server unreachable — routing all to escalation agent")
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
 		}
 		if !escalationAvail {
-			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — local only")
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — primary only")
 		}
 	} else {
 		localAvail, escalationAvail, _ = checkAgentAvailability(ctx, localAgent, cliAgent)

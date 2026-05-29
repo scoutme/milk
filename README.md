@@ -65,16 +65,16 @@ Each prompt is routed through a decision chain:
 1. Explicit flags (`--escalate`, `--primary`) override everything
 2. Session state — if the escalation agent asked a follow-up question, the next turn goes directly back to it
 3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
-4. Local model classifier — the local model decides `local` or `escalate` when the scorer is inconclusive
+4. Primary model classifier — the primary model decides `local` or `escalate` when the scorer is inconclusive
 5. Default: local
 
-When the local model cannot handle a task, it calls `escalate(reason)` and milk reformats the local conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
+When the primary model cannot handle a task, it calls `escalate(reason)` and milk reformats the primary conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
 
 ## Prerequisites
 
 | Dependency | Purpose | Required |
 | --- | --- | --- |
-| Local agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
+| Primary agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
 | Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
 | Go 1.21+ | build from source only | no (pre-built binaries available) |
 
@@ -164,7 +164,7 @@ milk [flags] <prompt>
 | Flag | Description |
 | --- | --- |
 | `--escalate` | Force this turn to the escalation agent |
-| `--local` | Force this turn to the primary agent |
+| `--primary` | Force this turn to the primary agent |
 | `--new` | Start a fresh session for the current directory |
 | `--session <name>` | Resume or create a named session |
 | `--list` | List sessions for the current directory |
@@ -190,7 +190,7 @@ milk --session auth-refactor "what does the current middleware do?"
 milk "yes, use Redis"
 
 # Force back to primary agent
-milk --local "grep for TODO comments"
+milk --primary "grep for TODO comments"
 
 # Inspect all active sessions
 milk --list --all
@@ -280,7 +280,7 @@ OTel signal files are written to `~/.milk/otel/`:
 
 Use `/otel` to inspect sizes and `/otel trim` to archive and reset. Use `/metrics` to see the latest metric values inline.
 
-## Local agent tools
+## Primary agent tools
 
 The primary agent has access to these built-in tools:
 

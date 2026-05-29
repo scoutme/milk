@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk lets you switch between a local LLM agent and a configurable escalation agent (Claude Code CLI or another inference backend) mid-workflow, maintaining full session context across the switch. The local agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
+milk lets you switch between a primary inference agent and a configurable escalation agent (Claude Code CLI or another inference backend) mid-workflow, maintaining full session context across the switch. The primary agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
 
 The primary use case is code assistance and shell automation for a single user.
 
@@ -24,10 +24,10 @@ milk [prompt | flags]
            ▼
 ┌──────────────────────────┐
 │  Router                  │
-│  1. Explicit flags       │  --escalate, --local
+│  1. Explicit flags       │  --escalate, --primary
 │  2. Session state check  │  ESCALATION_WAITING → bypass
 │  3. Rules layer          │  heuristics + weighted scorer
-│  4. Local model          │  local model self-classification
+│  4. Primary model        │  primary model self-classification
 │  5. Default: try local   │
 └────────┬─────────────────┘
          │
@@ -42,13 +42,13 @@ tool loop       claude-cli / bedrock / …
 ### Session state machine
 
 ```
-States: ROUTING | LOCAL | ESCALATION | ESCALATION_WAITING
+States: ROUTING | PRIMARY | ESCALATION | ESCALATION_WAITING
 
-ROUTING            → rules + local model decision → LOCAL or ESCALATION
-LOCAL              → --escalate OR local model escalate() → ESCALATION
+ROUTING              → rules + primary model decision → PRIMARY or ESCALATION
+PRIMARY            → --escalate OR primary model escalate() → ESCALATION
 ESCALATION         → escalation agent ends turn with question → ESCALATION_WAITING
 ESCALATION_WAITING → next user input bypasses router → direct --resume to escalation agent
-ESCALATION_WAITING → user --local flag → back to ROUTING
+ESCALATION_WAITING → user --primary flag → back to ROUTING
 ```
 
 ---
@@ -57,22 +57,22 @@ ESCALATION_WAITING → user --local flag → back to ROUTING
 
 Decision order per turn:
 
-1. **Explicit flags** — `--escalate` forces escalation agent; `--local` forces local (always wins)
+1. **Explicit flags** — `--escalate` forces escalation agent; `--primary` forces primary (always wins)
 2. **Session state** — if `ESCALATION_WAITING`, bypass router, send directly to escalation agent `--resume`
 3. **Rules layer** — layered scorer:
    - Hard rules: token length above `escalate_above_tokens` → escalation; keyword match → escalation
    - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
    - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open questions each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`
-4. **Local model classification** — when scorer is inconclusive, ask the local model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
-5. **Default** — attempt local; escalate if local returns `escalate(reason)`
+4. **Primary model classification** — when scorer is inconclusive, ask the primary model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
+5. **Default** — attempt primary; escalate if primary returns `escalate(reason)`
 
-The classifier uses the same model instance as the local coding agent. No second model or second inference server instance.
+The classifier uses the same model instance as the primary agent. No second model or second inference server instance.
 
 ---
 
-## Local Agent
+## Primary Agent
 
-- Backend: configurable via `agents` in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/agent switch <name> as primary`
+- Backend: configurable via `agents` (the primary agent must be an inference-server backend) in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/agent switch <name> as primary`
 - Protocols: OpenAI-compatible Chat Completions API (llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, Together.ai, Groq, Azure OpenAI) **or** AWS Bedrock Converse API natively (binary event-stream, SigV4 signing — not OpenAI-compat)
 - Model: any tool-calling-capable model. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B, Claude Haiku (via Bedrock).
 
@@ -109,8 +109,8 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
   - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches; expands `~`
   - `list_dir(path string) → entries` — names, types, sizes; expands `~`
   - `http_get(url string, max_bytes int) → body` — bounded HTTP fetch
-  - `get_session_context() → history` — returns the full shared session history (both agents) so the local model can see prior escalation turns
-- Self-escalation: local model may return `escalate(reason string)` as a tool call to trigger promotion
+  - `get_session_context() → history` — returns the full shared session history (both agents) so the primary model can see prior escalation turns
+- Self-escalation: primary model may return `escalate(reason string)` as a tool call to trigger promotion
 - Role-aware system prompt: primary agent sees the `escalate` tool and is told to use it for tasks beyond its capabilities; escalation agent does not see the `escalate` tool and is told it is the escalation target
 
 ---
@@ -157,10 +157,10 @@ Pre-approved tools and directories can be listed in `allowed_tools` and `add_dir
 
 ### Context handoff (escalation)
 
-When promoting from local to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt` (for Claude CLI) or as the first system message (for inference-server escalation). Format:
+When promoting from the primary agent to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt` (for Claude CLI) or as the first system message (for inference-server escalation). Format:
 
 ```
-[Context from local agent session]
+[Context from primary agent session]
 User: <turn>
 Assistant: <turn>
 [Tool: bash] <command>
@@ -197,7 +197,7 @@ User: <final prompt that triggered escalation>
   "history": [
     {
       "role": "user | assistant | tool_result",
-      "agent": "local | claude",
+      "agent": "local | escalation",
       "content": "...",
       "thinking": "...",
       "tool_calls": [],
@@ -284,7 +284,7 @@ The mode is persisted to `~/.milk/config.json` immediately and takes effect on t
 | `/think on` | Show thinking/reasoning tokens inline in the transcript |
 | `/think off` | Hide thinking tokens; a `[thinking…]` placeholder is shown instead |
 
-The toggle is retroactive — both transcript variants (full and no-think) are maintained in parallel during streaming, so switching is instantaneous with no rebuild. The default is configurable via `show_reasoning` in `~/.milk/config.json` (default: `true`). Applies to both local model `<think>` blocks and Claude extended thinking tokens.
+The toggle is retroactive — both transcript variants (full and no-think) are maintained in parallel during streaming, so switching is instantaneous with no rebuild. The default is configurable via `show_reasoning` in `~/.milk/config.json` (default: `true`). Applies to both primary model `<think>` blocks and Claude extended thinking tokens.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -297,7 +297,7 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 | Flag | Description |
 |------|-------------|
 | `--escalate` | Force route to escalation agent for this turn |
-| `--local` | Force route to primary agent for this turn; breaks ESCALATION_WAITING state |
+| `--primary` | Force route to primary agent for this turn; breaks ESCALATION_WAITING state |
 | `--new` | Start a new session (old sessions for cwd untouched) |
 | `--session <name>` | Target session by name (resume or create) |
 | `--continue` | Alias for default resume behavior (explicit) |
@@ -361,7 +361,7 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 
 `escalation_agent` selects which `agents` entry handles escalated turns. Defaults to `"claude"` (the built-in `claude-cli` entry). Set to the name of any `agents` entry — including another inference-server backend — to route escalated turns there instead. Change at runtime with `/agent switch <name> as escalation`.
 
-A built-in `claude-cli` entry named `"claude"` is always available even if not listed explicitly in `agents`. When absent from the file, it is injected in-memory with `bin: "claude"`. Existing sessions are automatically migrated from the old `local_agents` / `claude_bin` / `dangerously_skip_permissions` shape on first load; the migrated config is written back to disk.
+A built-in `claude-cli` entry named `"claude"` is always available even if not listed explicitly in `agents`. When absent from the file, it is injected in-memory with `bin: "claude"`. 
 
 ### `agents` entry fields
 
@@ -431,7 +431,7 @@ Controls whether thinking/reasoning tokens are shown in the transcript by defaul
 
 Both agents stream output in real time:
 
-- **Local agent**: SSE from OpenAI-compat API (`stream: true`), or AWS binary event-stream from Bedrock Converse API (provider-specific frame decoder)
+- **Primary agent**: SSE from OpenAI-compat API (`stream: true`), or AWS binary event-stream from Bedrock Converse API (provider-specific frame decoder)
 - **Claude agent**: NDJSON from `--output-format stream-json`, parsed line by line
 
 milk relays tokens to stdout as they arrive.

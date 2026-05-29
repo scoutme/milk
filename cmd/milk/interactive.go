@@ -221,7 +221,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 			// No inline prompt: pin all subsequent turns to local.
 			st.stickyPrimary = true
 			st.forcePrimary = false
-			output = milkTag() + " pinned to " + green("local model") + " (use /escalate to unpin)"
+			output = milkTag() + " pinned to " + green(st.cfg.ActiveAgent().Name) + " (use /escalate to unpin)"
 		} else {
 			// Inline prompt: single-turn override only.
 			st.forcePrimary = true
@@ -474,7 +474,7 @@ func execAgent(st *interactiveState) string {
 		name = "local"
 	}
 
-	return fmt.Sprintf("%s local agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
+	return fmt.Sprintf("%s primary agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
 		milkTag(), bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
 }
 
