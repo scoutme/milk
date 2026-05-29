@@ -116,7 +116,7 @@ print_success() {
         *)    printf "   ${BLUE}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}\n";;
     esac
     echo ""
-    echo "2. Ensure llama.cpp is running (default: http://localhost:8080)"
+    echo "2. Ensure your local inference server is running (or configure a cloud provider)."
     echo "   and the claude CLI is available in PATH."
     echo ""
     echo "3. Start milk:"

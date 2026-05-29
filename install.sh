@@ -118,7 +118,7 @@ print_success() {
     echo "============================================"
     printf "${NC}"
     echo ""
-    echo "Binary: $BIN_DIR/milk"
+    echo "Binary: $BIN_DIR/milk${EXT}"
     echo ""
     printf "${BOLD}Next steps:${NC}\n"
     echo ""
