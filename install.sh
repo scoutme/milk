@@ -61,7 +61,8 @@ resolve_version() {
     else
         error "curl or wget is required to download milk."
     fi
-    [ -n "$VERSION" ] || error "Could not determine latest release version. Set MILK_VERSION explicitly."
+    [ -n "$VERSION" ] || error "No published releases found. Set MILK_VERSION to a specific tag, or build from source:
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install-from-source.sh | sh"
 }
 
 download_binary() {

@@ -18,11 +18,13 @@ function Write-Warn    { Write-Host "Warning: $_" -ForegroundColor Yellow }
 $Version = $env:MILK_VERSION
 if (-not $Version) {
     "Resolving latest release..." | Write-Info
-    $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
-    $Version = $release.tag_name
+    try {
+        $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+        $Version = $release.tag_name
+    } catch { }
 }
 if (-not $Version) {
-    throw "Could not determine latest release version. Set `$env:MILK_VERSION explicitly."
+    throw "No published releases found. Set `$env:MILK_VERSION to a specific tag (e.g. v0.1.0), or build from source via WSL2: curl -fsSL https://raw.githubusercontent.com/$Repo/main/install-from-source.sh | sh"
 }
 
 # ── detect arch ───────────────────────────────────────────────────────────────
