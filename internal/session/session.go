@@ -179,12 +179,15 @@ func renderTurns(turns []Turn) string {
 // buildBrick selects turns belonging to agent, applies sanitization, then
 // trims from the oldest end until the rendered output is within budgetChars.
 func buildBrick(history []Turn, agent Agent, budgetChars int) string {
-	// Collect turns for this agent (user turns are shared context, included once).
+	// Collect turns for this agent. User turns are shared context, but only
+	// include a user turn if it belongs to this agent or has no agent tag (legacy).
 	var turns []Turn
 	for _, t := range history {
 		switch t.Role {
 		case RoleUser:
-			turns = append(turns, t)
+			if t.Agent == "" || t.Agent == agent {
+				turns = append(turns, t)
+			}
 		case RoleAssistant:
 			if t.Agent == agent {
 				turns = append(turns, t)

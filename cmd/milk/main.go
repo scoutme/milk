@@ -633,8 +633,21 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	}
 	fmt.Fprint(out, cliLabelStyled(agent)+" ")
 	aw := newActivityWriter(out)
-	resuming := sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != ""
-	if !resuming {
+	// Three-way mode:
+	// - ESCALATION_WAITING + existing session → RESUME (direct continuation)
+	// - existing session but not waiting (local did some work) → RETURNING
+	// - no session yet → FIRST
+	var ctxMode escalation.ContextMode
+	switch {
+	case sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != "":
+		ctxMode = escalation.ContextModeResume
+	case sess.EscalationSessionID != "":
+		ctxMode = escalation.ContextModeReturning
+	default:
+		ctxMode = escalation.ContextModeFirst
+	}
+	resuming := ctxMode == escalation.ContextModeResume
+	if ctxMode == escalation.ContextModeFirst {
 		sess.EscalationBrief = brief
 	}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
@@ -677,7 +690,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	if injectInstructions {
 		sess.MemoryInstructionInjectedAt = sess.EscalationTurnCount()
 	}
-	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForEscalation(cfg, mem, prompt), injectInstructions, primaryName, escalationName)
+	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, ctxMode, nonce, perceptsForEscalation(cfg, mem, prompt), injectInstructions, primaryName, escalationName)
 	aw.Done()
 	if err != nil {
 		return err
@@ -718,14 +731,20 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 	return agent
 }
 
-// runCLIEscalationAgent runs one escalation turn (first or resume) and returns the result.
+// runCLIEscalationAgent runs one escalation turn (first, resume, or returning) and returns the result.
 // nonce is the session-specific percept nonce embedded in the system-prompt instruction.
 // primaryName and escalationName are the configured agent names embedded in the memory instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
 // injectInstructions controls whether the need/memory instruction blocks are included.
-func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string) (claude.ParseResult, error) {
-	sysContext := escalation.BuildContext(sess, nonce, percepts, resuming, injectInstructions, primaryName, escalationName)
-	if resuming {
+func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, mode escalation.ContextMode, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string) (claude.ParseResult, error) {
+	sysContext := escalation.BuildContext(sess, nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+	if mode == escalation.ContextModeResume {
+		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
+	}
+	// ContextModeFirst and ContextModeReturning both start a new Claude session ID.
+	// For RETURNING we pass the existing EscalationSessionID as the parent session
+	// via --resume so Claude can recover its own tool history, then orient via sysContext.
+	if mode == escalation.ContextModeReturning && sess.EscalationSessionID != "" {
 		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
 	}
 	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, out)
@@ -1010,8 +1029,16 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
 // Escalation agent turns are excluded: the local model should only see its own prior conversation.
+// When the session has a LastEscalationSummary (i.e. the escalation agent did work previously),
+// it is prepended as a system-style assistant turn so the local model knows what Claude did.
 func sessionToMessages(sess *session.Session) []local.Message {
-	msgs := []local.Message{}
+	var msgs []local.Message
+	if sess.LastEscalationSummary != "" {
+		msgs = append(msgs, local.Message{
+			Role:    "assistant",
+			Content: "[Escalation agent summary]\n" + sess.LastEscalationSummary,
+		})
+	}
 	for _, t := range sess.History {
 		if t.Agent != session.AgentLocal {
 			continue
