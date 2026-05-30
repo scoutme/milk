@@ -238,7 +238,7 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 		text = stripTagsByPrefix(text, needOpenPrefix)
 	}
 	res.Text = text
-	res.EndsWithQ = strings.HasSuffix(text, "?")
+	res.EndsWithQ = endsWithQuestion(text)
 
 	if text != "" {
 		io.WriteString(out, "\n") //nolint:errcheck
@@ -362,6 +362,28 @@ func applyDelta(res *ParseResult, textBuf *strings.Builder, out io.Writer, delta
 }
 
 // ensureNewline appends a newline to textBuf and out if the last byte is not already '\n'.
+// endsWithQuestion returns true when the last non-empty line of text contains
+// a '?' that is either the final character or is followed only by whitespace.
+// This avoids false positives from question marks mid-sentence (e.g. in code
+// or URLs) that happen to appear near the end of the overall response.
+func endsWithQuestion(text string) bool {
+	// Find the last non-empty line.
+	last := strings.TrimRight(text, " \t\n\r")
+	if last == "" {
+		return false
+	}
+	if idx := strings.LastIndexByte(last, '\n'); idx >= 0 {
+		last = last[idx+1:]
+	}
+	last = strings.TrimSpace(last)
+	if last == "" {
+		return false
+	}
+	// The last non-empty line must end with '?' or contain '?' followed by only spaces.
+	trimmed := strings.TrimRight(last, " \t")
+	return len(trimmed) > 0 && trimmed[len(trimmed)-1] == '?'
+}
+
 func ensureNewline(textBuf *strings.Builder, out io.Writer) {
 	if textBuf.Len() > 0 && textBuf.String()[textBuf.Len()-1] != '\n' {
 		textBuf.WriteByte('\n')

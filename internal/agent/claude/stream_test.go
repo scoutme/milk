@@ -86,6 +86,30 @@ func TestStream_NotEndsWithQuestion(t *testing.T) {
 	}
 }
 
+func TestEndsWithQuestion(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"What do you mean?", true},
+		{"What do you mean? ", true},   // trailing space
+		{"Done.", false},
+		{"foo? bar", false},            // ? mid-sentence, not last line
+		{"foo?\nDone.", false},         // ? on earlier line
+		{"foo\nWhat now?", true},       // ? on last line
+		{"foo\nWhat now?  ", true},     // ? on last line with trailing spaces
+		{"", false},
+		{"?", true},
+		{"Is this ok?\nSure.", false},  // last line has no ?
+	}
+	for _, tc := range cases {
+		got := endsWithQuestion(tc.text)
+		if got != tc.want {
+			t.Errorf("endsWithQuestion(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
 func TestStream_ErrorResult(t *testing.T) {
 	input := ndjson(
 		`{"type":"system","session_id":"s1"}`,

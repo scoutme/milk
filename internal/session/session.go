@@ -116,6 +116,22 @@ func lastEscalationBoundary(history []Turn) int {
 	return last + 1
 }
 
+// lastLocalBoundary returns the index of the first turn after the most recent
+// local agent session ends (i.e. the first escalation or user turn after the
+// last local assistant turn). Returns 0 when there are no local turns.
+func lastLocalBoundary(history []Turn) int {
+	last := -1
+	for i, t := range history {
+		if t.Agent == AgentLocal {
+			last = i
+		}
+	}
+	if last < 0 {
+		return 0
+	}
+	return last + 1
+}
+
 // renderTurns serialises a slice of turns to text, collapsing consecutive
 // identical tool calls and truncating long tool results.
 func renderTurns(turns []Turn) string {
@@ -219,15 +235,16 @@ func buildBrick(history []Turn, agent Agent, budgetChars int) string {
 // RebuildSummaryBricks recomputes LastLocalSummary and LastEscalationSummary from
 // History. Call after every turn completes. budgetChars is the per-brick limit.
 // LastLocalSummary covers local turns since the last escalation turn (+ budget cap).
-// LastEscalationSummary covers all escalation agent turns (+ budget cap).
+// LastEscalationSummary covers escalation turns since the last local turn (+ budget cap).
 // An empty escalation session (0 tool calls, < 200 chars) does not update LastEscalationSummary.
 func (s *Session) RebuildSummaryBricks(budgetChars int) {
-	// Local brick: only turns since the last Claude boundary.
-	boundary := lastEscalationBoundary(s.History)
-	s.LastLocalSummary = buildBrick(s.History[boundary:], AgentLocal, budgetChars)
+	// Local brick: only turns since the last escalation boundary.
+	escBoundary := lastEscalationBoundary(s.History)
+	s.LastLocalSummary = buildBrick(s.History[escBoundary:], AgentLocal, budgetChars)
 
-	// Escalation brick: all escalation agent turns, but skip if the session was empty.
-	escalationTurns := s.History
+	// Escalation brick: only turns since the last local boundary (symmetric with local brick).
+	localBoundary := lastLocalBoundary(s.History)
+	escalationTurns := s.History[localBoundary:]
 	if !emptyEscalationSession(escalationTurns, 200) {
 		s.LastEscalationSummary = buildBrick(escalationTurns, AgentEscalation, budgetChars)
 	}
@@ -288,6 +305,26 @@ func (s *Session) EscalationOutputBytesSince(afterTurnIndex int) int {
 		}
 	}
 	return total
+}
+
+// EscalationMostRecent reports whether the escalation agent was the most recently
+// active agent — i.e. there is at least one escalation assistant turn after the
+// last local assistant turn. Used to decide whether to inject LastEscalationSummary
+// into local context (only relevant immediately after returning from escalation).
+func EscalationMostRecent(s *Session) bool {
+	lastLocal := -1
+	lastEsc := -1
+	for i, t := range s.History {
+		if t.Role != RoleAssistant {
+			continue
+		}
+		if t.Agent == AgentLocal {
+			lastLocal = i
+		} else if t.Agent == AgentEscalation {
+			lastEsc = i
+		}
+	}
+	return lastEsc > lastLocal
 }
 
 func (s *Session) AddTurn(t Turn) {
