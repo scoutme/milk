@@ -147,9 +147,9 @@ type addAgentStep int
 
 const (
 	addStepName addAgentStep = iota
+	addStepProvider
 	addStepURL
 	addStepModel
-	addStepProvider
 	addStepAPIKey    // only when provider is bearer
 	addStepAWSRegion // only when provider is bedrock
 	addStepDone
@@ -949,6 +949,9 @@ func (m *model) welcomeScreen() string {
 			"",
 			dim("OpenRouter · Together · Groq"),
 			"› /agent add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
+			"",
+			dim("Claude Code CLI"),
+			"› /agent add name=claude provider=claude-cli",
 			"",
 		)
 		if !escalationAvail {
@@ -1971,7 +1974,8 @@ func (m model) startAddAgent(inline string) model {
 	ac := parseAgentInlineArgs(inline)
 
 	// If all required fields are present, add immediately.
-	if ac.Name != "" && ac.URL != "" && ac.Model != "" {
+	isCLI := strings.ToLower(ac.Provider) == "claude-cli"
+	if ac.Name != "" && (isCLI || (ac.URL != "" && ac.Model != "")) {
 		return m.commitAddAgent(ac)
 	}
 
@@ -2005,6 +2009,8 @@ func parseAgentInlineArgs(s string) config.AgentConfig {
 			ac.APIKey = v
 		case "aws_region":
 			ac.AWSRegion = v
+		case "bin":
+			ac.Bin = v
 		}
 	}
 	return ac
@@ -2015,17 +2021,18 @@ func firstMissingStep(ac config.AgentConfig) addAgentStep {
 	if ac.Name == "" {
 		return addStepName
 	}
-	if ac.URL == "" {
-		return addStepURL
-	}
-	if ac.Model == "" {
-		return addStepModel
-	}
 	if ac.Provider == "" {
 		return addStepProvider
 	}
 	p := strings.ToLower(ac.Provider)
-	if p != "" && p != "local" && p != "bedrock" && ac.APIKey == "" {
+	isCLI := p == "claude-cli"
+	if !isCLI && ac.URL == "" {
+		return addStepURL
+	}
+	if !isCLI && ac.Model == "" {
+		return addStepModel
+	}
+	if !isCLI && p != "local" && p != "bedrock" && ac.APIKey == "" {
 		return addStepAPIKey
 	}
 	if p == "bedrock" && ac.AWSRegion == "" {
@@ -2044,7 +2051,7 @@ func addAgentPrompt(step addAgentStep) string {
 	case addStepModel:
 		return milkTag() + " model:"
 	case addStepProvider:
-		return milkTag() + " provider [local/bedrock/<bearer-name>, enter to skip]:"
+		return milkTag() + " provider [local/bedrock/claude-cli/<bearer-name>, enter to skip]:"
 	case addStepAPIKey:
 		return milkTag() + " api_key:"
 	case addStepAWSRegion:
@@ -2149,8 +2156,19 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	if provider == "" {
 		provider = "local"
 	}
-	m.appendTranscript(fmt.Sprintf("%s added agent %s  (%s | %s | %s)\n",
-		milkTag(), bold(ac.Name), ac.URL, ac.Model, provider))
+	var agentDetail string
+	if strings.ToLower(provider) == "claude-cli" {
+		bin := ac.Bin
+		if bin == "" {
+			bin = "claude"
+		}
+		agentDetail = fmt.Sprintf("%s added agent %s  (%s | bin=%s)\n",
+			milkTag(), bold(ac.Name), provider, bin)
+	} else {
+		agentDetail = fmt.Sprintf("%s added agent %s  (%s | %s | %s)\n",
+			milkTag(), bold(ac.Name), ac.URL, ac.Model, provider)
+	}
+	m.appendTranscript(agentDetail)
 	if isFirst {
 		m.appendTranscript(milkTag() + " activated as the default provider\n")
 	} else {
