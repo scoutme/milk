@@ -32,8 +32,8 @@ func TestBuildContext_CurrentNeed(t *testing.T) {
 func TestBuildContext_CurrentNeed_FreshLabel(t *testing.T) {
 	sess := &session.Session{
 		CurrentNeed:      "implement JWT auth",
-		CurrentNeedSetAt: 3,
-		History:          make([]session.Turn, 5), // turnsAgo = 5-3 = 2 → fresh
+		CurrentNeedSetAt: 4, // 1-based: set when len(History)=3 → turnsAgo = 5-(4-1) = 2 → fresh
+		History:          make([]session.Turn, 5),
 	}
 	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if !strings.Contains(got, "[Current user goal]") {
@@ -47,8 +47,8 @@ func TestBuildContext_CurrentNeed_FreshLabel(t *testing.T) {
 func TestBuildContext_CurrentNeed_StaleLabel(t *testing.T) {
 	sess := &session.Session{
 		CurrentNeed:      "implement JWT auth",
-		CurrentNeedSetAt: 0,
-		History:          make([]session.Turn, 6), // turnsAgo = 6-0 = 6 → stale
+		CurrentNeedSetAt: 2, // 1-based: set when len(History)=1 → turnsAgo = 6-(2-1) = 5 → stale
+		History:          make([]session.Turn, 6),
 	}
 	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if strings.Contains(got, "[Current user goal]") {

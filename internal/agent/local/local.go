@@ -425,11 +425,11 @@ func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
 	if turnThreshold == 0 && byteThreshold == 0 {
 		return false
 	}
-	turnsSince := sess.LocalTurnCount() - injectedAt
+	turnsSince := sess.LocalTurnCount() - (injectedAt - 1)
 	if turnThreshold > 0 && turnsSince >= turnThreshold {
 		return true
 	}
-	bytesSince := sess.LocalOutputBytesSince(injectedAt)
+	bytesSince := sess.LocalOutputBytesSince(injectedAt - 1)
 	if byteThreshold > 0 && bytesSince >= byteThreshold {
 		return true
 	}
@@ -494,7 +494,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName)})
 		if sess != nil {
-			sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount()
+			sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount() + 1
 		}
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})

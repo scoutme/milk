@@ -104,8 +104,8 @@ func TestShouldInjectMemoryInstruction_NilSession(t *testing.T) {
 
 func TestShouldInjectMemoryInstruction_BothThresholdsDisabled(t *testing.T) {
 	a := makeAgentWithMemCfg(0, 0)
+	// injectedAt=1 (1-based): injected at turn-0, non-zero sentinel → already injected
 	sess := &session.Session{LocalMemoryInstructionInjectedAt: 1}
-	// already injected, thresholds disabled → skip
 	if a.shouldInjectMemoryInstruction(sess) {
 		t.Error("expected no injection when both thresholds disabled and already injected")
 	}
@@ -113,19 +113,21 @@ func TestShouldInjectMemoryInstruction_BothThresholdsDisabled(t *testing.T) {
 
 func TestShouldInjectMemoryInstruction_TurnThresholdMet(t *testing.T) {
 	a := makeAgentWithMemCfg(3, 0)
-	sess := &session.Session{LocalMemoryInstructionInjectedAt: 1}
-	// Add 3 local turns so LocalTurnCount() = 3, turnsSince = 3-1 = 2... not met
+	// injectedAt=2 (1-based): injected when LocalTurnCount()=1.
+	// turnsSince = LocalTurnCount() - (injectedAt-1) = count - 1.
+	sess := &session.Session{LocalMemoryInstructionInjectedAt: 2}
+	// Add 3 local turns: turnsSince = 3-1 = 2 — not yet
 	for range 3 {
 		sess.History = append(sess.History, session.Turn{
 			Role:  session.RoleAssistant,
 			Agent: session.AgentLocal,
 		})
 	}
-	// LocalTurnCount = 3, injectedAt = 1, turnsSince = 2 — not yet
+	// LocalTurnCount = 3, turnsSince = 3-1 = 2 — not yet
 	if a.shouldInjectMemoryInstruction(sess) {
 		t.Error("threshold not yet met (turnsSince=2, threshold=3)")
 	}
-	// Add one more turn: turnsSince = 3 ≥ 3 → inject
+	// Add one more turn: turnsSince = 4-1 = 3 ≥ 3 → inject
 	sess.History = append(sess.History, session.Turn{
 		Role:  session.RoleAssistant,
 		Agent: session.AgentLocal,
@@ -137,14 +139,15 @@ func TestShouldInjectMemoryInstruction_TurnThresholdMet(t *testing.T) {
 
 func TestShouldInjectMemoryInstruction_ByteThresholdMet(t *testing.T) {
 	a := makeAgentWithMemCfg(0, 100)
-	sess := &session.Session{LocalMemoryInstructionInjectedAt: 1}
-	// Add 1 local turn before injection point (count index 0 = turn 1)
-	// Then add turns after injection point with enough bytes
+	// injectedAt=2 (1-based): injected when LocalTurnCount()=1.
+	// LocalOutputBytesSince(injectedAt-1 = 1) skips turn[0] (the seed).
+	sess := &session.Session{LocalMemoryInstructionInjectedAt: 2}
+	// Add 1 local turn before injection point (the seed, skipped by bytesSince)
 	sess.History = append(sess.History, session.Turn{
 		Role: session.RoleAssistant, Agent: session.AgentLocal,
 		Content: "seed",
 	})
-	// injectedAt=1, so we count turns from index 1 onward (count >= 1 means second turn+)
+	// Turns after injection point accumulate toward the threshold
 	sess.History = append(sess.History, session.Turn{
 		Role: session.RoleAssistant, Agent: session.AgentLocal,
 		Content: strings.Repeat("a", 50),
