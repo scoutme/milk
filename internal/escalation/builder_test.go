@@ -29,6 +29,39 @@ func TestBuildContext_CurrentNeed(t *testing.T) {
 	}
 }
 
+func TestBuildContext_CurrentNeed_FreshLabel(t *testing.T) {
+	sess := &session.Session{
+		CurrentNeed:      "implement JWT auth",
+		CurrentNeedSetAt: 3,
+		History:          make([]session.Turn, 5), // turnsAgo = 5-3 = 2 → fresh
+	}
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
+	if !strings.Contains(got, "[Current user goal]") {
+		t.Errorf("recent need should use fresh header, got %q", got)
+	}
+	if strings.Contains(got, "may already be fulfilled") {
+		t.Errorf("recent need should not carry stale warning, got %q", got)
+	}
+}
+
+func TestBuildContext_CurrentNeed_StaleLabel(t *testing.T) {
+	sess := &session.Session{
+		CurrentNeed:      "implement JWT auth",
+		CurrentNeedSetAt: 0,
+		History:          make([]session.Turn, 6), // turnsAgo = 6-0 = 6 → stale
+	}
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
+	if strings.Contains(got, "[Current user goal]") {
+		t.Errorf("stale need should not use fresh header, got %q", got)
+	}
+	if !strings.Contains(got, "may already be fulfilled") {
+		t.Errorf("stale need should carry stale warning, got %q", got)
+	}
+	if !strings.Contains(got, "implement JWT auth") {
+		t.Errorf("stale need content should still be present, got %q", got)
+	}
+}
+
 func TestBuildContext_NoNeedWhenEmpty(t *testing.T) {
 	sess := &session.Session{}
 	got := BuildContext(sess, "n1", nil, false, true, "", "")

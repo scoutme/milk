@@ -361,6 +361,7 @@ func dispatchCurrentNeed(sess *session.Session, argsJSON string) string {
 		return toolResult{Error: "goal must not be empty"}.String()
 	}
 	sess.CurrentNeed = args.Goal
+	sess.CurrentNeedSetAt = len(sess.History)
 	return toolResult{Output: "current need updated"}.String()
 }
 

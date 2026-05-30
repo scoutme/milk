@@ -321,3 +321,81 @@ func TestFindByIDPrefix_NoMatch(t *testing.T) {
 		t.Errorf("expected 0 results, got %d", len(results))
 	}
 }
+
+func TestPruneGlobal_NoopWhenUnderLimit(t *testing.T) {
+	s := newTestStore(t, false)
+	s.global.Percepts = []Percept{
+		{ID: "a", Content: "fact a", W: 0.8},
+		{ID: "b", Content: "fact b", W: 0.6},
+	}
+	if err := s.PruneGlobal(10); err != nil {
+		t.Fatalf("PruneGlobal: %v", err)
+	}
+	if len(s.global.Percepts) != 2 {
+		t.Errorf("expected 2, got %d", len(s.global.Percepts))
+	}
+}
+
+func TestPruneGlobal_ZeroMaxIsNoop(t *testing.T) {
+	s := newTestStore(t, false)
+	s.global.Percepts = []Percept{
+		{ID: "a", Content: "fact a", W: 0.8},
+		{ID: "b", Content: "fact b", W: 0.6},
+	}
+	if err := s.PruneGlobal(0); err != nil {
+		t.Fatalf("PruneGlobal: %v", err)
+	}
+	if len(s.global.Percepts) != 2 {
+		t.Errorf("expected 2 (noop), got %d", len(s.global.Percepts))
+	}
+}
+
+func TestPruneGlobal_DropsLowestWeightNonCore(t *testing.T) {
+	s := newTestStore(t, false)
+	s.global.Percepts = []Percept{
+		{ID: "high", Content: "high weight", W: 0.9},
+		{ID: "mid", Content: "mid weight", W: 0.6},
+		{ID: "low", Content: "low weight", W: 0.3},
+	}
+	if err := s.PruneGlobal(2); err != nil {
+		t.Fatalf("PruneGlobal: %v", err)
+	}
+	if len(s.global.Percepts) != 2 {
+		t.Fatalf("expected 2, got %d", len(s.global.Percepts))
+	}
+	for _, p := range s.global.Percepts {
+		if p.ID == "low" {
+			t.Error("lowest-weight percept should have been pruned")
+		}
+	}
+}
+
+func TestPruneGlobal_SparesCorePercepts(t *testing.T) {
+	s := newTestStore(t, false)
+	s.global.Percepts = []Percept{
+		{ID: "core", Content: "core fact", W: 1.0, Core: true},
+		{ID: "hi", Content: "high weight", W: 0.9},
+		{ID: "lo", Content: "low weight", W: 0.2},
+	}
+	// max=2: should keep core + high, drop low
+	if err := s.PruneGlobal(2); err != nil {
+		t.Fatalf("PruneGlobal: %v", err)
+	}
+	if len(s.global.Percepts) != 2 {
+		t.Fatalf("expected 2, got %d", len(s.global.Percepts))
+	}
+	for _, p := range s.global.Percepts {
+		if p.ID == "lo" {
+			t.Error("low-weight non-core percept should have been pruned")
+		}
+	}
+	found := false
+	for _, p := range s.global.Percepts {
+		if p.ID == "core" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("core percept must survive pruning")
+	}
+}
