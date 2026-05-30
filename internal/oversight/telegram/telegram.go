@@ -1,6 +1,6 @@
 // Package telegram implements the oversight.Notifier interface using the
 // Telegram Bot API. Messages are sent via plain HTTPS to the sendMessage
-// endpoint; updates are polled via getUpdates to receive replies.
+// endpoint; updates are routed by a single background polling goroutine.
 package telegram
 
 import (
@@ -21,27 +21,32 @@ import (
 const (
 	defaultAPIBase     = "https://api.telegram.org"
 	defaultPollTimeout = 20 * time.Second
-	pollInterval       = 2 * time.Second
 )
 
 // Config holds the Telegram-specific configuration.
 type Config struct {
-	Token          string
-	ChatID         int64
-	PermTimeout    time.Duration // how long AskPermission waits for a reply
-	TimeoutAction  string        // "allow" or "deny" when PermTimeout expires
-	APIBase        string        // override for testing; defaults to https://api.telegram.org
+	Token         string
+	ChatID        int64
+	PermTimeout   time.Duration // how long AskPermission waits for a reply
+	TimeoutAction string        // "allow" or "deny" when PermTimeout expires
+	APIBase       string        // override for testing; defaults to https://api.telegram.org
 }
 
 // Notifier sends notifications and forwards permission prompts via Telegram.
+// A single background goroutine (started by StartPolling) receives all
+// incoming messages and routes them to either a pending permission wait or
+// the registered OnInput callback.
 type Notifier struct {
-	cfg        Config
-	client     *http.Client
+	cfg    Config
+	client *http.Client
+
 	mu         sync.Mutex
-	lastUpdate int64 // offset for getUpdates long-polling
+	lastUpdate int64        // getUpdates offset
+	permCh     chan string  // non-nil when AskPermission is waiting
+	onInput    func(string) // called for non-permission messages when set
 }
 
-// New creates a Notifier. Callers should verify connectivity with Ping.
+// New creates a Notifier. Call StartPolling to begin receiving messages.
 func New(cfg Config) *Notifier {
 	if cfg.APIBase == "" {
 		cfg.APIBase = defaultAPIBase
@@ -55,6 +60,95 @@ func New(cfg Config) *Notifier {
 	return &Notifier{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// SetOnInput registers a callback invoked for every incoming message that is
+// not consumed by a pending AskPermission call. Safe to call before or after
+// StartPolling. Pass nil to unregister.
+func (n *Notifier) SetOnInput(cb func(string)) {
+	n.mu.Lock()
+	n.onInput = cb
+	n.mu.Unlock()
+}
+
+// StartPolling launches the background update-polling loop. It runs until ctx
+// is cancelled. Safe to call once after New.
+func (n *Notifier) StartPolling(ctx context.Context) {
+	go n.pollLoop(ctx)
+}
+
+// pollLoop is the single getUpdates consumer. It routes each message to either
+// the pending permission channel or the onInput callback.
+func (n *Notifier) pollLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		n.mu.Lock()
+		offset := n.lastUpdate + 1
+		n.mu.Unlock()
+
+		params := url.Values{
+			"offset":  []string{strconv.FormatInt(offset, 10)},
+			"timeout": []string{strconv.Itoa(int(defaultPollTimeout.Seconds()))},
+			"limit":   []string{"10"},
+		}
+
+		var result struct {
+			OK     bool `json:"ok"`
+			Result []struct {
+				UpdateID int64 `json:"update_id"`
+				Message  *struct {
+					Chat struct {
+						ID int64 `json:"id"`
+					} `json:"chat"`
+					Text string `json:"text"`
+				} `json:"message"`
+			} `json:"result"`
+		}
+
+		pollCtx, cancel := context.WithTimeout(ctx, defaultPollTimeout+5*time.Second)
+		err := n.apiGet(pollCtx, "getUpdates", params, &result)
+		cancel()
+
+		if err != nil || !result.OK {
+			// Back off briefly on error to avoid hammering the API.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+			continue
+		}
+
+		for _, upd := range result.Result {
+			n.mu.Lock()
+			if upd.UpdateID > n.lastUpdate {
+				n.lastUpdate = upd.UpdateID
+			}
+			permCh := n.permCh
+			cb := n.onInput
+			n.mu.Unlock()
+
+			if upd.Message == nil || upd.Message.Chat.ID != n.cfg.ChatID || upd.Message.Text == "" {
+				continue
+			}
+			text := upd.Message.Text
+
+			if permCh != nil {
+				// Non-blocking send — if the channel is full the permission
+				// waiter already received a reply; treat as input.
+				select {
+				case permCh <- text:
+					continue
+				default:
+				}
+			}
+			if cb != nil {
+				go cb(text)
+			}
+		}
 	}
 }
 
@@ -94,13 +188,22 @@ func (n *Notifier) NotifyToolUse(_ context.Context, toolName, summary string) {
 func (n *Notifier) NotifyTurnDone(_ context.Context, agent string, err error) {
 	if err != nil {
 		n.sendAsync(fmt.Sprintf("❌ *%s* error: `%s`", escMD(agent), escMD(err.Error())))
-	} else {
-		n.sendAsync(fmt.Sprintf("✅ *%s* done", escMD(agent)))
 	}
 }
 
-// AskPermission sends a formatted permission prompt and polls for a y/n reply.
-// Returns PermTimeout when cfg.PermTimeout elapses without a reply.
+func (n *Notifier) NotifyResponse(_ context.Context, agent, text string) {
+	if text == "" {
+		return
+	}
+	const maxLen = 3000
+	if len(text) > maxLen {
+		text = text[:maxLen] + "\n…"
+	}
+	n.sendAsync(fmt.Sprintf("💬 *%s*\n%s", escMD(agent), escMD(text)))
+}
+
+// AskPermission sends a formatted permission prompt and waits for a y/n reply
+// via the background poll loop. Returns PermTimeout when cfg.PermTimeout elapses.
 func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest) oversight.PermDecision {
 	lines := []string{fmt.Sprintf("🔐 Permission request — *%s*", escMD(req.ToolName))}
 	if req.Input != "" {
@@ -115,24 +218,28 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 	lines = append(lines, "\nReply *y* to allow or *n* to deny\\.")
 	n.send(strings.Join(lines, "\n"))
 
-	deadline := time.Now().Add(n.cfg.PermTimeout)
-	for time.Now().Before(deadline) {
-		remaining := time.Until(deadline)
-		pollCtx, cancel := context.WithTimeout(ctx, min(pollInterval+defaultPollTimeout, remaining+time.Second))
-		reply, ok := n.pollForReply(pollCtx)
-		cancel()
-		if ok {
-			r := strings.TrimSpace(strings.ToLower(reply))
-			if r == "y" || r == "yes" {
-				n.sendAsync("✅ Allowed")
-				return oversight.PermAllow
-			}
-			n.sendAsync("🚫 Denied")
-			return oversight.PermDeny
+	ch := make(chan string, 1)
+	n.mu.Lock()
+	n.permCh = ch
+	n.mu.Unlock()
+
+	defer func() {
+		n.mu.Lock()
+		n.permCh = nil
+		n.mu.Unlock()
+	}()
+
+	select {
+	case reply := <-ch:
+		r := strings.TrimSpace(strings.ToLower(reply))
+		if r == "y" || r == "yes" {
+			n.sendAsync("✅ Allowed")
+			return oversight.PermAllow
 		}
-		if ctx.Err() != nil {
-			break
-		}
+		n.sendAsync("🚫 Denied")
+		return oversight.PermDeny
+	case <-time.After(n.cfg.PermTimeout):
+	case <-ctx.Done():
 	}
 
 	action := "Denied (timeout)"
@@ -146,53 +253,7 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 	return oversight.PermTimeout
 }
 
-// pollForReply calls getUpdates once and returns the first text message
-// directed to this chat, or ("", false) when nothing arrived.
-func (n *Notifier) pollForReply(ctx context.Context) (string, bool) {
-	n.mu.Lock()
-	offset := n.lastUpdate + 1
-	n.mu.Unlock()
-
-	params := url.Values{
-		"offset":  []string{strconv.FormatInt(offset, 10)},
-		"timeout": []string{strconv.Itoa(int(defaultPollTimeout.Seconds()))},
-		"limit":   []string{"10"},
-	}
-
-	var result struct {
-		OK     bool `json:"ok"`
-		Result []struct {
-			UpdateID int64 `json:"update_id"`
-			Message  *struct {
-				Chat struct {
-					ID int64 `json:"id"`
-				} `json:"chat"`
-				Text string `json:"text"`
-			} `json:"message"`
-		} `json:"result"`
-	}
-	if err := n.apiGet(ctx, "getUpdates", params, &result); err != nil || !result.OK {
-		return "", false
-	}
-
-	for _, upd := range result.Result {
-		n.mu.Lock()
-		if upd.UpdateID > n.lastUpdate {
-			n.lastUpdate = upd.UpdateID
-		}
-		n.mu.Unlock()
-
-		if upd.Message == nil || upd.Message.Chat.ID != n.cfg.ChatID {
-			continue
-		}
-		if upd.Message.Text != "" {
-			return upd.Message.Text, true
-		}
-	}
-	return "", false
-}
-
-// send sends a Markdown-formatted message synchronously, ignoring errors.
+// send sends a MarkdownV2-formatted message synchronously, ignoring errors.
 func (n *Notifier) send(text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -250,4 +311,3 @@ func escMD(s string) string {
 	)
 	return replacer.Replace(s)
 }
-

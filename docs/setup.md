@@ -341,6 +341,75 @@ All keys go in `~/.milk/config.json`. Sensible defaults apply when omitted.
 | `local_memory_reinjection_turns` | 20 | Re-inject memory/need instructions into the local agent's context after this many local turns. Set to -1 to disable. |
 | `local_memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of local agent output. Set to -1 to disable. |
 
+### Context budget configuration
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `context_budget_chars` | 12000 | Max characters per summary brick (`last_local_summary` / `last_claude_summary`) injected into the escalation system prompt. Oldest turns are dropped first. |
+| `local_context_budget_chars` | 24000 | Max total characters in the local agent's `messages` array per turn. Oldest user+assistant pairs are dropped when over budget. Set to 0 for no limit. |
+
+### Remote oversight (Telegram)
+
+Forward agent activity and permission prompts to a mobile device.
+
+**Quick setup** (interactive wizard):
+
+```
+/setup telegram
+```
+
+Follows the prompts: paste your bot token from @BotFather, send the bot a message, and milk resolves your chat ID automatically and saves the config.
+
+**Manual config** (`~/.milk/config.json`):
+
+```json
+{
+  "remote_oversight": {
+    "backend": "telegram",
+    "telegram": {
+      "token": "<bot-token-from-botfather>",
+      "chat_id": <your-numeric-chat-id>
+    },
+    "perm_timeout_secs": 120,
+    "timeout_action": "deny",
+    "notify_tools": true
+  }
+}
+```
+
+**Enable / disable at runtime** (credentials are preserved):
+
+```
+/setup telegram on
+/setup telegram off
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `""` | Transport backend. `"telegram"` to enable; `""` to disable. |
+| `perm_timeout_secs` | 120 | How long to wait for a remote permission reply before falling back to `timeout_action`. |
+| `timeout_action` | `"deny"` | Action when remote permission reply times out. `"allow"` or `"deny"`. |
+| `notify_tools` | true | Forward escalation agent tool-call notifications. |
+
+**What gets forwarded:**
+- Turn start (agent name, target, prompt snippet)
+- Tool calls (name + key argument)
+- Agent response text (capped at 3000 chars)
+- Permission prompts with y/n reply — first response (TUI or Telegram) wins
+
+**Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Ignored while an agent turn is in progress.
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Mouse wheel / PgUp / PgDn / Ctrl+U / Ctrl+F | Scroll transcript |
+| Ctrl+C | Interrupt current agent turn |
+| Ctrl+T | Toggle thinking/reasoning visibility (works during streaming) |
+| Up / Down (single-line) / Ctrl+Up / Ctrl+Down | Navigate input history |
+| Ctrl+R / Ctrl+S | Reverse / forward incremental history search |
+| Ctrl+N / Shift+Alt+Enter / Alt+Enter | Insert newline in input |
+
 ### Troubleshooting
 
 **400 on first local call**: server started without `--jinja`. Restart with `./scripts/llama-serve.sh`.

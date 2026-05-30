@@ -33,6 +33,7 @@ func newNotifier(cfg config.Config) oversight.Notifier {
 			fmt.Fprintf(os.Stderr, "%s warning: telegram oversight ping failed: %v — oversight disabled\n", milkTag(), err)
 			return oversight.Noop{}
 		}
+		n.NotifyTurnStart(context.Background(), "milk", "startup", "oversight active")
 		return n
 	default:
 		fmt.Fprintf(os.Stderr, "%s warning: unknown remote_oversight backend %q — oversight disabled\n", milkTag(), ro.Backend)

@@ -8,7 +8,7 @@ import "context"
 type PermDecision int
 
 const (
-	PermAllow  PermDecision = iota
+	PermAllow PermDecision = iota
 	PermDeny
 	PermTimeout // remote did not respond within deadline
 )
@@ -35,6 +35,9 @@ type Notifier interface {
 	// NotifyTurnDone fires when a turn completes (or errors).
 	NotifyTurnDone(ctx context.Context, agent string, err error)
 
+	// NotifyResponse forwards the agent's final response text.
+	NotifyResponse(ctx context.Context, agent, text string)
+
 	// AskPermission sends a permission request to the remote interface and
 	// waits for an allow/deny reply up to the configured timeout.
 	// Returns PermTimeout when the deadline expires before a reply arrives.
@@ -44,9 +47,10 @@ type Notifier interface {
 // Noop is a no-op Notifier used when remote oversight is disabled.
 type Noop struct{}
 
-func (Noop) NotifyTurnStart(_ context.Context, _, _, _ string) {}
-func (Noop) NotifyToolUse(_ context.Context, _, _ string)      {}
+func (Noop) NotifyTurnStart(_ context.Context, _, _, _ string)   {}
+func (Noop) NotifyToolUse(_ context.Context, _, _ string)        {}
 func (Noop) NotifyTurnDone(_ context.Context, _ string, _ error) {}
+func (Noop) NotifyResponse(_ context.Context, _, _ string)       {}
 func (Noop) AskPermission(_ context.Context, _ PermRequest) PermDecision {
 	return PermAllow
 }
