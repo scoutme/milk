@@ -277,14 +277,14 @@ func addBrickLines(lines *[]string, label, value string, inner int) {
 	}
 }
 
-// consumerBadge returns a short display badge for non-all consumers: "[L]" for
-// local-only percepts and "[C]" for Claude-only. Returns "" for ConsumerAll.
+// consumerBadge returns a short display badge for non-all consumers: "[P]" for
+// primary-only percepts and "[E]" for escalation-only. Returns "" for ConsumerAll.
 func consumerBadge(p memory.Percept) string {
 	switch p.Consumer {
 	case memory.ConsumerLocal:
-		return dim("[L]")
+		return dim("[P]")
 	case memory.ConsumerEscalation:
-		return dim("[C]")
+		return dim("[E]")
 	}
 	return ""
 }
