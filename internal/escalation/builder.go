@@ -13,6 +13,20 @@ const identityBlock = "[Milk agent context]\n" +
 	"You share session history and memory with the local LLM agent. " +
 	"Expect mid-conversation hand-offs and multi-turn resumes.\n\n"
 
+// ContextMode describes the relationship between this escalation turn and any prior Claude session.
+type ContextMode int
+
+const (
+	// ContextModeFirst is the first escalation — no prior Claude session in this milk session.
+	ContextModeFirst ContextMode = iota
+	// ContextModeResume is a direct continuation of an active Claude session
+	// (state == ESCALATION_WAITING). Claude already has full conversation history via --resume.
+	ContextModeResume
+	// ContextModeReturning is a return to Claude after the local agent did some work.
+	// Claude has its own prior session but may not know what local did in the interim.
+	ContextModeReturning
+)
+
 // BuildContext assembles the system-prompt context block for a CLI escalation.
 //
 // primaryName and escalationName are the configured names of the two agents;
@@ -23,24 +37,24 @@ const identityBlock = "[Milk agent context]\n" +
 // included. Pass true on the first escalation and on re-injection turns; pass
 // false on subsequent resume turns where the instructions are already in context.
 //
-// On the first escalation (not a resume), it injects:
-//   - identity block
-//   - escalation brief (if agent-triggered via escalate)
-//   - current need (what the user is working towards)
-//   - last local summary (what the local model did since the last Claude session)
-//   - memory instruction (percept tag format)
-//   - remembered facts
-//
-// On a resume, only identity + current need + last local summary (+ optionally
-// memory instruction) are included — the escalation agent already has its own
-// conversation history.
-func BuildContext(sess *session.Session, nonce string, percepts []string, resuming bool, injectInstructions bool, primaryName, escalationName string) string {
+// ContextModeFirst: identity + brief + need + local summary + instructions + percepts
+// ContextModeResume: identity + need + local summary + (optionally instructions)
+// ContextModeReturning: identity + brief (if set) + escalation summary + need + local summary + (optionally instructions)
+func BuildContext(sess *session.Session, nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
 	var b strings.Builder
 	b.WriteString(identityBlock)
 
-	if !resuming && sess.EscalationBrief != "" {
+	// Brief: first escalation (agent-triggered), or returning if brief is still set.
+	if (mode == ContextModeFirst || mode == ContextModeReturning) && sess.EscalationBrief != "" {
 		b.WriteString("[Escalation brief from local agent]\n")
 		b.WriteString(sess.EscalationBrief)
+		b.WriteString("\n\n")
+	}
+
+	// On returning, orient Claude with what it did last and what local did since.
+	if mode == ContextModeReturning && sess.LastEscalationSummary != "" {
+		b.WriteString("[Recent escalation agent activity]\n")
+		b.WriteString(sess.LastEscalationSummary)
 		b.WriteString("\n\n")
 	}
 
