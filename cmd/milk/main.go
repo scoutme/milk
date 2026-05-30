@@ -19,6 +19,7 @@ import (
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -1019,10 +1020,13 @@ func formatAskUserQuestion(input map[string]any) string {
 }
 
 // makeTUIPermissionHandler returns a PermissionHandler for TUI mode.
-// It blocks the stream goroutine by sending a permRequestMsg to the TUI and
-// waiting for the user's y/n reply before forwarding allow/deny to the CLI escalation agent.
-// cs may be nil — persistence is best-effort.
-func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claude.PermissionHandler {
+// It races the TUI ask against the remote notifier: whichever responds first
+// (TUI y/n or remote allow/deny) wins. cs may be nil — persistence is best-effort.
+// notifier may be nil — treated as Noop.
+func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store, notifier oversight.Notifier) claude.PermissionHandler {
+	if notifier == nil {
+		notifier = oversight.Noop{}
+	}
 	return func(req claude.ControlRequest, stdinW io.Writer) {
 		b := req.Body
 		prompt := fmt.Sprintf("\n%s permission request — tool: %s", milkTag(), bold(b.ToolName))
@@ -1041,11 +1045,31 @@ func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claud
 		}
 		prompt += fmt.Sprintf("%s Allow? [Y/n] ", milkTag())
 
-		yn, _ := input.readLine(prompt)
-		if yn == "" {
-			yn = "y"
-		}
-		if strings.EqualFold(yn, "y") {
+		// Race TUI input against remote notifier. Use a buffered channel so
+		// whichever goroutine finishes first sends without blocking.
+		type result struct{ allow bool }
+		ch := make(chan result, 2)
+
+		go func() {
+			yn, _ := input.readLine(prompt)
+			if yn == "" {
+				yn = "y"
+			}
+			ch <- result{allow: strings.EqualFold(yn, "y")}
+		}()
+
+		go func() {
+			dec := notifier.AskPermission(context.Background(), oversight.PermRequest{
+				ToolName:    b.ToolName,
+				Input:       cliToolArgSummary(b.Input),
+				Description: b.Description,
+				BlockedPath: b.BlockedPath,
+			})
+			ch <- result{allow: dec == oversight.PermAllow}
+		}()
+
+		res := <-ch
+		if res.allow {
 			claude.Allow(req.RequestID, stdinW)
 			if cs != nil {
 				if b.ToolName != "" {

@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +112,9 @@ type credRefreshReadyMsg struct {
 
 // permRequestMsg is sent by the agent goroutine when it needs a y/n answer.
 // The agent blocks on respCh until the TUI sends a permResponseMsg back.
+// remoteInputMsg carries a prompt injected from the remote oversight interface.
+type remoteInputMsg struct{ text string }
+
 type permRequestMsg struct {
 	prompt string
 	respCh chan string
@@ -306,6 +311,9 @@ type model struct {
 
 	// pending /agent switch wizard
 	pendingSwitch *switchAgentState
+
+	// pending /setup telegram wizard
+	pendingTelegramSetup *telegramSetupState
 
 	// prompt width (visual columns) set by the most recent refreshPrompt call;
 	// used by taRows() to compute the exact content wrap width.
@@ -1400,10 +1408,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingSwitch != nil {
 			return m.handleSwitchAgentKey(msg)
 		}
+		if m.pendingTelegramSetup != nil {
+			return m.handleTelegramSetupKey(msg)
+		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
 		}
 		return m.handleKey(msg)
+
+	case remoteInputMsg:
+		if !m.busy && msg.text != "" {
+			m.appendTranscript(dim("[telegram]") + " " + colorizeTokens(msg.text) + "\n")
+			return m.dispatchAgent(msg.text)
+		}
+		return m, nil
+
+	case telegramGetMeMsg:
+		if msg.err != nil {
+			m.pendingTelegramSetup = nil
+			m.appendTranscript(fmt.Sprintf("%s token validation failed: %v\n", milkTag(), msg.err))
+			return m, nil
+		}
+		if m.pendingTelegramSetup != nil {
+			m.pendingTelegramSetup.botName = msg.botName
+			m.pendingTelegramSetup.step = telegramStepWaitMsg
+			m.appendTranscript(fmt.Sprintf("%s bot validated: @%s\n\n"+
+				"Now send any message to @%s on Telegram, then press Enter here.\n\n"+
+				milkTag()+" (press Enter when done) ",
+				milkTag(), msg.botName, msg.botName))
+		}
+		return m, nil
+
+	case telegramSetupResolvedMsg:
+		m.pendingTelegramSetup = nil
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s %v\n", milkTag(), msg.err))
+			return m, nil
+		}
+		m = m.commitTelegramSetup(msg.token, msg.chatID)
+		return m, nil
 
 	case permRequestMsg:
 		return m.handlePermRequest(msg)
@@ -1799,6 +1842,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdThink {
 		return m.handleThinkCmd(strings.TrimSpace(rest)), nil
 	}
+	if cmd == cmdSetup {
+		return m.handleSetupCmd(strings.TrimSpace(rest))
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -1877,6 +1923,232 @@ func (m model) toggleThinking() model {
 	} else {
 		m.appendTranscript(milkTag() + " reasoning visibility: off\n")
 	}
+	return m
+}
+
+// handleSetupCmd dispatches /setup <subcommand>.
+func (m model) handleSetupCmd(arg string) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "telegram":
+		m.appendTranscript(milkTag() + " Telegram setup\n\n" +
+			"1. Message @BotFather on Telegram\n" +
+			"2. Send /newbot and follow the prompts\n" +
+			"3. BotFather gives you a token like 123456:ABC-DEF...\n\n" +
+			milkTag() + " Bot token: ")
+		m.pendingTelegramSetup = &telegramSetupState{step: telegramStepToken}
+		m.ta.Reset()
+		return m, nil
+	case "telegram on":
+		m = m.setTelegramEnabled(true)
+		return m, nil
+	case "telegram off":
+		m = m.setTelegramEnabled(false)
+		return m, nil
+	default:
+		m.appendTranscript(milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram off\n")
+		return m, nil
+	}
+}
+
+// handleTelegramSetupKey handles keypresses during the /setup telegram wizard.
+func (m model) handleTelegramSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingTelegramSetup = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.syncLayout()
+
+		st := m.pendingTelegramSetup
+		switch st.step {
+		case telegramStepToken:
+			// Mask token display — show only last 6 chars.
+			display := answer
+			if len(answer) > 6 {
+				display = strings.Repeat("*", len(answer)-6) + answer[len(answer)-6:]
+			}
+			m.appendTranscript(display + "\n")
+			if answer == "" {
+				m.appendTranscript(milkTag() + " token is required\n" + milkTag() + " Bot token: ")
+				return m, nil
+			}
+			st.token = answer
+			m.appendTranscript(milkTag() + " validating token…\n")
+			token := answer
+			return m, func() tea.Msg {
+				botName, err := resolveTelegramBotName(token)
+				return telegramGetMeMsg{botName: botName, err: err}
+			}
+
+		case telegramStepWaitMsg:
+			m.appendTranscript("\n" + milkTag() + " looking for your chat ID…\n")
+			token := st.token
+			return m, func() tea.Msg {
+				chatID, err := resolveTelegramChatID(token)
+				return telegramSetupResolvedMsg{token: token, chatID: chatID, err: err}
+			}
+		}
+	}
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
+
+// telegramGetMeMsg carries the result of token validation via getMe.
+type telegramGetMeMsg struct {
+	botName string
+	err     error
+}
+
+// telegramSetupResolvedMsg carries the result of a chat ID resolution attempt.
+type telegramSetupResolvedMsg struct {
+	token  string
+	chatID int64
+	err    error
+}
+
+// resolveTelegramBotName calls getMe to validate the token and return the bot username.
+func resolveTelegramBotName(token string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.telegram.org/bot"+token+"/getMe", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Username string `json:"username"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if !result.OK {
+		return "", fmt.Errorf("invalid token — check the value from @BotFather")
+	}
+	return result.Result.Username, nil
+}
+
+// resolveTelegramChatID calls getUpdates to find the most recent chat ID that
+// messaged the bot. Returns an error when no messages are found.
+func resolveTelegramChatID(token string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.telegram.org/bot"+token+"/getUpdates?limit=10", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		OK     bool `json:"ok"`
+		Result []struct {
+			Message *struct {
+				Chat struct {
+					ID int64 `json:"id"`
+				} `json:"chat"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	if !result.OK {
+		return 0, fmt.Errorf("telegram API error — check your token")
+	}
+	for i := len(result.Result) - 1; i >= 0; i-- {
+		if m := result.Result[i].Message; m != nil && m.Chat.ID != 0 {
+			return m.Chat.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("no messages found — send any message to the bot and press Enter again")
+}
+
+// commitTelegramSetup writes the Telegram config and reinitialises the notifier.
+// setTelegramEnabled enables or disables Telegram oversight without touching
+// the stored credentials. Saves config and reinitialises the notifier.
+func (m model) setTelegramEnabled(on bool) model {
+	ro := m.st.cfg.RemoteOversight
+	if ro == nil {
+		ro = &config.RemoteOversightConfig{}
+		m.st.cfg.RemoteOversight = ro
+	}
+	if on {
+		if ro.Telegram == nil || ro.Telegram.Token == "" || ro.Telegram.ChatID == 0 {
+			m.appendTranscript(milkTag() + " no Telegram credentials configured — run /setup telegram first\n")
+			return m
+		}
+		ro.Backend = "telegram"
+	} else {
+		ro.Backend = ""
+	}
+	if err := config.Save(m.st.cfg); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+		return m
+	}
+	m.st.notifier = newNotifier(m.st.cfg)
+	if tn, ok := m.st.notifier.(interface {
+		SetOnInput(func(string))
+		StartPolling(context.Context)
+	}); ok && m.st.program != nil {
+		p := m.st.program
+		tn.SetOnInput(func(text string) { p.Send(remoteInputMsg{text: text}) })
+		tn.StartPolling(m.ctx)
+	}
+	if on {
+		m.appendTranscript(milkTag() + " Telegram oversight enabled\n")
+	} else {
+		m.appendTranscript(milkTag() + " Telegram oversight disabled\n")
+	}
+	return m
+}
+
+func (m model) commitTelegramSetup(token string, chatID int64) model {
+	ro := m.st.cfg.RemoteOversight
+	if ro == nil {
+		ro = &config.RemoteOversightConfig{}
+	}
+	ro.Backend = "telegram"
+	if ro.Telegram == nil {
+		ro.Telegram = &config.TelegramConfig{}
+	}
+	ro.Telegram.Token = token
+	ro.Telegram.ChatID = chatID
+	m.st.cfg.RemoteOversight = ro
+
+	if err := config.Save(m.st.cfg); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+		return m
+	}
+
+	// Re-init notifier with the new credentials.
+	m.st.notifier = newNotifier(m.st.cfg)
+	if tn, ok := m.st.notifier.(interface {
+		SetOnInput(func(string))
+		StartPolling(context.Context)
+	}); ok && m.st.program != nil {
+		p := m.st.program
+		tn.SetOnInput(func(text string) { p.Send(remoteInputMsg{text: text}) })
+		tn.StartPolling(m.ctx)
+	}
+
+	m.appendTranscript(fmt.Sprintf("%s Telegram configured (chat_id: %d) — sending test message…\n", milkTag(), chatID))
+	m.st.notifier.NotifyTurnStart(context.Background(), "milk", "setup", "Telegram oversight configured successfully ✓")
 	return m
 }
 
@@ -2666,11 +2938,14 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 				} else {
 					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
 				}
+				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+				}
 			}
 			send(chunkMsg{text: hint})
 		}).
 		WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
-		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs))
+		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
 
 	// Wire local-agent permissions: persistent store + TUI ask callback.
 	// Both the primary and escalation-local agents share the same store and ask
@@ -3573,21 +3848,43 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		inputR = newStdinInputReader()
 	}
 
+	targetName := "local"
+	agentName := st.cfg.ActiveAgent().Name
+	if target == router.TargetEscalation {
+		targetName = "escalation"
+		agentName = st.cfg.EscalationAgentConfig().Name
+	}
+	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
+
+	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
+		turnErr = runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
 			// Escalation is routed to a second local provider, not the Claude CLI.
-			return runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+			turnErr = runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+		} else {
+			// Refresh credentials before each turn so expiring tokens are renewed.
+			// The credential-process handles its own cache and returns immediately
+			// when the token is still fresh, so this is cheap in the common case.
+			cliAgent = applyAWSCreds(st.cfg, cliAgent)
+			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
 		}
-		// Refresh credentials before each turn so expiring tokens are renewed.
-		// The credential-process handles its own cache and returns immediately
-		// when the token is still fresh, so this is cheap in the common case.
-		cliAgent = applyAWSCreds(st.cfg, cliAgent)
-		return runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
 	}
-	return nil
+	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
+	if turnErr == nil {
+		// Find the last assistant turn added by this agent and forward its text.
+		hist := st.sess.History
+		for i := len(hist) - 1; i >= 0; i-- {
+			t := hist[i]
+			if t.Role == session.RoleAssistant && t.Content != "" {
+				st.notifier.NotifyResponse(turnCtx, agentName, t.Content)
+				break
+			}
+		}
+	}
+	return turnErr
 }
 
 // --- Input history persistence ---
@@ -3743,7 +4040,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localPerms = lp
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions}
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions, notifier: newNotifier(cfg)}
 	agents := dispatchAgents{
 		local:           localAgent,
 		cliAgent:        cliAgent,
@@ -3795,6 +4092,17 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	localAgent.WithOnSigV4Refresh(func(err error) {
 		p.Send(credRefreshReadyMsg{label: "AWS", err: err})
 	})
+
+	// Wire remote input: messages from the oversight backend are injected as turns.
+	if tn, ok := st.notifier.(interface {
+		SetOnInput(func(string))
+		StartPolling(context.Context)
+	}); ok {
+		tn.SetOnInput(func(text string) {
+			p.Send(remoteInputMsg{text: text})
+		})
+		tn.StartPolling(ctx)
+	}
 
 	// Mode 1002+1006: button-motion + SGR extension.
 	// Reports drag coordinates while a button is held, enabling live selection

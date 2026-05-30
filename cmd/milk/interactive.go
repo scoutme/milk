@@ -14,6 +14,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -32,11 +33,28 @@ const cmdSkipPerms = "/skip-permissions"
 const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
+const cmdSetup = "/setup"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
+
+// telegramSetupState tracks state for the /setup telegram wizard.
+type telegramSetupState struct {
+	token   string
+	chatID  int64
+	botName string // @username of the bot, set after token validation
+	step    telegramSetupStep
+}
+
+type telegramSetupStep int
+
+const (
+	telegramStepToken   telegramSetupStep = iota // waiting for token input
+	telegramStepWaitMsg                          // token validated; waiting for user to message the bot
+	telegramStepDone
+)
 
 func promptLabel(_ *interactiveState) string {
 	return "❯ "
@@ -97,6 +115,11 @@ const interactiveHelp = `
   /otel off              disable OTel for this session
   /otel trim             archive current OTel files and start fresh
 
+── Setup ─────────────────────────────────────────────────────────────────
+  /setup telegram        configure Telegram remote oversight interactively
+  /setup telegram on     enable Telegram (credentials must already be configured)
+  /setup telegram off    disable Telegram (credentials are preserved)
+
 ── General ──────────────────────────────────────────────────────────────
   /help                  show this help
   /exit  /quit           quit
@@ -104,6 +127,10 @@ const interactiveHelp = `
 ── Keyboard ─────────────────────────────────────────────────────────────
   Scrolling
     Mouse wheel / PgUp/PgDn / Ctrl+U / Ctrl+F   scroll transcript
+
+  Agent control
+    Ctrl+C   interrupt current agent turn
+    Ctrl+T   toggle thinking/reasoning visibility (works during streaming)
 
   Input history
     Up / Down (single-line input)   navigate history
@@ -145,6 +172,7 @@ type interactiveState struct {
 	toolFutures     map[string]chan string
 	skipPermissions bool             // session-level override for DangerouslySkipPermissions
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
+	notifier        oversight.Notifier
 }
 
 // escalationAgentName returns the display name of the configured escalation agent.
@@ -233,6 +261,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// execThink is handled in repl.go where it can toggle model.showThinking.
 		// This case is a no-op here; the TUI intercepts cmdThink before it reaches
 		// handleSlashCommand. Guard to prevent "unknown command" output.
+	case cmdSetup:
+		// Handled in repl.go (needs model state). No-op here.
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
