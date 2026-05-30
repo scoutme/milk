@@ -431,10 +431,8 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 
 	sess.ForceState(session.StateLocal)
 
-	primaryName := cfg.ActiveAgent().Name
-	escalationName := cfg.EscalationAgentConfig().Name
 	nonce := claude.GenerateNonce()
-	agent = agent.WithTagCallbacks(nonce, primaryName, escalationName,
+	agent = agent.WithTagCallbacks(nonce, "local", "claude",
 		func(content string) { sess.CurrentNeed = content },
 		func(content, consumerHint string) {
 			if mem == nil {
@@ -442,7 +440,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			}
 			var consumer memory.Consumer
 			switch consumerHint {
-			case escalationName:
+			case "claude":
 				consumer = memory.ConsumerEscalation
 			default:
 				consumer = memory.ConsumerLocal
@@ -632,9 +630,6 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
 	sess.ForceState(session.StateEscalation)
 
-	primaryName := cfg.ActiveAgent().Name
-	escalationName := cfg.EscalationAgentConfig().Name
-
 	// Generate a fresh nonce for this escalation turn. The same nonce is embedded in
 	// the system-prompt instructions (BuildContext, MemoryInstruction, NeedInstruction)
 	// and in the stream parser, so only tags containing this nonce are captured.
@@ -650,29 +645,33 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		agent = agent.WithOnPercept(func(content, consumerHint string) {
 			var consumer memory.Consumer
 			switch consumerHint {
-			case primaryName:
+			case "local":
 				consumer = memory.ConsumerLocal
-			case escalationName:
+			case "claude":
 				consumer = memory.ConsumerEscalation
 			}
 			_, err := mem.Record(ctx, content, memory.ProducerEscalation, consumer, memory.Roles{}, false)
-			// DuplicateError is expected when the escalation agent emits a percept similar
-			// to one already stored — silently drop it; any other error is also non-fatal.
+			// DuplicateError is expected when Claude emits a percept similar to one
+			// already stored — silently drop it; any other error is also non-fatal.
 			_ = err
-		}, nonce, primaryName, escalationName)
+		}, nonce, "local", "claude")
 	}
 	agent = agent.WithOnNeed(func(content string) {
 		sess.CurrentNeed = content
 	}, nonce)
 
-	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, primaryName, escalationName, perceptsForEscalation(mem))
+	injectInstructions := shouldInjectMemoryInstructions(cfg, sess, resuming)
+	if injectInstructions {
+		sess.MemoryInstructionInjectedAt = sess.EscalationTurnCount()
+	}
+	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForEscalation(mem), injectInstructions)
 	aw.Done()
 	if err != nil {
 		return err
 	}
 
 	if sess.EscalationSessionID != "" {
-		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc, nonce, primaryName, escalationName)
+		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc, nonce)
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
@@ -709,8 +708,9 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 // nonce is the session-specific percept nonce embedded in the system-prompt instruction.
 // primaryName and escalationName are the configured agent names embedded in the memory instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
-func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce, primaryName, escalationName string, percepts []string) (claude.ParseResult, error) {
-	sysContext := escalation.BuildContext(sess, nonce, percepts, resuming, primaryName, escalationName)
+// injectInstructions controls whether the need/memory instruction blocks are included.
+func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, resuming bool, nonce string, percepts []string, injectInstructions bool) (claude.ParseResult, error) {
+	sysContext := escalation.BuildContext(sess, nonce, percepts, resuming, injectInstructions)
 	if resuming {
 		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
 	}
@@ -721,10 +721,35 @@ func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *cl
 	return res, err
 }
 
+// shouldInjectMemoryInstructions returns true when the memory/need instruction
+// block must be included in this escalation turn's system-prompt context.
+// Always injects on first escalation (not resuming). On subsequent resume turns
+// skips injection unless the turn-count or byte-volume threshold has been crossed
+// since the last injection.
+func shouldInjectMemoryInstructions(cfg config.Config, sess *session.Session, resuming bool) bool {
+	if !resuming {
+		return true
+	}
+	turnThreshold := cfg.MemoryReinjectionTurnThreshold()
+	byteThreshold := cfg.MemoryReinjectionByteThreshold()
+	if turnThreshold == 0 && byteThreshold == 0 {
+		return false
+	}
+	turnsSince := sess.EscalationTurnCount() - sess.MemoryInstructionInjectedAt
+	if turnThreshold > 0 && turnsSince >= turnThreshold {
+		return true
+	}
+	bytesSince := sess.EscalationOutputBytesSince(sess.MemoryInstructionInjectedAt)
+	if byteThreshold > 0 && bytesSince >= byteThreshold {
+		return true
+	}
+	return false
+}
+
 // handlePermissionDenials checks the result for permission issues and retries if the user approves.
-func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce, primaryName, escalationName string) claude.ParseResult {
+func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
 	if len(res.PermissionDenials) > 0 {
-		return handleStructuredDenials(ctx, sess, agent, res, input, out, pc, nonce, primaryName, escalationName)
+		return handleStructuredDenials(ctx, sess, agent, res, input, out, pc, nonce)
 	}
 	return res
 }
@@ -737,14 +762,14 @@ type permContext struct {
 
 // handleStructuredDenials handles permission_denials from the result event —
 // language-neutral, fires regardless of the escalation agent's response language.
-func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce, primaryName, escalationName string) claude.ParseResult {
+func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string) claude.ParseResult {
 	fmt.Fprintf(out, "\n%s escalation agent was blocked from using:\n", milkTag())
 	retryAgent, changed := applyDenials(agent, dedupDenials(res.PermissionDenials), input, out, pc)
 	if !changed {
 		return res
 	}
 	fmt.Fprint(out, cliLabelStyled(retryAgent)+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce, primaryName, escalationName), "Please continue with the approved permissions.", out)
+	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce), "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
 	}
