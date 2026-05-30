@@ -1012,6 +1012,16 @@ func (m *model) welcomeScreen() string {
 // appendTranscript adds text to both transcript variants and refreshes the viewport.
 // Sticky-bottom: only auto-scrolls when already at the bottom.
 func (m *model) appendTranscript(text string) {
+	// If regular content follows thinking, ensure both variants end with a newline
+	// so the final content starts on its own line rather than the last thinking row.
+	if m.thinkingActiveInTurn {
+		if s := m.transcript.String(); len(s) > 0 && s[len(s)-1] != '\n' {
+			m.transcript.WriteByte('\n')
+		}
+		if s := m.transcriptNoThink.String(); len(s) > 0 && s[len(s)-1] != '\n' {
+			m.transcriptNoThink.WriteByte('\n')
+		}
+	}
 	m.transcript.WriteString(text)
 	m.transcriptNoThink.WriteString(text)
 	// If regular content arrives after thinking, mark that the think block ended
@@ -2642,12 +2652,20 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 			send(toolUseMsg{name: name})
 		}).
 		WithOnToolUseReady(func(name string, input map[string]any) {
-			summary := cliToolArgSummary(input)
 			var hint string
-			if summary != "" {
-				hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+			if name == "AskUserQuestion" {
+				if rendered := formatAskUserQuestion(input); rendered != "" {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n%s\n", name, rendered)
+				} else {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				}
 			} else {
-				hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				summary := cliToolArgSummary(input)
+				if summary != "" {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+				} else {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				}
 			}
 			send(chunkMsg{text: hint})
 		}).
