@@ -213,6 +213,41 @@ func TestDispatchListMemory_Empty(t *testing.T) {
 	}
 }
 
+func TestDispatchListMemoryFiltered_DropsUnrelated(t *testing.T) {
+	s := newToolsStore(t)
+	s.Record(context.Background(), "routing session state", ProducerUser, ConsumerAll, Roles{}, false)     //nolint:errcheck
+	s.Record(context.Background(), "database migration plan", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
+
+	result := DispatchListMemoryFiltered(context.Background(), s, `{}`, "routing")
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	msg := out["output"].(string)
+	if !strings.Contains(msg, "routing") {
+		t.Errorf("expected matching percept in output, got %q", msg)
+	}
+	if strings.Contains(msg, "database") {
+		t.Errorf("expected unrelated percept filtered out, got %q", msg)
+	}
+}
+
+func TestDispatchListMemoryFiltered_EmptyPromptPassesAll(t *testing.T) {
+	s := newToolsStore(t)
+	s.Record(context.Background(), "fact alpha", ProducerUser, ConsumerAll, Roles{}, false)  //nolint:errcheck
+	s.Record(context.Background(), "fact beta", ProducerSystem, ConsumerAll, Roles{}, false) //nolint:errcheck
+
+	result := DispatchListMemoryFiltered(context.Background(), s, `{}`, "")
+	var out map[string]any
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	msg := out["output"].(string)
+	if !strings.Contains(msg, "alpha") || !strings.Contains(msg, "beta") {
+		t.Errorf("expected all percepts when prompt is empty, got %q", msg)
+	}
+}
+
 func TestDispatchForgetMemory_DeletesByPrefix(t *testing.T) {
 	ctx := context.Background()
 	s := newToolsStore(t)

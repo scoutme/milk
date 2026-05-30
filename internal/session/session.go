@@ -58,8 +58,9 @@ type Session struct {
 	// Summary bricks — maintained eagerly after each turn.
 	// CurrentNeed tracks what the user is trying to accomplish; updated by
 	// <milk:need:NONCE> tags emitted by either agent when context switches.
-	// CurrentNeedSetAt is len(History) at the time CurrentNeed was last written;
-	// used to detect stale needs that may already have been fulfilled.
+	// CurrentNeedSetAt is len(History)+1 at the time CurrentNeed was last written
+	// (1-based: 0 is the unset sentinel, ≥1 encodes a real position).
+	// Used to detect stale needs that may already have been fulfilled.
 	CurrentNeed      string `json:"current_need,omitempty"`
 	CurrentNeedSetAt int    `json:"current_need_set_at,omitempty"`
 	// EscalationBrief is set when the local model calls escalate(reason).
@@ -76,6 +77,12 @@ type Session struct {
 	// memory/need instruction block was last injected. Zero means never injected.
 	// Used to skip redundant re-injection on resume turns.
 	MemoryInstructionInjectedAt int `json:"memory_instruction_injected_at,omitempty"`
+
+	// LocalMemoryInstructionInjectedAt is LocalTurnCount()+1 at the time the
+	// memory/need instruction was last appended to the local agent's messages.
+	// 1-based: 0 is the unset sentinel (never injected); ≥1 encodes a real position.
+	// Mirrors the CurrentNeedSetAt encoding to avoid the turn-0 collision.
+	LocalMemoryInstructionInjectedAt int `json:"local_memory_instruction_injected_at,omitempty"`
 }
 
 // emptyEscalationSession returns true when a Claude session produced no real work:
@@ -233,6 +240,34 @@ func (s *Session) EscalationTurnCount() int {
 		}
 	}
 	return count
+}
+
+// LocalTurnCount returns the number of assistant turns produced by the local
+// agent in the session history.
+func (s *Session) LocalTurnCount() int {
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			count++
+		}
+	}
+	return count
+}
+
+// LocalOutputBytesSince returns the total byte length of local agent assistant
+// turns that occurred after the given turn index (exclusive).
+func (s *Session) LocalOutputBytesSince(afterTurnIndex int) int {
+	total := 0
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			if count >= afterTurnIndex {
+				total += len(t.Content)
+			}
+			count++
+		}
+	}
+	return total
 }
 
 // EscalationOutputBytesSince returns the total byte length of escalation agent

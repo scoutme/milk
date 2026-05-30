@@ -138,6 +138,39 @@ func containsStr(s, sub string) bool {
 	return false
 }
 
+func TestLocalTurnCount(t *testing.T) {
+	s := &Session{History: []Turn{
+		mkTurn(RoleUser, AgentLocal, "hi"),
+		mkTurn(RoleAssistant, AgentLocal, "hello"),
+		mkTurn(RoleUser, AgentEscalation, "escalate"),
+		mkTurn(RoleAssistant, AgentEscalation, "escalation reply"),
+		mkTurn(RoleAssistant, AgentLocal, "back"),
+	}}
+	if got := s.LocalTurnCount(); got != 2 {
+		t.Errorf("expected 2 local turns, got %d", got)
+	}
+}
+
+func TestLocalOutputBytesSince(t *testing.T) {
+	s := &Session{History: []Turn{
+		mkTurn(RoleAssistant, AgentLocal, "aaa"),    // local turn index 0
+		mkTurn(RoleAssistant, AgentLocal, "bbbbbb"), // local turn index 1
+		mkTurn(RoleAssistant, AgentLocal, "cc"),     // local turn index 2
+	}}
+	// afterTurnIndex=0 means count turns with count>=0, i.e. all: 3+6+2=11
+	if got := s.LocalOutputBytesSince(0); got != 11 {
+		t.Errorf("LocalOutputBytesSince(0): want 11, got %d", got)
+	}
+	// afterTurnIndex=1: skip index 0 (count 0), include index 1+ → 6+2=8
+	if got := s.LocalOutputBytesSince(1); got != 8 {
+		t.Errorf("LocalOutputBytesSince(1): want 8, got %d", got)
+	}
+	// afterTurnIndex=3: nothing → 0
+	if got := s.LocalOutputBytesSince(3); got != 0 {
+		t.Errorf("LocalOutputBytesSince(3): want 0, got %d", got)
+	}
+}
+
 func TestAddTurn_SetsTimestampAndUpdatesLastUsed(t *testing.T) {
 	s := &Session{}
 	s.AddTurn(Turn{Role: RoleUser, Content: "hello"})

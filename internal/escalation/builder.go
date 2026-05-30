@@ -45,7 +45,11 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, resumi
 	}
 
 	if sess.CurrentNeed != "" {
-		turnsAgo := len(sess.History) - sess.CurrentNeedSetAt
+		// CurrentNeedSetAt is 1-based: 0 = never set (treat as fresh), ≥1 = len(History)+1 at write time.
+		var turnsAgo int
+		if sess.CurrentNeedSetAt > 0 {
+			turnsAgo = len(sess.History) - (sess.CurrentNeedSetAt - 1)
+		}
 		if turnsAgo >= 4 {
 			b.WriteString("[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n")
 		} else {

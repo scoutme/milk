@@ -435,8 +435,13 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	sess.ForceState(session.StateLocal)
 
 	nonce := claude.GenerateNonce()
-	agent = agent.WithTagCallbacks(nonce, "local", "claude",
-		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) },
+	agent = agent.WithMemConfig(local.MemConfig{
+		ResultMaxBytes:       cfg.LocalMemoryResultMaxByteCount(),
+		ReinjectionTurns:     cfg.LocalMemoryReinjectionTurnThreshold(),
+		ReinjectionBytes:     cfg.LocalMemoryReinjectionByteThreshold(),
+		RelevanceGateEnabled: cfg.PerceptRelevanceGateEnabled(),
+	}).WithTagCallbacks(nonce, "local", "claude",
+		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {
 			if mem == nil {
 				return
@@ -471,13 +476,11 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			// For Claude CLI: pre-add the user turn so BuildContext includes it in the
 			// system-prompt context block sent to the CLI escalation agent.
 			sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
-			// Set brief before rebuild so the brick includes it.
-			sess.EscalationBrief = esc.Reason
 			// isRepeatedPrompt exits before any streaming, so onNeed is never called.
 			// Set CurrentNeed from the prompt itself so the escalation agent has context.
 			if sess.CurrentNeed == "" {
 				sess.CurrentNeed = prompt
-				sess.CurrentNeedSetAt = len(sess.History)
+				sess.CurrentNeedSetAt = len(sess.History) + 1
 			}
 			sess.RebuildSummaryBricks(cfg.ContextBudget())
 			sess.ForceState(session.StateRouting)
@@ -488,7 +491,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			if cwd, err := os.Getwd(); err == nil {
 				localCs, _ = claudesettings.Open(cwd)
 			}
-			return runCLIEscalationWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, out)
+			return runCLIEscalationWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, esc.Reason, out)
 		}
 		return err
 	}
@@ -541,7 +544,7 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 }
 
 func runCLIEscalation(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, cs *claudesettings.Store, mem *memory.Store) error {
-	return runCLIEscalationWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem)
+	return runCLIEscalationWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem, "")
 }
 
 // runEscalationLocal handles escalated turns routed to a second local provider
@@ -623,7 +626,7 @@ func escalationLocalHistory(sess *session.Session, prompt string) []local.Messag
 	return msgs
 }
 
-func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, outs ...io.Writer) error {
+func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, brief string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
@@ -631,6 +634,9 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	fmt.Fprint(out, cliLabelStyled(agent)+" ")
 	aw := newActivityWriter(out)
 	resuming := sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != ""
+	if !resuming {
+		sess.EscalationBrief = brief
+	}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
 	sess.ForceState(session.StateEscalation)
 
@@ -664,7 +670,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	}
 	agent = agent.WithOnNeed(func(content string) {
 		sess.CurrentNeed = content
-		sess.CurrentNeedSetAt = len(sess.History)
+		sess.CurrentNeedSetAt = len(sess.History) + 1
 	}, nonce)
 
 	injectInstructions := shouldInjectMemoryInstructions(cfg, sess, resuming)
@@ -686,6 +692,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	if res.EndsWithQ {
 		sess.ForceState(session.StateEscalationWaiting)
 	} else {
+		sess.EscalationBrief = ""
 		sess.ForceState(session.StateRouting)
 	}
 	return session.Save(sess)

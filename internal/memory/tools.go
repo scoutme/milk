@@ -253,6 +253,33 @@ func DispatchListMemory(_ context.Context, store *Store, argsJSON string) string
 	return okResult(FormatList(percepts))
 }
 
+// DispatchListMemoryFiltered is like DispatchListMemory but applies keyword
+// relevance gating against prompt before formatting — percepts with zero token
+// overlap with prompt are dropped. Used by the local agent when
+// RelevanceGateEnabled is set.
+func DispatchListMemoryFiltered(_ context.Context, store *Store, argsJSON, prompt string) string {
+	var args struct {
+		Scope    string  `json:"scope"`
+		Producer string  `json:"producer"`
+		MinW     float64 `json:"min_w"`
+		Pattern  string  `json:"pattern"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return errResult(invalidArgs + err.Error())
+	}
+	percepts := store.List(ListOpts{
+		Scope:    args.Scope,
+		Producer: args.Producer,
+		MinW:     args.MinW,
+		Pattern:  args.Pattern,
+	})
+	percepts = FilterByRelevance(percepts, prompt)
+	if len(percepts) == 0 {
+		return okResult("(no relevant memories found)")
+	}
+	return okResult(FormatList(percepts))
+}
+
 // FormatList renders a human-readable table of Percepts.
 func FormatList(percepts []Percept) string {
 	var b strings.Builder
