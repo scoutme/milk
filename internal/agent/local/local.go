@@ -442,7 +442,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
 	}
 	if a.tagNonce != "" {
-		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce)})
+		primaryName, escalationName := "", ""
+		if len(a.agentNames) >= 2 {
+			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
+		}
+		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName)})
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess)

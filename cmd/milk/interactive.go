@@ -438,13 +438,19 @@ func execColorize(sub string, st *interactiveState) string {
 // execAgent shows the active local-agent provider configuration (no credentials).
 // arg is the remainder after "/agent" — empty for status display.
 func execAgent(st *interactiveState) string {
-	ac := st.cfg.ActiveAgent()
+	return agentLine("primary", st.cfg.ActiveAgent()) + "\n" +
+		agentLine("escalation", st.cfg.EscalationAgentConfig())
+}
 
+// agentLine formats a single agent config summary line for /agent output.
+func agentLine(role string, ac config.AgentConfig) string {
 	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
 	var authDesc string
 	switch provider {
 	case "", "local":
 		authDesc = "none (local / no-auth)"
+	case "claude-cli":
+		authDesc = "claude CLI subprocess"
 	case "bedrock":
 		region := ac.AWSRegion
 		if region == "" {
@@ -471,11 +477,14 @@ func execAgent(st *interactiveState) string {
 
 	name := ac.Name
 	if name == "" {
-		name = "local"
+		name = role
 	}
 
-	return fmt.Sprintf("%s primary agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
-		milkTag(), bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
+	if ac.IsCLI() {
+		return fmt.Sprintf("%s %s agent: %s\n  auth:   %s", milkTag(), role, bold(name), authDesc)
+	}
+	return fmt.Sprintf("%s %s agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
+		milkTag(), role, bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
 }
 
 // dropAndNewSession drops the current session, creates a fresh one, and writes output to w.

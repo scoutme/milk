@@ -9,7 +9,7 @@ import (
 
 func TestBuildContext_EmptySession(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "testnonce", nil, false, true)
+	got := BuildContext(sess, "testnonce", nil, false, true, "", "")
 	if !strings.Contains(got, "milk:percept:testnonce") {
 		t.Errorf("expected percept nonce in output, got %q", got)
 	}
@@ -20,7 +20,7 @@ func TestBuildContext_EmptySession(t *testing.T) {
 
 func TestBuildContext_CurrentNeed(t *testing.T) {
 	sess := &session.Session{CurrentNeed: "implement JWT auth"}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if !strings.Contains(got, "implement JWT auth") {
 		t.Errorf("expected CurrentNeed in output, got %q", got)
 	}
@@ -31,7 +31,7 @@ func TestBuildContext_CurrentNeed(t *testing.T) {
 
 func TestBuildContext_NoNeedWhenEmpty(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if strings.Contains(got, "[Current user goal]") {
 		t.Error("empty CurrentNeed should not produce goal block")
 	}
@@ -39,7 +39,7 @@ func TestBuildContext_NoNeedWhenEmpty(t *testing.T) {
 
 func TestBuildContext_EscalationBrief_FirstEscalation(t *testing.T) {
 	sess := &session.Session{EscalationBrief: "stuck on nil pointer in auth.go"}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if !strings.Contains(got, "stuck on nil pointer in auth.go") {
 		t.Errorf("expected EscalationBrief in first-escalation output, got %q", got)
 	}
@@ -47,7 +47,7 @@ func TestBuildContext_EscalationBrief_FirstEscalation(t *testing.T) {
 
 func TestBuildContext_EscalationBrief_SkippedOnResume(t *testing.T) {
 	sess := &session.Session{EscalationBrief: "stuck on nil pointer in auth.go"}
-	got := BuildContext(sess, "n1", nil, true, false)
+	got := BuildContext(sess, "n1", nil, true, false, "", "")
 	if strings.Contains(got, "stuck on nil pointer in auth.go") {
 		t.Error("EscalationBrief should not appear on resume")
 	}
@@ -55,7 +55,7 @@ func TestBuildContext_EscalationBrief_SkippedOnResume(t *testing.T) {
 
 func TestBuildContext_LastLocalSummary(t *testing.T) {
 	sess := &session.Session{LastLocalSummary: "User: fix typo\nAssistant (local): done"}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if !strings.Contains(got, "fix typo") {
 		t.Errorf("expected LastLocalSummary in output, got %q", got)
 	}
@@ -66,7 +66,7 @@ func TestBuildContext_LastLocalSummary(t *testing.T) {
 
 func TestBuildContext_NoLocalSummaryBlock_WhenEmpty(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if strings.Contains(got, "[Recent local agent activity]") {
 		t.Error("empty LastLocalSummary should not produce activity block")
 	}
@@ -74,7 +74,7 @@ func TestBuildContext_NoLocalSummaryBlock_WhenEmpty(t *testing.T) {
 
 func TestBuildContext_WithPercepts(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "n1", []string{"user prefers Go", "use flat files"}, false, true)
+	got := BuildContext(sess, "n1", []string{"user prefers Go", "use flat files"}, false, true, "", "")
 	if !strings.Contains(got, "[Remembered facts]") {
 		t.Errorf("expected [Remembered facts] block, got %q", got)
 	}
@@ -85,7 +85,7 @@ func TestBuildContext_WithPercepts(t *testing.T) {
 
 func TestBuildContext_NilPercepts(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "n1", nil, false, true)
+	got := BuildContext(sess, "n1", nil, false, true, "", "")
 	if strings.Contains(got, "[Remembered facts]") {
 		t.Error("nil percepts should not produce facts block")
 	}
@@ -96,7 +96,7 @@ func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
 		LastLocalSummary: "User: run tests",
 		CurrentNeed:      "fix failing tests",
 	}
-	got := BuildContext(sess, "n1", nil, true, false)
+	got := BuildContext(sess, "n1", nil, true, false, "", "")
 	if !strings.Contains(got, "fix failing tests") {
 		t.Errorf("expected CurrentNeed on resume, got %q", got)
 	}
@@ -107,7 +107,7 @@ func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
 
 func TestBuildContext_SkipsInstructionsWhenFlagFalse(t *testing.T) {
 	sess := &session.Session{}
-	got := BuildContext(sess, "n1", []string{"a fact"}, true, false)
+	got := BuildContext(sess, "n1", []string{"a fact"}, true, false, "", "")
 	if strings.Contains(got, "milk:percept:n1") {
 		t.Error("injectInstructions=false should omit memory instruction")
 	}
@@ -121,7 +121,7 @@ func TestBuildContext_SkipsInstructionsWhenFlagFalse(t *testing.T) {
 
 func TestBuildContext_InjectsInstructionsOnResumeWhenFlagTrue(t *testing.T) {
 	sess := &session.Session{CurrentNeed: "build auth"}
-	got := BuildContext(sess, "n1", []string{"a fact"}, true, true)
+	got := BuildContext(sess, "n1", []string{"a fact"}, true, true, "", "")
 	if !strings.Contains(got, "milk:percept:n1") {
 		t.Error("injectInstructions=true on resume should include memory instruction")
 	}
@@ -134,7 +134,7 @@ func TestBuildContext_InjectsInstructionsOnResumeWhenFlagTrue(t *testing.T) {
 }
 
 func TestMemoryInstruction_NonceInTag(t *testing.T) {
-	got := MemoryInstruction("abc123")
+	got := MemoryInstruction("abc123", "primary", "escalation")
 	if !strings.Contains(got, "<milk:percept:abc123>") {
 		t.Errorf("expected nonce open tag, got %q", got)
 	}
