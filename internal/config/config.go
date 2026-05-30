@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Rules struct {
@@ -218,6 +219,40 @@ type Config struct {
 	// accumulated history exceeds this budget, the oldest user+assistant pairs
 	// are dropped until it fits. Default: 24000. Set to 0 for no limit.
 	LocalContextBudgetChars int `json:"local_context_budget_chars,omitempty"`
+
+	// RemoteOversight configures the remote oversight interface. When non-nil
+	// and a backend is configured, agent turn notifications and permission
+	// prompts are forwarded to the configured backend (e.g. Telegram).
+	RemoteOversight *RemoteOversightConfig `json:"remote_oversight,omitempty"`
+}
+
+// RemoteOversightConfig holds settings for the remote oversight interface.
+type RemoteOversightConfig struct {
+	// Backend selects the transport. Currently only "telegram" is supported.
+	Backend string `json:"backend,omitempty"`
+
+	// Telegram holds Telegram-specific settings. Used when Backend == "telegram".
+	Telegram *TelegramConfig `json:"telegram,omitempty"`
+
+	// PermTimeoutSecs is how long to wait for a remote permission reply before
+	// falling back to TimeoutAction. Default: 120 (2 minutes).
+	PermTimeoutSecs int `json:"perm_timeout_secs,omitempty"`
+
+	// TimeoutAction is the fallback when no remote reply arrives within
+	// PermTimeoutSecs. One of "allow" or "deny". Default: "deny".
+	TimeoutAction string `json:"timeout_action,omitempty"`
+
+	// NotifyTools controls whether tool-use events are forwarded.
+	// Default: true.
+	NotifyTools *bool `json:"notify_tools,omitempty"`
+}
+
+// TelegramConfig holds Telegram Bot API settings.
+type TelegramConfig struct {
+	// Token is the bot token from @BotFather (e.g. "123456:ABC-DEF...").
+	Token string `json:"token,omitempty"`
+	// ChatID is the numeric chat/user ID to send messages to.
+	ChatID int64 `json:"chat_id,omitempty"`
 }
 
 func defaults() Config {
@@ -367,6 +402,33 @@ func (c Config) LocalMemoryReinjectionByteThreshold() int {
 		return 40000
 	}
 	return c.LocalMemoryReinjectionBytes
+}
+
+// PermTimeoutDuration returns the configured remote permission timeout,
+// defaulting to 120 seconds.
+func (r *RemoteOversightConfig) PermTimeoutDuration() time.Duration {
+	if r == nil || r.PermTimeoutSecs <= 0 {
+		return 120 * time.Second
+	}
+	return time.Duration(r.PermTimeoutSecs) * time.Second
+}
+
+// TimeoutActionValue returns the configured timeout action ("allow" or "deny"),
+// defaulting to "deny".
+func (r *RemoteOversightConfig) TimeoutActionValue() string {
+	if r == nil || r.TimeoutAction == "" {
+		return "deny"
+	}
+	return r.TimeoutAction
+}
+
+// NotifyToolsEnabled returns whether tool notifications are enabled.
+// Defaults to true.
+func (r *RemoteOversightConfig) NotifyToolsEnabled() bool {
+	if r == nil || r.NotifyTools == nil {
+		return true
+	}
+	return *r.NotifyTools
 }
 
 // LocalContextBudget returns the maximum total character count of the local

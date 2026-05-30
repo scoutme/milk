@@ -2666,11 +2666,14 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 				} else {
 					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
 				}
+				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+				}
 			}
 			send(chunkMsg{text: hint})
 		}).
 		WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
-		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs))
+		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
 
 	// Wire local-agent permissions: persistent store + TUI ask callback.
 	// Both the primary and escalation-local agents share the same store and ask
@@ -3573,21 +3576,32 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		inputR = newStdinInputReader()
 	}
 
+	targetName := "local"
+	agentName := st.cfg.ActiveAgent().Name
+	if target == router.TargetEscalation {
+		targetName = "escalation"
+		agentName = st.cfg.EscalationAgentConfig().Name
+	}
+	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
+
+	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		return runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
+		turnErr = runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
 			// Escalation is routed to a second local provider, not the Claude CLI.
-			return runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+			turnErr = runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+		} else {
+			// Refresh credentials before each turn so expiring tokens are renewed.
+			// The credential-process handles its own cache and returns immediately
+			// when the token is still fresh, so this is cheap in the common case.
+			cliAgent = applyAWSCreds(st.cfg, cliAgent)
+			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
 		}
-		// Refresh credentials before each turn so expiring tokens are renewed.
-		// The credential-process handles its own cache and returns immediately
-		// when the token is still fresh, so this is cheap in the common case.
-		cliAgent = applyAWSCreds(st.cfg, cliAgent)
-		return runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
 	}
-	return nil
+	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
+	return turnErr
 }
 
 // --- Input history persistence ---
@@ -3743,7 +3757,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localPerms = lp
 	}
 
-	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions}
+	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions, notifier: newNotifier(cfg)}
 	agents := dispatchAgents{
 		local:           localAgent,
 		cliAgent:        cliAgent,

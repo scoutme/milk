@@ -14,6 +14,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -145,6 +146,7 @@ type interactiveState struct {
 	toolFutures     map[string]chan string
 	skipPermissions bool             // session-level override for DangerouslySkipPermissions
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
+	notifier        oversight.Notifier
 }
 
 // escalationAgentName returns the display name of the configured escalation agent.
