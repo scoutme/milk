@@ -164,6 +164,17 @@ type Config struct {
 	// escalation system prompt. Turns are included newest-first until the
 	// budget is exhausted. Default: 12000.
 	ContextBudgetChars int `json:"context_budget_chars,omitempty"`
+
+	// MemoryReinjectionTurns is the number of escalation turns after which the
+	// memory/need instruction block is unconditionally re-injected, even when it
+	// was already sent in a prior turn. Guards against agent-side context truncation.
+	// Default: 20. Set to 0 to disable this threshold.
+	MemoryReinjectionTurns int `json:"memory_reinjection_turns,omitempty"`
+
+	// MemoryReinjectionBytes is the total bytes of escalation assistant output
+	// after which the memory/need instruction block is unconditionally re-injected.
+	// Default: 40000. Set to 0 to disable this threshold.
+	MemoryReinjectionBytes int `json:"memory_reinjection_bytes,omitempty"`
 }
 
 func defaults() Config {
@@ -208,6 +219,32 @@ func (c Config) ContextBudget() int {
 		return 12000
 	}
 	return c.ContextBudgetChars
+}
+
+// MemoryReinjectionTurnThreshold returns the escalation-turn interval for
+// unconditional memory instruction re-injection, defaulting to 20.
+// Returns 0 when the threshold is explicitly disabled.
+func (c Config) MemoryReinjectionTurnThreshold() int {
+	if c.MemoryReinjectionTurns < 0 {
+		return 0
+	}
+	if c.MemoryReinjectionTurns == 0 {
+		return 20
+	}
+	return c.MemoryReinjectionTurns
+}
+
+// MemoryReinjectionByteThreshold returns the escalation assistant output byte
+// threshold for unconditional memory instruction re-injection, defaulting to 40000.
+// Returns 0 when the threshold is explicitly disabled.
+func (c Config) MemoryReinjectionByteThreshold() int {
+	if c.MemoryReinjectionBytes < 0 {
+		return 0
+	}
+	if c.MemoryReinjectionBytes == 0 {
+		return 40000
+	}
+	return c.MemoryReinjectionBytes
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility

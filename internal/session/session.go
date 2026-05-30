@@ -68,6 +68,11 @@ type Session struct {
 	// LastEscalationSummary is a pre-rendered, sanitized, budget-capped summary of
 	// Escalation turns. Reserved for future demotion back to local.
 	LastEscalationSummary string `json:"last_claude_summary,omitempty"`
+
+	// MemoryInstructionInjectedAt is the escalation turn count at which the
+	// memory/need instruction block was last injected. Zero means never injected.
+	// Used to skip redundant re-injection on resume turns.
+	MemoryInstructionInjectedAt int `json:"memory_instruction_injected_at,omitempty"`
 }
 
 // emptyEscalationSession returns true when a Claude session produced no real work:
@@ -213,6 +218,35 @@ func (s *Session) RebuildSummaryBricks(budgetChars int) {
 	if !emptyEscalationSession(escalationTurns, 200) {
 		s.LastEscalationSummary = buildBrick(escalationTurns, AgentEscalation, budgetChars)
 	}
+}
+
+// EscalationTurnCount returns the number of assistant turns produced by the
+// escalation agent in the session history.
+func (s *Session) EscalationTurnCount() int {
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentEscalation {
+			count++
+		}
+	}
+	return count
+}
+
+// EscalationOutputBytesSince returns the total byte length of escalation agent
+// assistant turns that occurred after the given turn index (exclusive). Used to
+// measure output volume since the last memory instruction injection.
+func (s *Session) EscalationOutputBytesSince(afterTurnIndex int) int {
+	total := 0
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentEscalation {
+			if count >= afterTurnIndex {
+				total += len(t.Content)
+			}
+			count++
+		}
+	}
+	return total
 }
 
 func (s *Session) AddTurn(t Turn) {
