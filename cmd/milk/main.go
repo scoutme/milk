@@ -431,6 +431,10 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	fmt.Fprint(out, bold(green(localLabel(cfg)))+" ")
 	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
+	if trimmed, ok := trimLocalMessages(history, cfg.LocalContextBudget()); ok {
+		history = trimmed
+		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), cfg.LocalContextBudget())
+	}
 
 	sess.ForceState(session.StateLocal)
 
@@ -1074,6 +1078,35 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 	if b.Description != "" {
 		fmt.Fprintf(out, "  %s\n", b.Description)
 	}
+}
+
+// messagesCharCount returns the total character count across all message contents.
+func messagesCharCount(msgs []local.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n
+}
+
+// trimLocalMessages drops the oldest user+assistant pairs from msgs until the
+// total character count is within budgetChars. Tool-result messages that follow
+// a dropped assistant turn are also dropped. Returns the trimmed slice and true
+// when any trimming occurred. budgetChars == 0 means no limit.
+func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, bool) {
+	if budgetChars <= 0 || messagesCharCount(msgs) <= budgetChars {
+		return msgs, false
+	}
+	for messagesCharCount(msgs) > budgetChars && len(msgs) > 0 {
+		// Always drop the first message. If it was a user turn, also drop the
+		// immediately following assistant+tool-result run so we don't leave an
+		// orphaned assistant turn at the head.
+		msgs = msgs[1:]
+		for len(msgs) > 0 && msgs[0].Role != "user" {
+			msgs = msgs[1:]
+		}
+	}
+	return msgs, true
 }
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.

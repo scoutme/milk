@@ -212,6 +212,12 @@ type Config struct {
 	// after which the memory/need instruction block is re-appended.
 	// Default: 40000. Set to -1 to disable.
 	LocalMemoryReinjectionBytes int `json:"local_memory_reinjection_bytes,omitempty"`
+
+	// LocalContextBudgetChars is the maximum total character count of the
+	// messages array passed to the local inference server per turn. When the
+	// accumulated history exceeds this budget, the oldest user+assistant pairs
+	// are dropped until it fits. Default: 24000. Set to 0 for no limit.
+	LocalContextBudgetChars int `json:"local_context_budget_chars,omitempty"`
 }
 
 func defaults() Config {
@@ -361,6 +367,19 @@ func (c Config) LocalMemoryReinjectionByteThreshold() int {
 		return 40000
 	}
 	return c.LocalMemoryReinjectionBytes
+}
+
+// LocalContextBudget returns the maximum total character count of the local
+// agent's messages array, defaulting to 24000. Returns 0 when explicitly
+// disabled (no limit).
+func (c Config) LocalContextBudget() int {
+	if c.LocalContextBudgetChars < 0 {
+		return 0
+	}
+	if c.LocalContextBudgetChars == 0 {
+		return 24000
+	}
+	return c.LocalContextBudgetChars
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility
