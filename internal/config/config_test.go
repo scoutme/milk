@@ -86,3 +86,59 @@ func TestEscalationAgentConfig_NamedLocal(t *testing.T) {
 		t.Fatalf("expected haiku-aws/bedrock, got %+v", got)
 	}
 }
+
+func TestLocalMemoryResultMaxByteCount_Defaults(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.LocalMemoryResultMaxByteCount(); got != 2048 {
+		t.Errorf("expected default 2048, got %d", got)
+	}
+}
+
+func TestLocalMemoryResultMaxByteCount_Explicit(t *testing.T) {
+	cfg := Config{LocalMemoryResultMaxBytes: 500}
+	if got := cfg.LocalMemoryResultMaxByteCount(); got != 500 {
+		t.Errorf("expected 500, got %d", got)
+	}
+}
+
+func TestLocalMemoryResultMaxByteCount_Disabled(t *testing.T) {
+	cfg := Config{LocalMemoryResultMaxBytes: -1}
+	if got := cfg.LocalMemoryResultMaxByteCount(); got != 0 {
+		t.Errorf("expected 0 when disabled, got %d", got)
+	}
+}
+
+func TestLocalMemoryReinjectionTurnThreshold_Defaults(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.LocalMemoryReinjectionTurnThreshold(); got != 20 {
+		t.Errorf("expected default 20, got %d", got)
+	}
+}
+
+func TestLocalMemoryReinjectionTurnThreshold_Explicit(t *testing.T) {
+	cfg := Config{LocalMemoryReinjectionTurns: 5}
+	if got := cfg.LocalMemoryReinjectionTurnThreshold(); got != 5 {
+		t.Errorf("expected 5, got %d", got)
+	}
+}
+
+func TestLocalMemoryReinjectionTurnThreshold_Disabled(t *testing.T) {
+	cfg := Config{LocalMemoryReinjectionTurns: -1}
+	if got := cfg.LocalMemoryReinjectionTurnThreshold(); got != 0 {
+		t.Errorf("expected 0 when disabled, got %d", got)
+	}
+}
+
+func TestLocalMemoryReinjectionByteThreshold_Defaults(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.LocalMemoryReinjectionByteThreshold(); got != 40000 {
+		t.Errorf("expected default 40000, got %d", got)
+	}
+}
+
+func TestLocalMemoryReinjectionByteThreshold_Disabled(t *testing.T) {
+	cfg := Config{LocalMemoryReinjectionBytes: -1}
+	if got := cfg.LocalMemoryReinjectionByteThreshold(); got != 0 {
+		t.Errorf("expected 0 when disabled, got %d", got)
+	}
+}

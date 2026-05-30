@@ -70,6 +70,15 @@ type streamChunk struct {
 	} `json:"choices"`
 }
 
+// MemConfig holds the memory-related config values that the local agent uses at
+// runtime to gate memory tool results and instruction re-injection.
+type MemConfig struct {
+	ResultMaxBytes       int  // max bytes of a memory tool result appended to context; 0 = unlimited
+	ReinjectionTurns     int  // re-inject instruction after N local turns; 0 = disabled
+	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
+	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
+}
+
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
 // or the AWS Bedrock Converse API when useBedrockNative is true.
 type Agent struct {
@@ -92,6 +101,7 @@ type Agent struct {
 	agentNames       []string // [primaryName, escalationName] for consumer-hint parsing
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
+	memCfg           MemConfig
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -116,6 +126,14 @@ func (a *Agent) WithTagCallbacks(nonce, primaryName, escalationName string, onNe
 	copy.agentNames = []string{primaryName, escalationName}
 	copy.onNeed = onNeed
 	copy.onPercept = onPercept
+	return &copy
+}
+
+// WithMemConfig returns a shallow copy of the agent configured with the given
+// memory-management parameters. Call after New/NewFromConfig before running.
+func (a *Agent) WithMemConfig(mc MemConfig) *Agent {
+	copy := *a
+	copy.memCfg = mc
 	return &copy
 }
 
@@ -390,6 +408,34 @@ const minRepeatCheckLen = 20
 const repetitionWindow = 10     // number of recent user turns to consider
 const repetitionThreshold = 0.6 // escalate when score exceeds this
 
+// shouldInjectMemoryInstruction returns true when the memory/need instruction
+// block should be appended to the local agent's messages for this turn.
+// Always injects when no turn has been recorded yet. On subsequent turns,
+// injects when the turn-count or byte-volume threshold is crossed.
+func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
+	if sess == nil {
+		return true
+	}
+	injectedAt := sess.LocalMemoryInstructionInjectedAt
+	if injectedAt == 0 {
+		return true // first time
+	}
+	turnThreshold := a.memCfg.ReinjectionTurns
+	byteThreshold := a.memCfg.ReinjectionBytes
+	if turnThreshold == 0 && byteThreshold == 0 {
+		return false
+	}
+	turnsSince := sess.LocalTurnCount() - injectedAt
+	if turnThreshold > 0 && turnsSince >= turnThreshold {
+		return true
+	}
+	bytesSince := sess.LocalOutputBytesSince(injectedAt)
+	if byteThreshold > 0 && bytesSince >= byteThreshold {
+		return true
+	}
+	return false
+}
+
 func isRepeatedPrompt(history []Message, userPrompt string) bool {
 	norm := normalizePrompt(userPrompt)
 	if len(norm) < minRepeatCheckLen {
@@ -441,12 +487,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if sess.CWD != "" {
 		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
 	}
-	if a.tagNonce != "" {
+	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
 		primaryName, escalationName := "", ""
 		if len(a.agentNames) >= 2 {
 			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
 		}
 		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName)})
+		if sess != nil {
+			sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount()
+		}
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess)
@@ -494,7 +543,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 
 		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, out, sess, mem)
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem)
 		if esc != nil {
 			return msgs, esc
 		}
@@ -540,7 +589,41 @@ func (a *Agent) checkPermission(tool, summary string) (allowed bool, denied stri
 // Always uses the structured OpenAI tool_calls wire format — the server's chat
 // template renders it into the model-specific markup (<tool_call>, etc.) and
 // wraps tool results in <tool_response> automatically.
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
+// isMemoryReadTool returns true for memory tools whose results are injected into
+// the local context and therefore subject to the byte-cap limit.
+func isMemoryReadTool(name string) bool {
+	return name == "get_memory" || name == "list_memory"
+}
+
+// capMemToolResult truncates the output field of a toolResult JSON string so
+// that the total content size stays within maxBytes. A truncation notice is
+// appended so the model knows not all results were returned.
+// When maxBytes is 0 the result is returned unchanged.
+func capMemToolResult(result string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return result
+	}
+	var r toolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil || r.Output == "" {
+		return result
+	}
+	if len(r.Output) <= maxBytes {
+		return result
+	}
+	const notice = "\n... (truncated)"
+	cut := maxBytes - len(notice)
+	if cut < 0 {
+		cut = 0
+	}
+	r.Output = r.Output[:cut] + notice
+	b, err := json.Marshal(r)
+	if err != nil {
+		return result
+	}
+	return string(b)
+}
+
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 	for _, tc := range toolCalls {
 		printToolLine(out, tc)
@@ -562,6 +645,12 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			}
 			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
 			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
+		}
+		if isMemoryReadTool(tc.Function.Name) {
+			if a.memCfg.RelevanceGateEnabled && tc.Function.Name == "list_memory" && mem != nil {
+				result = memory.DispatchListMemoryFiltered(ctx, mem, tc.Function.Arguments, userPrompt)
+			}
+			result = capMemToolResult(result, a.memCfg.ResultMaxBytes)
 		}
 		msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 	}

@@ -76,6 +76,11 @@ type Session struct {
 	// memory/need instruction block was last injected. Zero means never injected.
 	// Used to skip redundant re-injection on resume turns.
 	MemoryInstructionInjectedAt int `json:"memory_instruction_injected_at,omitempty"`
+
+	// LocalMemoryInstructionInjectedAt is the local turn count at which the
+	// memory/need instruction was last appended to the local agent's messages.
+	// Zero means never injected (first turn always injects).
+	LocalMemoryInstructionInjectedAt int `json:"local_memory_instruction_injected_at,omitempty"`
 }
 
 // emptyEscalationSession returns true when a Claude session produced no real work:
@@ -233,6 +238,34 @@ func (s *Session) EscalationTurnCount() int {
 		}
 	}
 	return count
+}
+
+// LocalTurnCount returns the number of assistant turns produced by the local
+// agent in the session history.
+func (s *Session) LocalTurnCount() int {
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			count++
+		}
+	}
+	return count
+}
+
+// LocalOutputBytesSince returns the total byte length of local agent assistant
+// turns that occurred after the given turn index (exclusive).
+func (s *Session) LocalOutputBytesSince(afterTurnIndex int) int {
+	total := 0
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			if count >= afterTurnIndex {
+				total += len(t.Content)
+			}
+			count++
+		}
+	}
+	return total
 }
 
 // EscalationOutputBytesSince returns the total byte length of escalation agent

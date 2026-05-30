@@ -435,7 +435,12 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	sess.ForceState(session.StateLocal)
 
 	nonce := claude.GenerateNonce()
-	agent = agent.WithTagCallbacks(nonce, "local", "claude",
+	agent = agent.WithMemConfig(local.MemConfig{
+		ResultMaxBytes:       cfg.LocalMemoryResultMaxByteCount(),
+		ReinjectionTurns:     cfg.LocalMemoryReinjectionTurnThreshold(),
+		ReinjectionBytes:     cfg.LocalMemoryReinjectionByteThreshold(),
+		RelevanceGateEnabled: cfg.PerceptRelevanceGateEnabled(),
+	}).WithTagCallbacks(nonce, "local", "claude",
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) },
 		func(content, consumerHint string) {
 			if mem == nil {

@@ -325,6 +325,22 @@ All tests run without an inference server or claude. They use temp directories a
 # Expected: "[milk] warning: claude CLI unavailable — local only"
 ```
 
+### Memory configuration
+
+All keys go in `~/.milk/config.json`. Sensible defaults apply when omitted.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `percept_inject_max` | 25 | Max percepts injected into Claude context per turn. Lowest-weight percepts are dropped. Set to 0 for no limit. |
+| `percept_inject_max_bytes` | 2048 | Max byte size of percept content injected into Claude context per turn. Set to 0 for no limit. |
+| `percept_store_max` | 0 (unlimited) | Max percepts kept in the global store. Lowest-weight non-core percepts are pruned after NREM consolidation. |
+| `percept_relevance_gate` | true | Skip percepts with zero keyword overlap with the current prompt before injection (Claude context block and local agent `list_memory` results). Set to false to disable. |
+| `memory_reinjection_turns` | 20 | Re-inject memory/need instructions into Claude context after this many escalation turns (guards against Claude-side context truncation). Set to 0 to disable. |
+| `memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of Claude output. Set to 0 to disable. |
+| `local_memory_result_max_bytes` | 2048 | Max byte size of `get_memory` / `list_memory` tool results returned to the local agent per call. Set to -1 for no limit. |
+| `local_memory_reinjection_turns` | 20 | Re-inject memory/need instructions into the local agent's context after this many local turns. Set to -1 to disable. |
+| `local_memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of local agent output. Set to -1 to disable. |
+
 ### Troubleshooting
 
 **400 on first local call**: server started without `--jinja`. Restart with `./scripts/llama-serve.sh`.

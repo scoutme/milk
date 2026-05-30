@@ -195,6 +195,23 @@ type Config struct {
 	// percepts with zero token overlap with the current prompt are skipped.
 	// Default: true. Set to false to disable.
 	PerceptRelevanceGate *bool `json:"percept_relevance_gate,omitempty"`
+
+	// LocalMemoryResultMaxBytes caps the byte size of memory tool results
+	// (get_memory, list_memory) returned to the local agent per tool call.
+	// Results are truncated to this limit before being appended to the
+	// local context. Default: 2048. Set to 0 for no limit.
+	LocalMemoryResultMaxBytes int `json:"local_memory_result_max_bytes,omitempty"`
+
+	// LocalMemoryReinjectionTurns is the number of local agent turns after which
+	// the memory/need instruction block is unconditionally re-appended to the
+	// local agent's context. Mirrors memory_reinjection_turns for the escalation
+	// path. Default: 20. Set to -1 to disable.
+	LocalMemoryReinjectionTurns int `json:"local_memory_reinjection_turns,omitempty"`
+
+	// LocalMemoryReinjectionBytes is the total bytes of local agent output
+	// after which the memory/need instruction block is re-appended.
+	// Default: 40000. Set to -1 to disable.
+	LocalMemoryReinjectionBytes int `json:"local_memory_reinjection_bytes,omitempty"`
 }
 
 func defaults() Config {
@@ -307,6 +324,43 @@ func (c Config) PerceptRelevanceGateEnabled() bool {
 		return true
 	}
 	return *c.PerceptRelevanceGate
+}
+
+// LocalMemoryResultMaxByteCount returns the max byte size of memory tool results
+// returned to the local agent per call, defaulting to 2048. Returns 0 when
+// explicitly disabled (unlimited).
+func (c Config) LocalMemoryResultMaxByteCount() int {
+	if c.LocalMemoryResultMaxBytes < 0 {
+		return 0
+	}
+	if c.LocalMemoryResultMaxBytes == 0 {
+		return 2048
+	}
+	return c.LocalMemoryResultMaxBytes
+}
+
+// LocalMemoryReinjectionTurnThreshold returns the local-turn interval for
+// memory instruction re-injection, defaulting to 20. Returns 0 when disabled.
+func (c Config) LocalMemoryReinjectionTurnThreshold() int {
+	if c.LocalMemoryReinjectionTurns < 0 {
+		return 0
+	}
+	if c.LocalMemoryReinjectionTurns == 0 {
+		return 20
+	}
+	return c.LocalMemoryReinjectionTurns
+}
+
+// LocalMemoryReinjectionByteThreshold returns the local output byte threshold
+// for memory instruction re-injection, defaulting to 40000. Returns 0 when disabled.
+func (c Config) LocalMemoryReinjectionByteThreshold() int {
+	if c.LocalMemoryReinjectionBytes < 0 {
+		return 0
+	}
+	if c.LocalMemoryReinjectionBytes == 0 {
+		return 40000
+	}
+	return c.LocalMemoryReinjectionBytes
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility
