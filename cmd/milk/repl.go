@@ -458,6 +458,9 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "ctrl+m":
 		m.busyHint = "agent is responding — Ctrl+C to interrupt"
 		return m, busyHintClearCmd()
+	case "ctrl+t":
+		m = m.toggleThinking()
+		return m, nil
 	case "pgup", "ctrl+u":
 		m.vp.HalfPageUp()
 		return m, nil
@@ -1009,6 +1012,16 @@ func (m *model) welcomeScreen() string {
 // appendTranscript adds text to both transcript variants and refreshes the viewport.
 // Sticky-bottom: only auto-scrolls when already at the bottom.
 func (m *model) appendTranscript(text string) {
+	// If regular content follows thinking, ensure both variants end with a newline
+	// so the final content starts on its own line rather than the last thinking row.
+	if m.thinkingActiveInTurn {
+		if s := m.transcript.String(); len(s) > 0 && s[len(s)-1] != '\n' {
+			m.transcript.WriteByte('\n')
+		}
+		if s := m.transcriptNoThink.String(); len(s) > 0 && s[len(s)-1] != '\n' {
+			m.transcriptNoThink.WriteByte('\n')
+		}
+	}
 	m.transcript.WriteString(text)
 	m.transcriptNoThink.WriteString(text)
 	// If regular content arrives after thinking, mark that the think block ended
@@ -1029,7 +1042,7 @@ func (m *model) appendTranscript(text string) {
 func (m *model) appendThinking(text string) {
 	m.transcript.WriteString(dim(text))
 	if !m.thinkingActiveInTurn {
-		m.transcriptNoThink.WriteString(dim("[thinking…]"))
+		m.transcriptNoThink.WriteString(dim("[thinking… Ctrl+T to show]"))
 		m.thinkingActiveInTurn = true
 	}
 	if m.ready {
@@ -1610,6 +1623,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m = m.handleTab()
 		return m, nil
+	case "ctrl+t":
+		m = m.toggleThinking()
+		return m, nil
 	case "pgup", "ctrl+u":
 		m.vp.HalfPageUp()
 		return m, nil
@@ -1845,6 +1861,21 @@ func (m model) handleThinkCmd(arg string) model {
 			state = "on"
 		}
 		m.appendTranscript(fmt.Sprintf("%s reasoning visibility: %s  (use /think on|off)\n", milkTag(), bold(state)))
+	}
+	return m
+}
+
+// toggleThinking flips reasoning visibility and appends a status line.
+// Works at any time including while the agent is responding, since it only
+// mutates showThinking and the colorize cache — no input submission needed.
+func (m model) toggleThinking() model {
+	m.showThinking = !m.showThinking
+	m.colorizeForce = true
+	m.colorizeTransLen = 0
+	if m.showThinking {
+		m.appendTranscript(milkTag() + " reasoning visibility: on\n")
+	} else {
+		m.appendTranscript(milkTag() + " reasoning visibility: off\n")
 	}
 	return m
 }
@@ -2621,12 +2652,20 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 			send(toolUseMsg{name: name})
 		}).
 		WithOnToolUseReady(func(name string, input map[string]any) {
-			summary := cliToolArgSummary(input)
 			var hint string
-			if summary != "" {
-				hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+			if name == "AskUserQuestion" {
+				if rendered := formatAskUserQuestion(input); rendered != "" {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n%s\n", name, rendered)
+				} else {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				}
 			} else {
-				hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				summary := cliToolArgSummary(input)
+				if summary != "" {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+				} else {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				}
 			}
 			send(chunkMsg{text: hint})
 		}).

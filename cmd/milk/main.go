@@ -971,6 +971,49 @@ func cliToolArgSummary(args map[string]any) string {
 	return ""
 }
 
+// formatAskUserQuestion renders an AskUserQuestion tool call payload as a
+// human-readable string for display in the transcript. The input contains a
+// "questions" array; each item has "question", "header", "options" (array of
+// {label, description}), and optionally "multiSelect".
+func formatAskUserQuestion(input map[string]any) string {
+	qs, _ := input["questions"].([]any)
+	if len(qs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, raw := range qs {
+		q, _ := raw.(map[string]any)
+		if q == nil {
+			continue
+		}
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if text, _ := q["question"].(string); text != "" {
+			b.WriteString(text)
+			b.WriteString("\n")
+		}
+		opts, _ := q["options"].([]any)
+		for _, oRaw := range opts {
+			o, _ := oRaw.(map[string]any)
+			if o == nil {
+				continue
+			}
+			label, _ := o["label"].(string)
+			desc, _ := o["description"].(string)
+			if label == "" {
+				continue
+			}
+			if desc != "" {
+				b.WriteString(fmt.Sprintf("  • %s — %s\n", label, desc))
+			} else {
+				b.WriteString(fmt.Sprintf("  • %s\n", label))
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // makeTUIPermissionHandler returns a PermissionHandler for TUI mode.
 // It blocks the stream goroutine by sending a permRequestMsg to the TUI and
 // waiting for the user's y/n reply before forwarding allow/deny to the CLI escalation agent.
@@ -986,6 +1029,9 @@ func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store) claud
 			prompt += fmt.Sprintf("  reason: %s", b.DecisionReasonType)
 		}
 		prompt += "\n"
+		if summary := cliToolArgSummary(b.Input); summary != "" {
+			prompt += fmt.Sprintf("  %s\n", dim(summary))
+		}
 		if b.Description != "" {
 			prompt += fmt.Sprintf("  %s\n", b.Description)
 		}
@@ -1022,6 +1068,9 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 		fmt.Fprintf(out, "  reason: %s", b.DecisionReasonType)
 	}
 	fmt.Fprintln(out)
+	if summary := cliToolArgSummary(b.Input); summary != "" {
+		fmt.Fprintf(out, "  %s\n", dim(summary))
+	}
 	if b.Description != "" {
 		fmt.Fprintf(out, "  %s\n", b.Description)
 	}

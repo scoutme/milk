@@ -92,15 +92,15 @@ func TestEndsWithQuestion(t *testing.T) {
 		want bool
 	}{
 		{"What do you mean?", true},
-		{"What do you mean? ", true},   // trailing space
+		{"What do you mean? ", true}, // trailing space
 		{"Done.", false},
-		{"foo? bar", false},            // ? mid-sentence, not last line
-		{"foo?\nDone.", false},         // ? on earlier line
-		{"foo\nWhat now?", true},       // ? on last line
-		{"foo\nWhat now?  ", true},     // ? on last line with trailing spaces
+		{"foo? bar", false},        // ? mid-sentence, not last line
+		{"foo?\nDone.", false},     // ? on earlier line
+		{"foo\nWhat now?", true},   // ? on last line
+		{"foo\nWhat now?  ", true}, // ? on last line with trailing spaces
 		{"", false},
 		{"?", true},
-		{"Is this ok?\nSure.", false},  // last line has no ?
+		{"Is this ok?\nSure.", false}, // last line has no ?
 	}
 	for _, tc := range cases {
 		got := endsWithQuestion(tc.text)
