@@ -17,6 +17,8 @@ type sessionBricks struct {
 	lastLocalSummary      string
 	lastEscalationSummary string
 	escalationBrief       string
+	primaryName           string // configured name of the primary agent (used as brick label)
+	escalationName        string // configured name of the escalation agent (used as brick label)
 }
 
 const recentThreshold = 60 * time.Second
@@ -43,6 +45,8 @@ func (m *model) renderMemoryPanel(h int) string {
 		lastLocalSummary:      m.st.sess.LastLocalSummary,
 		lastEscalationSummary: m.st.sess.LastEscalationSummary,
 		escalationBrief:       m.st.sess.EscalationBrief,
+		primaryName:           m.st.cfg.ActiveAgent().Name,
+		escalationName:        m.st.cfg.EscalationAgentConfig().Name,
 	}
 	all := buildPanelLines(m.mem, inner, bricks)
 	total := len(all)
@@ -80,6 +84,8 @@ func (m *model) renderPanelScrollbar(h int) string {
 		lastLocalSummary:      m.st.sess.LastLocalSummary,
 		lastEscalationSummary: m.st.sess.LastEscalationSummary,
 		escalationBrief:       m.st.sess.EscalationBrief,
+		primaryName:           m.st.cfg.ActiveAgent().Name,
+		escalationName:        m.st.cfg.EscalationAgentConfig().Name,
 	}
 	all := buildPanelLines(m.mem, memoryPanelInner, bricks)
 	total := len(all)
@@ -177,11 +183,19 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	}
 
 	// --- CONTEXT BRICKS ---
+	primaryLabel := bricks.primaryName
+	if primaryLabel == "" {
+		primaryLabel = "primary"
+	}
+	escalationLabel := bricks.escalationName
+	if escalationLabel == "" {
+		escalationLabel = "escalation"
+	}
 	addLine("")
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
 	addBrickLines(&lines, "need", bricks.currentNeed, inner)
-	addBrickLines(&lines, "local", bricks.lastLocalSummary, inner)
-	addBrickLines(&lines, "claude", bricks.lastEscalationSummary, inner)
+	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner)
+	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner)
 	addBrickLines(&lines, "brief", bricks.escalationBrief, inner)
 
 	return lines
@@ -363,11 +377,19 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	}
 
 	// CONTEXT BRICKS section
+	primaryLabel := bricks.primaryName
+	if primaryLabel == "" {
+		primaryLabel = "primary"
+	}
+	escalationLabel := bricks.escalationName
+	if escalationLabel == "" {
+		escalationLabel = "escalation"
+	}
 	add("") // blank
 	add("") // CONTEXT BRICKS header
 	addBrick("need", bricks.currentNeed)
-	addBrick("local", bricks.lastLocalSummary)
-	addBrick("claude", bricks.lastEscalationSummary)
+	addBrick(primaryLabel, bricks.lastLocalSummary)
+	addBrick(escalationLabel, bricks.lastEscalationSummary)
 	addBrick("brief", bricks.escalationBrief)
 
 	return ids
@@ -375,12 +397,20 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 
 // brickContent returns the full text for a brick ID, or "" if unknown/empty.
 func brickContent(id string, bricks sessionBricks) string {
+	primaryLabel := bricks.primaryName
+	if primaryLabel == "" {
+		primaryLabel = "primary"
+	}
+	escalationLabel := bricks.escalationName
+	if escalationLabel == "" {
+		escalationLabel = "escalation"
+	}
 	switch id {
 	case "need":
 		return bricks.currentNeed
-	case "local":
+	case primaryLabel:
 		return bricks.lastLocalSummary
-	case "claude":
+	case escalationLabel:
 		return bricks.lastEscalationSummary
 	case "brief":
 		return bricks.escalationBrief

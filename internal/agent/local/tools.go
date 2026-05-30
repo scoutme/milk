@@ -194,8 +194,26 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 	}
 	if sess != nil {
 		base = append(base, exportSessionSchema())
+		base = append(base, currentNeedSchema())
 	}
 	return base
+}
+
+func currentNeedSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "current_need",
+			"description": "Update the current user goal for this session. Call this when the user switches to a new topic or objective. Equivalent to emitting a <milk:need:NONCE> tag.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"goal": map[string]any{"type": "string", "description": "One-sentence description of what the user is now trying to accomplish"},
+				},
+				"required": []string{"goal"},
+			},
+		},
+	}
 }
 
 func exportSessionSchema() map[string]any {
@@ -280,6 +298,8 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return toolResult{Error: "observability not available"}.String(), false
 	case "export_session":
 		return dispatchExportSession(sess, argsJSON), false
+	case "current_need":
+		return dispatchCurrentNeed(sess, argsJSON), false
 	case "escalate":
 		return "", true // caller checks the bool
 	default:
@@ -325,6 +345,23 @@ func dispatchExportSession(sess *session.Session, argsJSON string) string {
 		return toolResult{Output: fmt.Sprintf("session exported to %s (%d bytes)", path, len(content))}.String()
 	}
 	return toolResult{Output: content}.String()
+}
+
+func dispatchCurrentNeed(sess *session.Session, argsJSON string) string {
+	if sess == nil {
+		return toolResult{Error: "no active session"}.String()
+	}
+	var args struct {
+		Goal string `json:"goal"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return toolResult{Error: "invalid arguments: " + err.Error()}.String()
+	}
+	if args.Goal == "" {
+		return toolResult{Error: "goal must not be empty"}.String()
+	}
+	sess.CurrentNeed = args.Goal
+	return toolResult{Output: "current need updated"}.String()
 }
 
 // runGetSessionContext formats session history with optional filters:
@@ -538,6 +575,8 @@ func runReadFile(args map[string]any) (string, bool) {
 
 	lines := strings.Split(string(data), "\n")
 
+	const maxReadLines = 500
+
 	offset := 0
 	if v, ok := args["offset"]; ok {
 		switch n := v.(type) {
@@ -547,8 +586,10 @@ func runReadFile(args map[string]any) (string, bool) {
 			offset, _ = strconv.Atoi(n)
 		}
 	}
+	limitSet := false
 	limit := len(lines)
 	if v, ok := args["limit"]; ok {
+		limitSet = true
 		switch n := v.(type) {
 		case float64:
 			limit = int(n)
@@ -556,20 +597,22 @@ func runReadFile(args map[string]any) (string, bool) {
 			limit, _ = strconv.Atoi(n)
 		}
 	}
-
-	if offset > len(lines) {
-		offset = len(lines)
-	}
-	end := offset + limit
-	if end > len(lines) {
-		end = len(lines)
+	if !limitSet {
+		limit = min(limit, maxReadLines)
 	}
 
-	numbered := make([]string, 0, end-offset)
+	offset = min(offset, len(lines))
+	end := min(offset+limit, len(lines))
+
+	numbered := make([]string, 0, end-offset+1)
 	for i, l := range lines[offset:end] {
 		numbered = append(numbered, fmt.Sprintf("%d\t%s", offset+i+1, l))
 	}
-	return toolResult{Output: strings.Join(numbered, "\n")}.String(), false
+	out := strings.Join(numbered, "\n")
+	if !limitSet && end < len(lines) {
+		out += fmt.Sprintf("\n\n[truncated: showed lines %d-%d of %d; use offset+limit to read more]", offset+1, end, len(lines))
+	}
+	return toolResult{Output: out}.String(), false
 }
 
 func runEditFile(args map[string]any) (string, bool) {

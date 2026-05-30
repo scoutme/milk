@@ -89,6 +89,7 @@ type Agent struct {
 	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
 	sigv4            *sigv4Transport    // non-nil for Bedrock; used to wire the onRefresh callback
 	tagNonce         string
+	agentNames       []string // [primaryName, escalationName] for consumer-hint parsing
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 }
@@ -108,9 +109,11 @@ func (a *Agent) AsEscalationTarget(name string) *Agent {
 // WithTagCallbacks returns a shallow copy of the agent configured to intercept
 // <milk:need:NONCE> and <milk:percept:NONCE> tags in the response stream.
 // nonce must match the value injected into the system prompt via NeedInstruction/MemoryInstruction.
-func (a *Agent) WithTagCallbacks(nonce string, onNeed func(string), onPercept func(content, consumerHint string)) *Agent {
+// primaryName and escalationName are used to parse @<name>: consumer-hint prefixes in percept bodies.
+func (a *Agent) WithTagCallbacks(nonce, primaryName, escalationName string, onNeed func(string), onPercept func(content, consumerHint string)) *Agent {
 	copy := *a
 	copy.tagNonce = nonce
+	copy.agentNames = []string{primaryName, escalationName}
 	copy.onNeed = onNeed
 	copy.onPercept = onPercept
 	return &copy
@@ -439,7 +442,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
 	}
 	if a.tagNonce != "" {
-		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce)})
+		primaryName, escalationName := "", ""
+		if len(a.agentNames) >= 2 {
+			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
+		}
+		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName)})
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess)
@@ -449,7 +456,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			out = &tags.TagWriter{W: out, OpenPrefix: tags.NeedOpenPrefix, OnTag: a.onNeed, RecordNonce: a.tagNonce}
 		}
 		if a.onPercept != nil {
-			out = &tags.PerceptWriter{W: out, OnPercept: a.onPercept, RecordNonce: a.tagNonce}
+			out = &tags.PerceptWriter{W: out, OnPercept: a.onPercept, RecordNonce: a.tagNonce, AgentNames: a.agentNames}
 		}
 	}
 

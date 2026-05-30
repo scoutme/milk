@@ -25,6 +25,7 @@ type Agent struct {
 	onThinking        func(string)                 // called on thinking_delta tokens
 	onPercept         func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
 	perceptNonce      string                       // session-specific nonce matching the system-prompt instruction
+	agentNames        []string                     // [primaryName, escalationName] for @<name>: consumer-hint parsing
 	onNeed            func(string)                 // called for each <milk:need:NONCE> tag; arg: new current-need text
 	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
@@ -98,12 +99,16 @@ func (a *Agent) WithSkipPermissions(v bool) *Agent {
 
 // WithOnPercept returns a copy of the agent that calls fn for each
 // <milk:percept:NONCE>…</milk:percept:NONCE> tag intercepted in the response stream.
-// fn receives the percept body and a consumerHint ("local", "claude", or "").
-// nonce must be the same value passed to escalation.MemoryInstruction(nonce).
-func (a *Agent) WithOnPercept(fn func(content, consumerHint string), nonce string) *Agent {
+// fn receives the percept body and the consumer-hint name (one of the configured
+// agent names, or "" for all agents).
+// nonce must be the same value passed to escalation.MemoryInstruction(nonce, ...).
+// primaryName and escalationName are the configured agent names used to parse
+// @<name>: prefixes in percept bodies.
+func (a *Agent) WithOnPercept(fn func(content, consumerHint string), nonce, primaryName, escalationName string) *Agent {
 	c := *a
 	c.onPercept = fn
 	c.perceptNonce = nonce
+	c.agentNames = []string{primaryName, escalationName}
 	return &c
 }
 
@@ -267,6 +272,7 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		OnThinking:     a.onThinking,
 		OnPercept:      a.onPercept,
 		PerceptNonce:   a.perceptNonce,
+		AgentNames:     a.agentNames,
 		OnNeed:         a.onNeed,
 		NeedNonce:      a.needNonce,
 		DebugLog:       a.debugLog,

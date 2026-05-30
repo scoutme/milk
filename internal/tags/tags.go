@@ -21,10 +21,14 @@ func PerceptTagPair(nonce string) (open, close_ string) {
 	return "<milk:percept:" + nonce + ">", "</milk:percept:" + nonce + ">"
 }
 
-// ConsumerHintFrom strips an optional "@local: " or "@claude: " prefix from s
-// and returns the remaining body and the hint label ("local", "claude", or "").
-func ConsumerHintFrom(s string) (body, hint string) {
-	for _, h := range []string{"local", "claude"} {
+// ConsumerHintFrom strips an optional "@<name>: " prefix from s where name is
+// one of the provided agent names, and returns the remaining body and the matched
+// name (or "" when no prefix matches).
+func ConsumerHintFrom(s string, names ...string) (body, hint string) {
+	for _, h := range names {
+		if h == "" {
+			continue
+		}
 		prefix := "@" + h + ": "
 		if strings.HasPrefix(s, prefix) {
 			return strings.TrimPrefix(s, prefix), h
@@ -258,10 +262,13 @@ func (tw *TagWriter) Flush() error {
 // PerceptWriter wraps an io.Writer and intercepts <milk:percept:*>…</milk:percept:*>
 // tags in the byte stream. Tags matching RecordNonce have their body passed to OnPercept.
 // ALL percept tags (any nonce) are stripped from display output.
+// AgentNames lists the known agent names used to parse @<name>: consumer-hint prefixes;
+// when empty, ConsumerHintFrom returns an empty hint for all percepts.
 type PerceptWriter struct {
 	W           io.Writer
 	OnPercept   func(content, consumerHint string)
 	RecordNonce string
+	AgentNames  []string
 	closeTag    string
 	buf         strings.Builder
 	inTag       bool
@@ -315,7 +322,7 @@ func (pw *PerceptWriter) Write(p []byte) (int, error) {
 			if idx := strings.Index(s, pw.closeTag); idx >= 0 {
 				raw := strings.TrimSpace(s[:idx])
 				if pw.OnPercept != nil && raw != "" && pw.closeTag == "</milk:percept:"+pw.RecordNonce+">" {
-					body, hint := ConsumerHintFrom(raw)
+					body, hint := ConsumerHintFrom(raw, pw.AgentNames...)
 					pw.OnPercept(body, hint)
 				}
 				tail := s[idx+len(pw.closeTag):]

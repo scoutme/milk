@@ -15,6 +15,10 @@ const identityBlock = "[Milk agent context]\n" +
 
 // BuildContext assembles the system-prompt context block for a CLI escalation.
 //
+// primaryName and escalationName are the configured names of the two agents;
+// they are embedded in the MemoryInstruction so the escalation agent knows
+// which @<name>: prefix to use for consumer-targeted percepts.
+//
 // On the first escalation (not a resume), it injects:
 //   - identity block
 //   - escalation brief (if agent-triggered via escalate)
@@ -25,7 +29,7 @@ const identityBlock = "[Milk agent context]\n" +
 //
 // On a resume, only identity + current need + last local summary + memory instruction
 // are included — the escalation agent already has its own conversation history.
-func BuildContext(sess *session.Session, nonce string, percepts []string, resuming bool) string {
+func BuildContext(sess *session.Session, nonce string, percepts []string, resuming bool, primaryName, escalationName string) string {
 	var b strings.Builder
 	b.WriteString(identityBlock)
 
@@ -48,7 +52,7 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, resumi
 	}
 
 	b.WriteString(NeedInstruction(nonce))
-	b.WriteString(MemoryInstruction(nonce))
+	b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
 	b.WriteString(formatPercepts(percepts))
 	return b.String()
 }
@@ -81,14 +85,15 @@ func NeedInstruction(nonce string) string {
 		"Tags are intercepted by milk, never shown to the user.\n\n"
 }
 
-// MemoryInstruction returns a system-prompt fragment that instructs the escalation agent to
+// MemoryInstruction returns a system-prompt fragment that instructs an agent to
 // emit atomic facts worth persisting using session-specific nonce tags.
+// primaryName and escalationName are the configured agent names used in the
+// @<name>: consumer-hint prefix so the model knows the actual agent identifiers.
 // nonce is a short alphanumeric string generated fresh each session so that
 // only live responses — not explanations or code examples about the tag format —
 // are captured by the stream layer.
-// Milk's stream layer intercepts and strips these tags, recording each fact into
-// the shared memory store with ProducerEscalation — they never appear in the output.
-func MemoryInstruction(nonce string) string {
+// Milk's stream layer intercepts and strips these tags — they never appear in the output.
+func MemoryInstruction(nonce, primaryName, escalationName string) string {
 	openTag := "<milk:percept:" + nonce + ">"
 	closeTag := "</milk:percept:" + nonce + ">"
 	return "[Milk shared memory]\n" +
@@ -96,5 +101,5 @@ func MemoryInstruction(nonce string) string {
 		"  " + openTag + "one fact" + closeTag + "\n" +
 		"One fact per tag. Skip transient state or current-task details. " +
 		"Tags are intercepted by milk, never shown. " +
-		"Prefix @local: or @claude: to target a specific agent.\n"
+		"Prefix @" + primaryName + ": or @" + escalationName + ": to target a specific agent.\n"
 }

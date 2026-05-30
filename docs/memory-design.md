@@ -233,8 +233,10 @@ The nonce is a 6-character alphanumeric string generated fresh per session by
 recording each fact into the store with `ProducerEscalation`. The tags never appear in Claude's
 displayed output.
 
-**Consumer hints.** Claude may prefix a tag body with `@local: ` or `@claude: ` to restrict which
-agent receives the percept at injection time. Unprefixed facts are visible to both agents.
+**Consumer hints.** Either agent may prefix a tag body with `@<primaryName>: ` or `@<escalationName>: `
+to restrict which agent receives the percept at injection time. The names match the configured
+`agents[].name` values and are embedded in `MemoryInstruction` at runtime. Unprefixed facts are
+visible to both agents. See ADR-0031 for details.
 
 ---
 

@@ -30,3 +30,4 @@
 * [28. Multi-Provider Local-Agent Configuration](0028-multi-provider-local-agent-config.md) *(superseded by 30)*
 * [29. Summary Bricks for Escalation Context](0029-summary-bricks-escalation-context.md)
 * [30. Agent Flavours: Unified Config and Escalation Refactor](0030-agent-flavours-unified-config.md)
+* [31. Local Agent Percept Writing, Dynamic Consumer Hints, and CurrentNeed Early-Exit Fallback](0031-local-percept-writing-and-dynamic-consumer-hints.md)
