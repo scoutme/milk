@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -168,6 +169,65 @@ func TestLocalOutputBytesSince(t *testing.T) {
 	// afterTurnIndex=3: nothing → 0
 	if got := s.LocalOutputBytesSince(3); got != 0 {
 		t.Errorf("LocalOutputBytesSince(3): want 0, got %d", got)
+	}
+}
+
+func TestRebuildSummaryBricks_EscalationSinceLastLocalOnly(t *testing.T) {
+	// Escalation turns followed by local turns: escalation brick should only
+	// cover the escalation turns before the last local boundary.
+	s := &Session{History: []Turn{
+		mkTurn(RoleUser, AgentEscalation, "old question"),
+		mkTurn(RoleAssistant, AgentEscalation, "old escalation reply that is definitely long enough to count"),
+		mkTurn(RoleUser, AgentLocal, "now local"),
+		mkTurn(RoleAssistant, AgentLocal, "local answer"),
+	}}
+	s.RebuildSummaryBricks(12000)
+	// After local work, escalation brick should be empty (local was most recent).
+	if s.LastEscalationSummary != "" {
+		t.Errorf("LastEscalationSummary should be empty when local was most recent, got %q", s.LastEscalationSummary)
+	}
+}
+
+func TestRebuildSummaryBricks_EscalationBrickCoversOnlyRecentEscalation(t *testing.T) {
+	// Local turns, then escalation turns: escalation brick should only cover
+	// the escalation turns since the last local turn.
+	longReply := "new escalation reply: " + strings.Repeat("x", 200) // > 200 chars to pass emptyEscalationSession
+	s := &Session{History: []Turn{
+		mkTurn(RoleUser, AgentLocal, "old local"),
+		mkTurn(RoleAssistant, AgentLocal, "old local answer"),
+		mkTurn(RoleUser, AgentEscalation, "escalated"),
+		mkTurn(RoleAssistant, AgentEscalation, longReply),
+	}}
+	s.RebuildSummaryBricks(12000)
+	if !contains(s.LastEscalationSummary, "new escalation reply") {
+		t.Errorf("expected recent escalation turn in LastEscalationSummary, got %q", s.LastEscalationSummary)
+	}
+}
+
+func TestEscalationMostRecent_EscalationLast(t *testing.T) {
+	s := &Session{History: []Turn{
+		mkTurn(RoleAssistant, AgentLocal, "local"),
+		mkTurn(RoleAssistant, AgentEscalation, "escalation"),
+	}}
+	if !EscalationMostRecent(s) {
+		t.Error("expected EscalationMostRecent=true when escalation turn is last")
+	}
+}
+
+func TestEscalationMostRecent_LocalLast(t *testing.T) {
+	s := &Session{History: []Turn{
+		mkTurn(RoleAssistant, AgentEscalation, "escalation"),
+		mkTurn(RoleAssistant, AgentLocal, "local"),
+	}}
+	if EscalationMostRecent(s) {
+		t.Error("expected EscalationMostRecent=false when local turn is last")
+	}
+}
+
+func TestEscalationMostRecent_NoHistory(t *testing.T) {
+	s := &Session{}
+	if EscalationMostRecent(s) {
+		t.Error("expected EscalationMostRecent=false for empty history")
 	}
 }
 

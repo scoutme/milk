@@ -1029,11 +1029,13 @@ func printPermissionRequest(req claude.ControlRequest, out io.Writer) {
 
 // sessionToMessages converts local-agent session turns to the local agent's Message format.
 // Escalation agent turns are excluded: the local model should only see its own prior conversation.
-// When the session has a LastEscalationSummary (i.e. the escalation agent did work previously),
-// it is prepended as a system-style assistant turn so the local model knows what Claude did.
+// When the escalation agent was the most recent active agent (i.e. there are escalation turns
+// after the last local turn), LastEscalationSummary is prepended so the local model knows what
+// Claude just did. It is not injected if local was already the last agent, to avoid re-showing
+// stale escalation context on every subsequent local turn.
 func sessionToMessages(sess *session.Session) []local.Message {
 	var msgs []local.Message
-	if sess.LastEscalationSummary != "" {
+	if sess.LastEscalationSummary != "" && session.EscalationMostRecent(sess) {
 		msgs = append(msgs, local.Message{
 			Role:    "assistant",
 			Content: "[Escalation agent summary]\n" + sess.LastEscalationSummary,
