@@ -459,6 +459,7 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 	_, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
 		OnPercept:    func(body, hint string) { got = append(got, captured{body, hint}) },
 		PerceptNonce: nonce,
+		AgentNames:   []string{"local", "claude"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -477,6 +478,7 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 }
 
 func TestConsumerHintFrom(t *testing.T) {
+	names := []string{"local", "claude"}
 	cases := []struct{ in, wantBody, wantHint string }{
 		{"@local: some fact", "some fact", "local"},
 		{"@claude: other fact", "other fact", "claude"},
@@ -484,7 +486,7 @@ func TestConsumerHintFrom(t *testing.T) {
 		{"@local:no space", "@local:no space", ""},
 	}
 	for _, c := range cases {
-		body, hint := consumerHintFrom(c.in)
+		body, hint := consumerHintFrom(c.in, names)
 		if body != c.wantBody || hint != c.wantHint {
 			t.Errorf("consumerHintFrom(%q) = (%q, %q), want (%q, %q)",
 				c.in, body, hint, c.wantBody, c.wantHint)

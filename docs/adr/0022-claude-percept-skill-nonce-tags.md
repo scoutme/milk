@@ -4,7 +4,7 @@ Date: 2026-05-20
 
 ## Status
 
-Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md)
+Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md); partially superseded by [ADR-0031](0031-local-percept-writing-and-dynamic-consumer-hints.md) (local agent write path, dynamic consumer hint names)
 
 ## Context
 
@@ -45,20 +45,22 @@ strips the tag from the display output, and calls `OnPercept(content, consumerHi
 multiple `Write` calls; partial tag bytes are buffered and flushed at stream end. An unclosed open
 tag (stream ended before the matching close tag) is silently discarded.
 
-**Consumer hints.** The tag body may be prefixed with `@local: ` or `@claude: ` to restrict which
-agent receives the percept at injection time. `consumerHintFrom` strips the prefix and returns the
-body and hint label. `ConsumerLocal` percepts are filtered out when building Claude's `[Remembered
-facts]` block; `ConsumerClaude` percepts are filtered out of the local agent's context.
+**Consumer hints.** The tag body may be prefixed with `@<primaryName>: ` or `@<escalationName>: `
+to restrict which agent receives the percept at injection time. The actual names are the configured
+`agents[].name` values injected into `MemoryInstruction` at runtime. `consumerHintFrom` / `ConsumerHintFrom`
+accept the names as a variadic so they match whatever names are in use. `ConsumerLocal` percepts
+are filtered out when building the escalation agent's `[Remembered facts]` block; `ConsumerEscalation`
+percepts are filtered out of the local agent's context. See ADR-0031 for the full dynamic-name design.
 
 **Re-injection on every `RunResume`.** The `MemoryInstruction` fragment (with its nonce) is
 appended to `--append-system-prompt` on every Claude turn, including `--resume` turns. This ensures
 the instruction survives context compaction: even if Claude's context window is compressed and the
 original instruction is dropped, the next turn re-injects it.
 
-**`BuildContext` percept injection.** `BuildContext(sess, nonce, percepts []string)` accepts an
+**`BuildContext` percept injection.** `BuildContext(sess, nonce, percepts []string, resuming bool, primaryName, escalationName string)` accepts an
 optional list of content strings. When non-empty, they are rendered as a `[Remembered facts]` block
-appended after the `MemoryInstruction`. This is the read path for Claude: top-k Percepts filtered
-by `ConsumerClaude` or `ConsumerAll` are passed in at turn start.
+appended after the `MemoryInstruction`. This is the read path for the escalation agent: top-k Percepts
+filtered by `ConsumerEscalation` or `ConsumerAll` are passed in at turn start.
 
 ## Consequences
 

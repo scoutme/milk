@@ -181,7 +181,7 @@ func defaults() Config {
 		},
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
-			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"},
+			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize", "context brick", "memory panel", "panel memory"},
 			LocalBelowTokens:    30,
 
 			EscalateThreshold: 6,

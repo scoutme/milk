@@ -139,11 +139,12 @@ type StreamOpts struct {
 	OnThinking func(text string)
 	// OnPercept is called for each <milk:percept:NONCE>…</milk:percept:NONCE> tag found
 	// in the stream. The tag content is stripped from the display output before calling.
-	// consumerHint is "local", "claude", or "" (all), parsed from an optional "@local: "
-	// or "@claude: " prefix in the tag body.
+	// consumerHint is one of the configured agent names (or "" for all agents), parsed
+	// from an optional "@<name>: " prefix in the tag body.
 	// PerceptNonce must be set to the same nonce used in the system prompt instruction.
 	OnPercept    func(content, consumerHint string)
-	PerceptNonce string // session-specific nonce; required when OnPercept is non-nil
+	PerceptNonce string   // session-specific nonce; required when OnPercept is non-nil
+	AgentNames   []string // [primaryName, escalationName] for consumer-hint prefix parsing
 	// OnNeed is called when a <milk:need:NONCE>…</milk:need:NONCE> tag is found in the
 	// stream. The tag content (one-sentence user goal description) is stripped from the
 	// display output and passed to OnNeed. NeedNonce must match PerceptNonce.
@@ -204,7 +205,7 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 		out = &tagWriter{w: out, openPrefix: needOpenPrefix, onTag: func(body string) { opts.OnNeed(strings.TrimSpace(body)) }, recordNonce: opts.NeedNonce}
 	}
 	if opts.OnPercept != nil {
-		out = &perceptWriter{w: out, onPercept: opts.OnPercept, recordNonce: opts.PerceptNonce}
+		out = &perceptWriter{w: out, onPercept: opts.OnPercept, recordNonce: opts.PerceptNonce, agentNames: opts.AgentNames}
 	}
 	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onToolUseReady: opts.OnToolUseReady, onThinking: opts.OnThinking}
 
@@ -688,6 +689,7 @@ type perceptWriter struct {
 	w           io.Writer
 	onPercept   func(content, consumerHint string)
 	recordNonce string          // only tags with this nonce call onPercept; others are still stripped
+	agentNames  []string        // [primaryName, escalationName] for consumer-hint prefix parsing
 	closeTag    string          // set once an open tag is fully parsed; cleared on close
 	buf         strings.Builder // accumulates bytes while inside or possibly inside a tag
 	inTag       bool            // true once the open tag is confirmed
@@ -695,10 +697,13 @@ type perceptWriter struct {
 	codeBtCount int             // backticks collected while scanning for span opener/closer
 }
 
-// consumerHintFrom strips an optional "@local: " or "@claude: " prefix from s
-// and returns the remaining body and the hint label ("local", "claude", or "").
-func consumerHintFrom(s string) (body, hint string) {
-	for _, h := range []string{"local", "claude"} {
+// consumerHintFrom strips an optional "@<name>: " prefix from s where name is
+// one of the provided agent names, and returns the remaining body and the matched name.
+func consumerHintFrom(s string, names []string) (body, hint string) {
+	for _, h := range names {
+		if h == "" {
+			continue
+		}
 		prefix := "@" + h + ": "
 		if strings.HasPrefix(s, prefix) {
 			return strings.TrimPrefix(s, prefix), h
@@ -763,7 +768,7 @@ func (pw *perceptWriter) Write(p []byte) (int, error) {
 				raw := strings.TrimSpace(s[:idx])
 				// Only record into memory when the nonce matches the current turn.
 				if pw.onPercept != nil && raw != "" && pw.closeTag == "</milk:percept:"+pw.recordNonce+">" {
-					body, hint := consumerHintFrom(raw)
+					body, hint := consumerHintFrom(raw, pw.agentNames)
 					pw.onPercept(body, hint)
 				}
 				// Emit any bytes after the close tag to the real writer (tag body is always stripped).
