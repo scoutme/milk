@@ -58,7 +58,10 @@ type Session struct {
 	// Summary bricks — maintained eagerly after each turn.
 	// CurrentNeed tracks what the user is trying to accomplish; updated by
 	// <milk:need:NONCE> tags emitted by either agent when context switches.
-	CurrentNeed string `json:"current_need,omitempty"`
+	// CurrentNeedSetAt is len(History) at the time CurrentNeed was last written;
+	// used to detect stale needs that may already have been fulfilled.
+	CurrentNeed      string `json:"current_need,omitempty"`
+	CurrentNeedSetAt int    `json:"current_need_set_at,omitempty"`
 	// EscalationBrief is set when the local model calls escalate(reason).
 	// It is tactical and ephemeral: overwritten on each agent-triggered escalation.
 	EscalationBrief string `json:"escalation_brief,omitempty"`

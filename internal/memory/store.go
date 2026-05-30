@@ -321,6 +321,56 @@ func (s *Store) FindByIDPrefix(prefix string) []Percept {
 	return out
 }
 
+// PruneGlobal removes lowest-weight non-core percepts from the global store
+// until the total count is at most max. Does nothing when max <= 0.
+func (s *Store) PruneGlobal(max int) error {
+	if max <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	percepts := s.global.Percepts
+	if len(percepts) <= max {
+		return nil
+	}
+
+	// Stable-sort ascending by weight, keeping core percepts at the top so
+	// they are never evicted by the slice trim below.
+	sorted := make([]Percept, len(percepts))
+	copy(sorted, percepts)
+
+	// Separate core from non-core.
+	var core, nonCore []Percept
+	for _, p := range sorted {
+		if p.Core {
+			core = append(core, p)
+		} else {
+			nonCore = append(nonCore, p)
+		}
+	}
+
+	// Sort non-core ascending by weight so lowest-weight are at the front.
+	for i := 1; i < len(nonCore); i++ {
+		for j := i; j > 0 && nonCore[j].W < nonCore[j-1].W; j-- {
+			nonCore[j], nonCore[j-1] = nonCore[j-1], nonCore[j]
+		}
+	}
+
+	// Drop from the low-weight end of nonCore until total fits.
+	total := len(core) + len(nonCore)
+	drop := total - max
+	if drop > len(nonCore) {
+		drop = len(nonCore)
+	}
+	if drop > 0 {
+		nonCore = nonCore[drop:]
+	}
+
+	s.global.Percepts = append(core, nonCore...)
+	return s.saveFile(s.globalPath, s.global)
+}
+
 // Flush persists both stores to disk.
 func (s *Store) Flush() error {
 	s.mu.Lock()

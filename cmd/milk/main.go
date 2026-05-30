@@ -194,7 +194,10 @@ func run(cmd *cobra.Command, args []string) error {
 	switch target {
 	case router.TargetLocal:
 		if mem != nil {
-			defer mem.Consolidate() //nolint:errcheck
+			defer func() {
+				_ = mem.Consolidate()
+				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
+			}()
 		}
 		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
 	case router.TargetEscalation:
@@ -433,7 +436,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 
 	nonce := claude.GenerateNonce()
 	agent = agent.WithTagCallbacks(nonce, "local", "claude",
-		func(content string) { sess.CurrentNeed = content },
+		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) },
 		func(content, consumerHint string) {
 			if mem == nil {
 				return
@@ -474,6 +477,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			// Set CurrentNeed from the prompt itself so the escalation agent has context.
 			if sess.CurrentNeed == "" {
 				sess.CurrentNeed = prompt
+				sess.CurrentNeedSetAt = len(sess.History)
 			}
 			sess.RebuildSummaryBricks(cfg.ContextBudget())
 			sess.ForceState(session.StateRouting)
@@ -660,13 +664,14 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	}
 	agent = agent.WithOnNeed(func(content string) {
 		sess.CurrentNeed = content
+		sess.CurrentNeedSetAt = len(sess.History)
 	}, nonce)
 
 	injectInstructions := shouldInjectMemoryInstructions(cfg, sess, resuming)
 	if injectInstructions {
 		sess.MemoryInstructionInjectedAt = sess.EscalationTurnCount()
 	}
-	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForEscalation(mem), injectInstructions, primaryName, escalationName)
+	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, resuming, nonce, perceptsForEscalation(cfg, mem, prompt), injectInstructions, primaryName, escalationName)
 	aw.Done()
 	if err != nil {
 		return err
@@ -1065,15 +1070,17 @@ func runDrop() error {
 	return nil
 }
 
-// perceptsForEscalation returns the content strings of all percepts that Claude
-// should receive at session start: those not exclusively targeted at the local
-// agent and not already produced by Claude (to avoid echo loops).
-func perceptsForEscalation(mem *memory.Store) []string {
+// perceptsForEscalation returns the content strings of percepts that Claude
+// should receive: those not exclusively targeted at the local agent and not
+// already produced by Claude (to avoid echo loops). Results are relevance-gated
+// against the prompt and size-capped per config before returning.
+func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) []string {
 	if mem == nil {
 		return nil
 	}
+	// List returns percepts sorted by weight descending — required for LimitInjection.
 	all := mem.List(memory.ListOpts{})
-	var out []string
+	var candidates []memory.Percept
 	for _, p := range all {
 		if p.Producer == memory.ProducerEscalation {
 			continue // Claude wrote it; no need to echo it back
@@ -1081,7 +1088,18 @@ func perceptsForEscalation(mem *memory.Store) []string {
 		if p.Consumer == memory.ConsumerLocal {
 			continue // explicitly local-only
 		}
-		out = append(out, p.Content)
+		candidates = append(candidates, p)
+	}
+
+	if cfg.PerceptRelevanceGateEnabled() {
+		candidates = memory.FilterByRelevance(candidates, prompt)
+	}
+
+	candidates = memory.LimitInjection(candidates, cfg.PerceptInjectMaxCount(), cfg.PerceptInjectMaxByteCount())
+
+	out := make([]string, len(candidates))
+	for i, p := range candidates {
+		out[i] = p.Content
 	}
 	return out
 }

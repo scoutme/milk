@@ -175,6 +175,26 @@ type Config struct {
 	// after which the memory/need instruction block is unconditionally re-injected.
 	// Default: 40000. Set to 0 to disable this threshold.
 	MemoryReinjectionBytes int `json:"memory_reinjection_bytes,omitempty"`
+
+	// PerceptInjectMax caps the number of percepts injected into the escalation
+	// context per turn. Lowest-weight percepts are dropped when over budget.
+	// Default: 25. Set to 0 for no limit.
+	PerceptInjectMax int `json:"percept_inject_max,omitempty"`
+
+	// PerceptInjectMaxBytes caps the total byte size of percept content injected
+	// per turn. Lowest-weight percepts are dropped when over budget.
+	// Default: 2048. Set to 0 for no limit.
+	PerceptInjectMaxBytes int `json:"percept_inject_max_bytes,omitempty"`
+
+	// PerceptStoreMax caps the total number of percepts in the global store.
+	// After consolidation, lowest-weight non-core percepts are pruned to this limit.
+	// Default: 0 (no limit).
+	PerceptStoreMax int `json:"percept_store_max,omitempty"`
+
+	// PerceptRelevanceGate enables keyword-intersection filtering before injection:
+	// percepts with zero token overlap with the current prompt are skipped.
+	// Default: true. Set to false to disable.
+	PerceptRelevanceGate *bool `json:"percept_relevance_gate,omitempty"`
 }
 
 func defaults() Config {
@@ -245,6 +265,48 @@ func (c Config) MemoryReinjectionByteThreshold() int {
 		return 40000
 	}
 	return c.MemoryReinjectionBytes
+}
+
+// PerceptInjectMaxCount returns the max number of percepts to inject per turn,
+// defaulting to 25. Returns 0 when explicitly disabled (unlimited).
+func (c Config) PerceptInjectMaxCount() int {
+	if c.PerceptInjectMax < 0 {
+		return 0
+	}
+	if c.PerceptInjectMax == 0 {
+		return 25
+	}
+	return c.PerceptInjectMax
+}
+
+// PerceptInjectMaxByteCount returns the max byte size of percept content to
+// inject per turn, defaulting to 2048. Returns 0 when explicitly disabled.
+func (c Config) PerceptInjectMaxByteCount() int {
+	if c.PerceptInjectMaxBytes < 0 {
+		return 0
+	}
+	if c.PerceptInjectMaxBytes == 0 {
+		return 2048
+	}
+	return c.PerceptInjectMaxBytes
+}
+
+// PerceptStoreSizeLimit returns the configured global store size cap.
+// Returns 0 when not set (no limit).
+func (c Config) PerceptStoreSizeLimit() int {
+	if c.PerceptStoreMax < 0 {
+		return 0
+	}
+	return c.PerceptStoreMax
+}
+
+// PerceptRelevanceGateEnabled returns whether relevance-gating is active.
+// Defaults to true when unset.
+func (c Config) PerceptRelevanceGateEnabled() bool {
+	if c.PerceptRelevanceGate == nil {
+		return true
+	}
+	return *c.PerceptRelevanceGate
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility

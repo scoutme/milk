@@ -3773,7 +3773,8 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 	if mem != nil {
-		mem.Consolidate() //nolint:errcheck
+		_ = mem.Consolidate()
+		_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 	}
 	return err
 }
