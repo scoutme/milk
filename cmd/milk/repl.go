@@ -458,6 +458,9 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "ctrl+m":
 		m.busyHint = "agent is responding — Ctrl+C to interrupt"
 		return m, busyHintClearCmd()
+	case "ctrl+t":
+		m = m.toggleThinking()
+		return m, nil
 	case "pgup", "ctrl+u":
 		m.vp.HalfPageUp()
 		return m, nil
@@ -1029,7 +1032,7 @@ func (m *model) appendTranscript(text string) {
 func (m *model) appendThinking(text string) {
 	m.transcript.WriteString(dim(text))
 	if !m.thinkingActiveInTurn {
-		m.transcriptNoThink.WriteString(dim("[thinking…]"))
+		m.transcriptNoThink.WriteString(dim("[thinking… Ctrl+T to show]"))
 		m.thinkingActiveInTurn = true
 	}
 	if m.ready {
@@ -1610,6 +1613,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m = m.handleTab()
 		return m, nil
+	case "ctrl+t":
+		m = m.toggleThinking()
+		return m, nil
 	case "pgup", "ctrl+u":
 		m.vp.HalfPageUp()
 		return m, nil
@@ -1845,6 +1851,21 @@ func (m model) handleThinkCmd(arg string) model {
 			state = "on"
 		}
 		m.appendTranscript(fmt.Sprintf("%s reasoning visibility: %s  (use /think on|off)\n", milkTag(), bold(state)))
+	}
+	return m
+}
+
+// toggleThinking flips reasoning visibility and appends a status line.
+// Works at any time including while the agent is responding, since it only
+// mutates showThinking and the colorize cache — no input submission needed.
+func (m model) toggleThinking() model {
+	m.showThinking = !m.showThinking
+	m.colorizeForce = true
+	m.colorizeTransLen = 0
+	if m.showThinking {
+		m.appendTranscript(milkTag() + " reasoning visibility: on\n")
+	} else {
+		m.appendTranscript(milkTag() + " reasoning visibility: off\n")
 	}
 	return m
 }
