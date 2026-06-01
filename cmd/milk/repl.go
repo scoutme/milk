@@ -4059,6 +4059,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
+	localAgent.WithLogContext(cfg.Otel.LogContext)
 
 	// Build the escalation-local agent when the escalation target is a second
 	// local provider rather than the Claude CLI.
@@ -4070,6 +4071,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if od, err := config.OtelDir(); err == nil {
 				escalationLocalAgent.WithOtelDir(od)
 			}
+			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
 			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
