@@ -131,7 +131,14 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		})
 	}
 
+	// --- Milk log ---
+	stopDebug, err := initMilkLogger(cfg, otelDir)
+	if err != nil {
+		return nil, err
+	}
+
 	return func(ctx context.Context) error {
+		stopDebug()
 		var last error
 		for _, fn := range shutdowns {
 			if err := fn(ctx); err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tags"
 )
@@ -335,7 +336,7 @@ const systemPromptShared = `Rules:
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:
 1. Call bash with "git status" and "git diff --stat HEAD" to see what is staged or changed.
-2. Call get_session_context with agent: "local" to check whether the primary local agent performed those changes in this session.
+2. Call get_session_context with agent: "primary" to check whether the primary agent performed those changes in this session.
 3. Call get_session_context with agent: "escalation" to check whether the escalation agent made those changes.
 4. Only proceed with a commit if step 2 OR step 3 returned clear context that explains the changes and their purpose. Use that context to write an accurate commit message.
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.`
@@ -350,12 +351,12 @@ const systemPromptPrimary = `You are a coding and shell automation assistant wit
 
 // systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
 // %s is the escalation agent name (e.g. "haiku-aws").
-const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary local agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history. Tools available: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics.
+const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history. Tools available: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics.
 
 ` + systemPromptShared + `
-- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "local" to see what the primary agent did, or agent: "escalation" for your own prior turns.
+- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
 - You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "local" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
 
 func buildSystemPrompt(cwd, escalationName string) string {
 	var base string
@@ -627,6 +628,11 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 	for _, tc := range toolCalls {
 		printToolLine(out, tc)
+		args := tc.Function.Arguments
+		if len(args) > 120 {
+			args = args[:120] + "…"
+		}
+		obs.Debug("tool call", "name", tc.Function.Name, "args", args)
 
 		if toolNeedsPermission(tc.Function.Name) {
 			var argMap map[string]any
@@ -858,9 +864,9 @@ func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
 	if a.useBedrockNative {
 		return a.bedrockClassify(ctx, prompt)
 	}
-	classifyPrompt := `Respond with exactly one word: "local" or "escalate".
+	classifyPrompt := `Respond with exactly one word: "primary" or "escalate".
 Use "escalate" only when the task clearly requires complex multi-file refactoring, architectural design decisions, or deep reasoning beyond coding assistance.
-Use "local" for shell commands, file reading, grep, simple code questions, debugging, and writing small functions.
+Use "primary" for shell commands, file reading, grep, simple code questions, debugging, and writing small functions.
 
 Task: ` + prompt
 
