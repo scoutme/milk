@@ -142,3 +142,249 @@ func TestLocalMemoryReinjectionByteThreshold_Disabled(t *testing.T) {
 		t.Errorf("expected 0 when disabled, got %d", got)
 	}
 }
+
+// helpers for concise pointer literals in tests.
+func intPtr(v int) *int    { return &v }
+func boolPtr(v bool) *bool { return &v }
+
+// --- Per-agent resolver tests ---
+
+func TestAgentContextBudget_NilLimits(t *testing.T) {
+	cfg := Config{ContextBudgetChars: 5000}
+	ac := AgentConfig{}
+	if got := cfg.AgentContextBudget(ac); got != 5000 {
+		t.Errorf("expected global fallback 5000, got %d", got)
+	}
+}
+
+func TestAgentContextBudget_Override(t *testing.T) {
+	cfg := Config{ContextBudgetChars: 5000}
+	ac := AgentConfig{Limits: &AgentLimits{ContextBudgetChars: intPtr(8000)}}
+	if got := cfg.AgentContextBudget(ac); got != 8000 {
+		t.Errorf("expected per-agent 8000, got %d", got)
+	}
+}
+
+func TestAgentContextBudget_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{ContextBudgetChars: intPtr(0)}}
+	if got := cfg.AgentContextBudget(ac); got != 12000 {
+		t.Errorf("expected built-in default 12000, got %d", got)
+	}
+}
+
+func TestAgentContextBudget_Negative_Unlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{ContextBudgetChars: intPtr(-1)}}
+	if got := cfg.AgentContextBudget(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited), got %d", got)
+	}
+}
+
+func TestAgentMessageBudget_NilLimits(t *testing.T) {
+	cfg := Config{LocalContextBudgetChars: 6000}
+	ac := AgentConfig{}
+	if got := cfg.AgentMessageBudget(ac); got != 6000 {
+		t.Errorf("expected global fallback 6000, got %d", got)
+	}
+}
+
+func TestAgentMessageBudget_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MessageBudgetChars: intPtr(10000)}}
+	if got := cfg.AgentMessageBudget(ac); got != 10000 {
+		t.Errorf("expected 10000, got %d", got)
+	}
+}
+
+func TestAgentMessageBudget_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MessageBudgetChars: intPtr(0)}}
+	if got := cfg.AgentMessageBudget(ac); got != 24000 {
+		t.Errorf("expected built-in default 24000, got %d", got)
+	}
+}
+
+func TestAgentMessageBudget_Negative_Unlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MessageBudgetChars: intPtr(-1)}}
+	if got := cfg.AgentMessageBudget(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited), got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionTurnThreshold_NilLimits_Local(t *testing.T) {
+	cfg := Config{LocalMemoryReinjectionTurns: 7}
+	ac := AgentConfig{}
+	if got := cfg.AgentMemoryReinjectionTurnThreshold(ac, true); got != 7 {
+		t.Errorf("expected local global fallback 7, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionTurnThreshold_NilLimits_Escalation(t *testing.T) {
+	cfg := Config{MemoryReinjectionTurns: 12}
+	ac := AgentConfig{}
+	if got := cfg.AgentMemoryReinjectionTurnThreshold(ac, false); got != 12 {
+		t.Errorf("expected escalation global fallback 12, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionTurnThreshold_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionTurns: intPtr(5)}}
+	if got := cfg.AgentMemoryReinjectionTurnThreshold(ac, true); got != 5 {
+		t.Errorf("expected 5, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionTurnThreshold_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionTurns: intPtr(0)}}
+	if got := cfg.AgentMemoryReinjectionTurnThreshold(ac, true); got != 20 {
+		t.Errorf("expected built-in default 20, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionTurnThreshold_Negative_Disabled(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionTurns: intPtr(-1)}}
+	if got := cfg.AgentMemoryReinjectionTurnThreshold(ac, true); got != 0 {
+		t.Errorf("expected 0 (disabled), got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionByteThreshold_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionBytes: intPtr(20000)}}
+	if got := cfg.AgentMemoryReinjectionByteThreshold(ac, true); got != 20000 {
+		t.Errorf("expected 20000, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionByteThreshold_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionBytes: intPtr(0)}}
+	if got := cfg.AgentMemoryReinjectionByteThreshold(ac, false); got != 40000 {
+		t.Errorf("expected built-in default 40000, got %d", got)
+	}
+}
+
+func TestAgentMemoryReinjectionByteThreshold_Negative_Disabled(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryReinjectionBytes: intPtr(-1)}}
+	if got := cfg.AgentMemoryReinjectionByteThreshold(ac, false); got != 0 {
+		t.Errorf("expected 0 (disabled), got %d", got)
+	}
+}
+
+func TestAgentMemoryResultMaxByteCount_NilLimits(t *testing.T) {
+	cfg := Config{LocalMemoryResultMaxBytes: 1024}
+	ac := AgentConfig{}
+	if got := cfg.AgentMemoryResultMaxByteCount(ac); got != 1024 {
+		t.Errorf("expected global fallback 1024, got %d", got)
+	}
+}
+
+func TestAgentMemoryResultMaxByteCount_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryResultMaxBytes: intPtr(512)}}
+	if got := cfg.AgentMemoryResultMaxByteCount(ac); got != 512 {
+		t.Errorf("expected 512, got %d", got)
+	}
+}
+
+func TestAgentMemoryResultMaxByteCount_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryResultMaxBytes: intPtr(0)}}
+	if got := cfg.AgentMemoryResultMaxByteCount(ac); got != 2048 {
+		t.Errorf("expected built-in default 2048, got %d", got)
+	}
+}
+
+func TestAgentMemoryResultMaxByteCount_Negative_Unlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MemoryResultMaxBytes: intPtr(-1)}}
+	if got := cfg.AgentMemoryResultMaxByteCount(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited), got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxCount_NilLimits(t *testing.T) {
+	cfg := Config{PerceptInjectMax: 10}
+	ac := AgentConfig{}
+	if got := cfg.AgentPerceptInjectMaxCount(ac); got != 10 {
+		t.Errorf("expected global fallback 10, got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxCount_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMax: intPtr(3)}}
+	if got := cfg.AgentPerceptInjectMaxCount(ac); got != 3 {
+		t.Errorf("expected 3, got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxCount_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMax: intPtr(0)}}
+	if got := cfg.AgentPerceptInjectMaxCount(ac); got != 25 {
+		t.Errorf("expected built-in default 25, got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxCount_Negative_Unlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMax: intPtr(-1)}}
+	if got := cfg.AgentPerceptInjectMaxCount(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited), got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxByteCount_Override(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMaxBytes: intPtr(4096)}}
+	if got := cfg.AgentPerceptInjectMaxByteCount(ac); got != 4096 {
+		t.Errorf("expected 4096, got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxByteCount_Zero_UsesDefault(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMaxBytes: intPtr(0)}}
+	if got := cfg.AgentPerceptInjectMaxByteCount(ac); got != 2048 {
+		t.Errorf("expected built-in default 2048, got %d", got)
+	}
+}
+
+func TestAgentPerceptInjectMaxByteCount_Negative_Unlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptInjectMaxBytes: intPtr(-1)}}
+	if got := cfg.AgentPerceptInjectMaxByteCount(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited), got %d", got)
+	}
+}
+
+func TestAgentPerceptRelevanceGateEnabled_NilLimits_DefaultTrue(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{}
+	if got := cfg.AgentPerceptRelevanceGateEnabled(ac); !got {
+		t.Error("expected default true when nil")
+	}
+}
+
+func TestAgentPerceptRelevanceGateEnabled_Override_False(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptRelevanceGate: boolPtr(false)}}
+	if got := cfg.AgentPerceptRelevanceGateEnabled(ac); got {
+		t.Error("expected false from per-agent override")
+	}
+}
+
+func TestAgentPerceptRelevanceGateEnabled_Override_True(t *testing.T) {
+	cfg := Config{PerceptRelevanceGate: boolPtr(false)}
+	ac := AgentConfig{Limits: &AgentLimits{PerceptRelevanceGate: boolPtr(true)}}
+	if got := cfg.AgentPerceptRelevanceGateEnabled(ac); !got {
+		t.Error("expected per-agent true to override global disabled")
+	}
+}

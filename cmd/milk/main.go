@@ -447,21 +447,16 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	fmt.Fprint(out, bold(green(localLabel(cfg)))+" ")
 	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
-	if trimmed, ok := trimLocalMessages(history, cfg.LocalContextBudget()); ok {
-		obs.Debug("context trim", "agent", "primary", "budget_chars", cfg.LocalContextBudget(), "msgs_before", len(history), "msgs_after", len(trimmed))
-		history = trimmed
-		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), cfg.LocalContextBudget())
-	}
+	ac := cfg.ActiveAgent()
 
-	logStateTransition(sess, session.StateLocal, "run local")
-	sess.ForceState(session.StateLocal)
-
+	// Configure the agent before trimming so SystemOverheadChars can account for
+	// any memory instruction that will be injected on this turn.
 	nonce := claude.GenerateNonce()
 	agent = agent.WithMemConfig(local.MemConfig{
-		ResultMaxBytes:       cfg.LocalMemoryResultMaxByteCount(),
-		ReinjectionTurns:     cfg.LocalMemoryReinjectionTurnThreshold(),
-		ReinjectionBytes:     cfg.LocalMemoryReinjectionByteThreshold(),
-		RelevanceGateEnabled: cfg.PerceptRelevanceGateEnabled(),
+		ResultMaxBytes:       cfg.AgentMemoryResultMaxByteCount(ac),
+		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(ac, true),
+		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, true),
+		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 	}).WithTagCallbacks(nonce, "primary", "escalation",
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {
@@ -478,6 +473,22 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			_, _ = mem.Record(ctx, content, memory.ProducerLocal, consumer, memory.Roles{}, false)
 		},
 	)
+
+	msgBudget := cfg.AgentMessageBudget(ac)
+	if msgBudget > 0 {
+		overhead := agent.SystemOverheadChars(sess)
+		if overhead < msgBudget {
+			msgBudget -= overhead
+		}
+	}
+	if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
+		obs.Debug("context trim", "agent", "primary", "budget_chars", msgBudget, "msgs_before", len(history), "msgs_after", len(trimmed))
+		history = trimmed
+		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), msgBudget)
+	}
+
+	logStateTransition(sess, session.StateLocal, "run local")
+	sess.ForceState(session.StateLocal)
 
 	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess, mem)
 	aw.Done()
@@ -504,7 +515,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 				sess.CurrentNeed = prompt
 				sess.CurrentNeedSetAt = len(sess.History) + 1
 			}
-			sess.RebuildSummaryBricks(cfg.ContextBudget())
+			sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 			logStateTransition(sess, session.StateRouting, "pre-escalate local")
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
@@ -536,7 +547,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			Agent:   session.AgentLocal,
 			Content: assistantContent,
 		})
-		sess.RebuildSummaryBricks(cfg.ContextBudget())
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 	}
 
 	logStateTransition(sess, session.StateRouting, "local done")
@@ -581,7 +592,8 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
 	}
-	escName := strings.ToLower(strings.TrimSpace(cfg.EscalationAgentConfig().Name))
+	escAC := cfg.EscalationAgentConfig()
+	escName := strings.ToLower(strings.TrimSpace(escAC.Name))
 	if escName == "" {
 		escName = "escalation"
 	}
@@ -591,6 +603,45 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 	// Build history that the escalation agent should see: all turns, not just
 	// the primary-local ones, so it has full context.
 	history := escalationLocalHistory(sess, prompt)
+
+	// Configure the agent before trimming so SystemOverheadChars accounts for
+	// any memory instruction that will be injected on this turn.
+	nonce := claude.GenerateNonce()
+	primaryName := cfg.ActiveAgent().Name
+	agent = agent.WithMemConfig(local.MemConfig{
+		ResultMaxBytes:       cfg.AgentMemoryResultMaxByteCount(escAC),
+		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(escAC, false),
+		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(escAC, false),
+		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(escAC),
+	}).WithTagCallbacks(nonce, primaryName, escName,
+		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
+		func(content, consumerHint string) {
+			if mem == nil {
+				return
+			}
+			var consumer memory.Consumer
+			switch consumerHint {
+			case primaryName:
+				consumer = memory.ConsumerLocal
+			default:
+				consumer = memory.ConsumerEscalation
+			}
+			_, _ = mem.Record(ctx, content, memory.ProducerEscalation, consumer, memory.Roles{}, false)
+		},
+	)
+
+	msgBudget := cfg.AgentMessageBudget(escAC)
+	if msgBudget > 0 {
+		overhead := agent.SystemOverheadChars(sess)
+		if overhead < msgBudget {
+			msgBudget -= overhead
+		}
+	}
+	if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
+		obs.Debug("context trim", "agent", "escalation-local", "budget_chars", msgBudget, "msgs_before", len(history), "msgs_after", len(trimmed))
+		history = trimmed
+		fmt.Fprintf(out, "%s escalation context trimmed to fit budget (%d chars)\n", milkTag(), msgBudget)
+	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
 	logStateTransition(sess, session.StateEscalation, "run escalation-local")
@@ -612,7 +663,9 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 	}
 	if assistantContent != "" {
 		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: assistantContent})
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
 	}
+	sess.EscalationBrief = ""
 
 	logStateTransition(sess, session.StateRouting, "escalation-local done")
 	sess.ForceState(session.StateRouting)
@@ -739,7 +792,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		"cost_usd", res.TotalCostUSD)
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
-	sess.RebuildSummaryBricks(cfg.ContextBudget())
+	sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 	if res.EndsWithQ {
 		logStateTransition(sess, session.StateEscalationWaiting, "escalation ended with question")
 		sess.ForceState(session.StateEscalationWaiting)
@@ -818,8 +871,9 @@ func shouldInjectMemoryInstructions(cfg config.Config, sess *session.Session, re
 	if !resuming {
 		return true
 	}
-	turnThreshold := cfg.MemoryReinjectionTurnThreshold()
-	byteThreshold := cfg.MemoryReinjectionByteThreshold()
+	escAC := cfg.EscalationAgentConfig()
+	turnThreshold := cfg.AgentMemoryReinjectionTurnThreshold(escAC, false)
+	byteThreshold := cfg.AgentMemoryReinjectionByteThreshold(escAC, false)
 	if turnThreshold == 0 && byteThreshold == 0 {
 		return false
 	}
@@ -1099,30 +1153,51 @@ func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store, notif
 		}
 		prompt += fmt.Sprintf("%s Allow? [Y/n] ", milkTag())
 
-		// Race TUI input against remote notifier. Use a buffered channel so
-		// whichever goroutine finishes first sends without blocking.
+		// Race TUI input against remote notifier. Cancel the losing goroutine as
+		// soon as the first result arrives so neither leaks.
 		type result struct{ allow bool }
 		ch := make(chan result, 2)
+		raceCtx, cancelRace := context.WithCancel(context.Background())
+		defer cancelRace()
 
 		go func() {
-			yn, _ := input.readLine(prompt)
-			if yn == "" {
-				yn = "y"
+			// readLine blocks on a channel internally; we must also watch raceCtx
+			// so this goroutine exits when the Telegram side wins.
+			type lineResult struct {
+				yn  string
+				err error
 			}
-			ch <- result{allow: strings.EqualFold(yn, "y")}
+			lineCh := make(chan lineResult, 1)
+			go func() {
+				yn, err := input.readLine(prompt)
+				lineCh <- lineResult{yn: yn, err: err}
+			}()
+			select {
+			case lr := <-lineCh:
+				yn := lr.yn
+				if yn == "" {
+					yn = "y"
+				}
+				ch <- result{allow: strings.EqualFold(yn, "y")}
+			case <-raceCtx.Done():
+			}
 		}()
 
 		go func() {
-			dec := notifier.AskPermission(context.Background(), oversight.PermRequest{
+			dec := notifier.AskPermission(raceCtx, oversight.PermRequest{
 				ToolName:    b.ToolName,
 				Input:       cliToolArgSummary(b.Input),
 				Description: b.Description,
 				BlockedPath: b.BlockedPath,
 			})
-			ch <- result{allow: dec == oversight.PermAllow}
+			select {
+			case ch <- result{allow: dec == oversight.PermAllow}:
+			case <-raceCtx.Done():
+			}
 		}()
 
 		res := <-ch
+		cancelRace()
 		if res.allow {
 			claude.Allow(req.RequestID, stdinW)
 			if cs != nil {
@@ -1287,11 +1362,12 @@ func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) 
 		candidates = append(candidates, p)
 	}
 
-	if cfg.PerceptRelevanceGateEnabled() {
+	escAC := cfg.EscalationAgentConfig()
+	if cfg.AgentPerceptRelevanceGateEnabled(escAC) {
 		candidates = memory.FilterByRelevance(candidates, prompt)
 	}
 
-	candidates = memory.LimitInjection(candidates, cfg.PerceptInjectMaxCount(), cfg.PerceptInjectMaxByteCount())
+	candidates = memory.LimitInjection(candidates, cfg.AgentPerceptInjectMaxCount(escAC), cfg.AgentPerceptInjectMaxByteCount(escAC))
 
 	out := make([]string, len(candidates))
 	for i, p := range candidates {

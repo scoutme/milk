@@ -133,30 +133,39 @@ func TestBuildContext_NilPercepts(t *testing.T) {
 }
 
 func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
+	// Resume omits identity/need/instructions — only the changed primary summary is sent.
 	sess := &session.Session{
 		LastLocalSummary: "User: run tests",
 		CurrentNeed:      "fix failing tests",
 	}
 	got := BuildContext(sess, "n1", nil, ContextModeResume, false, "", "")
-	if !strings.Contains(got, "fix failing tests") {
-		t.Errorf("expected CurrentNeed on resume, got %q", got)
+	if strings.Contains(got, "fix failing tests") {
+		t.Error("resume should not include CurrentNeed (already cached in Claude's context)")
+	}
+	if strings.Contains(got, identityBlock) {
+		t.Error("resume should not include identity block (already cached)")
 	}
 	if !strings.Contains(got, "run tests") {
 		t.Errorf("expected LastLocalSummary on resume, got %q", got)
 	}
 }
 
-func TestBuildContext_ReturningIncludesEscalationSummary(t *testing.T) {
+func TestBuildContext_ReturningDoesNotIncludeEscalationSummary(t *testing.T) {
+	// ContextModeReturning uses --resume so Claude already has its history in context.
+	// Injecting the escalation summary would be redundant and bust the prompt cache.
 	sess := &session.Session{
 		LastEscalationSummary: "User: implement feature\nAssistant (escalation): done",
 		CurrentNeed:           "polish the UI",
 	}
 	got := BuildContext(sess, "n1", nil, ContextModeReturning, false, "", "")
-	if !strings.Contains(got, "implement feature") {
-		t.Errorf("expected LastEscalationSummary on returning, got %q", got)
+	if strings.Contains(got, "[Recent escalation agent activity]") {
+		t.Error("returning mode should not include escalation summary block (uses --resume)")
 	}
-	if !strings.Contains(got, "[Recent escalation agent activity]") {
-		t.Errorf("expected escalation activity header on returning, got %q", got)
+	if strings.Contains(got, "implement feature") {
+		t.Error("returning mode should not inject escalation summary content (uses --resume)")
+	}
+	if !strings.Contains(got, "polish the UI") {
+		t.Errorf("expected CurrentNeed on returning, got %q", got)
 	}
 }
 
@@ -185,16 +194,17 @@ func TestBuildContext_SkipsInstructionsWhenFlagFalse(t *testing.T) {
 }
 
 func TestBuildContext_InjectsInstructionsOnResumeWhenFlagTrue(t *testing.T) {
+	// Resume ignores injectInstructions — Claude already has them cached.
 	sess := &session.Session{CurrentNeed: "build auth"}
 	got := BuildContext(sess, "n1", []string{"a fact"}, ContextModeResume, true, "", "")
-	if !strings.Contains(got, "milk:percept:n1") {
-		t.Error("injectInstructions=true on resume should include memory instruction")
+	if strings.Contains(got, "milk:percept:n1") {
+		t.Error("resume should not include memory instruction (already cached)")
 	}
-	if !strings.Contains(got, "milk:need:n1") {
-		t.Error("injectInstructions=true on resume should include need instruction")
+	if strings.Contains(got, "milk:need:n1") {
+		t.Error("resume should not include need instruction (already cached)")
 	}
-	if !strings.Contains(got, "[Remembered facts]") {
-		t.Error("injectInstructions=true on resume should include percepts block")
+	if strings.Contains(got, "[Remembered facts]") {
+		t.Error("resume should not include percepts block (already cached)")
 	}
 }
 

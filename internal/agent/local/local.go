@@ -161,6 +161,35 @@ func (a *Agent) WithMemConfig(mc MemConfig) *Agent {
 	return &copy
 }
 
+// SystemOverheadChars returns an estimate of the character overhead that Run
+// will add as system messages on top of the history slice: the role system
+// prompt, the cwd context block (cached after the first call), and the memory
+// instruction block (when re-injection is due). Callers can subtract this from
+// their message-budget before trimming history to avoid silent overruns.
+func (a *Agent) SystemOverheadChars(sess *session.Session) int {
+	cwd := ""
+	if sess != nil {
+		cwd = sess.CWD
+	}
+	n := len(buildSystemPrompt(cwd, a.escalationName))
+	if cwd != "" {
+		if a.cachedCwd != cwd {
+			// Not yet cached; estimate from a fresh call.
+			n += len(cwdContext(cwd))
+		} else {
+			n += len(a.cachedCwdContext)
+		}
+	}
+	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
+		primaryName, escalationName := "", ""
+		if len(a.agentNames) >= 2 {
+			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
+		}
+		n += len(escalation.NeedInstruction(a.tagNonce)) + len(escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName))
+	}
+	return n
+}
+
 // HasTokenCmd reports whether this agent uses a token_cmd for authentication.
 func (a *Agent) HasTokenCmd() bool { return a.tokenCmd != nil }
 

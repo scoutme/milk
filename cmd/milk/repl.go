@@ -39,7 +39,7 @@ const agentTimeout = 10 * time.Minute
 
 // undoDebugLog is a debug-only file writer for undo/redo diagnostics.
 // Set undoDebugLogPath to a non-empty path to enable; leave empty to disable.
-const undoDebugLogPath = "/tmp/milk_undo_debug.log"
+const undoDebugLogPath = ""
 
 var undoDebugFile *os.File
 
@@ -1586,6 +1586,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newAgent.WithOnSigV4Refresh(func(err error) {
 					prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 				})
+				newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
+				ist := m.st
+				newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+					ist.sess.AddTokens(model, role, prompt, completion)
+				})
 				m.agents.local = newAgent
 				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 				m.rtr = router.New(m.st.cfg, newAgent)
@@ -2532,6 +2537,11 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 		newAgent.WithOnSigV4Refresh(func(err error) {
 			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 		})
+		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
+		ist := m.st
+		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			ist.sess.AddTokens(model, role, prompt, completion)
+		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 		m.rtr = router.New(m.st.cfg, newAgent)
@@ -2731,6 +2741,11 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		newAgent.WithOnSigV4Refresh(func(err error) {
 			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 		})
+		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
+		ist := m.st
+		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			ist.sess.AddTokens(model, role, prompt, completion)
+		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 		m.rtr = router.New(m.st.cfg, newAgent)
@@ -2776,6 +2791,11 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 			if od, err := config.OtelDir(); err == nil {
 				newEsc.WithOtelDir(od)
 			}
+			newEsc.WithLogContext(m.st.cfg.Otel.LogContext)
+			ist := m.st
+			newEsc.WithOnTokens(func(model, role string, prompt, completion int64) {
+				ist.sess.AddTokens(model, role, prompt, completion)
+			})
 			m.agents.escalationLocal = newEsc
 			m.agents.escalationAvail = newEsc.Ping(m.ctx) == nil
 		}

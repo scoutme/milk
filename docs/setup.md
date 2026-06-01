@@ -348,6 +348,54 @@ All keys go in `~/.milk/config.json`. Sensible defaults apply when omitted.
 | `context_budget_chars` | 12000 | Max characters per summary brick (`last_local_summary` / `last_claude_summary`) injected into the escalation system prompt. Oldest turns are dropped first. |
 | `local_context_budget_chars` | 24000 | Max total characters in the local agent's `messages` array per turn. Oldest user+assistant pairs are dropped when over budget. Set to 0 for no limit. |
 
+### Per-agent limit overrides
+
+Any entry in the `agents` array accepts a `limits` object that overrides the global context and memory settings for that specific agent. This lets you, for example, give a small Bedrock model a tighter context window without affecting the primary agent.
+
+```json
+{
+  "agents": [
+    {
+      "name": "haiku-aws",
+      "provider": "bedrock",
+      "model": "anthropic.claude-haiku-4-5",
+      "limits": {
+        "context_budget_chars": 6000,
+        "message_budget_chars": 12000,
+        "percept_inject_max": 5,
+        "percept_inject_max_bytes": 512,
+        "memory_result_max_bytes": 1024,
+        "memory_reinjection_turns": 10,
+        "memory_reinjection_bytes": 20000,
+        "percept_relevance_gate": true
+      }
+    }
+  ]
+}
+```
+
+All fields are optional. When omitted, the global value (or built-in default) applies.
+
+**Integer field semantics:**
+
+| Value | Meaning |
+|-------|---------|
+| omitted / `null` | Use global config value |
+| `0` | Use built-in hardcoded default |
+| positive integer | Use this exact value |
+| negative (e.g. `-1`) | Disabled / unlimited |
+
+| Field | Global key | Built-in default | Description |
+|-------|-----------|-----------------|-------------|
+| `context_budget_chars` | `context_budget_chars` | 12000 | Max chars per summary brick injected into the escalation system prompt |
+| `message_budget_chars` | `local_context_budget_chars` | 24000 | Max chars in message history per turn (oldest pairs dropped when over budget) |
+| `percept_inject_max` | `percept_inject_max` | 25 | Max percepts injected per turn |
+| `percept_inject_max_bytes` | `percept_inject_max_bytes` | 2048 | Max total bytes of injected percept content |
+| `memory_result_max_bytes` | `local_memory_result_max_bytes` | 2048 | Max bytes of a `get_memory` / `list_memory` tool result |
+| `memory_reinjection_turns` | `memory_reinjection_turns` / `local_memory_reinjection_turns` | 20 | Re-inject memory instructions after N turns |
+| `memory_reinjection_bytes` | `memory_reinjection_bytes` / `local_memory_reinjection_bytes` | 40000 | Re-inject memory instructions after N bytes of output |
+| `percept_relevance_gate` | `percept_relevance_gate` | `true` | Enable keyword-intersection filter before percept injection |
+
 ### Remote oversight (Telegram)
 
 Forward agent activity and permission prompts to a mobile device.

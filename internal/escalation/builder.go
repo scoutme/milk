@@ -37,26 +37,37 @@ const (
 // included. Pass true on the first escalation and on re-injection turns; pass
 // false on subsequent resume turns where the instructions are already in context.
 //
-// ContextModeFirst: identity + brief + need + primary summary + instructions + percepts
-// ContextModeResume: identity + need + primary summary + (optionally instructions)
-// ContextModeReturning: identity + brief (if set) + escalation summary + need + primary summary + (optionally instructions)
+// ContextModeFirst:    identity · brief · need · primary summary · instructions · percepts
+// ContextModeResume:   primary summary only (if changed) — identity/need/instructions already cached
+// ContextModeReturning: identity · brief · need · primary summary · (optionally instructions)
+//
+//	(no escalation summary — --resume already gives Claude its full prior history)
 func BuildContext(sess *session.Session, nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
 	var b strings.Builder
+
+	// Resume: Claude already has identity, need, instructions, and full history in its cached
+	// context. Only send what changed — the primary-agent summary — to minimise cache churn.
+	if mode == ContextModeResume {
+		if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
+			b.WriteString("[Recent primary agent activity]\n")
+			b.WriteString(sess.LastLocalSummary)
+			b.WriteString("\n")
+			sess.LastLocalSummaryInjected = sess.LastLocalSummary
+		}
+		return b.String()
+	}
+
+	// First and Returning: Claude needs full orientation.
 	b.WriteString(identityBlock)
 
-	// Brief: first escalation (agent-triggered), or returning if brief is still set.
-	if (mode == ContextModeFirst || mode == ContextModeReturning) && sess.EscalationBrief != "" {
+	if sess.EscalationBrief != "" {
 		b.WriteString("[Escalation brief from primary agent]\n")
 		b.WriteString(sess.EscalationBrief)
 		b.WriteString("\n\n")
 	}
 
-	// On returning, orient the escalation agent with what it did last and what the primary agent did since.
-	if mode == ContextModeReturning && sess.LastEscalationSummary != "" {
-		b.WriteString("[Recent escalation agent activity]\n")
-		b.WriteString(sess.LastEscalationSummary)
-		b.WriteString("\n\n")
-	}
+	// ContextModeReturning uses --resume so Claude already has its escalation history.
+	// Do not inject the escalation summary — it's redundant and busts the prompt cache.
 
 	if sess.CurrentNeed != "" {
 		// CurrentNeedSetAt is 1-based: 0 = never set (treat as fresh), ≥1 = len(History)+1 at write time.
@@ -73,9 +84,6 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, mode C
 		b.WriteString("\n\n")
 	}
 
-	// Include the primary-agent summary only when it has changed since the last injection.
-	// On ContextModeResume, an unchanged summary would shift the system-prompt suffix and
-	// bust Claude's prompt cache without adding information.
 	if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
 		b.WriteString("[Recent primary agent activity]\n")
 		b.WriteString(sess.LastLocalSummary)
