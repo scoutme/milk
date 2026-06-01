@@ -89,6 +89,13 @@ type streamEvent struct {
 	RequestID         string                   `json:"request_id"`
 	Request           controlRequestBody       `json:"request"`
 	PermissionDenials []PermissionDenialRecord `json:"permission_denials"`
+	Usage             *struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	} `json:"usage,omitempty"`
+	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
 }
 
 // PermissionDenialRecord records a tool that was blocked in the final result event.
@@ -105,6 +112,12 @@ type ParseResult struct {
 	EndsWithQ         bool // true if the final text ends with a question mark
 	IsError           bool
 	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
+	// Token usage from the result event (may be zero if not reported).
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	TotalCostUSD             float64
 	// streamedViaDeltas is set when text_delta events were received, so the
 	// final assistant event's text is skipped to avoid double-printing.
 	streamedViaDeltas bool
@@ -282,6 +295,13 @@ func applyResult(res *ParseResult, ev streamEvent) {
 	}
 	res.IsError = ev.IsError
 	res.PermissionDenials = ev.PermissionDenials
+	if ev.Usage != nil {
+		res.InputTokens = ev.Usage.InputTokens
+		res.OutputTokens = ev.Usage.OutputTokens
+		res.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
+		res.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
+	}
+	res.TotalCostUSD = ev.TotalCostUSD
 }
 
 func applyAssistant(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent) {

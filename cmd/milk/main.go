@@ -717,6 +717,16 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		res = handlePermissionDenials(ctx, sess, agent, res, input, out, pc, nonce, primaryName, escalationName)
 	}
 
+	escCfg := cfg.EscalationAgentConfig()
+	escModel := escCfg.Model
+	if escModel == "" {
+		escModel = escCfg.Name
+	}
+	obs.RecordTokens(ctx, escModel, "escalation", res.InputTokens, res.OutputTokens)
+	obs.Debug("tokens (claude)", "input", res.InputTokens, "output", res.OutputTokens,
+		"cache_read", res.CacheReadInputTokens, "cache_write", res.CacheCreationInputTokens,
+		"cost_usd", res.TotalCostUSD)
+
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
 	sess.RebuildSummaryBricks(cfg.ContextBudget())
 	if res.EndsWithQ {

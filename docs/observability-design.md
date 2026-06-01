@@ -99,7 +99,7 @@ The last three (`milk.otel.*_bytes`) are self-observability metrics: they make t
 | OpenAI-compatible (classify, non-streaming) | `usage` field in JSON response | Always present in spec-compliant servers |
 | Bedrock Converse (streaming) | `metadata` event in AWS Event Stream | Always present |
 | Bedrock Converse (classify, non-streaming) | `usage` field in JSON response | Always present |
-| Claude CLI subprocess | Not exposed via `stream-json` format | Never available — no token metrics emitted |
+| Claude CLI subprocess | `result` event `usage` field | Always present — parsed from the final `result` NDJSON line |
 
 ---
 
