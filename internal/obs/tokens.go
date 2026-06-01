@@ -101,58 +101,65 @@ func SessionCompletionTotal() int64 {
 // tkey is the composite key for token metric aggregation.
 type tkey struct{ metric, model, agent string }
 
-// FormatTokenUsage reads metrics.jsonl and returns a human-readable token usage
-// report grouped by model and agent role.
+// FormatTokenUsage returns a human-readable token usage report.
+// The cumulative table merges flushed metrics.jsonl data with the unflushed
+// in-memory session accumulator so the totals are always current.
 func FormatTokenUsage(ctx context.Context, otelDir string) string {
 	_ = ctx
-	path := filepath.Join(otelDir, "metrics.jsonl")
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "no token metrics recorded yet"
-		}
-		return fmt.Sprintf("error reading metrics: %v", err)
-	}
-	defer f.Close()
 
-	// Accumulate latest cumulative value per (metric, model, agent) from the file.
-	latest := map[tkey]float64{}
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		parseTokenMetricLine(line, latest)
-	}
-
-	// Build report grouped by agent role then model.
 	type rowKey struct{ agent, model string }
 	type row struct {
 		agent, model       string
 		prompt, completion float64
 	}
 	rowMap := map[rowKey]*row{}
-	for k, v := range latest { //nolint:gocritic
-		if k.metric != "milk.tokens.prompt" && k.metric != "milk.tokens.completion" {
-			continue
+
+	// Layer 1: flushed data from metrics.jsonl (may lag by up to flush interval).
+	path := filepath.Join(otelDir, "metrics.jsonl")
+	if f, err := os.Open(path); err == nil {
+		latest := map[tkey]float64{}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		for scanner.Scan() {
+			if line := scanner.Text(); line != "" {
+				parseTokenMetricLine(line, latest)
+			}
 		}
-		rk := rowKey{agent: k.agent, model: k.model}
-		r, ok := rowMap[rk]
-		if !ok {
-			r = &row{agent: k.agent, model: k.model}
-			rowMap[rk] = r
-		}
-		if k.metric == "milk.tokens.prompt" {
-			r.prompt = v
-		} else {
-			r.completion = v
+		f.Close()
+		for k, v := range latest { //nolint:gocritic
+			if k.metric != "milk.tokens.prompt" && k.metric != "milk.tokens.completion" {
+				continue
+			}
+			rk := rowKey{k.agent, k.model}
+			r, ok := rowMap[rk]
+			if !ok {
+				r = &row{agent: k.agent, model: k.model}
+				rowMap[rk] = r
+			}
+			if k.metric == "milk.tokens.prompt" {
+				r.prompt = v
+			} else {
+				r.completion = v
+			}
 		}
 	}
+
+	// Layer 2: in-memory session accumulator (always current, not yet flushed).
+	// We add session tokens on top of the disk values so the cumulative total is accurate.
+	sessionEntries, turns := SessionTotals()
+	for _, e := range sessionEntries {
+		rk := rowKey{e.Agent, e.Model}
+		r, ok := rowMap[rk]
+		if !ok {
+			r = &row{agent: e.Agent, model: e.Model}
+			rowMap[rk] = r
+		}
+		r.prompt += float64(e.Prompt)
+		r.completion += float64(e.Completion)
+	}
+
 	if len(rowMap) == 0 {
-		return "no token metrics found in metrics.jsonl (run a few turns first)"
+		return "no token metrics recorded yet (run a few turns first)"
 	}
 
 	rows := make([]row, 0, len(rowMap))
@@ -167,30 +174,26 @@ func FormatTokenUsage(ctx context.Context, otelDir string) string {
 	})
 
 	var b strings.Builder
-	fmt.Fprintln(&b, "token usage (cumulative, all sessions):")
+	fmt.Fprintln(&b, "token usage (cumulative):")
 	fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s\n", "role", "model", "prompt", "completion", "total")
 	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
 	var grandPrompt, grandCompletion float64
 	for _, r := range rows {
-		total := r.prompt + r.completion
 		grandPrompt += r.prompt
 		grandCompletion += r.completion
 		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f\n",
-			r.agent, r.model, r.prompt, r.completion, total)
+			r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion)
 	}
 	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
 	fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n",
 		"total", grandPrompt, grandCompletion, grandPrompt+grandCompletion)
 
-	// Append current session totals.
-	sessionEntries, turns := SessionTotals()
 	if len(sessionEntries) > 0 {
 		fmt.Fprintf(&b, "\nthis session (%d turns):\n", turns)
 		var sp, sc float64
 		for _, e := range sessionEntries {
-			total := float64(e.Prompt + e.Completion)
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10.0f\n",
-				e.Agent, e.Model, e.Prompt, e.Completion, total)
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
+				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion)
 			sp += float64(e.Prompt)
 			sc += float64(e.Completion)
 		}
@@ -209,7 +212,9 @@ func parseTokenMetricLine(line string, out map[tkey]float64) {
 					DataPoints []struct {
 						Attributes []struct {
 							Key   string `json:"Key"`
-							Value struct{ Value any `json:"Value"` } `json:"Value"`
+							Value struct {
+								Value any `json:"Value"`
+							} `json:"Value"`
 						} `json:"Attributes"`
 						Value float64 `json:"Value"`
 					} `json:"DataPoints"`
