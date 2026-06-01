@@ -165,7 +165,7 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 					"properties": map[string]any{
 						"last_n":  map[string]any{"type": "integer", "description": "Return only the last N turns. Omit to return all."},
 						"pattern": map[string]any{"type": "string", "description": "Case-insensitive substring filter — only turns whose content contains this string are returned."},
-						"agent":   map[string]any{"type": "string", "enum": []string{"local", "escalation"}, "description": "Restrict to turns from a specific agent role. Use \"local\" for the primary agent, \"escalation\" for the escalation agent. Omit for all turns."},
+						"agent":   map[string]any{"type": "string", "enum": []string{"primary", "escalation"}, "description": "Restrict to turns from a specific agent role. Use \"primary\" for the primary agent, \"escalation\" for the escalation agent. Omit for all turns."},
 					},
 					"required": []string{},
 				},
@@ -366,7 +366,7 @@ func dispatchCurrentNeed(sess *session.Session, argsJSON string) string {
 }
 
 // runGetSessionContext formats session history with optional filters:
-// last_n, pattern (substring), agent ("local"|"escalation").
+// last_n, pattern (substring), agent ("primary"|"escalation").
 func runGetSessionContext(sess *session.Session, args map[string]any) string {
 	if sess == nil || len(sess.History) == 0 {
 		return toolResult{Output: "(no session history yet)"}.String()

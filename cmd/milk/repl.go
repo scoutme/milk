@@ -1273,7 +1273,7 @@ func (m *model) statusBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("state:"+string(m.st.sess.State)), dim("agent:")+m.statusAgent())
+	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent())
 	right := dim(m.statusCwd() + " ")
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
@@ -1334,6 +1334,20 @@ func (m *model) statusAgent() string {
 		return frame + " " + pulsed
 	}
 	return agent
+}
+
+// sessionRole maps session state to the human-readable role shown in the status bar.
+func sessionRole(s session.State) string {
+	switch s {
+	case session.StateLocal:
+		return "PRIMARY"
+	case session.StateEscalation:
+		return "ESCALATION"
+	case session.StateEscalationWaiting:
+		return "ESCALATION_WAITING"
+	default:
+		return "ROUTING"
+	}
 }
 
 func agentLabel(st *interactiveState) string {

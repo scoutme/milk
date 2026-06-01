@@ -403,6 +403,11 @@ func resolveTarget(target router.Target, localAvail, escalationAvail bool) route
 	return target
 }
 
+// logStateTransition emits a debug log entry for a session state change.
+func logStateTransition(sess *session.Session, next session.State, trigger string) {
+	obs.Debug("state transition", "from", string(sess.State), "to", string(next), "trigger", trigger)
+}
+
 const cliLabel = "claude:"
 
 func cliLabelStyled(a *claude.Agent) string {
@@ -433,10 +438,12 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
 	if trimmed, ok := trimLocalMessages(history, cfg.LocalContextBudget()); ok {
+		obs.Debug("context trim", "agent", "primary", "budget_chars", cfg.LocalContextBudget(), "msgs_before", len(history), "msgs_after", len(trimmed))
 		history = trimmed
 		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), cfg.LocalContextBudget())
 	}
 
+	logStateTransition(sess, session.StateLocal, "run local")
 	sess.ForceState(session.StateLocal)
 
 	nonce := claude.GenerateNonce()
@@ -445,7 +452,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 		ReinjectionTurns:     cfg.LocalMemoryReinjectionTurnThreshold(),
 		ReinjectionBytes:     cfg.LocalMemoryReinjectionByteThreshold(),
 		RelevanceGateEnabled: cfg.PerceptRelevanceGateEnabled(),
-	}).WithTagCallbacks(nonce, "local", "claude",
+	}).WithTagCallbacks(nonce, "primary", "escalation",
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {
 			if mem == nil {
@@ -453,7 +460,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			}
 			var consumer memory.Consumer
 			switch consumerHint {
-			case "claude":
+			case "escalation":
 				consumer = memory.ConsumerEscalation
 			default:
 				consumer = memory.ConsumerLocal
@@ -488,6 +495,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 				sess.CurrentNeedSetAt = len(sess.History) + 1
 			}
 			sess.RebuildSummaryBricks(cfg.ContextBudget())
+			logStateTransition(sess, session.StateRouting, "pre-escalate local")
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
 			escalateAgent := newCLIAgent(cliAgentConfig(cfg))
@@ -521,6 +529,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 		sess.RebuildSummaryBricks(cfg.ContextBudget())
 	}
 
+	logStateTransition(sess, session.StateRouting, "local done")
 	sess.ForceState(session.StateRouting)
 	return session.Save(sess)
 }
@@ -574,6 +583,7 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 	history := escalationLocalHistory(sess, prompt)
 
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	logStateTransition(sess, session.StateEscalation, "run escalation-local")
 	sess.ForceState(session.StateEscalation)
 
 	updatedHistory, err := agent.Run(ctx, history, prompt, aw, sess, mem)
@@ -594,6 +604,7 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: assistantContent})
 	}
 
+	logStateTransition(sess, session.StateRouting, "escalation-local done")
 	sess.ForceState(session.StateRouting)
 	return session.Save(sess)
 }
@@ -656,6 +667,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		sess.EscalationBrief = brief
 	}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	logStateTransition(sess, session.StateEscalation, "run CLI escalation")
 	sess.ForceState(session.StateEscalation)
 
 	// Generate a fresh nonce for this escalation turn. The same nonce is embedded in
@@ -708,9 +720,11 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
 	sess.RebuildSummaryBricks(cfg.ContextBudget())
 	if res.EndsWithQ {
+		logStateTransition(sess, session.StateEscalationWaiting, "escalation ended with question")
 		sess.ForceState(session.StateEscalationWaiting)
 	} else {
 		sess.EscalationBrief = ""
+		logStateTransition(sess, session.StateRouting, "CLI escalation done")
 		sess.ForceState(session.StateRouting)
 	}
 	return session.Save(sess)

@@ -340,9 +340,9 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 
 // bedrockClassify uses the synchronous Bedrock Converse API for routing classification.
 func (a *Agent) bedrockClassify(ctx context.Context, prompt string) (bool, error) {
-	classifyPrompt := `You are a routing classifier. Respond with exactly one word: "local" or "escalate".
+	classifyPrompt := `You are a routing classifier. Respond with exactly one word: "primary" or "escalate".
 Respond "escalate" only if the task clearly requires: complex multi-file refactoring, architectural design decisions, or tasks that require deep reasoning beyond coding assistance.
-Respond "local" for: shell commands, file reading, grep, simple code questions, debugging, writing small functions.
+Respond "primary" for: shell commands, file reading, grep, simple code questions, debugging, writing small functions.
 
 Task: ` + prompt
 

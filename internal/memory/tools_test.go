@@ -60,7 +60,7 @@ func TestDispatchRecordMemory_UserProducer(t *testing.T) {
 
 func TestDispatchRecordMemory_ClaudeProducer(t *testing.T) {
 	s := newToolsStore(t)
-	result := DispatchRecordMemory(context.Background(), s, `{"content":"claude fact","producer":"claude"}`)
+	result := DispatchRecordMemory(context.Background(), s, `{"content":"escalation fact","producer":"escalation"}`)
 
 	var out map[string]any
 	if err := json.Unmarshal([]byte(result), &out); err != nil {
@@ -116,7 +116,7 @@ func TestDispatchRecordMemory_DuplicateReturnsSkipped(t *testing.T) {
 
 func TestDispatchRecordMemory_ConsumerHint(t *testing.T) {
 	s := newToolsStore(t)
-	result := DispatchRecordMemory(context.Background(), s, `{"content":"local-only fact","consumer":"local"}`)
+	result := DispatchRecordMemory(context.Background(), s, `{"content":"primary-only fact","consumer":"primary"}`)
 
 	var out map[string]any
 	if err := json.Unmarshal([]byte(result), &out); err != nil {

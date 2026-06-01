@@ -42,7 +42,8 @@ type Rules struct {
 // OtelConfig controls OpenTelemetry signal collection and file management.
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
-	LogLevel            string `json:"log_level"` // DEBUG | INFO | ERROR (default INFO)
+	LogLevel            string `json:"log_level"`  // minimum log level: DEBUG | INFO | WARN | ERROR (default INFO)
+	LogFormat           string `json:"log_format"` // "" or "off" (disabled), "text" (human-readable), "json" (structured)
 	Traces              bool   `json:"traces"`
 	Metrics             bool   `json:"metrics"`
 	WarnMB              int    `json:"warn_mb"`               // warn when any otel file exceeds this (0 = off)
@@ -157,7 +158,7 @@ type Config struct {
 
 	// ShowReasoning controls whether thinking/reasoning tokens are visible in the
 	// transcript by default. Can be toggled live with /think on|off.
-	// true (default) = show reasoning; false = show "[thinking…]" placeholder.
+	// false (default) = show "[thinking…]" placeholder; true = show reasoning.
 	ShowReasoning *bool `json:"show_reasoning,omitempty"`
 
 	// ContextBudgetChars is the maximum number of characters injected per
@@ -445,10 +446,10 @@ func (c Config) LocalContextBudget() int {
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility
-// (true when unset, i.e. show reasoning by default).
+// (false when unset, i.e. hide reasoning by default).
 func (c Config) ShowReasoningDefault() bool {
 	if c.ShowReasoning == nil {
-		return true
+		return false
 	}
 	return *c.ShowReasoning
 }
@@ -538,6 +539,15 @@ func OtelDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "otel"), nil
+}
+
+// MilkLogPath returns the path for the milk log file (~/.milk/otel/milk.log).
+func MilkLogPath() (string, error) {
+	d, err := OtelDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "milk.log"), nil
 }
 
 // HistoryPath returns the readline history file path for the given cwd.
