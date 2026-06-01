@@ -15,28 +15,14 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "record_memory",
-				"description": "Record a fact, preference, or decision worth remembering across sessions. Use when the user states a preference, makes a decision, or shares a fact that should persist. Set producer='user' when the fact was explicitly stated by the user; omit or use 'local'/'claude' for inferred facts.",
+				"description": "Persist a fact, preference, or decision across sessions.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"content": map[string]any{
-							"type":        "string",
-							"description": "Natural-language assertion to remember (e.g. 'User prefers flat file output over JSON').",
-						},
-						"subject": map[string]any{
-							"type":        "string",
-							"description": "Short subject label for grouping (e.g. 'user preferences', 'project setup').",
-						},
-						"producer": map[string]any{
-							"type":        "string",
-							"enum":        []string{"user", "primary", "escalation"},
-							"description": "Who is the source of this fact. Use 'user' when the user directly stated it; defaults to the calling agent.",
-						},
-						"consumer": map[string]any{
-							"type":        "string",
-							"enum":        []string{"primary", "escalation", ""},
-							"description": "Which agent receives this at injection time. 'primary' = only the primary agent; 'escalation' = only the escalation agent; omit or empty = both.",
-						},
+						"content":  map[string]any{"type": "string", "description": "Fact to remember."},
+						"subject":  map[string]any{"type": "string", "description": "Short label for grouping."},
+						"producer": map[string]any{"type": "string", "enum": []string{"user", "primary", "escalation"}, "description": "Source: 'user' if stated by user."},
+						"consumer": map[string]any{"type": "string", "enum": []string{"primary", "escalation", ""}, "description": "Target agent; omit for both."},
 					},
 					"required": []string{"content"},
 				},
@@ -46,22 +32,13 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "get_memory",
-				"description": "Retrieve Percepts (remembered facts) relevant to a query. Call before answering questions that reference past context or stated preferences.",
+				"description": "Retrieve remembered facts relevant to a query.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "Keywords or phrase describing what to recall.",
-						},
-						"min_confidence": map[string]any{
-							"type":        "number",
-							"description": "Minimum confidence weight [0,1] (default 0.4).",
-						},
-						"max_results": map[string]any{
-							"type":        "integer",
-							"description": "Maximum number of results to return (default 5).",
-						},
+						"query":          map[string]any{"type": "string", "description": "Keywords to recall."},
+						"min_confidence": map[string]any{"type": "number", "description": "Min weight [0,1] (default 0.4)."},
+						"max_results":    map[string]any{"type": "integer", "description": "Max results (default 5)."},
 					},
 					"required": []string{"query"},
 				},
@@ -71,28 +48,14 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "list_memory",
-				"description": "List Percepts stored in memory, optionally filtered by scope, producer, confidence, or keyword. Use this to inspect what the memory store currently contains.",
+				"description": "List stored memories, optionally filtered.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"scope": map[string]any{
-							"type":        "string",
-							"enum":        []string{"global", "session", ""},
-							"description": "Restrict to global or session scope. Omit for both.",
-						},
-						"producer": map[string]any{
-							"type":        "string",
-							"enum":        []string{"user", "primary", "escalation", "system", ""},
-							"description": "Filter by who created the Percept. Omit for all producers.",
-						},
-						"min_w": map[string]any{
-							"type":        "number",
-							"description": "Minimum confidence weight [0,1]. Omit for no floor.",
-						},
-						"pattern": map[string]any{
-							"type":        "string",
-							"description": "Case-insensitive substring to match against content.",
-						},
+						"scope":    map[string]any{"type": "string", "enum": []string{"global", "session", ""}, "description": "Scope filter."},
+						"producer": map[string]any{"type": "string", "enum": []string{"user", "primary", "escalation", "system", ""}, "description": "Producer filter."},
+						"min_w":    map[string]any{"type": "number", "description": "Min weight [0,1]."},
+						"pattern":  map[string]any{"type": "string", "description": "Substring filter."},
 					},
 					"required": []string{},
 				},
@@ -102,14 +65,11 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "forget_memory",
-				"description": "Delete a stored Percept by its ID or 8-char prefix. Use when the user explicitly asks to forget or remove a specific memory.",
+				"description": "Delete a stored memory by ID or 8-char prefix.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"id": map[string]any{
-							"type":        "string",
-							"description": "Full Percept ID or the 8-character prefix shown by list_memory.",
-						},
+						"id": map[string]any{"type": "string", "description": "Percept ID or 8-char prefix."},
 					},
 					"required": []string{"id"},
 				},

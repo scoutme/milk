@@ -12,7 +12,7 @@ func ToolSchemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "get_metrics",
-				"description": "Return the most recent values of all milk observability metrics (memory stats, otel file sizes). Use when the user asks about memory usage, percept counts, or observability status.",
+				"description": "Return current milk observability metrics (memory stats, otel file sizes).",
 				"parameters": map[string]any{
 					"type":       "object",
 					"properties": map[string]any{},
@@ -24,23 +24,13 @@ func ToolSchemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "search_signals",
-				"description": "Search OTel signal files (logs, traces, metrics) for lines matching a pattern. Useful for debugging, finding specific events, or inspecting what was observed.",
+				"description": "Search OTel signal files (logs, traces, metrics) for a pattern.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"pattern": map[string]any{
-							"type":        "string",
-							"description": "Case-insensitive substring to search for.",
-						},
-						"signals": map[string]any{
-							"type":        "array",
-							"items":       map[string]any{"type": "string", "enum": []string{"logs", "traces", "metrics"}},
-							"description": "Which signal files to search. Omit to search all three.",
-						},
-						"max_results": map[string]any{
-							"type":        "integer",
-							"description": "Maximum number of matching lines to return (default 20).",
-						},
+						"pattern":     map[string]any{"type": "string", "description": "Case-insensitive substring."},
+						"signals":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"logs", "traces", "metrics"}}, "description": "Files to search; omit for all."},
+						"max_results": map[string]any{"type": "integer", "description": "Max matches (default 20)."},
 					},
 					"required": []string{"pattern"},
 				},

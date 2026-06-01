@@ -69,6 +69,9 @@ type Session struct {
 	// LastLocalSummary is a pre-rendered, sanitized, budget-capped summary of
 	// local-agent turns since the last escalation turn. Injected when escalating to Claude.
 	LastLocalSummary string `json:"last_local_summary,omitempty"`
+	// LastLocalSummaryInjected is the value of LastLocalSummary at the time it was last
+	// sent to the escalation agent. Used to detect when re-injection is necessary.
+	LastLocalSummaryInjected string `json:"-"` // transient, not persisted
 	// LastEscalationSummary is a pre-rendered, sanitized, budget-capped summary of
 	// Escalation turns. Reserved for future demotion back to local.
 	LastEscalationSummary string `json:"last_claude_summary,omitempty"`

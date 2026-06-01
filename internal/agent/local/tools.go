@@ -159,13 +159,13 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 			"type": "function",
 			"function": map[string]any{
 				"name":        "get_session_context",
-				"description": "Return shared conversation history for this session (both agents). Use filters to avoid retrieving more than needed. Prefer last_n: 5 for recent context, pattern for a specific fact, agent to scope to one agent's turns.",
+				"description": "Return shared session history for both agents. Filter with last_n, pattern, or agent.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"last_n":  map[string]any{"type": "integer", "description": "Return only the last N turns. Omit to return all."},
-						"pattern": map[string]any{"type": "string", "description": "Case-insensitive substring filter — only turns whose content contains this string are returned."},
-						"agent":   map[string]any{"type": "string", "enum": []string{"primary", "escalation"}, "description": "Restrict to turns from a specific agent role. Use \"primary\" for the primary agent, \"escalation\" for the escalation agent. Omit for all turns."},
+						"last_n":  map[string]any{"type": "integer", "description": "Last N turns only."},
+						"pattern": map[string]any{"type": "string", "description": "Substring filter."},
+						"agent":   map[string]any{"type": "string", "enum": []string{"primary", "escalation"}, "description": "Filter by agent role."},
 					},
 					"required": []string{},
 				},
@@ -204,11 +204,11 @@ func currentNeedSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        "current_need",
-			"description": "Update the current user goal for this session. Call this when the user switches to a new topic or objective. Equivalent to emitting a <milk:need:NONCE> tag.",
+			"description": "Update the current user goal for this session.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"goal": map[string]any{"type": "string", "description": "One-sentence description of what the user is now trying to accomplish"},
+					"goal": map[string]any{"type": "string", "description": "One-sentence description of the current goal."},
 				},
 				"required": []string{"goal"},
 			},
@@ -221,19 +221,12 @@ func exportSessionSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        "export_session",
-			"description": "Export the current session (metadata + full conversation history). Returns a structured transcript. Optionally write it to a file.",
+			"description": "Export the current session transcript. Optionally write to a file.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"format": map[string]any{
-						"type":        "string",
-						"enum":        []string{"text", "json"},
-						"description": "Output format: 'text' for readable transcript (default), 'json' for raw session JSON.",
-					},
-					"output_path": map[string]any{
-						"type":        "string",
-						"description": "Optional file path to write the export to. If omitted, the export is returned inline.",
-					},
+					"format":      map[string]any{"type": "string", "enum": []string{"text", "json"}, "description": "'text' (default) or 'json'."},
+					"output_path": map[string]any{"type": "string", "description": "File path to write to; omit to return inline."},
 				},
 				"required": []string{},
 			},

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -709,7 +710,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	if injectInstructions {
 		sess.MemoryInstructionInjectedAt = sess.EscalationTurnCount()
 	}
-	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, ctxMode, nonce, perceptsForEscalation(cfg, mem, prompt), injectInstructions, primaryName, escalationName)
+	res, err := runCLIEscalationAgent(ctx, sess, agent, prompt, aw, ctxMode, nonce, perceptsForEscalation(cfg, mem, prompt), injectInstructions, primaryName, escalationName, pc.contextHash)
 	aw.Done()
 	if err != nil {
 		return err
@@ -767,8 +768,23 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 // primaryName and escalationName are the configured agent names embedded in the memory instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
 // injectInstructions controls whether the need/memory instruction blocks are included.
-func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, mode escalation.ContextMode, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string) (claude.ParseResult, error) {
+func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, mode escalation.ContextMode, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string, contextHash *string) (claude.ParseResult, error) {
 	sysContext := escalation.BuildContext(sess, nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+
+	// Suppress --append-system-prompt-file on resume turns when content is unchanged.
+	// Sending an identical file shifts Claude's system-prompt suffix and invalidates
+	// its prompt cache prefix, forcing an expensive re-tokenisation of the full context.
+	if mode == escalation.ContextModeResume && contextHash != nil {
+		h := fmt.Sprintf("%x", sha256.Sum256([]byte(sysContext)))[:16]
+		if h == *contextHash {
+			sysContext = "" // omit the file — Claude already has these instructions
+		} else {
+			*contextHash = h
+		}
+	} else if contextHash != nil {
+		*contextHash = fmt.Sprintf("%x", sha256.Sum256([]byte(sysContext)))[:16]
+	}
+
 	if mode == escalation.ContextModeResume {
 		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
 	}
@@ -822,6 +838,10 @@ func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *
 type permContext struct {
 	cs          *claudesettings.Store
 	toolFutures map[string]chan string // tool name → buffered channel pre-filled by OnToolUse
+	// contextHash, when non-nil, holds the hash of the last --append-system-prompt-file
+	// sent to the escalation agent. runCLIEscalationAgent skips re-sending the file when
+	// the hash is unchanged, preserving Claude's prompt cache prefix.
+	contextHash *string
 }
 
 // handleStructuredDenials handles permission_denials from the result event —

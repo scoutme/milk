@@ -175,6 +175,10 @@ type interactiveState struct {
 	skipPermissions bool             // session-level override for DangerouslySkipPermissions
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
 	notifier        oversight.Notifier
+
+	// lastEscalationContextHash is a short hash of the last --append-system-prompt-file
+	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
+	lastEscalationContextHash string
 }
 
 // escalationAgentName returns the display name of the configured escalation agent.

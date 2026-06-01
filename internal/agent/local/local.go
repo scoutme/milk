@@ -119,7 +119,9 @@ type Agent struct {
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
-	logContext       bool // when true, log full request payload at DEBUG level
+	logContext       bool   // when true, log full request payload at DEBUG level
+	cachedCwd        string // cwd for which cachedCwdContext was built
+	cachedCwdContext string // cached working directory listing system message
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -365,7 +367,7 @@ const systemPromptShared = `Rules:
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.`
 
 // systemPromptPrimary is prepended for the primary (local) role.
-const systemPromptPrimary = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics, escalate.
+const systemPromptPrimary = `You are a coding and shell automation assistant.
 
 ` + systemPromptShared + `
 - If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
@@ -374,7 +376,7 @@ const systemPromptPrimary = `You are a coding and shell automation assistant wit
 
 // systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
 // %s is the escalation agent name (e.g. "haiku-aws").
-const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history. Tools available: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics.
+const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
 
 ` + systemPromptShared + `
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
@@ -509,7 +511,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD, a.escalationName)}}
 	msgs = append(msgs, history...)
 	if sess.CWD != "" {
-		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
+		if a.cachedCwd != sess.CWD {
+			a.cachedCwdContext = cwdContext(sess.CWD)
+			a.cachedCwd = sess.CWD
+		}
+		msgs = append(msgs, Message{Role: "system", Content: a.cachedCwdContext})
 	}
 	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
 		primaryName, escalationName := "", ""
@@ -667,6 +673,14 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			}
 		}
 
+		// Invalidate cwd listing cache when model lists the working directory.
+		if tc.Function.Name == "list_dir" && sess != nil {
+			var listArgs map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &listArgs) //nolint:errcheck
+			if p, _ := listArgs["path"].(string); p == "" || p == sess.CWD || p == "." {
+				a.cachedCwd = ""
+			}
+		}
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 		if escalate {
 			var escalateArgs struct {

@@ -3957,7 +3957,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 			// The credential-process handles its own cache and returns immediately
 			// when the token is still fresh, so this is cheap in the common case.
 			cliAgent = applyAWSCreds(st.cfg, cliAgent)
-			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
+			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}, st.mem, "", out)
 		}
 	}
 	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
