@@ -357,13 +357,13 @@ type model struct {
 	escalationPrompt  int64
 	escalationComp    int64
 
-	// Live turn output: chars written during the current turn (proxy for completion tokens).
-	// Reset at turn start, frozen at turn end as lastTurnChars until next turn starts.
+	// Live turn output: chars written during the current turn, used as a streaming proxy.
+	// Reset at turn start.
 	currentTurnChars int64
-	lastTurnChars    int64
-	// lastTurnTokens is the real completion token count from the last completed turn
-	// (replaces lastTurnChars when available; 0 means use char count).
-	lastTurnTokens int64
+	// lastTurnPrompt/Completion are the real token counts from the last completed turn,
+	// captured from the session accumulator delta at agentDoneMsg.
+	lastTurnPrompt     int64
+	lastTurnCompletion int64
 
 	colorizeMode ColorizeMode
 
@@ -575,9 +575,19 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 	}
 	obs.IncrementTurnCount()
-	m.primaryPrompt, m.primaryCompletion = obs.SessionTokensByRole("primary")
-	m.escalationPrompt, m.escalationComp = obs.SessionTokensByRole("escalation")
-	m.lastTurnChars = m.currentTurnChars
+	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
+	newEscPrompt, newEscComp := obs.SessionTokensByRole("escalation")
+	// Compute per-turn delta: what was added this turn specifically.
+	role := agentRoleForStatus(m.st.sess.State)
+	if role == "escalation" {
+		m.lastTurnPrompt = newEscPrompt - m.escalationPrompt
+		m.lastTurnCompletion = newEscComp - m.escalationComp
+	} else {
+		m.lastTurnPrompt = newPrimaryPrompt - m.primaryPrompt
+		m.lastTurnCompletion = newPrimaryCompletion - m.primaryCompletion
+	}
+	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
+	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
 	m.currentTurnChars = 0
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
@@ -1358,9 +1368,8 @@ func (m *model) statusAgent() string {
 }
 
 // statusTokens returns the token counter fragment for the status bar.
-// While busy: shows live output char count for current turn (↓ proxy).
-// While idle: shows session totals for the current agent role (↑↓).
-// After the first turn a "last:" suffix shows the previous turn's output count.
+// While busy: shows live streamed char count as a proxy for in-progress output.
+// While idle: "in:X out:Y  last in:X out:Y" — session totals + last turn real tokens.
 func (m *model) statusTokens() string {
 	role := agentRoleForStatus(m.st.sess.State)
 
@@ -1373,23 +1382,21 @@ func (m *model) statusTokens() string {
 	}
 
 	if m.busy {
-		// Live turn: show running output char count.
-		live := dim(fmt.Sprintf("  ↓%s", formatTokenCount(m.currentTurnChars)))
-		return live
+		return "  " + dim(fmt.Sprintf("out:%s…", formatTokenCount(m.currentTurnChars)))
 	}
 
-	if prompt+completion == 0 && m.lastTurnChars == 0 {
+	if prompt+completion == 0 && m.lastTurnPrompt+m.lastTurnCompletion == 0 {
 		return ""
 	}
 
 	var parts []string
 	if prompt+completion > 0 {
-		parts = append(parts, fmt.Sprintf("%s↑%s↓", formatTokenCount(prompt), formatTokenCount(completion)))
+		parts = append(parts, fmt.Sprintf("in:%s out:%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	}
-	if m.lastTurnChars > 0 {
-		parts = append(parts, fmt.Sprintf("last:↓%s", formatTokenCount(m.lastTurnChars)))
+	if m.lastTurnPrompt+m.lastTurnCompletion > 0 {
+		parts = append(parts, fmt.Sprintf("last in:%s out:%s", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
 	}
-	return "  " + dim(strings.Join(parts, " "))
+	return "  " + dim(strings.Join(parts, "  "))
 }
 
 // agentRoleForStatus maps session state to an agent role string for token lookup.
