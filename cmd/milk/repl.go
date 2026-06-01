@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1378,7 +1379,7 @@ func (m *model) statusTokens() string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	if m.busy {
-		parts = append(parts, fmt.Sprintf("↓%s…", formatTokenCount(m.currentTurnChars)))
+		parts = append(parts, fmt.Sprintf("↓~%s", formatTokenCount(int64(math.Round(float64(m.currentTurnChars)*0.25)))))
 	} else if m.lastTurnPrompt+m.lastTurnCompletion > 0 {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
 	}
