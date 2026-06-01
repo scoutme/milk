@@ -29,6 +29,7 @@ import (
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -350,6 +351,10 @@ type model struct {
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
 
+	// sessionTokens mirrors the in-memory session accumulator; updated at turn end.
+	sessionPrompt     int64
+	sessionCompletion int64
+
 	colorizeMode ColorizeMode
 
 	// colorize cache: avoid re-running chroma/glamour on every streamed token.
@@ -559,6 +564,9 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	} else if msg.err != nil {
 		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 	}
+	obs.IncrementTurnCount()
+	m.sessionPrompt = obs.SessionPromptTotal()
+	m.sessionCompletion = obs.SessionCompletionTotal()
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
@@ -1273,7 +1281,11 @@ func (m *model) statusBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent())
+	tokenStr := ""
+	if m.sessionPrompt+m.sessionCompletion > 0 {
+		tokenStr = "  " + dim(fmt.Sprintf("tokens:%s↑%s↓", formatTokenCount(m.sessionPrompt), formatTokenCount(m.sessionCompletion)))
+	}
+	left := fmt.Sprintf(" %s  %s  %s%s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
 	right := dim(m.statusCwd() + " ")
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
@@ -1334,6 +1346,14 @@ func (m *model) statusAgent() string {
 		return frame + " " + pulsed
 	}
 	return agent
+}
+
+// formatTokenCount formats a token count compactly: <1000 → exact, ≥1000 → "1.2k".
+func formatTokenCount(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // sessionRole maps session state to the human-readable role shown in the status bar.

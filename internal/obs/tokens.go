@@ -1,0 +1,242 @@
+package obs
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+)
+
+// TokenEntry accumulates token counts for one (model, agent-role) pair.
+type TokenEntry struct {
+	Model      string
+	Agent      string // "primary", "escalation", "router"
+	Prompt     int64
+	Completion int64
+}
+
+// sessionAccumulator holds per-session in-memory token totals, thread-safe.
+var sessionAccumulator struct {
+	mu      sync.Mutex
+	entries map[string]*TokenEntry // key: model+"\x00"+agent
+	turns   atomic.Int64
+}
+
+func init() {
+	sessionAccumulator.entries = map[string]*TokenEntry{}
+}
+
+// accumulateSessionTokens adds token counts to the in-memory session accumulator.
+// Called automatically by RecordTokens.
+func accumulateSessionTokens(model, agent string, prompt, completion int64) {
+	key := model + "\x00" + agent
+	sessionAccumulator.mu.Lock()
+	e, ok := sessionAccumulator.entries[key]
+	if !ok {
+		e = &TokenEntry{Model: model, Agent: agent}
+		sessionAccumulator.entries[key] = e
+	}
+	e.Prompt += prompt
+	e.Completion += completion
+	sessionAccumulator.mu.Unlock()
+}
+
+// IncrementTurnCount increments the session turn counter. Call once per completed turn.
+func IncrementTurnCount() {
+	sessionAccumulator.turns.Add(1)
+}
+
+// SessionTotals returns a snapshot of the current session's token accumulator.
+func SessionTotals() (entries []TokenEntry, turns int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		entries = append(entries, *e)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Agent != entries[j].Agent {
+			return entries[i].Agent < entries[j].Agent
+		}
+		return entries[i].Model < entries[j].Model
+	})
+	return entries, sessionAccumulator.turns.Load()
+}
+
+// ResetSessionTokens clears the in-memory session accumulator (call on /new).
+func ResetSessionTokens() {
+	sessionAccumulator.mu.Lock()
+	sessionAccumulator.entries = map[string]*TokenEntry{}
+	sessionAccumulator.mu.Unlock()
+	sessionAccumulator.turns.Store(0)
+}
+
+// SessionPromptTotal returns the total prompt tokens across all roles this session.
+func SessionPromptTotal() int64 {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	var t int64
+	for _, e := range sessionAccumulator.entries {
+		t += e.Prompt
+	}
+	return t
+}
+
+// SessionCompletionTotal returns the total completion tokens across all roles this session.
+func SessionCompletionTotal() int64 {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	var t int64
+	for _, e := range sessionAccumulator.entries {
+		t += e.Completion
+	}
+	return t
+}
+
+// tkey is the composite key for token metric aggregation.
+type tkey struct{ metric, model, agent string }
+
+// FormatTokenUsage reads metrics.jsonl and returns a human-readable token usage
+// report grouped by model and agent role.
+func FormatTokenUsage(ctx context.Context, otelDir string) string {
+	_ = ctx
+	path := filepath.Join(otelDir, "metrics.jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "no token metrics recorded yet"
+		}
+		return fmt.Sprintf("error reading metrics: %v", err)
+	}
+	defer f.Close()
+
+	// Accumulate latest cumulative value per (metric, model, agent) from the file.
+	latest := map[tkey]float64{}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		parseTokenMetricLine(line, latest)
+	}
+
+	// Build report grouped by agent role then model.
+	type rowKey struct{ agent, model string }
+	type row struct {
+		agent, model       string
+		prompt, completion float64
+	}
+	rowMap := map[rowKey]*row{}
+	for k, v := range latest { //nolint:gocritic
+		if k.metric != "milk.tokens.prompt" && k.metric != "milk.tokens.completion" {
+			continue
+		}
+		rk := rowKey{agent: k.agent, model: k.model}
+		r, ok := rowMap[rk]
+		if !ok {
+			r = &row{agent: k.agent, model: k.model}
+			rowMap[rk] = r
+		}
+		if k.metric == "milk.tokens.prompt" {
+			r.prompt = v
+		} else {
+			r.completion = v
+		}
+	}
+	if len(rowMap) == 0 {
+		return "no token metrics found in metrics.jsonl (run a few turns first)"
+	}
+
+	rows := make([]row, 0, len(rowMap))
+	for _, r := range rowMap {
+		rows = append(rows, *r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].agent != rows[j].agent {
+			return rows[i].agent < rows[j].agent
+		}
+		return rows[i].model < rows[j].model
+	})
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "token usage (cumulative, all sessions):")
+	fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s\n", "role", "model", "prompt", "completion", "total")
+	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
+	var grandPrompt, grandCompletion float64
+	for _, r := range rows {
+		total := r.prompt + r.completion
+		grandPrompt += r.prompt
+		grandCompletion += r.completion
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f\n",
+			r.agent, r.model, r.prompt, r.completion, total)
+	}
+	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
+	fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n",
+		"total", grandPrompt, grandCompletion, grandPrompt+grandCompletion)
+
+	// Append current session totals.
+	sessionEntries, turns := SessionTotals()
+	if len(sessionEntries) > 0 {
+		fmt.Fprintf(&b, "\nthis session (%d turns):\n", turns)
+		var sp, sc float64
+		for _, e := range sessionEntries {
+			total := float64(e.Prompt + e.Completion)
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10.0f\n",
+				e.Agent, e.Model, e.Prompt, e.Completion, total)
+			sp += float64(e.Prompt)
+			sc += float64(e.Completion)
+		}
+		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n", "total", sp, sc, sp+sc)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// parseTokenMetricLine extracts milk.tokens.* data points from one OTLP JSON metrics line.
+func parseTokenMetricLine(line string, out map[tkey]float64) {
+	var root struct {
+		ScopeMetrics []struct {
+			Metrics []struct {
+				Name string `json:"Name"`
+				Data struct {
+					DataPoints []struct {
+						Attributes []struct {
+							Key   string `json:"Key"`
+							Value struct{ Value any `json:"Value"` } `json:"Value"`
+						} `json:"Attributes"`
+						Value float64 `json:"Value"`
+					} `json:"DataPoints"`
+				} `json:"Data"`
+			} `json:"Metrics"`
+		} `json:"ScopeMetrics"`
+	}
+	if err := json.Unmarshal([]byte(line), &root); err != nil {
+		return
+	}
+	for _, sm := range root.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if !strings.HasPrefix(m.Name, "milk.tokens.") {
+				continue
+			}
+			for _, dp := range m.Data.DataPoints {
+				var model, agent string
+				for _, a := range dp.Attributes {
+					switch a.Key {
+					case "model":
+						model = fmt.Sprintf("%v", a.Value.Value)
+					case "agent":
+						agent = fmt.Sprintf("%v", a.Value.Value)
+					}
+				}
+				out[tkey{m.Name, model, agent}] = dp.Value
+			}
+		}
+	}
+}

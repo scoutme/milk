@@ -24,6 +24,7 @@ const cmdPaste = "/paste"
 const cmdLearn = "/learn"
 const cmdOtel = "/otel"
 const cmdMetrics = "/metrics"
+const cmdUsage = "/usage"
 const cmdMemory = "/memory"
 const cmdExport = "/export"
 const cmdHistory = "/history"
@@ -36,7 +37,7 @@ const cmdThink = "/think"
 const cmdSetup = "/setup"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -109,6 +110,7 @@ const interactiveHelp = `
   /history session       navigate session input history (default)
 
 ── Observability ────────────────────────────────────────────────────────
+  /usage                 token usage report for this session and all-time totals
   /metrics               show latest metric values
   /otel                  show OTel file sizes and record counts
   /otel on               enable OTel for this session
@@ -225,6 +227,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		output = execOtel(prompt, st)
 	case cmdMetrics:
 		output = execMetrics()
+	case cmdUsage:
+		output = execUsage()
 	case cmdMemory:
 		output = execMemory(prompt, st)
 	case cmdExport:
@@ -286,6 +290,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 			fmt.Fprintf(&out, errFmt, err)
 			return out.String()
 		}
+		obs.ResetSessionTokens()
 		fmt.Fprintf(&out, "%s new session %s", milkTag(), st.sess.ID[:8])
 	case "/drop":
 		if err := dropAndNewSession(st, &out); err != nil {
@@ -299,6 +304,15 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
 	}
 	return out.String()
+}
+
+// execUsage prints token usage by agent role and model, plus current-session totals.
+func execUsage() string {
+	otelDir, err := config.OtelDir()
+	if err != nil {
+		return fmt.Sprintf("%s error: %v", milkTag(), err)
+	}
+	return milkTag() + " " + obs.FormatTokenUsage(context.Background(), otelDir)
 }
 
 // execMetrics prints the most recent metric values from the otel metrics file.
