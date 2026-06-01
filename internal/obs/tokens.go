@@ -98,6 +98,20 @@ func SessionCompletionTotal() int64 {
 	return t
 }
 
+// SessionTokensByRole returns the cumulative prompt and completion tokens for a
+// given agent role ("primary", "escalation", "router") this session.
+func SessionTokensByRole(role string) (prompt, completion int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == role {
+			prompt += e.Prompt
+			completion += e.Completion
+		}
+	}
+	return
+}
+
 // tkey is the composite key for token metric aggregation.
 type tkey struct{ metric, model, agent string }
 

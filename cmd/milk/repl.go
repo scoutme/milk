@@ -351,9 +351,19 @@ type model struct {
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
 
-	// sessionTokens mirrors the in-memory session accumulator; updated at turn end.
-	sessionPrompt     int64
-	sessionCompletion int64
+	// Per-agent session token totals; updated at turn end from the in-memory accumulator.
+	primaryPrompt     int64
+	primaryCompletion int64
+	escalationPrompt  int64
+	escalationComp    int64
+
+	// Live turn output: chars written during the current turn (proxy for completion tokens).
+	// Reset at turn start, frozen at turn end as lastTurnChars until next turn starts.
+	currentTurnChars int64
+	lastTurnChars    int64
+	// lastTurnTokens is the real completion token count from the last completed turn
+	// (replaces lastTurnChars when available; 0 means use char count).
+	lastTurnTokens int64
 
 	colorizeMode ColorizeMode
 
@@ -565,8 +575,10 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 	}
 	obs.IncrementTurnCount()
-	m.sessionPrompt = obs.SessionPromptTotal()
-	m.sessionCompletion = obs.SessionCompletionTotal()
+	m.primaryPrompt, m.primaryCompletion = obs.SessionTokensByRole("primary")
+	m.escalationPrompt, m.escalationComp = obs.SessionTokensByRole("escalation")
+	m.lastTurnChars = m.currentTurnChars
+	m.currentTurnChars = 0
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
@@ -1281,10 +1293,7 @@ func (m *model) statusBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	tokenStr := ""
-	if m.sessionPrompt+m.sessionCompletion > 0 {
-		tokenStr = "  " + dim(fmt.Sprintf("tokens:%s↑%s↓", formatTokenCount(m.sessionPrompt), formatTokenCount(m.sessionCompletion)))
-	}
+	tokenStr := m.statusTokens()
 	left := fmt.Sprintf(" %s  %s  %s%s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
 	right := dim(m.statusCwd() + " ")
 	if m.credRefreshing {
@@ -1346,6 +1355,49 @@ func (m *model) statusAgent() string {
 		return frame + " " + pulsed
 	}
 	return agent
+}
+
+// statusTokens returns the token counter fragment for the status bar.
+// While busy: shows live output char count for current turn (↓ proxy).
+// While idle: shows session totals for the current agent role (↑↓).
+// After the first turn a "last:" suffix shows the previous turn's output count.
+func (m *model) statusTokens() string {
+	role := agentRoleForStatus(m.st.sess.State)
+
+	var prompt, completion int64
+	switch role {
+	case "escalation":
+		prompt, completion = m.escalationPrompt, m.escalationComp
+	default:
+		prompt, completion = m.primaryPrompt, m.primaryCompletion
+	}
+
+	if m.busy {
+		// Live turn: show running output char count.
+		live := dim(fmt.Sprintf("  ↓%s", formatTokenCount(m.currentTurnChars)))
+		return live
+	}
+
+	if prompt+completion == 0 && m.lastTurnChars == 0 {
+		return ""
+	}
+
+	var parts []string
+	if prompt+completion > 0 {
+		parts = append(parts, fmt.Sprintf("%s↑%s↓", formatTokenCount(prompt), formatTokenCount(completion)))
+	}
+	if m.lastTurnChars > 0 {
+		parts = append(parts, fmt.Sprintf("last:↓%s", formatTokenCount(m.lastTurnChars)))
+	}
+	return "  " + dim(strings.Join(parts, " "))
+}
+
+// agentRoleForStatus maps session state to an agent role string for token lookup.
+func agentRoleForStatus(s session.State) string {
+	if s == session.StateEscalation || s == session.StateEscalationWaiting {
+		return "escalation"
+	}
+	return "primary"
 }
 
 // formatTokenCount formats a token count compactly: <1000 → exact, ≥1000 → "1.2k".
@@ -1490,6 +1542,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chunkMsg:
+		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscript(msg.text)
 		return m, nil
 
@@ -2937,6 +2990,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
+	m.currentTurnChars = 0
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
 
