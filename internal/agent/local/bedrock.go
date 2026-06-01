@@ -312,7 +312,11 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 		case "metadata":
 			var ev bedrockMetadataEvent
 			if json.Unmarshal(payload, &ev) == nil {
-				obs.RecordTokens(ctx, a.model, agentRoleForMetrics(a.escalationName), ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				role := agentRoleForMetrics(a.escalationName)
+				obs.RecordTokens(ctx, a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				if a.onTokens != nil {
+					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				}
 			}
 
 		default:

@@ -122,6 +122,10 @@ type Agent struct {
 	logContext       bool   // when true, log full request payload at DEBUG level
 	cachedCwd        string // cwd for which cachedCwdContext was built
 	cachedCwdContext string // cached working directory listing system message
+	// onTokens is an optional callback fired after each inference call with real
+	// token counts. Used to persist usage into the session without coupling the
+	// agent to the session package.
+	onTokens func(model, role string, prompt, completion int64)
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -329,6 +333,13 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 	copy := *a
 	copy.skipPerms = skip
 	return &copy
+}
+
+// WithOnTokens registers a callback invoked after each inference call with the
+// model name, agent role, and real prompt/completion token counts.
+func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion int64)) *Agent {
+	a.onTokens = fn
+	return a
 }
 
 // WithLogContext enables full request payload logging at DEBUG level.
@@ -784,7 +795,11 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if err != nil {
 		return "", "", nil, err
 	}
-	obs.RecordTokens(ctx, a.model, agentRoleForMetrics(a.escalationName), promptTokens, completionTokens)
+	role := agentRoleForMetrics(a.escalationName)
+	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	if a.onTokens != nil {
+		a.onTokens(a.model, role, promptTokens, completionTokens)
+	}
 
 	if det.Format != ToolFormatUnknown {
 		a.detectedFormat = det.Format

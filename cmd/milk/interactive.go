@@ -232,7 +232,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdMetrics:
 		output = execMetrics()
 	case cmdUsage:
-		output = execUsage()
+		output = execUsage(st)
 	case cmdMemory:
 		output = execMemory(prompt, st)
 	case cmdExport:
@@ -311,12 +311,23 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 }
 
 // execUsage prints token usage by agent role and model, plus current-session totals.
-func execUsage() string {
+func execUsage(st *interactiveState) string {
 	otelDir, err := config.OtelDir()
 	if err != nil {
 		return fmt.Sprintf("%s error: %v", milkTag(), err)
 	}
-	return milkTag() + " " + obs.FormatTokenUsage(context.Background(), otelDir)
+	var sessEntries []obs.SessionTokenEntry
+	var turns int64
+	if st != nil && st.sess != nil {
+		for _, u := range st.sess.Tokens {
+			sessEntries = append(sessEntries, obs.SessionTokenEntry{
+				Model: u.Model, Agent: u.Agent,
+				Prompt: u.Prompt, Completion: u.Completion,
+			})
+		}
+		turns = int64(st.sess.EscalationTurnCount() + st.sess.LocalTurnCount())
+	}
+	return milkTag() + " " + obs.FormatTokenUsage(context.Background(), otelDir, sessEntries, turns)
 }
 
 // execMetrics prints the most recent metric values from the otel metrics file.

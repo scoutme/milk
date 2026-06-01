@@ -115,10 +115,19 @@ func SessionTokensByRole(role string) (prompt, completion int64) {
 // tkey is the composite key for token metric aggregation.
 type tkey struct{ metric, model, agent string }
 
+// SessionTokenEntry is a (model, role, prompt, completion) tuple passed by callers
+// to avoid a circular import with the session package.
+type SessionTokenEntry struct {
+	Model, Agent       string
+	Prompt, Completion int64
+}
+
 // FormatTokenUsage returns a human-readable token usage report.
-// The cumulative table merges flushed metrics.jsonl data with the unflushed
-// in-memory session accumulator so the totals are always current.
-func FormatTokenUsage(ctx context.Context, otelDir string) string {
+// sessEntries is the persisted token data from the current session (may be nil).
+// turns is the current session turn count.
+// The cumulative table merges flushed metrics.jsonl data with sessEntries so totals
+// are always current regardless of the OTel flush interval.
+func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []SessionTokenEntry, turns int64) string {
 	_ = ctx
 
 	type rowKey struct{ agent, model string }
@@ -158,10 +167,8 @@ func FormatTokenUsage(ctx context.Context, otelDir string) string {
 		}
 	}
 
-	// Layer 2: in-memory session accumulator (always current, not yet flushed).
-	// We add session tokens on top of the disk values so the cumulative total is accurate.
-	sessionEntries, turns := SessionTotals()
-	for _, e := range sessionEntries {
+	// Layer 2: session-persisted token data (always current, survives restarts).
+	for _, e := range sessEntries {
 		rk := rowKey{e.Agent, e.Model}
 		r, ok := rowMap[rk]
 		if !ok {
@@ -202,10 +209,10 @@ func FormatTokenUsage(ctx context.Context, otelDir string) string {
 	fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n",
 		"total", grandPrompt, grandCompletion, grandPrompt+grandCompletion)
 
-	if len(sessionEntries) > 0 {
+	if len(sessEntries) > 0 {
 		fmt.Fprintf(&b, "\nthis session (%d turns):\n", turns)
 		var sp, sc float64
-		for _, e := range sessionEntries {
+		for _, e := range sessEntries {
 			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
 				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion)
 			sp += float64(e.Prompt)

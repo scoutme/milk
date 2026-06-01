@@ -4136,6 +4136,18 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions, notifier: newNotifier(cfg)}
+
+	// Wire token persistence callbacks now that st is available; closures reference
+	// st.sess so they always write to the current session even after /new.
+	localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+		st.sess.AddTokens(model, role, prompt, completion)
+	})
+	if escalationLocalAgent != nil {
+		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			st.sess.AddTokens(model, role, prompt, completion)
+		})
+	}
+
 	agents := dispatchAgents{
 		local:           localAgent,
 		cliAgent:        cliAgent,

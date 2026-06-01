@@ -127,6 +127,9 @@ func run(cmd *cobra.Command, args []string) error {
 		localAgent.WithOtelDir(od)
 	}
 	localAgent.WithLogContext(cfg.Otel.LogContext)
+	localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+		sess.AddTokens(model, role, prompt, completion)
+	})
 	// Single-prompt mode: wire permissions (no interactive ask — tools are denied
 	// unless dangerously_skip_permissions is on or already granted in the store).
 	if lp, err := local.OpenPermStore(cwd); err == nil {
@@ -143,6 +146,9 @@ func run(cmd *cobra.Command, args []string) error {
 				escalationLocalAgent.WithOtelDir(od)
 			}
 			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
+			escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+				sess.AddTokens(model, role, prompt, completion)
+			})
 			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
@@ -726,6 +732,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		escModel = escCfg.Name
 	}
 	obs.RecordTokens(ctx, escModel, "escalation", res.InputTokens, res.OutputTokens)
+	sess.AddTokens(escModel, "escalation", res.InputTokens, res.OutputTokens)
 	obs.Debug("tokens (claude)", "input", res.InputTokens, "output", res.OutputTokens,
 		"cache_read", res.CacheReadInputTokens, "cache_write", res.CacheCreationInputTokens,
 		"cost_usd", res.TotalCostUSD)
