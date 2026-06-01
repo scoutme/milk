@@ -364,7 +364,6 @@ type model struct {
 	// captured from the session accumulator delta at agentDoneMsg.
 	lastTurnPrompt     int64
 	lastTurnCompletion int64
-	lastTurnDone       bool // true after the first turn completes; distinguishes 0 tokens from no turn yet
 
 	colorizeMode ColorizeMode
 
@@ -590,7 +589,6 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
 	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
 	m.currentTurnChars = 0
-	m.lastTurnDone = true
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
@@ -1371,17 +1369,13 @@ func (m *model) statusTokens() string {
 		prompt, completion = m.primaryPrompt, m.primaryCompletion
 	}
 
-	if prompt+completion == 0 && !m.lastTurnDone && !m.busy {
-		return ""
-	}
-
 	var parts []string
 	if prompt+completion > 0 {
 		parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	}
 	if m.busy {
 		parts = append(parts, fmt.Sprintf("↓%s…", formatTokenCount(m.currentTurnChars)))
-	} else if m.lastTurnDone {
+	} else {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
 	}
 	return "  " + dim(strings.Join(parts, "  "))
