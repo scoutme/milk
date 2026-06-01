@@ -53,12 +53,15 @@ type toolCallFunction struct {
 }
 
 type chatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []map[string]any `json:"tools,omitempty"`
-	Stream      bool             `json:"stream"`
-	Temperature float64          `json:"temperature"`
-	Seed        int64            `json:"seed,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []Message        `json:"messages"`
+	Tools         []map[string]any `json:"tools,omitempty"`
+	Stream        bool             `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options,omitempty"`
+	Temperature float64 `json:"temperature"`
+	Seed        int64   `json:"seed,omitempty"`
 }
 
 type streamChunk struct {
@@ -712,12 +715,13 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
 	req := chatRequest{
-		Model:       a.model,
-		Messages:    msgs,
-		Tools:       tools,
-		Stream:      true,
-		Temperature: 0.2,
-		Seed:        time.Now().UnixNano(),
+		Model:         a.model,
+		Messages:      msgs,
+		Tools:         tools,
+		Stream:        true,
+		StreamOptions: &struct{ IncludeUsage bool `json:"include_usage"` }{IncludeUsage: true},
+		Temperature:   0.2,
+		Seed:          time.Now().UnixNano(),
 	}
 
 	body, err := json.Marshal(req)
