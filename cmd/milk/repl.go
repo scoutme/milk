@@ -1267,11 +1267,17 @@ func (m *model) headerBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
+	var totalPrompt, totalCompletion int64
+	for _, u := range m.st.sess.Tokens {
+		totalPrompt += u.Prompt
+		totalCompletion += u.Completion
+	}
+	sessLabel := fmt.Sprintf("sess:%s(total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
 	const repoURL = "github.com/scoutme/milk"
-	rightFull := dim(repoURL + "  sess:" + sessID + "  /help")
-	rightFulPlain := repoURL + "  sess:" + sessID + "  /help"
-	rightShort := dim("sess:" + sessID + "  /help")
-	rightShortPlain := "sess:" + sessID + "  /help"
+	rightFull := dim(repoURL + "  " + sessLabel + "  /help")
+	rightFulPlain := repoURL + "  " + sessLabel + "  /help"
+	rightShort := dim(sessLabel + "  /help")
+	rightShortPlain := sessLabel + "  /help"
 
 	logoPlain := stripANSI(logo)
 	available := m.width - 2
