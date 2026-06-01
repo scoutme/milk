@@ -1272,7 +1272,7 @@ func (m *model) headerBar() string {
 		totalPrompt += u.Prompt
 		totalCompletion += u.Completion
 	}
-	sessLabel := fmt.Sprintf("sess:%s(total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
+	sessLabel := fmt.Sprintf("sess:%s (total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
 	const repoURL = "github.com/scoutme/milk"
 	rightFull := dim(repoURL + "  " + sessLabel + "  /help")
 	rightFulPlain := repoURL + "  " + sessLabel + "  /help"
