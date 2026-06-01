@@ -118,8 +118,10 @@ type AgentConfig struct {
 }
 
 // AgentLimits holds optional per-agent overrides for context caps and injection
-// limits. A nil field means "use the global default from Config". All fields
-// use pointer types so that zero can be expressed as "unlimited/disabled".
+// limits. A nil field means "use the global default from Config". All integer
+// fields use pointer types with the following semantics: nil = use global
+// default, negative (e.g. -1) = disabled/unlimited (resolves to 0), zero =
+// use the built-in hardcoded default, positive = exact value.
 //
 // These mirror the global fields on Config but without the Local* prefix — the
 // distinction was a legacy artefact of fixed role assignments. When set on an
