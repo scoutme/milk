@@ -160,6 +160,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	cliAgent := newCLIAgent(cliAgentConfig(cfg))
 	cliAgent = applyAWSCreds(cfg, cliAgent)
+	cliAgent = cliAgent.WithLogContext(cfg.Otel.LogContext)
 	if dbg, err := openCLIDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {

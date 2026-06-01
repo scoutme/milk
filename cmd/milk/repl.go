@@ -4077,6 +4077,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	cliAgent := newCLIAgent(cliAgentConfig(cfg))
 	cliAgent = applyAWSCreds(cfg, cliAgent)
+	cliAgent = cliAgent.WithLogContext(cfg.Otel.LogContext)
 	if dbg, err := openCLIDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
