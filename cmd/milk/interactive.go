@@ -24,6 +24,7 @@ const cmdPaste = "/paste"
 const cmdLearn = "/learn"
 const cmdOtel = "/otel"
 const cmdMetrics = "/metrics"
+const cmdUsage = "/usage"
 const cmdMemory = "/memory"
 const cmdExport = "/export"
 const cmdHistory = "/history"
@@ -36,7 +37,7 @@ const cmdThink = "/think"
 const cmdSetup = "/setup"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -109,6 +110,7 @@ const interactiveHelp = `
   /history session       navigate session input history (default)
 
 ── Observability ────────────────────────────────────────────────────────
+  /usage                 token usage report for this session and all-time totals
   /metrics               show latest metric values
   /otel                  show OTel file sizes and record counts
   /otel on               enable OTel for this session
@@ -173,6 +175,10 @@ type interactiveState struct {
 	skipPermissions bool             // session-level override for DangerouslySkipPermissions
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
 	notifier        oversight.Notifier
+
+	// lastEscalationContextHash is a short hash of the last --append-system-prompt-file
+	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
+	lastEscalationContextHash string
 }
 
 // escalationAgentName returns the display name of the configured escalation agent.
@@ -225,6 +231,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		output = execOtel(prompt, st)
 	case cmdMetrics:
 		output = execMetrics()
+	case cmdUsage:
+		output = execUsage(st)
 	case cmdMemory:
 		output = execMemory(prompt, st)
 	case cmdExport:
@@ -286,6 +294,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 			fmt.Fprintf(&out, errFmt, err)
 			return out.String()
 		}
+		obs.ResetSessionTokens()
 		fmt.Fprintf(&out, "%s new session %s", milkTag(), st.sess.ID[:8])
 	case "/drop":
 		if err := dropAndNewSession(st, &out); err != nil {
@@ -299,6 +308,26 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
 	}
 	return out.String()
+}
+
+// execUsage prints token usage by agent role and model, plus current-session totals.
+func execUsage(st *interactiveState) string {
+	otelDir, err := config.OtelDir()
+	if err != nil {
+		return fmt.Sprintf("%s error: %v", milkTag(), err)
+	}
+	var sessEntries []obs.SessionTokenEntry
+	var turns int64
+	if st != nil && st.sess != nil {
+		for _, u := range st.sess.Tokens {
+			sessEntries = append(sessEntries, obs.SessionTokenEntry{
+				Model: u.Model, Agent: u.Agent,
+				Prompt: u.Prompt, Completion: u.Completion,
+			})
+		}
+		turns = int64(st.sess.EscalationTurnCount() + st.sess.LocalTurnCount())
+	}
+	return milkTag() + " " + obs.FormatTokenUsage(context.Background(), otelDir, sessEntries, turns)
 }
 
 // execMetrics prints the most recent metric values from the otel metrics file.

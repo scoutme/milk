@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // --- Bedrock Converse API request/response types ---
@@ -74,6 +76,10 @@ type bedrockConverseResponse struct {
 		Message bedrockMessage `json:"message"`
 	} `json:"output"`
 	StopReason string `json:"stopReason"`
+	Usage      struct {
+		InputTokens  int64 `json:"inputTokens"`
+		OutputTokens int64 `json:"outputTokens"`
+	} `json:"usage"`
 }
 
 // --- Streaming event structs ---
@@ -96,6 +102,13 @@ type bedrockContentBlockDeltaEvent struct {
 			Input string `json:"input"`
 		} `json:"toolUse,omitempty"`
 	} `json:"delta"`
+}
+
+type bedrockMetadataEvent struct {
+	Usage struct {
+		InputTokens  int64 `json:"inputTokens"`
+		OutputTokens int64 `json:"outputTokens"`
+	} `json:"usage"`
 }
 
 // --- Conversion helpers ---
@@ -225,6 +238,9 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	if err != nil {
 		return "", "", nil, err
 	}
+	if a.logContext {
+		obs.LogPayload(a.converseEndpoint(true), body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.converseEndpoint(true), bytes.NewReader(body))
 	if err != nil {
@@ -293,6 +309,16 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 		case "messageStop":
 			done = true
 
+		case "metadata":
+			var ev bedrockMetadataEvent
+			if json.Unmarshal(payload, &ev) == nil {
+				role := agentRoleForMetrics(a.escalationName)
+				obs.RecordTokens(ctx, a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				if a.onTokens != nil {
+					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				}
+			}
+
 		default:
 			// exception variants — surface them as errors
 			if strings.Contains(eventType, "Exception") || strings.Contains(eventType, "exception") {
@@ -355,6 +381,9 @@ Task: ` + prompt
 	if err != nil {
 		return false, err
 	}
+	if a.logContext {
+		obs.LogPayload(a.converseEndpoint(false)+" [classify]", body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.converseEndpoint(false), bytes.NewReader(body))
 	if err != nil {
@@ -377,6 +406,7 @@ Task: ` + prompt
 	if err := json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
 		return false, err
 	}
+	obs.RecordTokens(ctx, a.model, "router", result.Usage.InputTokens, result.Usage.OutputTokens)
 	for _, block := range result.Output.Message.Content {
 		if block.Text != "" {
 			return strings.HasPrefix(strings.TrimSpace(strings.ToLower(block.Text)), "escalate"), nil

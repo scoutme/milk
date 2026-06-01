@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // Agent runs the claude CLI as a subprocess.
@@ -29,6 +31,7 @@ type Agent struct {
 	onNeed            func(string)                 // called for each <milk:need:NONCE> tag; arg: new current-need text
 	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
+	logContext        bool                         // when true, log system context and prompt at DEBUG level
 }
 
 func New(bin string) *Agent {
@@ -52,6 +55,14 @@ func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []strin
 func (a *Agent) WithPermissionHandler(h PermissionHandler) *Agent {
 	c := *a
 	c.permissionHandler = h
+	return &c
+}
+
+// WithLogContext enables logging of the system context and prompt passed to the
+// claude subprocess at DEBUG level via obs.LogPayload.
+func (a *Agent) WithLogContext(v bool) *Agent {
+	c := *a
+	c.logContext = v
 	return &c
 }
 
@@ -158,6 +169,10 @@ func (a *Agent) Ping() error {
 // systemContext is the formatted local transcript passed via --append-system-prompt-file.
 // Returns the session ID emitted by the subprocess and a ParseResult.
 func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out io.Writer) (string, ParseResult, error) {
+	if a.logContext {
+		obs.LogPayload("claude-cli [first] system-context", []byte(systemContext))
+		obs.LogPayload("claude-cli [first] prompt", []byte(prompt))
+	}
 	sessionID := uuid.New().String()
 	var args []string
 	args = append(args, "--session-id", sessionID)
@@ -183,6 +198,10 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 // so that instructions (e.g. the percept tag convention) remain active even
 // when Claude's conversation compresses its original context.
 func (a *Agent) RunResume(ctx context.Context, claudeSessionID, systemContext, prompt string, out io.Writer) (ParseResult, error) {
+	if a.logContext {
+		obs.LogPayload("claude-cli [resume] system-context", []byte(systemContext))
+		obs.LogPayload("claude-cli [resume] prompt", []byte(prompt))
+	}
 	args := []string{"--resume", claudeSessionID}
 	if systemContext != "" {
 		f, err := writeTempContext(systemContext)

@@ -53,12 +53,15 @@ type toolCallFunction struct {
 }
 
 type chatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []map[string]any `json:"tools,omitempty"`
-	Stream      bool             `json:"stream"`
-	Temperature float64          `json:"temperature"`
-	Seed        int64            `json:"seed,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []Message        `json:"messages"`
+	Tools         []map[string]any `json:"tools,omitempty"`
+	Stream        bool             `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options,omitempty"`
+	Temperature float64 `json:"temperature"`
+	Seed        int64   `json:"seed,omitempty"`
 }
 
 type streamChunk struct {
@@ -69,6 +72,10 @@ type streamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 // MemConfig holds the memory-related config values that the local agent uses at
@@ -78,6 +85,15 @@ type MemConfig struct {
 	ReinjectionTurns     int  // re-inject instruction after N local turns; 0 = disabled
 	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
 	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
+}
+
+// agentRoleForMetrics returns "escalation" when the agent is configured as the
+// escalation target, "primary" otherwise. Used as the OTel "agent" label.
+func agentRoleForMetrics(escalationName string) string {
+	if escalationName != "" {
+		return "escalation"
+	}
+	return "primary"
 }
 
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
@@ -103,6 +119,13 @@ type Agent struct {
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
+	logContext       bool   // when true, log full request payload at DEBUG level
+	cachedCwd        string // cwd for which cachedCwdContext was built
+	cachedCwdContext string // cached working directory listing system message
+	// onTokens is an optional callback fired after each inference call with real
+	// token counts. Used to persist usage into the session without coupling the
+	// agent to the session package.
+	onTokens func(model, role string, prompt, completion int64)
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -312,6 +335,19 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 	return &copy
 }
 
+// WithOnTokens registers a callback invoked after each inference call with the
+// model name, agent role, and real prompt/completion token counts.
+func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion int64)) *Agent {
+	a.onTokens = fn
+	return a
+}
+
+// WithLogContext enables full request payload logging at DEBUG level.
+func (a *Agent) WithLogContext(v bool) *Agent {
+	a.logContext = v
+	return a
+}
+
 // WithOtelDir sets the otel directory so the agent can offer get_metrics.
 func (a *Agent) WithOtelDir(dir string) *Agent {
 	a.otelDir = dir
@@ -342,7 +378,7 @@ const systemPromptShared = `Rules:
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.`
 
 // systemPromptPrimary is prepended for the primary (local) role.
-const systemPromptPrimary = `You are a coding and shell automation assistant with access to tools: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics, escalate.
+const systemPromptPrimary = `You are a coding and shell automation assistant.
 
 ` + systemPromptShared + `
 - If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
@@ -351,7 +387,7 @@ const systemPromptPrimary = `You are a coding and shell automation assistant wit
 
 // systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
 // %s is the escalation agent name (e.g. "haiku-aws").
-const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history. Tools available: bash, find_files, grep, read_file, write_file, edit_file, list_dir, http_get, get_session_context, record_memory, get_memory, list_memory, forget_memory, get_metrics.
+const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
 
 ` + systemPromptShared + `
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
@@ -486,7 +522,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD, a.escalationName)}}
 	msgs = append(msgs, history...)
 	if sess.CWD != "" {
-		msgs = append(msgs, Message{Role: "system", Content: cwdContext(sess.CWD)})
+		if a.cachedCwd != sess.CWD {
+			a.cachedCwdContext = cwdContext(sess.CWD)
+			a.cachedCwd = sess.CWD
+		}
+		msgs = append(msgs, Message{Role: "system", Content: a.cachedCwdContext})
 	}
 	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
 		primaryName, escalationName := "", ""
@@ -644,6 +684,14 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			}
 		}
 
+		// Invalidate cwd listing cache when model lists the working directory.
+		if tc.Function.Name == "list_dir" && sess != nil {
+			var listArgs map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &listArgs) //nolint:errcheck
+			if p, _ := listArgs["path"].(string); p == "" || p == sess.CWD || p == "." {
+				a.cachedCwd = ""
+			}
+		}
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 		if escalate {
 			var escalateArgs struct {
@@ -699,10 +747,13 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
 	req := chatRequest{
-		Model:       a.model,
-		Messages:    msgs,
-		Tools:       tools,
-		Stream:      true,
+		Model:    a.model,
+		Messages: msgs,
+		Tools:    tools,
+		Stream:   true,
+		StreamOptions: &struct {
+			IncludeUsage bool `json:"include_usage"`
+		}{IncludeUsage: true},
 		Temperature: 0.2,
 		Seed:        time.Now().UnixNano(),
 	}
@@ -710,6 +761,9 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", "", nil, err
+	}
+	if a.logContext {
+		obs.LogPayload(a.inferenceURL(), body)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -737,9 +791,14 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
 		return "", "", nil, err
+	}
+	role := agentRoleForMetrics(a.escalationName)
+	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	if a.onTokens != nil {
+		a.onTokens(a.model, role, promptTokens, completionTokens)
 	}
 
 	if det.Format != ToolFormatUnknown {
@@ -791,13 +850,15 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 
 // scanSSE reads SSE lines from the scanner, feeding content tokens through the
 // detector and accumulating native tool-call deltas in partialTools.
+// Returns the collected tool calls and any token usage reported by the server.
 func (a *Agent) scanSSE(
 	scanner *bufio.Scanner,
 	det *StreamDetector,
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, error) {
+) ([]toolCall, int64, int64, error) {
+	var promptTokens, completionTokens int64
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -811,15 +872,19 @@ func (a *Agent) scanSSE(
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
+		if chunk.Usage != nil {
+			promptTokens = chunk.Usage.PromptTokens
+			completionTokens = chunk.Usage.CompletionTokens
+		}
 		for _, choice := range chunk.Choices {
 			processContentToken(choice.Delta.Content, det, textBuf, out)
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
-	return collectNativeToolCalls(partialTools), nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {
@@ -883,6 +948,9 @@ Task: ` + prompt
 	if err != nil {
 		return false, err
 	}
+	if a.logContext {
+		obs.LogPayload(a.inferenceURL()+" [classify]", body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.inferenceURL(), bytes.NewReader(body))
@@ -903,9 +971,16 @@ Task: ` + prompt
 				Content string `json:"content"`
 			} `json:"Message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage,omitempty"`
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
 		return false, err
+	}
+	if result.Usage != nil {
+		obs.RecordTokens(ctx, a.model, "router", result.Usage.PromptTokens, result.Usage.CompletionTokens)
 	}
 
 	if len(result.Choices) == 0 {

@@ -42,8 +42,9 @@ type Rules struct {
 // OtelConfig controls OpenTelemetry signal collection and file management.
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
-	LogLevel            string `json:"log_level"`  // minimum log level: DEBUG | INFO | WARN | ERROR (default INFO)
-	LogFormat           string `json:"log_format"` // "" or "off" (disabled), "text" (human-readable), "json" (structured)
+	LogLevel            string `json:"log_level"`   // minimum log level: DEBUG | INFO | WARN | ERROR (default INFO)
+	LogFormat           string `json:"log_format"`  // "" or "off" (disabled), "text" (human-readable), "json" (structured)
+	LogContext          bool   `json:"log_context"` // when true, log the full serialised request payload on each inference call
 	Traces              bool   `json:"traces"`
 	Metrics             bool   `json:"metrics"`
 	WarnMB              int    `json:"warn_mb"`               // warn when any otel file exceeds this (0 = off)

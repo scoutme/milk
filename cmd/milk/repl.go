@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -350,6 +352,20 @@ type model struct {
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
 
+	// Per-agent session token totals; updated at turn end from the in-memory accumulator.
+	primaryPrompt     int64
+	primaryCompletion int64
+	escalationPrompt  int64
+	escalationComp    int64
+
+	// Live turn output: chars written during the current turn, used as a streaming proxy.
+	// Reset at turn start.
+	currentTurnChars int64
+	// lastTurnPrompt/Completion are the real token counts from the last completed turn,
+	// captured from the session accumulator delta at agentDoneMsg.
+	lastTurnPrompt     int64
+	lastTurnCompletion int64
+
 	colorizeMode ColorizeMode
 
 	// colorize cache: avoid re-running chroma/glamour on every streamed token.
@@ -559,6 +575,21 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	} else if msg.err != nil {
 		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
 	}
+	obs.IncrementTurnCount()
+	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
+	newEscPrompt, newEscComp := obs.SessionTokensByRole("escalation")
+	// Compute per-turn delta: what was added this turn specifically.
+	role := agentRoleForStatus(m.st.sess.State)
+	if role == "escalation" {
+		m.lastTurnPrompt = newEscPrompt - m.escalationPrompt
+		m.lastTurnCompletion = newEscComp - m.escalationComp
+	} else {
+		m.lastTurnPrompt = newPrimaryPrompt - m.primaryPrompt
+		m.lastTurnCompletion = newPrimaryCompletion - m.primaryCompletion
+	}
+	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
+	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
+	m.currentTurnChars = 0
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
@@ -1237,19 +1268,17 @@ func (m *model) headerBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	ac := m.st.cfg.ActiveAgent()
-	model := ac.Name
-	if model == "" {
-		model = ac.Model
+	var totalPrompt, totalCompletion int64
+	for _, u := range m.st.sess.Tokens {
+		totalPrompt += u.Prompt
+		totalCompletion += u.Completion
 	}
-	if model == "" {
-		model = "local"
-	}
+	sessLabel := fmt.Sprintf("sess:%s (total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
 	const repoURL = "github.com/scoutme/milk"
-	rightFull := dim(repoURL + "  sess:" + sessID + "  model:" + model + "  /help")
-	rightFulPlain := repoURL + "  sess:" + sessID + "  model:" + model + "  /help"
-	rightShort := dim("sess:" + sessID + "  /help")
-	rightShortPlain := "sess:" + sessID + "  /help"
+	rightFull := dim(repoURL + "  " + sessLabel + "  /help")
+	rightFulPlain := repoURL + "  " + sessLabel + "  /help"
+	rightShort := dim(sessLabel + "  /help")
+	rightShortPlain := sessLabel + "  /help"
 
 	logoPlain := stripANSI(logo)
 	available := m.width - 2
@@ -1269,11 +1298,8 @@ func (m *model) headerBar() string {
 
 // statusBar renders the one-line status bar.
 func (m *model) statusBar() string {
-	sessID := m.st.sess.ID
-	if len(sessID) > 8 {
-		sessID = sessID[:8]
-	}
-	left := fmt.Sprintf(" %s  %s  %s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent())
+	tokenStr := m.statusTokens()
+	left := fmt.Sprintf(" %s  %s%s", dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
 	right := dim(m.statusCwd() + " ")
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
@@ -1334,6 +1360,46 @@ func (m *model) statusAgent() string {
 		return frame + " " + pulsed
 	}
 	return agent
+}
+
+// statusTokens returns the token counter fragment for the status bar.
+// While busy: shows live streamed char count as a proxy for in-progress output.
+// While idle: "in:X out:Y  last in:X out:Y" — session totals + last turn real tokens.
+func (m *model) statusTokens() string {
+	role := agentRoleForStatus(m.st.sess.State)
+
+	var prompt, completion int64
+	switch role {
+	case "escalation":
+		prompt, completion = m.escalationPrompt, m.escalationComp
+	default:
+		prompt, completion = m.primaryPrompt, m.primaryCompletion
+	}
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
+	if m.busy {
+		parts = append(parts, fmt.Sprintf("↓~%s", formatTokenCount(int64(math.Round(float64(m.currentTurnChars)*0.25)))))
+	} else if m.lastTurnPrompt+m.lastTurnCompletion > 0 {
+		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
+	}
+	return "  " + dim(strings.Join(parts, "  "))
+}
+
+// agentRoleForStatus maps session state to an agent role string for token lookup.
+func agentRoleForStatus(s session.State) string {
+	if s == session.StateEscalation || s == session.StateEscalationWaiting {
+		return "escalation"
+	}
+	return "primary"
+}
+
+// formatTokenCount formats a token count compactly: <1000 → exact, ≥1000 → "1.2k".
+func formatTokenCount(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // sessionRole maps session state to the human-readable role shown in the status bar.
@@ -1470,6 +1536,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chunkMsg:
+		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscript(msg.text)
 		return m, nil
 
@@ -2917,6 +2984,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
+	m.currentTurnChars = 0
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
 
@@ -3883,7 +3951,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 			// The credential-process handles its own cache and returns immediately
 			// when the token is still fresh, so this is cheap in the common case.
 			cliAgent = applyAWSCreds(st.cfg, cliAgent)
-			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures}, st.mem, "", out)
+			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}, st.mem, "", out)
 		}
 	}
 	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
@@ -3985,6 +4053,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
+	localAgent.WithLogContext(cfg.Otel.LogContext)
 
 	// Build the escalation-local agent when the escalation target is a second
 	// local provider rather than the Claude CLI.
@@ -3996,6 +4065,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if od, err := config.OtelDir(); err == nil {
 				escalationLocalAgent.WithOtelDir(od)
 			}
+			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
 			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
@@ -4007,6 +4077,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	cliAgent := newCLIAgent(cliAgentConfig(cfg))
 	cliAgent = applyAWSCreds(cfg, cliAgent)
+	cliAgent = cliAgent.WithLogContext(cfg.Otel.LogContext)
 	if dbg, err := openCLIDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
@@ -4055,6 +4126,18 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, skipPermissions: cliAgentConfig(cfg).DangerouslySkipPermissions, notifier: newNotifier(cfg)}
+
+	// Wire token persistence callbacks now that st is available; closures reference
+	// st.sess so they always write to the current session even after /new.
+	localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+		st.sess.AddTokens(model, role, prompt, completion)
+	})
+	if escalationLocalAgent != nil {
+		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			st.sess.AddTokens(model, role, prompt, completion)
+		})
+	}
+
 	agents := dispatchAgents{
 		local:           localAgent,
 		cliAgent:        cliAgent,

@@ -73,10 +73,14 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, mode C
 		b.WriteString("\n\n")
 	}
 
-	if sess.LastLocalSummary != "" {
+	// Include the primary-agent summary only when it has changed since the last injection.
+	// On ContextModeResume, an unchanged summary would shift the system-prompt suffix and
+	// bust Claude's prompt cache without adding information.
+	if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
 		b.WriteString("[Recent primary agent activity]\n")
 		b.WriteString(sess.LastLocalSummary)
 		b.WriteString("\n")
+		sess.LastLocalSummaryInjected = sess.LastLocalSummary
 	}
 
 	if injectInstructions {

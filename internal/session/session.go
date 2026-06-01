@@ -69,6 +69,9 @@ type Session struct {
 	// LastLocalSummary is a pre-rendered, sanitized, budget-capped summary of
 	// local-agent turns since the last escalation turn. Injected when escalating to Claude.
 	LastLocalSummary string `json:"last_local_summary,omitempty"`
+	// LastLocalSummaryInjected is the value of LastLocalSummary at the time it was last
+	// sent to the escalation agent. Used to detect when re-injection is necessary.
+	LastLocalSummaryInjected string `json:"-"` // transient, not persisted
 	// LastEscalationSummary is a pre-rendered, sanitized, budget-capped summary of
 	// Escalation turns. Reserved for future demotion back to local.
 	LastEscalationSummary string `json:"last_claude_summary,omitempty"`
@@ -83,6 +86,36 @@ type Session struct {
 	// 1-based: 0 is the unset sentinel (never injected); ≥1 encodes a real position.
 	// Mirrors the CurrentNeedSetAt encoding to avoid the turn-0 collision.
 	LocalMemoryInstructionInjectedAt int `json:"local_memory_instruction_injected_at,omitempty"`
+
+	// Tokens holds cumulative token usage for this session, keyed by "model\x00role".
+	// Persisted so /usage can show totals from prior runs of the same session.
+	Tokens map[string]*TokenUsage `json:"tokens,omitempty"`
+}
+
+// TokenUsage holds cumulative token counts for one (model, agent-role) pair.
+type TokenUsage struct {
+	Model      string `json:"model"`
+	Agent      string `json:"agent"`
+	Prompt     int64  `json:"prompt"`
+	Completion int64  `json:"completion"`
+}
+
+// AddTokens accumulates token counts for a (model, role) pair into the session.
+func (s *Session) AddTokens(model, role string, prompt, completion int64) {
+	if model == "" || role == "" || (prompt == 0 && completion == 0) {
+		return
+	}
+	if s.Tokens == nil {
+		s.Tokens = map[string]*TokenUsage{}
+	}
+	key := model + "\x00" + role
+	e, ok := s.Tokens[key]
+	if !ok {
+		e = &TokenUsage{Model: model, Agent: role}
+		s.Tokens[key] = e
+	}
+	e.Prompt += prompt
+	e.Completion += completion
 }
 
 // emptyEscalationSession returns true when a Claude session produced no real work:

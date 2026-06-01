@@ -23,6 +23,7 @@ All three signals use standard OTLP JSON. Switching from file export to an OTLP/
   traces.jsonl      # OTLP JSON spans, one per line
   metrics.jsonl     # OTLP JSON metric exports, one per line
   logs.jsonl        # OTLP NDJSON log records
+  milk.log          # human-readable or JSON slog log (otel.log_format=text|json; disabled by default)
 ```
 
 ---
@@ -70,6 +71,9 @@ All metrics use the `milk.` namespace per OTel semantic conventions.
 |---|---|---|---|
 | `milk.turn.duration` | Histogram (ms) | `agent` | End-to-end turn latency |
 | `milk.tool.calls` | Counter | `tool_name`, `agent` | Tool invocations |
+| `milk.tokens.prompt` | Counter | `model`, `agent` | Prompt tokens consumed per turn |
+| `milk.tokens.completion` | Counter | `model`, `agent` | Completion tokens generated per turn |
+| `milk.tokens.total` | Counter | `model`, `agent` | Total tokens (prompt + completion) per turn |
 | `milk.memory.percepts_recorded` | Counter | `producer`, `scope` (`session`/`global`) | Percepts written |
 | `milk.memory.percepts_recalled` | Counter | — | `get_memory` invocations |
 | `milk.memory.consolidation.decayed` | Counter | — | Percepts that lost weight |
@@ -81,6 +85,21 @@ All metrics use the `milk.` namespace per OTel semantic conventions.
 | `milk.otel.metrics_bytes` | Gauge | — | Current size of metrics.jsonl |
 
 The last three (`milk.otel.*_bytes`) are self-observability metrics: they make the growth of the observability files themselves visible in the metrics stream.
+
+#### Token metric labels
+
+- `model`: the model name from config (e.g. `"qwen2.5-coder"`, `"claude-3-5-sonnet-20241022"`)
+- `agent`: role of the agent that made the call — `"primary"`, `"escalation"`, or `"router"` (classification calls)
+
+#### Token metric availability by backend
+
+| Backend | Source | Availability |
+|---|---|---|
+| OpenAI-compatible (streaming) | trailing SSE chunk `usage` field | Server-dependent — most local servers (llama.cpp, Ollama) include it; some may not |
+| OpenAI-compatible (classify, non-streaming) | `usage` field in JSON response | Always present in spec-compliant servers |
+| Bedrock Converse (streaming) | `metadata` event in AWS Event Stream | Always present |
+| Bedrock Converse (classify, non-streaming) | `usage` field in JSON response | Always present |
+| Claude CLI subprocess | `result` event `usage` field | Always present — parsed from the final `result` NDJSON line |
 
 ---
 
