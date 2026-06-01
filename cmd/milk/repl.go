@@ -1370,12 +1370,10 @@ func (m *model) statusTokens() string {
 	}
 
 	var parts []string
-	if prompt+completion > 0 {
-		parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
-	}
+	parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	if m.busy {
 		parts = append(parts, fmt.Sprintf("↓%s…", formatTokenCount(m.currentTurnChars)))
-	} else {
+	} else if m.lastTurnPrompt+m.lastTurnCompletion > 0 {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
 	}
 	return "  " + dim(strings.Join(parts, "  "))
