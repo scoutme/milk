@@ -7,8 +7,8 @@ type Producer string
 
 const (
 	ProducerUser       Producer = "user"
-	ProducerLocal      Producer = "local"
-	ProducerEscalation Producer = "claude"
+	ProducerLocal      Producer = "primary"
+	ProducerEscalation Producer = "escalation"
 	ProducerSystem     Producer = "system"
 )
 
@@ -17,9 +17,9 @@ const (
 type Consumer string
 
 const (
-	ConsumerAll        Consumer = ""       // default — injected for both agents
-	ConsumerLocal      Consumer = "local"  // only injected for the local agent
-	ConsumerEscalation Consumer = "claude" // only injected for Claude
+	ConsumerAll        Consumer = ""           // default — injected for both agents
+	ConsumerLocal      Consumer = "primary"    // only injected for the primary agent
+	ConsumerEscalation Consumer = "escalation" // only injected for the escalation agent
 )
 
 // Roles holds Neo-Davidsonian semantic roles extracted from a Percept's content.

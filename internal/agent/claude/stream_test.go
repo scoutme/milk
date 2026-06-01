@@ -472,7 +472,7 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 	type captured struct{ body, hint string }
 	var got []captured
 	open, close_ := perceptTagPair(nonce)
-	text := open + "@local: use local for simple tasks" + close_ +
+	text := open + "@primary: use primary for simple tasks" + close_ +
 		" " + open + "user prefers Go" + close_
 	input := ndjson(
 		`{"type":"system","session_id":"s1"}`,
@@ -483,7 +483,7 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 	_, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{
 		OnPercept:    func(body, hint string) { got = append(got, captured{body, hint}) },
 		PerceptNonce: nonce,
-		AgentNames:   []string{"local", "claude"},
+		AgentNames:   []string{"primary", "escalation"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -491,9 +491,9 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 percepts, got %v", got)
 	}
-	if got[0].body != "use local for simple tasks" || got[0].hint != "local" {
+	if got[0].body != "use primary for simple tasks" || got[0].hint != "primary" {
 		t.Errorf("first percept: want body=%q hint=%q, got body=%q hint=%q",
-			"use local for simple tasks", "local", got[0].body, got[0].hint)
+			"use primary for simple tasks", "primary", got[0].body, got[0].hint)
 	}
 	if got[1].body != "user prefers Go" || got[1].hint != "" {
 		t.Errorf("second percept: want body=%q hint=%q, got body=%q hint=%q",
@@ -502,12 +502,12 @@ func TestStream_OnPerceptConsumerHint(t *testing.T) {
 }
 
 func TestConsumerHintFrom(t *testing.T) {
-	names := []string{"local", "claude"}
+	names := []string{"primary", "escalation"}
 	cases := []struct{ in, wantBody, wantHint string }{
-		{"@local: some fact", "some fact", "local"},
-		{"@claude: other fact", "other fact", "claude"},
+		{"@primary: some fact", "some fact", "primary"},
+		{"@escalation: other fact", "other fact", "escalation"},
 		{"plain fact", "plain fact", ""},
-		{"@local:no space", "@local:no space", ""},
+		{"@primary:no space", "@primary:no space", ""},
 	}
 	for _, c := range cases {
 		body, hint := consumerHintFrom(c.in, names)

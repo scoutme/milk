@@ -29,13 +29,13 @@ func Schemas() []map[string]any {
 						},
 						"producer": map[string]any{
 							"type":        "string",
-							"enum":        []string{"user", "local", "claude"},
+							"enum":        []string{"user", "primary", "escalation"},
 							"description": "Who is the source of this fact. Use 'user' when the user directly stated it; defaults to the calling agent.",
 						},
 						"consumer": map[string]any{
 							"type":        "string",
-							"enum":        []string{"local", "claude", ""},
-							"description": "Which agent receives this at injection time. 'local' = only the local model; 'claude' = only Claude; omit or empty = both.",
+							"enum":        []string{"primary", "escalation", ""},
+							"description": "Which agent receives this at injection time. 'primary' = only the primary agent; 'escalation' = only the escalation agent; omit or empty = both.",
 						},
 					},
 					"required": []string{"content"},
@@ -82,7 +82,7 @@ func Schemas() []map[string]any {
 						},
 						"producer": map[string]any{
 							"type":        "string",
-							"enum":        []string{"user", "local", "claude", "system", ""},
+							"enum":        []string{"user", "primary", "escalation", "system", ""},
 							"description": "Filter by who created the Percept. Omit for all producers.",
 						},
 						"min_w": map[string]any{
@@ -179,14 +179,14 @@ func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) st
 	switch args.Producer {
 	case "user":
 		producer = ProducerUser
-	case "claude":
+	case "escalation":
 		producer = ProducerEscalation
 	}
 	var consumer Consumer
 	switch args.Consumer {
-	case "local":
+	case "primary":
 		consumer = ConsumerLocal
-	case "claude":
+	case "escalation":
 		consumer = ConsumerEscalation
 	}
 	id, err := store.Record(ctx, args.Content, producer, consumer, roles, false)

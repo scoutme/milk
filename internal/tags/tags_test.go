@@ -30,36 +30,36 @@ func TestPerceptTagPair_EmptyNonce(t *testing.T) {
 // --- ConsumerHintFrom ---
 
 func TestConsumerHintFrom_FirstHint(t *testing.T) {
-	body, hint := ConsumerHintFrom("@local: some fact", "local", "claude")
-	if body != "some fact" || hint != "local" {
-		t.Errorf("want (some fact, local), got (%q, %q)", body, hint)
+	body, hint := ConsumerHintFrom("@primary: some fact", "primary", "escalation")
+	if body != "some fact" || hint != "primary" {
+		t.Errorf("want (some fact, primary), got (%q, %q)", body, hint)
 	}
 }
 
 func TestConsumerHintFrom_SecondHint(t *testing.T) {
-	body, hint := ConsumerHintFrom("@claude: other fact", "local", "claude")
-	if body != "other fact" || hint != "claude" {
-		t.Errorf("want (other fact, claude), got (%q, %q)", body, hint)
+	body, hint := ConsumerHintFrom("@escalation: other fact", "primary", "escalation")
+	if body != "other fact" || hint != "escalation" {
+		t.Errorf("want (other fact, escalation), got (%q, %q)", body, hint)
 	}
 }
 
 func TestConsumerHintFrom_NoHint(t *testing.T) {
-	body, hint := ConsumerHintFrom("plain fact", "local", "claude")
+	body, hint := ConsumerHintFrom("plain fact", "primary", "escalation")
 	if body != "plain fact" || hint != "" {
 		t.Errorf("want (plain fact, ), got (%q, %q)", body, hint)
 	}
 }
 
 func TestConsumerHintFrom_NoSpaceAfterColon_NoMatch(t *testing.T) {
-	body, hint := ConsumerHintFrom("@local:no space", "local", "claude")
-	if body != "@local:no space" || hint != "" {
+	body, hint := ConsumerHintFrom("@primary:no space", "primary", "escalation")
+	if body != "@primary:no space" || hint != "" {
 		t.Errorf("want original string and empty hint, got (%q, %q)", body, hint)
 	}
 }
 
 func TestConsumerHintFrom_EmptyNameSkipped(t *testing.T) {
 	// Empty name must not produce a spurious match for "@: " prefix.
-	_, hint := ConsumerHintFrom("@: fact", "", "claude")
+	_, hint := ConsumerHintFrom("@: fact", "", "escalation")
 	if hint != "" {
 		t.Errorf("empty name should not match, got hint %q", hint)
 	}
@@ -495,15 +495,15 @@ func TestPerceptWriter_ConsumerHint(t *testing.T) {
 		W:           &out,
 		OnPercept:   func(body, hint string) { got = append(got, captured{body, hint}) },
 		RecordNonce: nonce,
-		AgentNames:  []string{"local", "claude"},
+		AgentNames:  []string{"primary", "escalation"},
 	}
 
 	open, close_ := PerceptTagPair(nonce)
-	pw.Write([]byte(open + "@local: route simple tasks" + close_)) //nolint:errcheck
-	pw.Flush()                                                     //nolint:errcheck
+	pw.Write([]byte(open + "@primary: route simple tasks" + close_)) //nolint:errcheck
+	pw.Flush()                                                       //nolint:errcheck
 
-	if len(got) != 1 || got[0].body != "route simple tasks" || got[0].hint != "local" {
-		t.Errorf("want [{route simple tasks local}], got %v", got)
+	if len(got) != 1 || got[0].body != "route simple tasks" || got[0].hint != "primary" {
+		t.Errorf("want [{route simple tasks primary}], got %v", got)
 	}
 }
 

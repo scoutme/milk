@@ -11,14 +11,14 @@ type State string
 const (
 	StateRouting           State = "ROUTING"
 	StateLocal             State = "LOCAL"
-	StateEscalation        State = "CLAUDE"
-	StateEscalationWaiting State = "CLAUDE_WAITING"
+	StateEscalation        State = "ESCALATION"
+	StateEscalationWaiting State = "ESCALATION_WAITING"
 )
 
 type Agent string
 
 const (
-	AgentLocal      Agent = "local"
+	AgentLocal      Agent = "primary"
 	AgentEscalation Agent = "escalation"
 )
 

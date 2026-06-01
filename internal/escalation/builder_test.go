@@ -95,20 +95,20 @@ func TestBuildContext_EscalationBrief_IncludedOnReturning(t *testing.T) {
 }
 
 func TestBuildContext_LastLocalSummary(t *testing.T) {
-	sess := &session.Session{LastLocalSummary: "User: fix typo\nAssistant (local): done"}
+	sess := &session.Session{LastLocalSummary: "User: fix typo\nAssistant (primary): done"}
 	got := BuildContext(sess, "n1", nil, ContextModeFirst, true, "", "")
 	if !strings.Contains(got, "fix typo") {
 		t.Errorf("expected LastLocalSummary in output, got %q", got)
 	}
-	if !strings.Contains(got, "[Recent local agent activity]") {
-		t.Errorf("expected local activity header, got %q", got)
+	if !strings.Contains(got, "[Recent primary agent activity]") {
+		t.Errorf("expected primary activity header, got %q", got)
 	}
 }
 
 func TestBuildContext_NoLocalSummaryBlock_WhenEmpty(t *testing.T) {
 	sess := &session.Session{}
 	got := BuildContext(sess, "n1", nil, ContextModeFirst, true, "", "")
-	if strings.Contains(got, "[Recent local agent activity]") {
+	if strings.Contains(got, "[Recent primary agent activity]") {
 		t.Error("empty LastLocalSummary should not produce activity block")
 	}
 }

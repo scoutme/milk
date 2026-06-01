@@ -6,6 +6,7 @@ import (
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -13,7 +14,7 @@ type Target string
 
 const (
 	TargetLocal      Target = "local"
-	TargetEscalation Target = "claude"
+	TargetEscalation Target = "escalation"
 )
 
 type Decision struct {
@@ -35,6 +36,12 @@ func New(cfg config.Config, localAgent *local.Agent) *Router {
 // Route returns the target agent for the given prompt and session state.
 // explicitEscalate and explicitLocal reflect the --escalate / --local flags.
 func (r *Router) Route(ctx context.Context, sess *session.Session, prompt string, explicitEscalate, explicitLocal bool) (Decision, error) {
+	d, err := r.route(ctx, sess, prompt, explicitEscalate, explicitLocal)
+	obs.Debug("router", "target", d.Target, "reason", d.Reason, "conclusive", d.Conclusive)
+	return d, err
+}
+
+func (r *Router) route(ctx context.Context, sess *session.Session, prompt string, explicitEscalate, explicitLocal bool) (Decision, error) {
 	// 1. Explicit flags always win
 	if explicitEscalate {
 		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "--escalate flag"}, nil
@@ -53,10 +60,10 @@ func (r *Router) Route(ctx context.Context, sess *session.Session, prompt string
 		return d, nil
 	}
 
-	// 4. Configurable fallback: local LLM classifier or direct Claude escalation
+	// 4. Configurable fallback: local LLM classifier or direct escalation
 	switch r.cfg.Rules.ClassifierFallback {
-	case "claude":
-		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "classifier-fallback=claude"}, nil
+	case "claude", "escalation":
+		return Decision{Target: TargetEscalation, Conclusive: true, Reason: "classifier-fallback=escalation"}, nil
 	default: // "local" or unset
 		if r.localAgent != nil {
 			escalate, err := r.localAgent.Classify(ctx, prompt)
