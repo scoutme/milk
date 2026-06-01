@@ -1263,23 +1263,11 @@ func (m *model) headerBar() string {
 	tagline := dim("switch models, not context.")
 	taglinePlain := "switch models, not context."
 
-	sessID := m.st.sess.ID
-	if len(sessID) > 8 {
-		sessID = sessID[:8]
-	}
-	ac := m.st.cfg.ActiveAgent()
-	model := ac.Name
-	if model == "" {
-		model = ac.Model
-	}
-	if model == "" {
-		model = "local"
-	}
 	const repoURL = "github.com/scoutme/milk"
-	rightFull := dim(repoURL + "  sess:" + sessID + "  model:" + model + "  /help")
-	rightFulPlain := repoURL + "  sess:" + sessID + "  model:" + model + "  /help"
-	rightShort := dim("sess:" + sessID + "  /help")
-	rightShortPlain := "sess:" + sessID + "  /help"
+	rightFull := dim(repoURL + "  /help")
+	rightFulPlain := repoURL + "  /help"
+	rightShort := dim("/help")
+	rightShortPlain := "/help"
 
 	logoPlain := stripANSI(logo)
 	available := m.width - 2
@@ -1299,12 +1287,8 @@ func (m *model) headerBar() string {
 
 // statusBar renders the one-line status bar.
 func (m *model) statusBar() string {
-	sessID := m.st.sess.ID
-	if len(sessID) > 8 {
-		sessID = sessID[:8]
-	}
 	tokenStr := m.statusTokens()
-	left := fmt.Sprintf(" %s  %s  %s%s", dim("session:"+sessID), dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
+	left := fmt.Sprintf(" %s  %s%s", dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
 	right := dim(m.statusCwd() + " ")
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
