@@ -69,6 +69,10 @@ type streamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 // MemConfig holds the memory-related config values that the local agent uses at
@@ -78,6 +82,15 @@ type MemConfig struct {
 	ReinjectionTurns     int  // re-inject instruction after N local turns; 0 = disabled
 	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
 	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
+}
+
+// agentRoleForMetrics returns "escalation" when the agent is configured as the
+// escalation target, "primary" otherwise. Used as the OTel "agent" label.
+func agentRoleForMetrics(escalationName string) string {
+	if escalationName != "" {
+		return "escalation"
+	}
+	return "primary"
 }
 
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
@@ -737,10 +750,11 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
 		return "", "", nil, err
 	}
+	obs.RecordTokens(ctx, a.model, agentRoleForMetrics(a.escalationName), promptTokens, completionTokens)
 
 	if det.Format != ToolFormatUnknown {
 		a.detectedFormat = det.Format
@@ -791,13 +805,15 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 
 // scanSSE reads SSE lines from the scanner, feeding content tokens through the
 // detector and accumulating native tool-call deltas in partialTools.
+// Returns the collected tool calls and any token usage reported by the server.
 func (a *Agent) scanSSE(
 	scanner *bufio.Scanner,
 	det *StreamDetector,
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, error) {
+) ([]toolCall, int64, int64, error) {
+	var promptTokens, completionTokens int64
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -811,15 +827,19 @@ func (a *Agent) scanSSE(
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
+		if chunk.Usage != nil {
+			promptTokens = chunk.Usage.PromptTokens
+			completionTokens = chunk.Usage.CompletionTokens
+		}
 		for _, choice := range chunk.Choices {
 			processContentToken(choice.Delta.Content, det, textBuf, out)
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
-	return collectNativeToolCalls(partialTools), nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {
@@ -903,9 +923,16 @@ Task: ` + prompt
 				Content string `json:"content"`
 			} `json:"Message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage,omitempty"`
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
 		return false, err
+	}
+	if result.Usage != nil {
+		obs.RecordTokens(ctx, a.model, "router", result.Usage.PromptTokens, result.Usage.CompletionTokens)
 	}
 
 	if len(result.Choices) == 0 {

@@ -89,6 +89,23 @@ func Add(ctx context.Context, meterName, instrument string, n int64, attrs ...at
 	c.Add(ctx, n, withAttrs(attrs...))
 }
 
+// RecordTokens emits prompt, completion, and total token counters with model
+// and agent-role labels. model and agentRole must be non-empty.
+// agentRole should be "primary", "escalation", or "router".
+func RecordTokens(ctx context.Context, model, agentRole string, prompt, completion int64) {
+	if model == "" || agentRole == "" || (prompt == 0 && completion == 0) {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("agent", agentRole),
+	}
+	Add(ctx, instrumentationScope, "milk.tokens.prompt", prompt, attrs...)
+	Add(ctx, instrumentationScope, "milk.tokens.completion", completion, attrs...)
+	Add(ctx, instrumentationScope, "milk.tokens.total", prompt+completion, attrs...)
+	Debug("tokens", "model", model, "agent", agentRole, "prompt", prompt, "completion", completion)
+}
+
 // SetGauge sets an observable gauge via a callback. Registers a new observable
 // gauge each call — intended for low-frequency gauges (e.g. session end).
 func SetGauge(ctx context.Context, meterName, instrument string, value int64, attrs ...attribute.KeyValue) {

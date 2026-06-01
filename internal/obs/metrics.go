@@ -56,7 +56,7 @@ func FormatMetrics(otelDir string) string {
 	sort.Strings(keys)
 
 	var b strings.Builder
-	fmt.Fprintln(&b, "memory metrics (most recent values):")
+	fmt.Fprintln(&b, "metrics (most recent values):")
 	for _, k := range keys {
 		p := latest[k]
 		label := p.name
