@@ -447,10 +447,12 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 	fmt.Fprint(out, bold(green(localLabel(cfg)))+" ")
 	aw := newActivityWriter(out)
 	history := sessionToMessages(sess)
-	if trimmed, ok := trimLocalMessages(history, cfg.LocalContextBudget()); ok {
-		obs.Debug("context trim", "agent", "primary", "budget_chars", cfg.LocalContextBudget(), "msgs_before", len(history), "msgs_after", len(trimmed))
+	ac := cfg.ActiveAgent()
+	msgBudget := cfg.AgentMessageBudget(ac)
+	if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
+		obs.Debug("context trim", "agent", "primary", "budget_chars", msgBudget, "msgs_before", len(history), "msgs_after", len(trimmed))
 		history = trimmed
-		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), cfg.LocalContextBudget())
+		fmt.Fprintf(out, "%s local context trimmed to fit budget (%d chars)\n", milkTag(), msgBudget)
 	}
 
 	logStateTransition(sess, session.StateLocal, "run local")
@@ -458,10 +460,10 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 
 	nonce := claude.GenerateNonce()
 	agent = agent.WithMemConfig(local.MemConfig{
-		ResultMaxBytes:       cfg.LocalMemoryResultMaxByteCount(),
-		ReinjectionTurns:     cfg.LocalMemoryReinjectionTurnThreshold(),
-		ReinjectionBytes:     cfg.LocalMemoryReinjectionByteThreshold(),
-		RelevanceGateEnabled: cfg.PerceptRelevanceGateEnabled(),
+		ResultMaxBytes:       cfg.AgentMemoryResultMaxByteCount(ac),
+		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(ac, true),
+		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, true),
+		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 	}).WithTagCallbacks(nonce, "primary", "escalation",
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {
@@ -504,7 +506,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 				sess.CurrentNeed = prompt
 				sess.CurrentNeedSetAt = len(sess.History) + 1
 			}
-			sess.RebuildSummaryBricks(cfg.ContextBudget())
+			sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 			logStateTransition(sess, session.StateRouting, "pre-escalate local")
 			sess.ForceState(session.StateRouting)
 			session.Save(sess) //nolint:errcheck
@@ -536,7 +538,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 			Agent:   session.AgentLocal,
 			Content: assistantContent,
 		})
-		sess.RebuildSummaryBricks(cfg.ContextBudget())
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 	}
 
 	logStateTransition(sess, session.StateRouting, "local done")
@@ -739,7 +741,7 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		"cost_usd", res.TotalCostUSD)
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
-	sess.RebuildSummaryBricks(cfg.ContextBudget())
+	sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 	if res.EndsWithQ {
 		logStateTransition(sess, session.StateEscalationWaiting, "escalation ended with question")
 		sess.ForceState(session.StateEscalationWaiting)
@@ -818,8 +820,9 @@ func shouldInjectMemoryInstructions(cfg config.Config, sess *session.Session, re
 	if !resuming {
 		return true
 	}
-	turnThreshold := cfg.MemoryReinjectionTurnThreshold()
-	byteThreshold := cfg.MemoryReinjectionByteThreshold()
+	escAC := cfg.EscalationAgentConfig()
+	turnThreshold := cfg.AgentMemoryReinjectionTurnThreshold(escAC, false)
+	byteThreshold := cfg.AgentMemoryReinjectionByteThreshold(escAC, false)
 	if turnThreshold == 0 && byteThreshold == 0 {
 		return false
 	}
@@ -1287,11 +1290,12 @@ func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) 
 		candidates = append(candidates, p)
 	}
 
-	if cfg.PerceptRelevanceGateEnabled() {
+	escAC := cfg.EscalationAgentConfig()
+	if cfg.AgentPerceptRelevanceGateEnabled(escAC) {
 		candidates = memory.FilterByRelevance(candidates, prompt)
 	}
 
-	candidates = memory.LimitInjection(candidates, cfg.PerceptInjectMaxCount(), cfg.PerceptInjectMaxByteCount())
+	candidates = memory.LimitInjection(candidates, cfg.AgentPerceptInjectMaxCount(escAC), cfg.AgentPerceptInjectMaxByteCount(escAC))
 
 	out := make([]string, len(candidates))
 	for i, p := range candidates {

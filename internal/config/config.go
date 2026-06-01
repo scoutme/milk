@@ -111,6 +111,37 @@ type AgentConfig struct {
 	AllowedTools []string `json:"allowed_tools,omitempty"`
 	// AddDirs is a list of extra directories to pass with --add-dir.
 	AddDirs []string `json:"add_dirs,omitempty"`
+
+	// Limits holds optional per-agent overrides for context caps and injection limits.
+	// Nil fields fall back to the global Config defaults.
+	Limits *AgentLimits `json:"limits,omitempty"`
+}
+
+// AgentLimits holds optional per-agent overrides for context caps and injection
+// limits. A nil field means "use the global default from Config". All fields
+// use pointer types so that zero can be expressed as "unlimited/disabled".
+//
+// These mirror the global fields on Config but without the Local* prefix — the
+// distinction was a legacy artefact of fixed role assignments. When set on an
+// AgentConfig, they override the global value for that specific agent regardless
+// of whether it is acting as primary or escalation.
+type AgentLimits struct {
+	// ContextBudgetChars overrides context_budget_chars for this agent.
+	ContextBudgetChars *int `json:"context_budget_chars,omitempty"`
+	// MessageBudgetChars overrides local_context_budget_chars (message history trim).
+	MessageBudgetChars *int `json:"message_budget_chars,omitempty"`
+	// MemoryReinjectionTurns overrides memory_reinjection_turns / local_memory_reinjection_turns.
+	MemoryReinjectionTurns *int `json:"memory_reinjection_turns,omitempty"`
+	// MemoryReinjectionBytes overrides memory_reinjection_bytes / local_memory_reinjection_bytes.
+	MemoryReinjectionBytes *int `json:"memory_reinjection_bytes,omitempty"`
+	// MemoryResultMaxBytes overrides local_memory_result_max_bytes.
+	MemoryResultMaxBytes *int `json:"memory_result_max_bytes,omitempty"`
+	// PerceptInjectMax overrides percept_inject_max.
+	PerceptInjectMax *int `json:"percept_inject_max,omitempty"`
+	// PerceptInjectMaxBytes overrides percept_inject_max_bytes.
+	PerceptInjectMaxBytes *int `json:"percept_inject_max_bytes,omitempty"`
+	// PerceptRelevanceGate overrides percept_relevance_gate.
+	PerceptRelevanceGate *bool `json:"percept_relevance_gate,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -444,6 +475,125 @@ func (c Config) LocalContextBudget() int {
 		return 24000
 	}
 	return c.LocalContextBudgetChars
+}
+
+// --- Per-agent resolvers ---
+// Each resolver accepts an AgentConfig and returns the effective value for that
+// agent: the per-agent override when set, otherwise the global Config default.
+
+// AgentContextBudget returns the summary-brick budget for the given agent,
+// falling back to the global ContextBudget().
+func (c Config) AgentContextBudget(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.ContextBudgetChars != nil {
+		v := *a.Limits.ContextBudgetChars
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 12000)
+	}
+	return c.ContextBudget()
+}
+
+// AgentMessageBudget returns the message-history trim budget for the given agent,
+// falling back to the global LocalContextBudget().
+func (c Config) AgentMessageBudget(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.MessageBudgetChars != nil {
+		v := *a.Limits.MessageBudgetChars
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 24000)
+	}
+	return c.LocalContextBudget()
+}
+
+// AgentMemoryReinjectionTurnThreshold returns the memory re-injection turn interval
+// for the given agent, falling back to the appropriate global default.
+// useLocalDefault selects which global field to fall back to (primary vs escalation).
+func (c Config) AgentMemoryReinjectionTurnThreshold(a AgentConfig, useLocalDefault bool) int {
+	if a.Limits != nil && a.Limits.MemoryReinjectionTurns != nil {
+		v := *a.Limits.MemoryReinjectionTurns
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 20)
+	}
+	if useLocalDefault {
+		return c.LocalMemoryReinjectionTurnThreshold()
+	}
+	return c.MemoryReinjectionTurnThreshold()
+}
+
+// AgentMemoryReinjectionByteThreshold returns the memory re-injection byte threshold
+// for the given agent, falling back to the appropriate global default.
+func (c Config) AgentMemoryReinjectionByteThreshold(a AgentConfig, useLocalDefault bool) int {
+	if a.Limits != nil && a.Limits.MemoryReinjectionBytes != nil {
+		v := *a.Limits.MemoryReinjectionBytes
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 40000)
+	}
+	if useLocalDefault {
+		return c.LocalMemoryReinjectionByteThreshold()
+	}
+	return c.MemoryReinjectionByteThreshold()
+}
+
+// AgentMemoryResultMaxByteCount returns the memory tool result size cap for the
+// given agent, falling back to the global LocalMemoryResultMaxByteCount().
+func (c Config) AgentMemoryResultMaxByteCount(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.MemoryResultMaxBytes != nil {
+		v := *a.Limits.MemoryResultMaxBytes
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 2048)
+	}
+	return c.LocalMemoryResultMaxByteCount()
+}
+
+// AgentPerceptInjectMaxCount returns the percept injection count cap for the
+// given agent, falling back to the global PerceptInjectMaxCount().
+func (c Config) AgentPerceptInjectMaxCount(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.PerceptInjectMax != nil {
+		v := *a.Limits.PerceptInjectMax
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 25)
+	}
+	return c.PerceptInjectMaxCount()
+}
+
+// AgentPerceptInjectMaxByteCount returns the percept injection byte cap for the
+// given agent, falling back to the global PerceptInjectMaxByteCount().
+func (c Config) AgentPerceptInjectMaxByteCount(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.PerceptInjectMaxBytes != nil {
+		v := *a.Limits.PerceptInjectMaxBytes
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 2048)
+	}
+	return c.PerceptInjectMaxByteCount()
+}
+
+// AgentPerceptRelevanceGateEnabled returns whether relevance gating is active for
+// the given agent, falling back to the global PerceptRelevanceGateEnabled().
+func (c Config) AgentPerceptRelevanceGateEnabled(a AgentConfig) bool {
+	if a.Limits != nil && a.Limits.PerceptRelevanceGate != nil {
+		return *a.Limits.PerceptRelevanceGate
+	}
+	return c.PerceptRelevanceGateEnabled()
+}
+
+// intOr returns v when v > 0, otherwise returns def.
+func intOr(v, def int) int {
+	if v > 0 {
+		return v
+	}
+	return def
 }
 
 // ShowReasoningDefault returns the configured default for reasoning visibility
