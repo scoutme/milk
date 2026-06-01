@@ -1263,11 +1263,15 @@ func (m *model) headerBar() string {
 	tagline := dim("switch models, not context.")
 	taglinePlain := "switch models, not context."
 
+	sessID := m.st.sess.ID
+	if len(sessID) > 8 {
+		sessID = sessID[:8]
+	}
 	const repoURL = "github.com/scoutme/milk"
-	rightFull := dim(repoURL + "  /help")
-	rightFulPlain := repoURL + "  /help"
-	rightShort := dim("/help")
-	rightShortPlain := "/help"
+	rightFull := dim(repoURL + "  sess:" + sessID + "  /help")
+	rightFulPlain := repoURL + "  sess:" + sessID + "  /help"
+	rightShort := dim("sess:" + sessID + "  /help")
+	rightShortPlain := "sess:" + sessID + "  /help"
 
 	logoPlain := stripANSI(logo)
 	available := m.width - 2
