@@ -238,6 +238,9 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	if err != nil {
 		return "", "", nil, err
 	}
+	if a.logContext {
+		obs.LogPayload(a.converseEndpoint(true), body)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.converseEndpoint(true), bytes.NewReader(body))
 	if err != nil {
@@ -373,6 +376,9 @@ Task: ` + prompt
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return false, err
+	}
+	if a.logContext {
+		obs.LogPayload(a.converseEndpoint(false)+" [classify]", body)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.converseEndpoint(false), bytes.NewReader(body))

@@ -125,6 +125,7 @@ func run(cmd *cobra.Command, args []string) error {
 	if od, err := config.OtelDir(); err == nil {
 		localAgent.WithOtelDir(od)
 	}
+	localAgent.WithLogContext(cfg.Otel.LogContext)
 	// Single-prompt mode: wire permissions (no interactive ask — tools are denied
 	// unless dangerously_skip_permissions is on or already granted in the store).
 	if lp, err := local.OpenPermStore(cwd); err == nil {
@@ -140,6 +141,7 @@ func run(cmd *cobra.Command, args []string) error {
 			if od, err := config.OtelDir(); err == nil {
 				escalationLocalAgent.WithOtelDir(od)
 			}
+			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
 			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)

@@ -119,6 +119,7 @@ type Agent struct {
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
+	logContext       bool // when true, log full request payload at DEBUG level
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -326,6 +327,12 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 	copy := *a
 	copy.skipPerms = skip
 	return &copy
+}
+
+// WithLogContext enables full request payload logging at DEBUG level.
+func (a *Agent) WithLogContext(v bool) *Agent {
+	a.logContext = v
+	return a
 }
 
 // WithOtelDir sets the otel directory so the agent can offer get_metrics.
@@ -715,18 +722,23 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
 	req := chatRequest{
-		Model:         a.model,
-		Messages:      msgs,
-		Tools:         tools,
-		Stream:        true,
-		StreamOptions: &struct{ IncludeUsage bool `json:"include_usage"` }{IncludeUsage: true},
-		Temperature:   0.2,
-		Seed:          time.Now().UnixNano(),
+		Model:    a.model,
+		Messages: msgs,
+		Tools:    tools,
+		Stream:   true,
+		StreamOptions: &struct {
+			IncludeUsage bool `json:"include_usage"`
+		}{IncludeUsage: true},
+		Temperature: 0.2,
+		Seed:        time.Now().UnixNano(),
 	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", "", nil, err
+	}
+	if a.logContext {
+		obs.LogPayload(a.inferenceURL(), body)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -906,6 +918,9 @@ Task: ` + prompt
 	body, err := json.Marshal(req)
 	if err != nil {
 		return false, err
+	}
+	if a.logContext {
+		obs.LogPayload(a.inferenceURL()+" [classify]", body)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
