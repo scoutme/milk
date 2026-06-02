@@ -17,6 +17,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
@@ -1080,6 +1081,29 @@ func cliToolArgSummary(args map[string]any) string {
 			}
 			return v
 		}
+	}
+	return ""
+}
+
+// cliToolDiff returns a colored inline diff for Claude CLI file-edit tool calls.
+// Handles the Edit tool (old_string/new_string) and Write tool (content).
+func cliToolDiff(name string, input map[string]any) string {
+	switch name {
+	case "Edit":
+		path, _ := input["file_path"].(string)
+		oldStr, _ := input["old_string"].(string)
+		newStr, _ := input["new_string"].(string)
+		if path == "" || oldStr == "" {
+			return ""
+		}
+		return diff.ForEdit(path, oldStr, newStr, 3)
+	case "Write":
+		path, _ := input["file_path"].(string)
+		content, _ := input["content"].(string)
+		if path == "" {
+			return ""
+		}
+		return diff.ForWrite(path, content, 3)
 	}
 	return ""
 }

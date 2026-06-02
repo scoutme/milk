@@ -361,10 +361,13 @@ type model struct {
 	// Live turn output: chars written during the current turn, used as a streaming proxy.
 	// Reset at turn start.
 	currentTurnChars int64
-	// lastTurnPrompt/Completion are the real token counts from the last completed turn,
-	// captured from the session accumulator delta at agentDoneMsg.
-	lastTurnPrompt     int64
-	lastTurnCompletion int64
+	// lastTurnPrompt/Completion are per-role deltas from the last completed turn
+	// for each agent, captured at agentDoneMsg.
+	lastTurnPrompt     map[string]int64
+	lastTurnCompletion map[string]int64
+	// lastTokenRole tracks which role's counters were last displayed; used to detect
+	// role changes and clear stale last-turn counters between turns.
+	lastTokenRole string
 
 	colorizeMode ColorizeMode
 
@@ -411,6 +414,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		taSelAnchor:         -1,
 		taSelEnd:            -1,
 		lastUndoValue:       "\x00", // sentinel: never equals real textarea value, so first push always succeeds
+		lastTurnPrompt:      map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
 	}
 }
 
@@ -467,9 +472,8 @@ func (m *model) refreshPrompt() {
 func (m *model) inputLocked() bool { return m.busy }
 
 // handleBusyKey handles key events while an agent turn is running.
-// Enter is blocked (with a one-time hint); ctrl+c cancels; page-up/down scroll
-// the viewport (consistent with normal mode); all other keys are forwarded to
-// the textarea so the user can pre-compose the next message.
+// It intercepts the three busy-specific cases, then delegates to handleKey
+// for all navigation, editing, history, undo/redo, and viewport scroll.
 func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -482,21 +486,11 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "ctrl+m":
 		m.busyHint = "agent is responding — Ctrl+C to interrupt"
 		return m, busyHintClearCmd()
-	case "ctrl+t":
-		m = m.toggleThinking()
-		return m, nil
-	case "pgup", "ctrl+u":
-		m.vp.HalfPageUp()
-		return m, nil
-	case "pgdown", "ctrl+f":
-		m.vp.HalfPageDown()
+	case "tab":
+		// Tab completion not available while busy — ignore silently.
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.undoPush(true)
-	cmd = m.updateTA(msg)
-	m.syncLayout()
-	return m, cmd
+	return m.handleKey(msg)
 }
 
 // handlePermKey routes key events while a permission prompt is pending.
@@ -578,17 +572,14 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
 	newEscPrompt, newEscComp := obs.SessionTokensByRole("escalation")
-	// Compute per-turn delta: what was added this turn specifically.
-	role := agentRoleForStatus(m.st.sess.State)
-	if role == "escalation" {
-		m.lastTurnPrompt = newEscPrompt - m.escalationPrompt
-		m.lastTurnCompletion = newEscComp - m.escalationComp
-	} else {
-		m.lastTurnPrompt = newPrimaryPrompt - m.primaryPrompt
-		m.lastTurnCompletion = newPrimaryCompletion - m.primaryCompletion
-	}
+	// Compute per-role per-turn deltas from the accumulators.
+	m.lastTurnPrompt["escalation"] = newEscPrompt - m.escalationPrompt
+	m.lastTurnCompletion["escalation"] = newEscComp - m.escalationComp
+	m.lastTurnPrompt["primary"] = newPrimaryPrompt - m.primaryPrompt
+	m.lastTurnCompletion["primary"] = newPrimaryCompletion - m.primaryCompletion
 	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
 	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
+	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
@@ -1366,7 +1357,11 @@ func (m *model) statusAgent() string {
 // While busy: shows live streamed char count as a proxy for in-progress output.
 // While idle: "in:X out:Y  last in:X out:Y" — session totals + last turn real tokens.
 func (m *model) statusTokens() string {
-	role := agentRoleForStatus(m.st.sess.State)
+	role := m.activeTokenRole()
+
+	if !m.busy {
+		m.lastTokenRole = role
+	}
 
 	var prompt, completion int64
 	switch role {
@@ -1376,19 +1371,36 @@ func (m *model) statusTokens() string {
 		prompt, completion = m.primaryPrompt, m.primaryCompletion
 	}
 
+	lastPrompt := m.lastTurnPrompt[role]
+	lastCompletion := m.lastTurnCompletion[role]
+
 	var parts []string
 	parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	if m.busy {
 		parts = append(parts, fmt.Sprintf("↓~%s", formatTokenCount(int64(math.Round(float64(m.currentTurnChars)*0.25)))))
-	} else if m.lastTurnPrompt+m.lastTurnCompletion > 0 {
-		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(m.lastTurnPrompt), formatTokenCount(m.lastTurnCompletion)))
+	} else if lastPrompt+lastCompletion > 0 {
+		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion)))
 	}
 	return "  " + dim(strings.Join(parts, "  "))
 }
 
-// agentRoleForStatus maps session state to an agent role string for token lookup.
-func agentRoleForStatus(s session.State) string {
-	if s == session.StateEscalation || s == session.StateEscalationWaiting {
+// activeTokenRole returns "escalation" or "primary" reflecting which agent will
+// handle (or is handling) the current turn. Mirrors agentLabel priority order.
+func (m *model) activeTokenRole() string {
+	st := m.st
+	if st.activeFallbackTarget == "escalation" {
+		return "escalation"
+	}
+	if st.activeFallbackTarget == "primary" {
+		return "primary"
+	}
+	if st.stickyEscalate || st.forceEscalate {
+		return "escalation"
+	}
+	if st.stickyPrimary || st.forcePrimary {
+		return "primary"
+	}
+	if st.sess.State == session.StateEscalation || st.sess.State == session.StateEscalationWaiting {
 		return "escalation"
 	}
 	return "primary"
@@ -1426,6 +1438,10 @@ func agentLabel(st *interactiveState) string {
 		escalationName = "escalation"
 	}
 	switch {
+	case st.activeFallbackTarget == "escalation":
+		return escalationName + " (fallback)"
+	case st.activeFallbackTarget == "primary":
+		return localName + " (fallback)"
 	case st.stickyEscalate:
 		return escalationName + " (pinned)"
 	case st.forceEscalate:
@@ -3043,6 +3059,10 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
 					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
 				}
+				// Inline diff for file edits.
+				if d := cliToolDiff(name, input); d != "" {
+					hint += d
+				}
 			}
 			send(chunkMsg{text: hint})
 		}).
@@ -3938,10 +3958,14 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	target := decision.Target
 	if target == router.TargetLocal && !localAvail {
 		target = router.TargetEscalation
-	}
-	if target == router.TargetEscalation && !escalationAvail {
+		st.activeFallbackTarget = "escalation"
+	} else if target == router.TargetEscalation && !escalationAvail {
 		target = router.TargetLocal
+		st.activeFallbackTarget = "primary"
+	} else {
+		st.activeFallbackTarget = ""
 	}
+	defer func() { st.activeFallbackTarget = "" }()
 
 	var inputR inputReader
 	if len(ir) > 0 && ir[0] != nil {

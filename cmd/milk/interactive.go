@@ -179,6 +179,12 @@ type interactiveState struct {
 	// lastEscalationContextHash is a short hash of the last --append-system-prompt-file
 	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
 	lastEscalationContextHash string
+
+	// activeFallbackTarget is set by runTurn just before a turn runs when the
+	// router's decision was overridden by availability (e.g. local down → escalation).
+	// "" means no override is active. Used by agentLabel to show the correct agent
+	// during the turn without waiting for session state to update.
+	activeFallbackTarget string
 }
 
 // escalationAgentName returns the display name of the configured escalation agent.

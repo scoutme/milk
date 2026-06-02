@@ -195,9 +195,18 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 	})
 
 	var b strings.Builder
-	fmt.Fprintln(&b, "token usage (cumulative):")
-	fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s\n", "role", "model", "prompt", "completion", "total")
-	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
+	rule := "  " + strings.Repeat("─", 82)
+	header := func(title string) {
+		fmt.Fprintf(&b, "\n%s\n", title)
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s\n", "role", "model", "prompt", "completion", "total")
+		fmt.Fprintln(&b, rule)
+	}
+	footer := func(p, c float64) {
+		fmt.Fprintln(&b, rule)
+		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n", "total", p, c, p+c)
+	}
+
+	header("token usage (cumulative):")
 	var grandPrompt, grandCompletion float64
 	for _, r := range rows {
 		grandPrompt += r.prompt
@@ -205,12 +214,10 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f\n",
 			r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion)
 	}
-	fmt.Fprintf(&b, "  %s\n", strings.Repeat("─", 82))
-	fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n",
-		"total", grandPrompt, grandCompletion, grandPrompt+grandCompletion)
+	footer(grandPrompt, grandCompletion)
 
 	if len(sessEntries) > 0 {
-		fmt.Fprintf(&b, "\nthis session (%d turns):\n", turns)
+		header(fmt.Sprintf("this session (%d turns):", turns))
 		var sp, sc float64
 		for _, e := range sessEntries {
 			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
@@ -218,8 +225,23 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 			sp += float64(e.Prompt)
 			sc += float64(e.Completion)
 		}
-		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n", "total", sp, sc, sp+sc)
+		footer(sp, sc)
 	}
+
+	// In-process accumulator: tokens since milk started (resets on /new).
+	procEntries, procTurns := SessionTotals()
+	if len(procEntries) > 0 {
+		header(fmt.Sprintf("since start (%d turns):", procTurns))
+		var pp, pc float64
+		for _, e := range procEntries {
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
+				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion)
+			pp += float64(e.Prompt)
+			pc += float64(e.Completion)
+		}
+		footer(pp, pc)
+	}
+
 	return strings.TrimRight(b.String(), "\n")
 }
 

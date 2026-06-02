@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
@@ -702,6 +703,9 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			args = args[:120] + "…"
 		}
 		obs.Debug("tool call", "name", tc.Function.Name, "args", args)
+		if d := toolDiff(tc.Function.Name, tc.Function.Arguments); d != "" {
+			fmt.Fprint(out, d)
+		}
 
 		if toolNeedsPermission(tc.Function.Name) {
 			var argMap map[string]any
@@ -753,6 +757,33 @@ func printToolLine(out io.Writer, tc toolCall) {
 	} else {
 		fmt.Fprintf(out, "\n\033[2m⚙ %s\033[0m\n", tc.Function.Name)
 	}
+}
+
+// toolDiff returns a colored inline diff string for edit_file and write_file
+// tool calls. Returns "" for all other tools or when no diff is available.
+func toolDiff(name, argsJSON string) string {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	switch name {
+	case "edit_file":
+		path, _ := args["path"].(string)
+		oldStr, _ := args["old_string"].(string)
+		newStr, _ := args["new_string"].(string)
+		if path == "" || oldStr == "" {
+			return ""
+		}
+		return diff.ForEdit(path, oldStr, newStr, 3)
+	case "write_file":
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		if path == "" {
+			return ""
+		}
+		return diff.ForWrite(path, content, 3)
+	}
+	return ""
 }
 
 // toolArgSummary extracts the most informative single argument value for display.

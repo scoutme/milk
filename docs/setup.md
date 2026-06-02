@@ -447,6 +447,22 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 
 **Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Ignored while an agent turn is in progress.
 
+### Token usage
+
+`/usage` prints a three-section token report:
+
+| Section | Scope |
+|---------|-------|
+| `token usage (cumulative)` | All-time totals across all sessions and directories (from `~/.milk/otel/metrics.jsonl`) |
+| `this session (N turns)` | Current session file — persists across milk restarts |
+| `since start (N turns)` | In-process accumulator since milk launched; resets on `/new` |
+
+Each section is broken down by agent role and model.
+
+### Inline diff view
+
+When an agent calls `edit_file` or `write_file` (local agent), or `Edit` or `Write` (Claude CLI agent), milk renders a colored inline diff in the transcript immediately after the tool hint line. Deleted lines appear in red, added lines in green, with 3 lines of context on each side of each changed region.
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |
@@ -454,8 +470,9 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 | Mouse wheel / PgUp / PgDn / Ctrl+U / Ctrl+F | Scroll transcript |
 | Ctrl+C | Interrupt current agent turn |
 | Ctrl+T | Toggle thinking/reasoning visibility (works during streaming) |
-| Up / Down (single-line) / Ctrl+Up / Ctrl+Down | Navigate input history |
-| Ctrl+R / Ctrl+S | Reverse / forward incremental history search |
+| Up / Down (single-line) / Ctrl+Up / Ctrl+Down | Navigate input history (also works while agent is responding) |
+| Ctrl+R / Ctrl+S | Reverse / forward incremental history search (also works while agent is responding) |
+| Ctrl+Z / Ctrl+Y | Undo / redo in input area (also works while agent is responding) |
 | Ctrl+N / Shift+Alt+Enter / Alt+Enter | Insert newline in input |
 
 ### Troubleshooting
