@@ -1373,6 +1373,11 @@ func runDrop() error {
 		return err
 	}
 	fmt.Printf("dropped session %s\n", sess.ID[:8])
+	// Pre-create a fresh empty session so the next plain `milk` invocation
+	// starts clean rather than resuming the next oldest session in the index.
+	if _, err := session.New(cwd, flagSession); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: could not create fresh session: %v\n", milkTag(), err)
+	}
 	return nil
 }
 
