@@ -34,7 +34,7 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
 - **Escalation agent**: any `agents` entry can be the escalation target — set `escalation_agent` to its name. Defaults to the built-in `claude-cli` entry. Use `/agent switch <name> as escalation` to change it at runtime.
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API. Configured as `provider: "claude-cli"` in `agents`.
-- **Context handoff**: local transcript passed via `--append-system-prompt`; escalation agent orients itself
+- **Context handoff**: local transcript passed via two `--append-system-prompt-file` flags (static instructions + dynamic summary); escalation agent orients itself
 - **ESCALATION_WAITING state**: once the escalation agent asks a follow-up, next turn bypasses router → `--resume`
 - **Self-escalation**: local model can call `escalate(reason)` as a function call
 - **Role-aware system prompt**: primary agent and escalation agent receive different system prompts — the escalation agent knows it is the escalation target and should not escalate further
@@ -56,13 +56,17 @@ ESCALATION_WAITING → ESCALATION (default: next turn goes via --resume)
 
 ### Sticky mode (`/escalate` / `/primary` without a prompt)
 
-Typing `/escalate` alone (no inline prompt) sets `stickyEscalate = true`: every subsequent turn is routed to the configured escalation agent, bypassing the router, until the user types `/primary` or presses Ctrl+C. The prompt label switches to the escalation agent name immediately.
+Typing `/escalate` alone (no inline prompt) sets `stickyEscalate = true`: every subsequent turn is routed to the configured escalation agent, bypassing the router, until the user types `/primary` or presses Ctrl+C. The prompt label shows `<agent> (pinned)`.
 
-Symmetrically, `/primary` alone sets `stickyPrimary = true`: every turn goes to the primary agent until `/escalate` or Ctrl+C.
+Symmetrically, `/primary` alone sets `stickyPrimary = true`: every turn goes to the primary agent until `/escalate` or Ctrl+C. The prompt label shows `<agent> (pinned)`.
 
 Typing `/escalate <prompt>` or `/primary <prompt>` is a **single-turn override** (`forceEscalate` / `forcePrimary`): the flag is reset to false after the turn completes, and normal routing resumes.
 
-Ctrl+C on an empty input clears both sticky and force flags before quitting — so it acts as a "reset mode" shortcut.
+### Auto-sticky escalation
+
+When the router first escalates (without an explicit `/escalate`), `autoStickyEscalate` is set automatically — every subsequent turn stays on the escalation agent, showing `<agent> (sticky)` in the status bar. This avoids the "RETURNING" context-mode where Claude would otherwise lose continuity between sessions. Cleared by `/primary` or a single-turn `forcePrimary` override.
+
+Disable via `sticky_escalation: false` in `~/.milk/config.json`. Explicit `/escalate` (pinned) is unaffected by this setting.
 
 ## Routing order (per turn)
 

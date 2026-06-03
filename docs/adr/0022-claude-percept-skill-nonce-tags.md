@@ -27,16 +27,17 @@ A naive write path — giving Claude direct tool access to `record_memory` — c
 ## Decision
 
 **Nonce-tagged percept emission.** Claude is instructed via the `MemoryInstruction` fragment
-(appended to every `--append-system-prompt`) to emit facts using session-specific tags:
+(in the static `--append-system-prompt-file`) to emit facts using session-specific tags:
 
 ```
 <milk:percept:NONCE>fact</milk:percept:NONCE>
 ```
 
-The nonce is a 6-character alphanumeric string generated fresh per session by
-`claude.GenerateNonce()`. Because the nonce is not known ahead of time and changes each session,
-it cannot appear in pre-written explanations or code examples — only live responses contain the
-correct nonce.
+The nonce is a 6-character alphanumeric string generated once per milk session by
+`claude.GenerateNonce()` and persisted as `sess.EscalationNonce`. It is stable across all turns
+of a session. Because the nonce is unknown ahead of time, it cannot appear in pre-written
+explanations or code examples — only live responses contain the correct nonce. The stable nonce
+also allows the `MemoryInstruction` block to be cached by Claude across turns (see ADR-0004).
 
 **Stream interception via `perceptWriter`.** When `StreamOpts.OnPercept` and `PerceptNonce` are
 set, the `out io.Writer` passed to `Stream` is wrapped in a `perceptWriter`. This FSM-based writer
@@ -52,10 +53,12 @@ accept the names as a variadic so they match whatever names are in use. `Consume
 are filtered out when building the escalation agent's `[Remembered facts]` block; `ConsumerEscalation`
 percepts are filtered out of the local agent's context. See ADR-0031 for the full dynamic-name design.
 
-**Re-injection on every `RunResume`.** The `MemoryInstruction` fragment (with its nonce) is
-appended to `--append-system-prompt` on every Claude turn, including `--resume` turns. This ensures
-the instruction survives context compaction: even if Claude's context window is compressed and the
-original instruction is dropped, the next turn re-injects it.
+**Re-injection on threshold.** The `MemoryInstruction` fragment is part of the static context
+file (see ADR-0004). On `ContextModeResume` turns the static file is omitted entirely — Claude
+already has it cached. Re-injection is triggered only by `shouldInjectMemoryInstructions` when
+the turn or byte threshold is crossed (`MemoryReinjectionTurns` / `MemoryReinjectionBytes`,
+default: 20 turns or 40 KB), guarding against Claude-side context compaction dropping the
+instruction.
 
 **`BuildContext` percept injection.** `BuildContext(sess, nonce, percepts []string, resuming bool, primaryName, escalationName string)` accepts an
 optional list of content strings. When non-empty, they are rendered as a `[Remembered facts]` block

@@ -125,17 +125,23 @@ The escalation agent is any entry in `agents` whose name matches `escalation_age
 ### Claude CLI escalation
 
 - **AWS credential injection**: when `aws_auth_refresh: true` in `~/.milk/config.json`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn to obtain fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped from the inherited environment to prevent wrong-account overrides. See ADR 23.
+- Context is split across two `--append-system-prompt-file` flags to preserve Claude's prompt cache:
+  - **Static file** (`BuildStaticContext`): per-session stable nonce tags (`NeedInstruction`, `MemoryInstruction`), remembered percepts. Byte-identical across turns → cache hit.
+  - **Dynamic file** (`BuildDynamicContext`): identity block, escalation brief, current need, `LastLocalSummary`. Changes per turn; suppressed when content is unchanged.
 - First escalation turn:
   ```
   claude --print --output-format stream-json \
          --session-id <new-uuid> \
-         --append-system-prompt "<formatted transcript + context>"
+         --append-system-prompt-file <static-ctx> \
+         --append-system-prompt-file <dynamic-ctx> \
+         -- "<user prompt>"
   ```
-- Subsequent turns in same escalation:
+- Subsequent turns in same escalation (`ContextModeResume`):
   ```
   claude --print --output-format stream-json \
          --resume <escalation-session-id> \
-         "<user prompt>"
+         --append-system-prompt-file <dynamic-ctx-if-changed> \
+         -- "<user prompt>"
   ```
 - `session_id` is extracted from the first NDJSON message and persisted to the milk session file
 - The escalation agent orients itself from the appended context — no separate reformulation step
@@ -157,7 +163,7 @@ Pre-approved tools and directories can be listed in `allowed_tools` and `add_dir
 
 ### Context handoff (escalation)
 
-When promoting from the primary agent to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt` (for Claude CLI) or as the first system message (for inference-server escalation). Format:
+When promoting from the primary agent to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt-file` (for Claude CLI, split into static+dynamic files — see ADR-0004) or as the first system message (for inference-server escalation). Format:
 
 ```
 [Context from primary agent session]
@@ -194,6 +200,7 @@ User: <final prompt that triggered escalation>
   "last_used": "2026-05-05T11:32:00Z",
   "state": "ESCALATION_WAITING",
   "escalation_session_id": "abc123",
+  "escalation_nonce": "x7k2mq",
   "history": [
     {
       "role": "user | assistant | tool_result",
@@ -338,6 +345,7 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
   "default_route": "local",
   "colorization": "balanced",
   "show_reasoning": true,
+  "sticky_escalation": true,
   "aws_auth_refresh": false,
   "rules": {
     "escalate_above_tokens": 2000,
@@ -411,6 +419,10 @@ Controls transcript syntax and Markdown rendering. Applied per turn to avoid ANS
 ### `show_reasoning` field
 
 Controls whether thinking/reasoning tokens are shown in the transcript by default. Can be overridden live with `/think on|off`. When `false`, thinking blocks are replaced with a `[thinking…]` placeholder. Omit or set to `true` to show reasoning (default).
+
+### `sticky_escalation` field
+
+When `true` (default), the first router-triggered escalation automatically keeps subsequent turns on the escalation agent — shown as `<agent> (sticky)` in the status bar. Cleared by `/primary` or a single-turn `/primary <prompt>` override. Set to `false` to re-evaluate routing on every turn. Explicit `/escalate` pinning is unaffected by this setting.
 
 **Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 

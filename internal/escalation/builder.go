@@ -27,26 +27,44 @@ const (
 	ContextModeReturning
 )
 
-// BuildContext assembles the system-prompt context block for a CLI escalation.
+// BuildStaticContext assembles the stable part of the system-prompt context for a
+// CLI escalation turn. It includes everything that does not change turn-to-turn:
+// the identity block, need/memory instructions (with the session-stable nonce), and
+// remembered percepts. Because the content is stable, the CLI can cache it as a
+// long-lived prefix and only pay tokenisation once per session.
 //
-// primaryName and escalationName are the configured names of the two agents;
-// they are embedded in the MemoryInstruction so the escalation agent knows
-// which @<name>: prefix to use for consumer-targeted percepts.
+// Returns "" on ContextModeResume — instructions are already in Claude's cached context.
+// On ContextModeFirst and ContextModeReturning the full static block is returned;
+// injectInstructions gates whether the tag-instruction and percept blocks are included
+// (false on re-injection turns that have not crossed the threshold).
+func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+	if mode == ContextModeResume {
+		return ""
+	}
+	if !injectInstructions {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(NeedInstruction(nonce))
+	b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
+	b.WriteString(formatPercepts(percepts))
+	return b.String()
+}
+
+// BuildDynamicContext assembles the turn-specific part of the system-prompt context
+// for a CLI escalation. It includes everything that may change each turn: the identity
+// block, escalation brief, current need, and the rolling primary-agent summary.
+// Because this content changes frequently it is sent as a separate file from the
+// static instructions, so changes here do not invalidate Claude's cached prefix.
 //
-// injectInstructions controls whether the need/memory instruction blocks are
-// included. Pass true on the first escalation and on re-injection turns; pass
-// false on subsequent resume turns where the instructions are already in context.
+// ContextModeFirst:     identity · brief · need · primary summary
+// ContextModeResume:    primary summary only (if changed since last injection)
+// ContextModeReturning: identity · brief · need · primary summary
 //
-// ContextModeFirst:    identity · brief · need · primary summary · instructions · percepts
-// ContextModeResume:   primary summary only (if changed) — identity/need/instructions already cached
-// ContextModeReturning: identity · brief · need · primary summary · (optionally instructions)
-//
-//	(no escalation summary — --resume already gives Claude its full prior history)
-func BuildContext(sess *session.Session, nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+// (No escalation summary — --resume already gives Claude its full prior history.)
+func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 	var b strings.Builder
 
-	// Resume: Claude already has identity, need, instructions, and full history in its cached
-	// context. Only send what changed — the primary-agent summary — to minimise cache churn.
 	if mode == ContextModeResume {
 		if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
 			b.WriteString("[Recent primary agent activity]\n")
@@ -66,11 +84,7 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, mode C
 		b.WriteString("\n\n")
 	}
 
-	// ContextModeReturning uses --resume so Claude already has its escalation history.
-	// Do not inject the escalation summary — it's redundant and busts the prompt cache.
-
 	if sess.CurrentNeed != "" {
-		// CurrentNeedSetAt is 1-based: 0 = never set (treat as fresh), ≥1 = len(History)+1 at write time.
 		var turnsAgo int
 		if sess.CurrentNeedSetAt > 0 {
 			turnsAgo = len(sess.History) - (sess.CurrentNeedSetAt - 1)
@@ -91,12 +105,22 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, mode C
 		sess.LastLocalSummaryInjected = sess.LastLocalSummary
 	}
 
-	if injectInstructions {
-		b.WriteString(NeedInstruction(nonce))
-		b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
-		b.WriteString(formatPercepts(percepts))
-	}
 	return b.String()
+}
+
+// BuildContext is the legacy single-string builder kept for callers that have not
+// yet been migrated to the split BuildStaticContext/BuildDynamicContext API.
+// Deprecated: prefer BuildStaticContext + BuildDynamicContext to enable per-part
+// caching via two --append-system-prompt-file flags.
+func BuildContext(sess *session.Session, nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+	dynamic := BuildDynamicContext(sess, mode)
+	static := BuildStaticContext(nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+	if mode == ContextModeResume {
+		// Resume: dynamic summary only (static already in Claude's cached context).
+		return dynamic
+	}
+	// First/Returning: dynamic orientation first, then static instructions.
+	return dynamic + static
 }
 
 // formatPercepts renders a [Remembered facts] block when percepts is non-empty.

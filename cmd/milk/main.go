@@ -734,10 +734,13 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	logStateTransition(sess, session.StateEscalation, "run CLI escalation")
 	sess.ForceState(session.StateEscalation)
 
-	// Generate a fresh nonce for this escalation turn. The same nonce is embedded in
-	// the system-prompt instructions (BuildContext, MemoryInstruction, NeedInstruction)
-	// and in the stream parser, so only tags containing this nonce are captured.
-	nonce := claude.GenerateNonce()
+	// Use a stable per-session nonce so the static instruction block (which embeds
+	// the nonce in tag patterns) is byte-identical across turns and can be cached.
+	// The nonce is generated once at ContextModeFirst and persisted in the session.
+	if sess.EscalationNonce == "" {
+		sess.EscalationNonce = claude.GenerateNonce()
+	}
+	nonce := sess.EscalationNonce
 
 	agent = applyPersistedGrants(agent, pc)
 	// In TUI mode the handler is pre-attached by dispatchAgent (toolFutures != nil).
@@ -787,7 +790,8 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		escModel = escCfg.Name
 	}
 	obs.RecordTokens(ctx, escModel, "escalation", res.InputTokens, res.OutputTokens)
-	sess.AddTokens(escModel, "escalation", res.InputTokens, res.OutputTokens)
+	obs.AccumulateCacheTokens(escModel, "escalation", res.CacheReadInputTokens, res.CacheCreationInputTokens)
+	sess.AddTokensFull(escModel, "escalation", res.InputTokens, res.OutputTokens, res.CacheReadInputTokens, res.CacheCreationInputTokens)
 	obs.Debug("tokens (claude)", "input", res.InputTokens, "output", res.OutputTokens,
 		"cache_read", res.CacheReadInputTokens, "cache_write", res.CacheCreationInputTokens,
 		"cost_usd", res.TotalCostUSD)
@@ -830,33 +834,40 @@ func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
 // primaryName and escalationName are the configured agent names embedded in the memory instruction.
 // percepts are injected as a [Remembered facts] block in the system prompt.
 // injectInstructions controls whether the need/memory instruction blocks are included.
-func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, mode escalation.ContextMode, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string, contextHash *string) (claude.ParseResult, error) {
-	sysContext := escalation.BuildContext(sess, nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+//
+// Context is split into two files sent via separate --append-system-prompt-file flags:
+//   - staticContext: stable instructions (nonce tags, percepts) — cached across turns
+//   - dynamicContext: turn-specific summary (brief, need, local activity) — changes each turn
+//
+// This lets Claude cache the large static prefix independently of the small dynamic suffix,
+// so a changed summary does not force re-tokenisation of the full instruction block.
+func runCLIEscalationAgent(ctx context.Context, sess *session.Session, agent *claude.Agent, prompt string, out io.Writer, mode escalation.ContextMode, nonce string, percepts []string, injectInstructions bool, primaryName, escalationName string, dynamicHash *string) (claude.ParseResult, error) {
+	staticCtx := escalation.BuildStaticContext(nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+	dynamicCtx := escalation.BuildDynamicContext(sess, mode)
 
-	// Suppress --append-system-prompt-file on resume turns when content is unchanged.
-	// Sending an identical file shifts Claude's system-prompt suffix and invalidates
-	// its prompt cache prefix, forcing an expensive re-tokenisation of the full context.
-	if mode == escalation.ContextModeResume && contextHash != nil {
-		h := fmt.Sprintf("%x", sha256.Sum256([]byte(sysContext)))[:16]
-		if h == *contextHash {
-			sysContext = "" // omit the file — Claude already has these instructions
+	// On resume turns, suppress the dynamic file when content is unchanged —
+	// re-sending an identical file still shifts the cache suffix and causes a miss.
+	if mode == escalation.ContextModeResume && dynamicHash != nil {
+		h := fmt.Sprintf("%x", sha256.Sum256([]byte(dynamicCtx)))[:16]
+		if h == *dynamicHash {
+			dynamicCtx = ""
 		} else {
-			*contextHash = h
+			*dynamicHash = h
 		}
-	} else if contextHash != nil {
-		*contextHash = fmt.Sprintf("%x", sha256.Sum256([]byte(sysContext)))[:16]
+	} else if dynamicHash != nil {
+		*dynamicHash = fmt.Sprintf("%x", sha256.Sum256([]byte(dynamicCtx)))[:16]
 	}
 
 	if mode == escalation.ContextModeResume {
-		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
+		return agent.RunResume(ctx, sess.EscalationSessionID, staticCtx, dynamicCtx, prompt, out)
 	}
 	// ContextModeFirst and ContextModeReturning both start a new Claude session ID.
 	// For RETURNING we pass the existing EscalationSessionID as the parent session
-	// via --resume so Claude can recover its own tool history, then orient via sysContext.
+	// via --resume so Claude can recover its own tool history, then orient via the context.
 	if mode == escalation.ContextModeReturning && sess.EscalationSessionID != "" {
-		return agent.RunResume(ctx, sess.EscalationSessionID, sysContext, prompt, out)
+		return agent.RunResume(ctx, sess.EscalationSessionID, staticCtx, dynamicCtx, prompt, out)
 	}
-	claudeSessionID, res, err := agent.RunFirst(ctx, sysContext, prompt, out)
+	claudeSessionID, res, err := agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, out)
 	if err == nil {
 		sess.EscalationSessionID = claudeSessionID
 	}
@@ -916,7 +927,7 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 		return res
 	}
 	fmt.Fprint(out, cliLabelStyled(retryAgent)+" ")
-	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce, primaryName, escalationName), "Please continue with the approved permissions.", out)
+	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce, primaryName, escalationName), "", "Please continue with the approved permissions.", out)
 	if err != nil {
 		return res
 	}

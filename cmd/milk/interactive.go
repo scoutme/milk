@@ -157,8 +157,13 @@ type interactiveState struct {
 	// stickyEscalate is set when the user explicitly calls /escalate with no
 	// prompt. It causes every subsequent turn to route to the escalation agent
 	// until the user calls /primary or closes the session. forceEscalate is reset after each
-	// turn; stickyEscalate persists across turns.
+	// turn; stickyEscalate persists across turns. Shown as "(pinned)" in the status bar.
 	stickyEscalate bool
+	// autoStickyEscalate is set automatically when the router first escalates
+	// (without an explicit /escalate command) and cfg.StickyEscalationEnabled() is true.
+	// Cleared by /primary, Ctrl+C on empty input, or a forcePrimary turn.
+	// Shown as "(sticky)" in the status bar to distinguish it from user-pinned.
+	autoStickyEscalate bool
 	// stickyPrimary mirrors stickyEscalate for the local model.
 	stickyPrimary bool
 	cwd           string
@@ -259,6 +264,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdPrimary:
 		st.forceEscalate = false
 		st.stickyEscalate = false
+		st.autoStickyEscalate = false
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.
 			st.stickyPrimary = true
@@ -329,6 +335,7 @@ func execUsage(st *interactiveState) string {
 			sessEntries = append(sessEntries, obs.SessionTokenEntry{
 				Model: u.Model, Agent: u.Agent,
 				Prompt: u.Prompt, Completion: u.Completion,
+				CacheRead: u.CacheRead, CacheCreation: u.CacheCreation,
 			})
 		}
 		turns = int64(st.sess.EscalationTurnCount() + st.sess.LocalTurnCount())

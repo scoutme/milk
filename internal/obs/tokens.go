@@ -15,10 +15,12 @@ import (
 
 // TokenEntry accumulates token counts for one (model, agent-role) pair.
 type TokenEntry struct {
-	Model      string
-	Agent      string // "primary", "escalation", "router"
-	Prompt     int64
-	Completion int64
+	Model         string
+	Agent         string // "primary", "escalation", "router"
+	Prompt        int64
+	Completion    int64
+	CacheRead     int64
+	CacheCreation int64
 }
 
 // sessionAccumulator holds per-session in-memory token totals, thread-safe.
@@ -44,6 +46,25 @@ func accumulateSessionTokens(model, agent string, prompt, completion int64) {
 	}
 	e.Prompt += prompt
 	e.Completion += completion
+	sessionAccumulator.mu.Unlock()
+}
+
+// AccumulateCacheTokens adds cache read/creation token counts to the in-memory
+// session accumulator. Called separately from RecordTokens because cache tokens
+// are only available from the Claude CLI path.
+func AccumulateCacheTokens(model, agent string, cacheRead, cacheCreation int64) {
+	if cacheRead == 0 && cacheCreation == 0 {
+		return
+	}
+	key := model + "\x00" + agent
+	sessionAccumulator.mu.Lock()
+	e, ok := sessionAccumulator.entries[key]
+	if !ok {
+		e = &TokenEntry{Model: model, Agent: agent}
+		sessionAccumulator.entries[key] = e
+	}
+	e.CacheRead += cacheRead
+	e.CacheCreation += cacheCreation
 	sessionAccumulator.mu.Unlock()
 }
 
@@ -112,14 +133,29 @@ func SessionTokensByRole(role string) (prompt, completion int64) {
 	return
 }
 
+// SessionCacheByRole returns the cumulative cache_read and cache_creation tokens
+// for a given agent role this session.
+func SessionCacheByRole(role string) (cacheRead, cacheCreation int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == role {
+			cacheRead += e.CacheRead
+			cacheCreation += e.CacheCreation
+		}
+	}
+	return
+}
+
 // tkey is the composite key for token metric aggregation.
 type tkey struct{ metric, model, agent string }
 
-// SessionTokenEntry is a (model, role, prompt, completion) tuple passed by callers
-// to avoid a circular import with the session package.
+// SessionTokenEntry is a (model, role, prompt, completion, cache) tuple passed by
+// callers to avoid a circular import with the session package.
 type SessionTokenEntry struct {
-	Model, Agent       string
-	Prompt, Completion int64
+	Model, Agent             string
+	Prompt, Completion       int64
+	CacheRead, CacheCreation int64
 }
 
 // FormatTokenUsage returns a human-readable token usage report.
@@ -132,8 +168,9 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 
 	type rowKey struct{ agent, model string }
 	type row struct {
-		agent, model       string
-		prompt, completion float64
+		agent, model             string
+		prompt, completion       float64
+		cacheRead, cacheCreation int64
 	}
 	rowMap := map[rowKey]*row{}
 
@@ -177,6 +214,8 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		}
 		r.prompt += float64(e.Prompt)
 		r.completion += float64(e.Completion)
+		r.cacheRead += e.CacheRead
+		r.cacheCreation += e.CacheCreation
 	}
 
 	if len(rowMap) == 0 {
@@ -195,37 +234,63 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 	})
 
 	var b strings.Builder
-	rule := "  " + strings.Repeat("─", 82)
+	rule := "  " + strings.Repeat("─", 110)
 	header := func(title string) {
 		fmt.Fprintf(&b, "\n%s\n", title)
-		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s\n", "role", "model", "prompt", "completion", "total")
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s  %10s  %10s  %6s\n",
+			"role", "model", "prompt", "completion", "total", "cache_read", "cache_wrt", "hit%")
 		fmt.Fprintln(&b, rule)
 	}
-	footer := func(p, c float64) {
+	hitRate := func(read, creation int64) string {
+		total := read + creation
+		if total == 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%.1f%%", 100*float64(read)/float64(total))
+	}
+	cacheRow := func(read, creation int64) (string, string) {
+		if read == 0 && creation == 0 {
+			return "—", "—"
+		}
+		return fmt.Sprintf("%d", read), fmt.Sprintf("%d", creation)
+	}
+	footer := func(p, c float64, cacheRead, cacheCreation int64) {
+		cr, cw := cacheRow(cacheRead, cacheCreation)
 		fmt.Fprintln(&b, rule)
-		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f\n", "total", p, c, p+c)
+		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n",
+			"total", p, c, p+c, cr, cw, hitRate(cacheRead, cacheCreation))
 	}
 
 	header("token usage (cumulative):")
 	var grandPrompt, grandCompletion float64
+	var grandCacheRead, grandCacheCreation int64
 	for _, r := range rows {
 		grandPrompt += r.prompt
 		grandCompletion += r.completion
-		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f\n",
-			r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion)
+		grandCacheRead += r.cacheRead
+		grandCacheCreation += r.cacheCreation
+		cr, cw := cacheRow(r.cacheRead, r.cacheCreation)
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n",
+			r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion,
+			cr, cw, hitRate(r.cacheRead, r.cacheCreation))
 	}
-	footer(grandPrompt, grandCompletion)
+	footer(grandPrompt, grandCompletion, grandCacheRead, grandCacheCreation)
 
 	if len(sessEntries) > 0 {
 		header(fmt.Sprintf("this session (%d turns):", turns))
 		var sp, sc float64
+		var sCacheRead, sCacheCreation int64
 		for _, e := range sessEntries {
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
-				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion)
+			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n",
+				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion,
+				cr, cw, hitRate(e.CacheRead, e.CacheCreation))
 			sp += float64(e.Prompt)
 			sc += float64(e.Completion)
+			sCacheRead += e.CacheRead
+			sCacheCreation += e.CacheCreation
 		}
-		footer(sp, sc)
+		footer(sp, sc, sCacheRead, sCacheCreation)
 	}
 
 	// In-process accumulator: tokens since milk started (resets on /new).
@@ -233,13 +298,18 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 	if len(procEntries) > 0 {
 		header(fmt.Sprintf("since start (%d turns):", procTurns))
 		var pp, pc float64
+		var pCacheRead, pCacheCreation int64
 		for _, e := range procEntries {
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d\n",
-				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion)
+			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n",
+				e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion,
+				cr, cw, hitRate(e.CacheRead, e.CacheCreation))
 			pp += float64(e.Prompt)
 			pc += float64(e.Completion)
+			pCacheRead += e.CacheRead
+			pCacheCreation += e.CacheCreation
 		}
-		footer(pp, pc)
+		footer(pp, pc, pCacheRead, pCacheCreation)
 	}
 
 	return strings.TrimRight(b.String(), "\n")

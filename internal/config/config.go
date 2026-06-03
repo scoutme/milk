@@ -195,6 +195,14 @@ type Config struct {
 	// false (default) = show "[thinking…]" placeholder; true = show reasoning.
 	ShowReasoning *bool `json:"show_reasoning,omitempty"`
 
+	// StickyEscalation controls whether the escalation agent is automatically
+	// kept for subsequent turns after the router first escalates (without an
+	// explicit /escalate command). true (default) — router-triggered escalations
+	// are sticky until the user types /primary or Ctrl+C. false — routing is
+	// re-evaluated every turn as before. Explicit /escalate commands always pin
+	// regardless of this setting.
+	StickyEscalation *bool `json:"sticky_escalation,omitempty"`
+
 	// ContextBudgetChars is the maximum number of characters injected per
 	// agent summary brick (last_local_summary / last_claude_summary) in the
 	// escalation system prompt. Turns are included newest-first until the
@@ -605,6 +613,16 @@ func (c Config) ShowReasoningDefault() bool {
 		return false
 	}
 	return *c.ShowReasoning
+}
+
+// StickyEscalationEnabled returns true when router-triggered escalations
+// should be kept sticky across turns (the default). Returns false only when
+// explicitly disabled via sticky_escalation: false in config.
+func (c Config) StickyEscalationEnabled() bool {
+	if c.StickyEscalation == nil {
+		return true
+	}
+	return *c.StickyEscalation
 }
 
 // effectiveAgents returns Agents with the built-in claude-cli entry appended

@@ -361,6 +361,9 @@ type model struct {
 	primaryCompletion int64
 	escalationPrompt  int64
 	escalationComp    int64
+	// Cumulative cache tokens for the escalation role (Claude CLI only).
+	escalationCacheRead     int64
+	escalationCacheCreation int64
 
 	// Live turn output: chars written during the current turn, used as a streaming proxy.
 	// Reset at turn start.
@@ -576,6 +579,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
 	newEscPrompt, newEscComp := obs.SessionTokensByRole("escalation")
+	newEscCacheRead, newEscCacheCreation := obs.SessionCacheByRole("escalation")
 	// Compute per-role per-turn deltas from the accumulators.
 	m.lastTurnPrompt["escalation"] = newEscPrompt - m.escalationPrompt
 	m.lastTurnCompletion["escalation"] = newEscComp - m.escalationComp
@@ -583,6 +587,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.lastTurnCompletion["primary"] = newPrimaryCompletion - m.primaryCompletion
 	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
 	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
+	m.escalationCacheRead, m.escalationCacheCreation = newEscCacheRead, newEscCacheCreation
 	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
 	m.appendTranscript("\n")
@@ -1270,12 +1275,18 @@ func (m *model) headerBar() string {
 	if len(sessID) > 8 {
 		sessID = sessID[:8]
 	}
-	var totalPrompt, totalCompletion int64
+	var totalPrompt, totalCompletion, totalCacheRead, totalCacheCreation int64
 	for _, u := range m.st.sess.Tokens {
 		totalPrompt += u.Prompt
 		totalCompletion += u.Completion
+		totalCacheRead += u.CacheRead
+		totalCacheCreation += u.CacheCreation
 	}
 	sessLabel := fmt.Sprintf("sess:%s (total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
+	if cacheTotal := totalCacheRead + totalCacheCreation; cacheTotal > 0 {
+		hitPct := int(100 * float64(totalCacheRead) / float64(cacheTotal))
+		sessLabel += fmt.Sprintf(" cache:%d%%", hitPct)
+	}
 	const repoURL = "github.com/scoutme/milk"
 	rightFull := dim(repoURL + "  " + sessLabel + "  /help")
 	rightFulPlain := repoURL + "  " + sessLabel + "  /help"
@@ -1392,6 +1403,16 @@ func (m *model) statusTokens() string {
 	} else if lastPrompt+lastCompletion > 0 {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion)))
 	}
+	if role == "escalation" {
+		cacheTotal := m.escalationCacheRead + m.escalationCacheCreation
+		if cacheTotal > 0 {
+			hitPct := int(100 * float64(m.escalationCacheRead) / float64(cacheTotal))
+			parts = append(parts, fmt.Sprintf("cache:%s/%s(%d%%)",
+				formatTokenCount(m.escalationCacheRead),
+				formatTokenCount(m.escalationCacheCreation),
+				hitPct))
+		}
+	}
 	return "  " + dim(strings.Join(parts, "  "))
 }
 
@@ -1405,7 +1426,7 @@ func (m *model) activeTokenRole() string {
 	if st.activeFallbackTarget == "primary" {
 		return "primary"
 	}
-	if st.stickyEscalate || st.forceEscalate {
+	if st.stickyEscalate || st.forceEscalate || st.autoStickyEscalate {
 		return "escalation"
 	}
 	if st.stickyPrimary || st.forcePrimary {
@@ -1455,6 +1476,8 @@ func agentLabel(st *interactiveState) string {
 		return localName + " (fallback)"
 	case st.stickyEscalate:
 		return escalationName + " (pinned)"
+	case st.autoStickyEscalate:
+		return escalationName + " (sticky)"
 	case st.forceEscalate:
 		return escalationName + " (forced)"
 	case st.stickyPrimary:
@@ -4087,15 +4110,20 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	turnCtx, cancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
 	defer cancel()
 
-	forceEscalate := st.forceEscalate || st.stickyEscalate
+	forceEscalate := st.forceEscalate || st.stickyEscalate || st.autoStickyEscalate
 	forcePrimary := st.forcePrimary || st.stickyPrimary
 	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forcePrimary)
 	if routeErr != nil {
 		return fmt.Errorf("routing: %w", routeErr)
 	}
 	st.forceEscalate = false
+	// A forcePrimary turn (single-turn /primary <prompt>) breaks auto-sticky so
+	// the next turn is re-evaluated by the router rather than staying on escalation.
+	if st.forcePrimary {
+		st.autoStickyEscalate = false
+	}
 	st.forcePrimary = false
-	// stickyEscalate/stickyPrimary persist until explicitly cleared.
+	// stickyEscalate/stickyPrimary/autoStickyEscalate persist until explicitly cleared.
 
 	target := decision.Target
 	if target == router.TargetLocal && !localAvail {
@@ -4150,6 +4178,14 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				st.notifier.NotifyResponse(turnCtx, agentName, t.Content)
 				break
 			}
+		}
+		// Auto-sticky: if the router decided to escalate (not user-pinned) and the
+		// turn succeeded, keep subsequent turns on the escalation agent.
+		// Explicit /escalate uses stickyEscalate (pinned) and is unaffected by this.
+		if target == router.TargetEscalation &&
+			!st.stickyEscalate && !st.forceEscalate &&
+			st.cfg.StickyEscalationEnabled() {
+			st.autoStickyEscalate = true
 		}
 	}
 	return turnErr

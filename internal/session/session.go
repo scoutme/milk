@@ -76,6 +76,12 @@ type Session struct {
 	// Escalation turns. Reserved for future demotion back to local.
 	LastEscalationSummary string `json:"last_claude_summary,omitempty"`
 
+	// EscalationNonce is generated once at the first escalation of this session
+	// and reused on every subsequent turn. Keeping it stable lets the static
+	// instruction block (which embeds the nonce in tag patterns) remain
+	// byte-identical across turns, preserving Claude's prompt-cache prefix.
+	EscalationNonce string `json:"escalation_nonce,omitempty"`
+
 	// MemoryInstructionInjectedAt is the escalation turn count at which the
 	// memory/need instruction block was last injected. Zero means never injected.
 	// Used to skip redundant re-injection on resume turns.
@@ -94,15 +100,22 @@ type Session struct {
 
 // TokenUsage holds cumulative token counts for one (model, agent-role) pair.
 type TokenUsage struct {
-	Model      string `json:"model"`
-	Agent      string `json:"agent"`
-	Prompt     int64  `json:"prompt"`
-	Completion int64  `json:"completion"`
+	Model         string `json:"model"`
+	Agent         string `json:"agent"`
+	Prompt        int64  `json:"prompt"`
+	Completion    int64  `json:"completion"`
+	CacheRead     int64  `json:"cache_read,omitempty"`
+	CacheCreation int64  `json:"cache_creation,omitempty"`
 }
 
 // AddTokens accumulates token counts for a (model, role) pair into the session.
 func (s *Session) AddTokens(model, role string, prompt, completion int64) {
-	if model == "" || role == "" || (prompt == 0 && completion == 0) {
+	s.AddTokensFull(model, role, prompt, completion, 0, 0)
+}
+
+// AddTokensFull accumulates prompt, completion, and cache token counts.
+func (s *Session) AddTokensFull(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	if model == "" || role == "" || (prompt == 0 && completion == 0 && cacheRead == 0 && cacheCreation == 0) {
 		return
 	}
 	if s.Tokens == nil {
@@ -116,6 +129,8 @@ func (s *Session) AddTokens(model, role string, prompt, completion int64) {
 	}
 	e.Prompt += prompt
 	e.Completion += completion
+	e.CacheRead += cacheRead
+	e.CacheCreation += cacheCreation
 }
 
 // emptyEscalationSession returns true when a Claude session produced no real work:

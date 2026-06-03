@@ -166,24 +166,21 @@ func (a *Agent) Ping() error {
 }
 
 // RunFirst runs the first turn of a new Claude escalation session.
-// systemContext is the formatted local transcript passed via --append-system-prompt-file.
+// staticContext is stable across turns (instructions, nonce tags) and is sent as a
+// separate --append-system-prompt-file before dynamicContext so its cache prefix
+// survives changes to the dynamic part. Either may be empty.
 // Returns the session ID emitted by the subprocess and a ParseResult.
-func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out io.Writer) (string, ParseResult, error) {
+func (a *Agent) RunFirst(ctx context.Context, staticContext, dynamicContext, prompt string, out io.Writer) (string, ParseResult, error) {
 	if a.logContext {
-		obs.LogPayload("claude-cli [first] system-context", []byte(systemContext))
+		obs.LogPayload("claude-cli [first] static-context", []byte(staticContext))
+		obs.LogPayload("claude-cli [first] dynamic-context", []byte(dynamicContext))
 		obs.LogPayload("claude-cli [first] prompt", []byte(prompt))
 	}
 	sessionID := uuid.New().String()
 	var args []string
 	args = append(args, "--session-id", sessionID)
-	if systemContext != "" {
-		f, err := writeTempContext(systemContext)
-		if err != nil {
-			return "", ParseResult{}, err
-		}
-		defer os.Remove(f)
-		args = append(args, "--append-system-prompt-file", f)
-	}
+	args, cleanup := appendContextFiles(args, staticContext, dynamicContext)
+	defer cleanup()
 	args = append(args, "--", prompt)
 
 	res, err := a.run(ctx, args, out)
@@ -194,25 +191,44 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 }
 
 // RunResume continues an existing Claude session.
-// systemContext is re-injected via --append-system-prompt-file on every resumed turn
-// so that instructions (e.g. the percept tag convention) remain active even
-// when Claude's conversation compresses its original context.
-func (a *Agent) RunResume(ctx context.Context, claudeSessionID, systemContext, prompt string, out io.Writer) (ParseResult, error) {
+// staticContext holds the stable instruction block (nonce tags, percepts); it is only
+// re-sent when instructions need re-injection after compaction. dynamicContext holds
+// the turn-specific summary and is re-sent whenever it changes. Sending them as
+// separate files lets the static prefix remain cached even when the dynamic part changes.
+func (a *Agent) RunResume(ctx context.Context, claudeSessionID, staticContext, dynamicContext, prompt string, out io.Writer) (ParseResult, error) {
 	if a.logContext {
-		obs.LogPayload("claude-cli [resume] system-context", []byte(systemContext))
+		obs.LogPayload("claude-cli [resume] static-context", []byte(staticContext))
+		obs.LogPayload("claude-cli [resume] dynamic-context", []byte(dynamicContext))
 		obs.LogPayload("claude-cli [resume] prompt", []byte(prompt))
 	}
 	args := []string{"--resume", claudeSessionID}
-	if systemContext != "" {
-		f, err := writeTempContext(systemContext)
-		if err != nil {
-			return ParseResult{}, err
-		}
-		defer os.Remove(f)
-		args = append(args, "--append-system-prompt-file", f)
-	}
+	args, cleanup := appendContextFiles(args, staticContext, dynamicContext)
+	defer cleanup()
 	args = append(args, "--", prompt)
 	return a.run(ctx, args, out)
+}
+
+// appendContextFiles writes non-empty context strings to temp files, appends the
+// corresponding --append-system-prompt-file flags to args, and returns a cleanup
+// function that removes the temp files. The caller must call cleanup() when done.
+func appendContextFiles(args []string, staticContext, dynamicContext string) ([]string, func()) {
+	var paths []string
+	for _, content := range []string{staticContext, dynamicContext} {
+		if content == "" {
+			continue
+		}
+		f, err := writeTempContext(content)
+		if err != nil {
+			continue
+		}
+		paths = append(paths, f)
+		args = append(args, "--append-system-prompt-file", f)
+	}
+	return args, func() {
+		for _, p := range paths {
+			os.Remove(p) //nolint:errcheck
+		}
+	}
 }
 
 // writeTempContext writes content to a temp file and returns its path.

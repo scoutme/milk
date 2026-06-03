@@ -231,6 +231,37 @@ func TestEscalationMostRecent_NoHistory(t *testing.T) {
 	}
 }
 
+func TestAddTokensFull_AccumulatesCacheTokens(t *testing.T) {
+	s := &Session{}
+	s.AddTokensFull("model-a", "escalation", 100, 20, 500, 80)
+	s.AddTokensFull("model-a", "escalation", 50, 10, 200, 30)
+	u := s.Tokens["model-a\x00escalation"]
+	if u == nil {
+		t.Fatal("expected token entry")
+	}
+	if u.Prompt != 150 {
+		t.Errorf("prompt: got %d want 150", u.Prompt)
+	}
+	if u.CacheRead != 700 {
+		t.Errorf("cache_read: got %d want 700", u.CacheRead)
+	}
+	if u.CacheCreation != 110 {
+		t.Errorf("cache_creation: got %d want 110", u.CacheCreation)
+	}
+}
+
+func TestAddTokens_DoesNotWriteCacheFields(t *testing.T) {
+	s := &Session{}
+	s.AddTokens("model-a", "primary", 100, 20)
+	u := s.Tokens["model-a\x00primary"]
+	if u == nil {
+		t.Fatal("expected token entry")
+	}
+	if u.CacheRead != 0 || u.CacheCreation != 0 {
+		t.Errorf("AddTokens should leave cache fields zero, got read=%d creation=%d", u.CacheRead, u.CacheCreation)
+	}
+}
+
 func TestAddTurn_SetsTimestampAndUpdatesLastUsed(t *testing.T) {
 	s := &Session{}
 	s.AddTurn(Turn{Role: RoleUser, Content: "hello"})

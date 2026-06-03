@@ -86,34 +86,42 @@ of the first-session write.
 
 ### What milk injects via `--append-system-prompt-file`
 
-Sent on every resume turn:
+Context is split across two files sent as separate `--append-system-prompt-file` flags,
+so the stable prefix can be cached independently of the changing dynamic suffix.
+
+**File 1 — static (cacheable across turns):**
 
 | Component | Chars | Dynamic? |
 |---|---|---|
-| `identityBlock` | 207 | Static |
-| `NeedInstruction` | 327 | Nonce changes per session |
-| `MemoryInstruction` | 299 | Nonce + agent names |
+| `NeedInstruction` | 327 | Stable (per-session nonce) |
+| `MemoryInstruction` | 299 | Stable (per-session nonce + agent names) |
+| Percepts | 0–2,500 | Up to 25 × ~100 chars |
+
+**File 2 — dynamic (changes per turn):**
+
+| Component | Chars | Dynamic? |
+|---|---|---|
+| `identityBlock` | 207 | Static text |
 | `EscalationBrief` | 0–500 | Set on `escalate()` calls |
 | `CurrentNeed` | 0–200 | Updated by model tags |
 | `LastLocalSummary` | 0–12,000 | Updated after each primary turn |
-| `LastEscalationSummary` | 0–12,000 | Updated after returning from escalation |
-| Percepts | 0–2,500 | Up to 25 × ~100 chars |
-| **Total** | **~833–27,500** | |
 
-### The cache invalidation problem
+The nonce (`EscalationNonce`) is generated once at the first escalation of a session and
+persisted in the session file. Reusing it keeps file 1 byte-identical across turns, preserving
+Claude's prompt-cache prefix.
 
-`--append-system-prompt-file` is re-sent on **every resume turn**. When `LastLocalSummary`
-changes (the primary agent completed a turn since the last escalation), the file content
-changes, shifting Claude's system prompt suffix and invalidating the prompt cache prefix.
-This forces a new `cache_write` for what should be a cache hit.
+### The cache invalidation problem (resolved)
 
-The small cache_write values visible in some session groups (e.g. 1,300 or 456 tokens) confirm
-this: those are turns where milk's injected context changed and triggered a partial re-cache
-rather than a full read hit.
+Previously, all components were bundled into one file and the nonce was regenerated on every
+turn, guaranteeing a cache miss on every instruction re-injection. The split-file approach
+(implemented 2026-06-03) means:
 
-The `MemoryReinjectionTurns` threshold (default: 20) limits how often the full instruction block
-is re-sent, but does not suppress re-sends when `LastLocalSummary` changes — which happens on
-every primary→escalation transition.
+- File 1 (large, ~3k+ chars) hits cache on every turn except the first and reinjection thresholds.
+- File 2 (small, ~200–12k chars) changes on primary→escalation transitions but no longer
+  invalidates file 1's cache prefix.
+
+The `MemoryReinjectionTurns` threshold (default: 20) still governs when file 1 is re-sent
+(e.g. after Claude context compaction).
 
 ### What is NOT a problem
 
@@ -174,60 +182,40 @@ Files: `internal/agent/local/tools.go`
 
 ---
 
-### A4 — Suppress `--append-system-prompt-file` re-send when content is unchanged
-**Impact:** Cache invalidation on every primary→escalation transition | **Effort:** Medium | **Risk:** Medium
+### A4 — Split static/dynamic context into separate files ✓ Done (2026-06-03)
+**Impact:** Eliminates cache invalidation on primary→escalation transitions | **Effort:** Medium
 
-Track a hash (or the full string) of the last context block sent to Claude for a given session.
-On resume, only re-send `--append-system-prompt-file` if the content has changed since the
-previous turn. When unchanged, omit the flag entirely — Claude already has the instructions
-in its session history.
-
-The safety concern (Claude's own context compression dropping the injected instructions) is
-addressed by the existing `MemoryReinjectionTurns` threshold, which forces a re-inject at
-turn 20 regardless.
-
-Implementation: add `lastContextHash string` to `interactiveState` (or session); compare
-`sha256(newContext)[:16]` before writing the temp file.
-
-Files: `internal/agent/claude/claude.go`, `cmd/milk/main.go`, `cmd/milk/repl.go`
+Implemented via `BuildStaticContext` / `BuildDynamicContext` in `internal/escalation/builder.go`.
+`RunFirst` and `RunResume` in `internal/agent/claude/claude.go` accept both and pass them as
+separate `--append-system-prompt-file` flags. `EscalationNonce` is now persisted in the session
+file and reused across turns. The dynamic-content hash guard (previously on the full combined
+file) now guards only the dynamic file.
 
 ---
 
-### A5 — Track `LastLocalSummary` change separately from turn count
-**Impact:** Reduces unnecessary cache invalidations | **Effort:** Low | **Risk:** Low
+### A5 — Track `LastLocalSummary` change separately ✓ Done (implicitly, via split)
+**Impact:** Reduces unnecessary cache invalidations
 
-Currently `LastLocalSummary` is always included in the context block regardless of whether it
-changed since the last escalation. Add a `LastLocalSummaryHash` to `Session`; only include the
-summary block when it differs from what was sent in the previous escalation turn. This prevents
-a changed summary from invalidating the cache prefix on turns where the primary agent did
-minor work.
-
-This is simpler than A4 and orthogonal to it: A4 suppresses full re-sends; A5 reduces the
-surface area of what changes within a re-send.
-
-Files: `internal/session/session.go`, `internal/escalation/builder.go`
+`LastLocalSummaryInjected` deduplication in `BuildDynamicContext` suppresses re-sends of an
+unchanged summary. Combined with the split-file approach, a no-op primary turn no longer
+produces any file update at all.
 
 ---
 
 ## Priority and sequencing
 
-| Action | Chars saved/turn | Cache benefit | Effort | Suggested order |
+| Action | Chars saved/turn | Cache benefit | Effort | Status |
 |---|---|---|---|---|
-| A1 — Remove tool list from prompt | 175 | None | 5 min | First (free) |
-| A2 — Cache cwd listing | 578 × (n−1) | None | 1h | Second |
-| A3 — Compact tool schemas | 2,500–3,500 | None | 3–4h | Third |
-| A4 — Suppress unchanged context re-send | — | High ($0.10–0.30/session) | 4h | Fourth |
-| A5 — Track summary hash | — | Medium | 1h | With A4 |
+| A1 — Remove tool list from prompt | 175 | None | 5 min | Open |
+| A2 — Cache cwd listing | 578 × (n−1) | None | 1h | Open |
+| A3 — Compact tool schemas | 2,500–3,500 | None | 3–4h | Open |
+| A4 — Split static/dynamic context | — | High ($0.10–0.30/session) | 4h | **Done** |
+| A5 — Track summary hash | — | Medium | 1h | **Done** (via A4 split) |
 
 A1 and A2 are pure local-agent improvements with no risk. A3 requires validating that compact
 schemas don't degrade local model tool-call accuracy — run a few tool-heavy sessions before
-committing. A4 and A5 address the escalation cache invalidation and have real cost impact at
-$0.60/session average.
+committing.
 
 **Combined effect of A1+A2+A3:** reduce per-turn payload from ~15k to ~11k chars (~27%
 reduction). For a 10-turn session: ~40k chars saved from context window pressure, letting
 history accumulate longer before the 24k budget forces trimming.
-
-**Effect of A4+A5:** eliminate most involuntary cache invalidations on primary→escalation
-transitions. Estimated saving: 0.5–1 cache_write per session × $0.003/1k tokens × avg write
-size = ~$0.10–0.25 per session, or roughly $36–90/year at current usage rate.
