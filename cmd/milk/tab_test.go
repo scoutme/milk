@@ -25,6 +25,10 @@ func TestStripCompletionPlaceholders(t *testing.T) {
 		{"", ""},
 		// Only placeholders — collapses to empty.
 		{"<param> [opt]", ""},
+		// Multiline input must preserve newlines.
+		{"line one\nline two\nline three", "line one\nline two\nline three"},
+		// Multiline with placeholder on one line only.
+		{"/memory show <pat|#id>\nsome other line", "/memory show\nsome other line"},
 	}
 	for _, c := range cases {
 		got := stripCompletionPlaceholders(c.in)

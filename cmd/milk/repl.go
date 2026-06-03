@@ -1139,7 +1139,14 @@ func (m *model) wrappedTranscript() string {
 		// so the user sees new content immediately even without re-colorizing.
 		if txGrew > 0 {
 			newText := ansi.Wrap(raw[m.colorizeTransLen:], vw, "")
-			return m.applySelectionHighlight(m.colorizeCached + newText)
+			// Close any open ANSI sequence from the cache before appending raw
+			// text, so a trailing dim/color from e.g. a tool hint line doesn't
+			// bleed into the next chunk of streamed content.
+			base := m.colorizeCached
+			if !strings.HasSuffix(base, ansiReset) {
+				base += ansiReset
+			}
+			return m.applySelectionHighlight(base + newText)
 		}
 		return m.applySelectionHighlight(m.colorizeCached)
 	}
@@ -3505,32 +3512,40 @@ func applyTabCompletion(input, completed string) string {
 // Applied before submitting input so accepted completions like
 // "/memory show <pat|#id>" dispatch as "/memory show".
 func stripCompletionPlaceholders(s string) string {
-	var b strings.Builder
-	i := 0
-	for i < len(s) {
-		switch s[i] {
-		case '<':
-			end := strings.IndexByte(s[i:], '>')
-			if end >= 0 {
-				i += end + 1
-			} else {
-				b.WriteByte(s[i])
-				i++
+	// Process line by line to preserve newlines in multiline input.
+	// Placeholders only appear in slash-command completions (single-line),
+	// so stripping and collapsing spaces per-line is safe.
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		var b strings.Builder
+		j := 0
+		for j < len(line) {
+			switch line[j] {
+			case '<':
+				end := strings.IndexByte(line[j:], '>')
+				if end >= 0 {
+					j += end + 1
+				} else {
+					b.WriteByte(line[j])
+					j++
+				}
+			case '[':
+				end := strings.IndexByte(line[j:], ']')
+				if end >= 0 {
+					j += end + 1
+				} else {
+					b.WriteByte(line[j])
+					j++
+				}
+			default:
+				b.WriteByte(line[j])
+				j++
 			}
-		case '[':
-			end := strings.IndexByte(s[i:], ']')
-			if end >= 0 {
-				i += end + 1
-			} else {
-				b.WriteByte(s[i])
-				i++
-			}
-		default:
-			b.WriteByte(s[i])
-			i++
 		}
+		// Collapse multiple spaces within the line but preserve the line itself.
+		lines[i] = strings.Join(strings.Fields(b.String()), " ")
 	}
-	return strings.Join(strings.Fields(b.String()), " ")
+	return strings.Join(lines, "\n")
 }
 
 // replaceLastToken finds the last token in input matching pred and replaces it

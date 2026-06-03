@@ -371,3 +371,58 @@ func TestStyleLine_HRule(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyInlineMarkdown_ToolHintNoBleed(t *testing.T) {
+	// A tool hint line ends with ansiReset; the following plain text line
+	// must not inherit any ANSI carry-over.
+	input := "\n\033[2m⚙ Bash: go test ./...\033[0m\nCommitted — `1908192`, done."
+	got := applyInlineMarkdown(input)
+	lines := strings.Split(got, "\n")
+	// Last line must not start with a dim or other escape carried from the hint.
+	last := lines[len(lines)-1]
+	if strings.HasPrefix(last, "\033[2m") {
+		t.Errorf("last line should not inherit dim carry-over, got: %q", last)
+	}
+	// The hint line itself should still be dim.
+	hintLine := lines[1]
+	if !strings.Contains(hintLine, "\033[2m") {
+		t.Errorf("hint line should contain dim, got: %q", hintLine)
+	}
+}
+
+func TestApplyInlineMarkdown_MultipleHintsNoBleed(t *testing.T) {
+	// Multiple tool hints followed by plain text with inline code.
+	// None of the plain text lines should be dimmed.
+	input := "\n\033[2m⚙ Bash: go test\033[0m\n\n\033[2m⚙ Bash: git add\033[0m\n\n\033[2m⚙ Bash: git commit\033[0m\nCommitted — `1908192`, 10 files."
+	got := applyInlineMarkdown(input)
+	lines := strings.Split(got, "\n")
+	last := lines[len(lines)-1]
+	if strings.HasPrefix(last, "\033[2m") {
+		t.Errorf("plain text after hints must not be dim, got: %q", last)
+	}
+	if !strings.Contains(last, "Committed") {
+		t.Errorf("expected Committed in last line, got: %q", last)
+	}
+}
+
+func TestColorizeSingle_HintsNoBleedBalanced(t *testing.T) {
+	input := "\n\033[2m⚙ Bash: go test\033[0m\n\nCommitted — `1908192`, done."
+	got := colorizeSingle(input, ColorizeBalanced)
+	lines := strings.Split(got, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "Committed") && strings.HasPrefix(l, "\033[2m") {
+			t.Errorf("line %d with 'Committed' is dimmed: %q", i, l)
+		}
+	}
+}
+
+func TestColorizeSingle_HintsNoBleedFenced(t *testing.T) {
+	input := "\n\033[2m⚙ Bash: go test\033[0m\n\nCommitted — `1908192`, done."
+	got := colorizeSingle(input, ColorizeFenced)
+	lines := strings.Split(got, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "Committed") && strings.HasPrefix(l, "\033[2m") {
+			t.Errorf("line %d with 'Committed' is dimmed: %q", i, l)
+		}
+	}
+}
