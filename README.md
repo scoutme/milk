@@ -6,6 +6,32 @@ Switch models, not context.
 
 Start cheap. Go deep when you need it. Switch mid-workflow — the full conversation goes with you.
 
+## How it works
+
+Each prompt is routed through a decision chain:
+
+1. Explicit flags (`--escalate`, `--primary`) override everything
+2. Session state — if the escalation agent asked a follow-up question, the next turn goes directly back to it
+3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
+4. Primary model classifier — the primary model decides `local` or `escalate` when the scorer is inconclusive
+5. Default: local
+
+When the primary model cannot handle a task, it calls `escalate(reason)` and milk reformats the primary conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
+
+## Prerequisites
+
+| Dependency | Purpose | Required |
+| --- | --- | --- |
+| Primary agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
+| Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
+| Go 1.21+ | build from source only | no (pre-built binaries available) |
+
+The primary agent supports multiple backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, and any OpenAI-compatible server. The escalation agent can be any of the above, or the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`) — a powerful option when available but not required.
+
+If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
+
+For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific setup (Bedrock, OpenRouter, Groq, Copilot, Azure, etc.) see [docs/providers.md](docs/providers.md).
+
 ## Installation
 
 ### Linux / macOS
@@ -58,32 +84,6 @@ Native Windows is not yet fully supported. The recommended path is **WSL2** (Win
 
 See [docs/setup.md](docs/setup.md#windows-and-wsl2) for the full Windows/WSL2 setup walkthrough.
 
-## How it works
-
-Each prompt is routed through a decision chain:
-
-1. Explicit flags (`--escalate`, `--primary`) override everything
-2. Session state — if the escalation agent asked a follow-up question, the next turn goes directly back to it
-3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
-4. Primary model classifier — the primary model decides `local` or `escalate` when the scorer is inconclusive
-5. Default: local
-
-When the primary model cannot handle a task, it calls `escalate(reason)` and milk reformats the primary conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
-
-## Prerequisites
-
-| Dependency | Purpose | Required |
-| --- | --- | --- |
-| Primary agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
-| Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
-| Go 1.21+ | build from source only | no (pre-built binaries available) |
-
-The primary agent supports multiple backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, and any OpenAI-compatible server. The escalation agent can be any of the above, or the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`) — a powerful option when available but not required.
-
-If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
-
-For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For cloud providers see [docs/providers.md](docs/providers.md).
-
 ## Usage
 
 ### Interactive mode
@@ -113,10 +113,13 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/export` | Print the current session transcript |
 | `/export json` | Print the current session as raw JSON |
 | `/export <path>` | Write the session transcript to a file |
+| `/usage` | Token usage report (cumulative, this session, since start) |
 | `/metrics` | Show the most recent values of all observability metrics |
 | `/otel` | Show OTel signal file sizes and record counts |
 | `/otel trim` | Archive current OTel files and start fresh |
 | `/otel off` / `/otel on` | Disable / re-enable OTel for this session |
+| `/setup telegram` | Configure Telegram remote oversight interactively |
+| `/setup telegram on\|off` | Enable / disable Telegram (credentials preserved) |
 | `/history` | Show current history mode and entry counts |
 | `/history global` | Switch input navigation to global history (all sessions) |
 | `/history session` | Switch input navigation to session history (default) |
@@ -135,21 +138,27 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/help` | Show categorised command reference |
 | `/exit` | Quit |
 
-**Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory (e.g. `@src/main.go`).
+**Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory (e.g. `@src/main.go`). Tab cycles forward through matches entry by entry — within a command's variants first, then to the next command. Shift+Tab cycles backward. The hint panel below the transcript shows all matches with the active entry highlighted. Completion works on the token under the cursor, not just at end of line.
 
 **Keyboard shortcuts:**
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+C` | Cancel running turn (if busy); or exit (press twice on empty input) |
+| `Ctrl+C` | Cancel running turn (if busy); clear input or exit (on empty) |
 | `Ctrl+D` | Exit (on empty input) |
-| `Ctrl+R` | Reverse incremental search through input history |
-| `Ctrl+S` | Forward incremental search through input history |
-| `Up` / `Down` | Navigate input history (single-line input only) |
-| `Ctrl+Up` / `Ctrl+Down` | Navigate input history (any input height) |
-| `Ctrl+N` / `Shift+Alt+Enter` | Insert newline (multi-line input) |
+| `Ctrl+T` | Toggle thinking/reasoning token visibility |
+| `Ctrl+R` / `Ctrl+S` | Reverse / forward incremental history search |
+| `Up` / `Down` | Navigate input history (at first/last line); move cursor otherwise |
+| `Ctrl+Up` / `Ctrl+Down` | Navigate input history (always) |
+| `Shift+Left/Right/Up/Down` | Extend keyboard selection by character |
+| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Extend keyboard selection by word |
+| `Tab` / `Shift+Tab` | Cycle tab completion forward / backward |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo in input area |
+| `Ctrl+N` / `Shift+Alt+Enter` / `Alt+Enter` | Insert newline (multi-line input) |
 | `PgUp` / `Ctrl+U` | Scroll transcript up |
 | `PgDn` / `Ctrl+F` | Scroll transcript down |
+
+All navigation, editing, history search, and undo/redo work while an agent turn is in progress. Only `Enter` (submit) is blocked until the turn completes.
 
 **Input history** is persisted per session (`~/.milk/sessions/<id>.history`) and globally (`~/.milk/input_history`). Navigation defaults to session history; use `/history global` to switch.
 
@@ -288,6 +297,7 @@ The primary agent has access to these built-in tools:
 | --- | --- |
 | `bash` | Run a shell command, returns stdout/stderr/exit code |
 | `grep` | Search file contents by pattern |
+| `find_files` | Find files by name pattern or glob |
 | `read_file` | Read a file with optional offset and line limit |
 | `write_file` | Write content to a file (creates parent directories) |
 | `edit_file` | Exact-string replacement within a file |

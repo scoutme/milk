@@ -106,7 +106,7 @@ For cross-region inference profiles, use the profile ARN as the model:
 ### Step 4 — Verify
 
 ```sh
-milk --new --local "say hi in one word"
+milk --new --primary "say hi in one word"
 ```
 
 Expected: response from Haiku (or whichever model you configured).

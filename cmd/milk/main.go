@@ -28,7 +28,7 @@ import (
 
 var (
 	flagEscalate bool
-	flagLocal    bool
+	flagPrimary  bool
 	flagNew      bool
 	flagSession  string
 	flagContinue bool
@@ -67,7 +67,7 @@ any hosted endpoint).`,
 
 func init() {
 	rootCmd.Flags().BoolVar(&flagEscalate, "escalate", false, "Force route to escalation agent for this turn")
-	rootCmd.Flags().BoolVar(&flagLocal, "local", false, "Force route to local model for this turn")
+	rootCmd.Flags().BoolVar(&flagPrimary, "primary", false, "Force route to primary agent for this turn")
 	rootCmd.Flags().BoolVar(&flagNew, "new", false, "Start a new session")
 	rootCmd.Flags().StringVar(&flagSession, "session", "", "Target session by name")
 	rootCmd.Flags().BoolVarP(&flagContinue, "continue", "c", false, "Resume current session (default behavior, explicit alias)")
@@ -196,7 +196,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	rtr := router.New(cfg, routeLocalAgent)
 
-	decision, err := rtr.Route(ctx, sess, prompt, flagEscalate, flagLocal)
+	decision, err := rtr.Route(ctx, sess, prompt, flagEscalate, flagPrimary)
 	if err != nil {
 		return fmt.Errorf("routing: %w", err)
 	}

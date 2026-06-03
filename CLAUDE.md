@@ -66,7 +66,7 @@ Ctrl+C on an empty input clears both sticky and force flags before quitting — 
 
 ## Routing order (per turn)
 
-1. Explicit flags (`--escalate`, `--local`)
+1. Explicit flags (`--escalate`, `--primary`)
 2. Session state (`ESCALATION_WAITING` → bypass)
 3. Rules layer (hard thresholds → short-prompt shortcut → weighted signal scorer)
 4. Local model (classification call, when scorer is inconclusive)
@@ -90,7 +90,7 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 | up | available | normal routing |
 | down | available | warn, route all to escalation agent |
 | up | unavailable | warn, primary-only |
-| down | unavailable | error + exit |
+| down | unavailable | warn both unavailable, TUI stays open (use /agent to reconfigure) |
 
 ## Tech stack
 

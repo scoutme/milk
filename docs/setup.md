@@ -293,7 +293,7 @@ All tests run without an inference server or claude. They use temp directories a
 ./milk "now show only the test files"
 
 # Force local even if rules would escalate
-./milk --local "grep for TODO comments"
+./milk --primary "grep for TODO comments"
 ```
 
 **Escalation to Claude** (both services running):
@@ -310,7 +310,7 @@ All tests run without an inference server or claude. They use temp directories a
 ./milk "focus on the rules layer"   # goes directly to --resume, no routing
 
 # Break back to local
-./milk --local "grep for TODO"
+./milk --primary "grep for TODO"
 ```
 
 **Graceful degradation**:
@@ -465,15 +465,7 @@ When an agent calls `edit_file` or `write_file` (local agent), or `Edit` or `Wri
 
 ### Keyboard shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| Mouse wheel / PgUp / PgDn / Ctrl+U / Ctrl+F | Scroll transcript |
-| Ctrl+C | Interrupt current agent turn |
-| Ctrl+T | Toggle thinking/reasoning visibility (works during streaming) |
-| Up / Down (single-line) / Ctrl+Up / Ctrl+Down | Navigate input history (also works while agent is responding) |
-| Ctrl+R / Ctrl+S | Reverse / forward incremental history search (also works while agent is responding) |
-| Ctrl+Z / Ctrl+Y | Undo / redo in input area (also works while agent is responding) |
-| Ctrl+N / Shift+Alt+Enter / Alt+Enter | Insert newline in input |
+See the [keyboard shortcuts reference in README.md](../README.md#interactive-mode).
 
 ### Troubleshooting
 

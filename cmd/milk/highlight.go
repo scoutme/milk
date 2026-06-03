@@ -384,10 +384,25 @@ func applyInlineMarkdown(text string) string {
 			line = activeANSI + line
 		}
 		styled := styleLine(line)
-		// If we're inside an outer ANSI context, patch every ansiReset produced
-		// by inline spans so the outer dim is restored after each one.
-		if activeANSI != "" {
-			styled = injectANSIAfterResets(styled, activeANSI)
+		// Determine the effective ANSI context for this line: either the
+		// carried-over context from the previous line, or the line's own
+		// leading escape (e.g. a diff line that opens with its own color).
+		// This ensures ansiReset injected by inline spans (e.g. backtick
+		// matches) is followed by a re-injection of the active color.
+		lineContext := activeANSI
+		localContext := false // true when lineContext came from leadingANSI, not carry-over
+		if lineContext == "" {
+			lineContext = leadingANSI(originalLine)
+			localContext = lineContext != ""
+		}
+		if lineContext != "" {
+			styled = injectANSIAfterResets(styled, lineContext)
+			// When the context was sourced from the line's own leading ANSI
+			// (not a carry-over from the previous line), ensure the styled line
+			// ends with ansiReset so the color does not bleed into the next line.
+			if localContext && !strings.HasSuffix(styled, ansiReset) {
+				styled += ansiReset
+			}
 		}
 		lines[i] = styled
 		// Carry-over: compute from the ORIGINAL (pre-prepend) line so that
@@ -396,12 +411,28 @@ func applyInlineMarkdown(text string) string {
 		// source text closes the outer context.
 		activeANSI = trailingOpenANSI(originalLine)
 		// If the original line had no ANSI at all, check whether styleLine
-		// opened a new context (e.g. a dim heading).
+		// opened a new context (e.g. a dim heading). Use the final styled line
+		// (after the localContext guard) so a properly closed diff line never
+		// propagates its color to the next line.
 		if activeANSI == "" {
-			activeANSI = trailingOpenANSI(styled)
+			activeANSI = trailingOpenANSI(lines[i])
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// leadingANSI returns the first ANSI escape sequence at the start of s, or "".
+// Used to detect lines that open with their own color (e.g. diff output) so
+// that inline-span resets can be patched without a cross-line carry-over.
+func leadingANSI(s string) string {
+	if len(s) < 3 || s[0] != 0x1B || s[1] != '[' {
+		return ""
+	}
+	end := strings.IndexByte(s[2:], 'm')
+	if end == -1 {
+		return ""
+	}
+	return s[:end+3]
 }
 
 // injectANSIAfterResets re-injects context after every ansiReset in s.

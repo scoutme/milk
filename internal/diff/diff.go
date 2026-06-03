@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	ansiRed   = "\033[38;5;203m\033[48;5;52m" // bright red fg + dark red bg
-	ansiGreen = "\033[38;5;119m\033[48;5;22m" // bright green fg + dark green bg
+	ansiRed   = "\033[38;5;203;48;5;52m" // bright red fg + dark red bg (single SGR sequence)
+	ansiGreen = "\033[38;5;119;48;5;22m" // bright green fg + dark green bg (single SGR sequence)
 	ansiDim   = "\033[2m"
 	ansiReset = "\033[0m"
 )

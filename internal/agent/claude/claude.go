@@ -184,7 +184,7 @@ func (a *Agent) RunFirst(ctx context.Context, systemContext, prompt string, out 
 		defer os.Remove(f)
 		args = append(args, "--append-system-prompt-file", f)
 	}
-	args = append(args, prompt)
+	args = append(args, "--", prompt)
 
 	res, err := a.run(ctx, args, out)
 	if res.SessionID != "" {
@@ -211,7 +211,7 @@ func (a *Agent) RunResume(ctx context.Context, claudeSessionID, systemContext, p
 		defer os.Remove(f)
 		args = append(args, "--append-system-prompt-file", f)
 	}
-	args = append(args, prompt)
+	args = append(args, "--", prompt)
 	return a.run(ctx, args, out)
 }
 

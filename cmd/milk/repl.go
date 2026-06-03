@@ -280,11 +280,15 @@ type model struct {
 	searchIdx     int // position in activeHistory() we last matched
 
 	// tab completion
-	tabMatches []string
-	tabIdx     int
-	tabLine    int      // line index the current tabMatches were built for
-	tabPrefix  string   // what the user had typed when Tab was first pressed
-	tabHints   []string // hint lines shown below viewport while completing a slash command
+	tabMatches      []string // flat list of matching commands / @-paths
+	tabIdx          int      // index into tabMatches (for @-path and non-slash completions)
+	tabCmdIdx       int      // index of current command within tabMatches (slash completions)
+	tabVarIdx       int      // index of current variant within the current command's variants
+	tabLine         int      // line index the current tabMatches were built for
+	tabPrefix       string   // what the user had typed when Tab was first pressed
+	tabBeforeCursor string   // beforeCursor snapshot at session start; used for clean cycling
+	tabAfterCursor  string   // afterCursor snapshot at session start
+	tabHints        []string // hint lines shown below viewport while completing a slash command
 
 	// pending permission request (non-nil while waiting for user y/n) and queue
 	// for tool-use permission prompts that arrive while a prior one is active.
@@ -1763,10 +1767,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	case "shift+left", "shift+right", "shift+up", "shift+down", "shift+home", "shift+end",
-		"shift+ctrl+left", "shift+ctrl+right", "shift+alt+left", "shift+alt+right":
+		"shift+ctrl+left", "shift+ctrl+right", "shift+alt+left", "shift+alt+right",
+		"ctrl+shift+left", "ctrl+shift+right":
 		return m.handleShiftArrow(msg)
 	case "tab":
-		m = m.handleTab()
+		m = m.handleTab(1)
+		return m, nil
+	case "shift+tab":
+		m = m.handleTab(-1)
 		return m, nil
 	case "ctrl+t":
 		m = m.toggleThinking()
@@ -1782,6 +1790,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Non-Tab key resets tab cycling
 	m.tabMatches = nil
 	m.tabIdx = -1
+	m.tabCmdIdx = 0
+	m.tabVarIdx = 0
+	m.tabBeforeCursor = ""
+	m.tabAfterCursor = ""
 	m.tabPrefix = ""
 	m.tabHints = nil
 
@@ -1844,9 +1856,9 @@ func (m model) handleShiftArrow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		bareKey = tea.KeyMsg{Type: tea.KeyHome}
 	case "shift+end":
 		bareKey = tea.KeyMsg{Type: tea.KeyEnd}
-	case "shift+ctrl+left", "shift+alt+left":
+	case "shift+ctrl+left", "shift+alt+left", "ctrl+shift+left":
 		bareKey = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
-	case "shift+ctrl+right", "shift+alt+right":
+	case "shift+ctrl+right", "shift+alt+right", "ctrl+shift+right":
 		bareKey = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
 	default:
 		bareKey = tea.KeyMsg{Type: tea.KeyRight}
@@ -1878,6 +1890,10 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 
 		m.tabMatches = nil
 		m.tabIdx = -1
+		m.tabCmdIdx = 0
+		m.tabVarIdx = 0
+		m.tabBeforeCursor = ""
+		m.tabAfterCursor = ""
 		m.tabPrefix = ""
 		m.tabHints = nil
 		m.syncLayout()
@@ -1891,11 +1907,15 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
-	input := strings.TrimSpace(m.ta.Value())
+	input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
 	m.ta.Reset()
 
 	m.tabMatches = nil
 	m.tabIdx = -1
+	m.tabCmdIdx = 0
+	m.tabVarIdx = 0
+	m.tabBeforeCursor = ""
+	m.tabAfterCursor = ""
 	m.tabPrefix = ""
 	m.tabHints = nil
 	m.syncLayout()
@@ -3312,7 +3332,10 @@ func buildCmdVariants() map[string][]cmdVariant {
 	return result
 }
 
-func (m model) handleTab() model {
+// handleTab advances (dir=+1) or retreats (dir=-1) through the tab completion
+// cycle. For slash commands: cycles entry by entry within a command's variants,
+// then moves to the next/previous command. For @-paths: cycles the flat list.
+func (m model) handleTab(dir int) model {
 	fullInput := m.ta.Value()
 	lines := strings.Split(fullInput, "\n")
 	curLine := m.ta.Line()
@@ -3321,44 +3344,115 @@ func (m model) handleTab() model {
 	}
 	lineInput := lines[curLine]
 
+	// Split at cursor column so completion works on the token under the cursor.
+	col := m.ta.LineInfo().CharOffset
+	if col > len([]rune(lineInput)) {
+		col = len([]rune(lineInput))
+	}
+	runes := []rune(lineInput)
+	beforeCursor := string(runes[:col])
+	afterCursor := string(runes[col:])
+
+	// Build or reuse the match list.
 	if len(m.tabMatches) == 0 || curLine != m.tabLine {
-		m.tabMatches, m.tabIdx = buildTabMatches(lineInput, m.st.cwd)
+		m.tabMatches, m.tabIdx = buildTabMatches(beforeCursor, m.st.cwd)
 		m.tabLine = curLine
 		if len(m.tabMatches) == 0 {
 			return m
 		}
-		// Capture what the user typed before completion — used to bold the
-		// matching prefix in hints and the completed text in the textarea.
-		m.tabPrefix = tabInputPrefix(lineInput)
-	} else {
-		m.tabIdx = (m.tabIdx + 1) % len(m.tabMatches)
-	}
-	completed := m.tabMatches[m.tabIdx]
-	lines[curLine] = applyTabCompletion(lineInput, completed)
-	m.ta.SetValue(strings.Join(lines, "\n"))
-	m.ta.CursorEnd()
-
-	// Build hint lines for the completed slash command.
-	m.tabHints = nil
-	if vs, ok := cmdVariants[completed]; ok {
-		cycleIndicator := ""
-		if len(m.tabMatches) > 1 {
-			cycleIndicator = dim(fmt.Sprintf("  (%d/%d)", m.tabIdx+1, len(m.tabMatches)))
-		}
-		prefix := m.tabPrefix
-		for i, v := range vs {
-			suffix := ""
-			if i == len(vs)-1 {
-				suffix = cycleIndicator
+		m.tabPrefix = tabInputPrefix(beforeCursor)
+		m.tabBeforeCursor = beforeCursor
+		m.tabAfterCursor = afterCursor
+		m.tabCmdIdx = 0
+		m.tabVarIdx = 0
+		if dir < 0 {
+			// Shift+Tab from scratch: start at the last entry of the last command.
+			m.tabCmdIdx = len(m.tabMatches) - 1
+			if vs, ok := cmdVariants[m.tabMatches[m.tabCmdIdx]]; ok && len(vs) > 0 {
+				m.tabVarIdx = len(vs) - 1
 			}
-			// Bold the typed prefix within the sig; rest in normal yellow.
+		}
+	} else {
+		// Advance within the current command's variants, then wrap to next command.
+		cmd := m.tabMatches[m.tabCmdIdx]
+		varCount := 1
+		if vs, ok := cmdVariants[cmd]; ok && len(vs) > 0 {
+			varCount = len(vs)
+		}
+		m.tabVarIdx += dir
+		if m.tabVarIdx >= varCount {
+			// Move to first variant of next command.
+			m.tabCmdIdx = (m.tabCmdIdx + 1) % len(m.tabMatches)
+			m.tabVarIdx = 0
+		} else if m.tabVarIdx < 0 {
+			// Move to last variant of previous command.
+			m.tabCmdIdx = (m.tabCmdIdx - 1 + len(m.tabMatches)) % len(m.tabMatches)
+			if vs, ok := cmdVariants[m.tabMatches[m.tabCmdIdx]]; ok && len(vs) > 0 {
+				m.tabVarIdx = len(vs) - 1
+			} else {
+				m.tabVarIdx = 0
+			}
+		}
+		// For non-slash (@-path) completions keep the flat tabIdx in sync.
+		m.tabIdx = m.tabCmdIdx
+	}
+
+	completed := m.tabMatches[m.tabCmdIdx]
+
+	// Insert the full variant sig into the textarea so the user sees the
+	// subcommand and parameter placeholders. Always apply against the original
+	// beforeCursor snapshot so cycling doesn't accumulate previous completions.
+	completionToken := completed
+	if vs, ok := cmdVariants[completed]; ok && len(vs) > 0 && m.tabVarIdx < len(vs) {
+		completionToken = vs[m.tabVarIdx].sig
+	}
+
+	completedBefore := applyTabCompletion(m.tabBeforeCursor, completionToken)
+	lines[curLine] = completedBefore + m.tabAfterCursor
+	m.ta.SetValue(strings.Join(lines, "\n"))
+	precedingLen := 0
+	if curLine > 0 {
+		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
+	}
+	// Cursor goes after the completed token (before afterCursor).
+	m.ta.SetCursor(precedingLen + len([]rune(completedBefore)))
+
+	// Build hint panel: all variants of all matching commands, with the active
+	// entry highlighted via reverse video.
+	m.tabHints = nil
+	prefix := m.tabPrefix
+	totalCmds := len(m.tabMatches)
+	for ci, cmd := range m.tabMatches {
+		vs := cmdVariants[cmd]
+		if len(vs) == 0 {
+			// No registered variants (e.g. @-path or unlisted command) — one entry.
+			isActive := ci == m.tabCmdIdx
+			entry := yellow(cmd)
+			if isActive {
+				entry = "\033[48;5;238m" + ansi.Strip(entry) + "\033[49m"
+			}
+			m.tabHints = append(m.tabHints, " "+entry)
+			continue
+		}
+		for vi, v := range vs {
+			isActive := ci == m.tabCmdIdx && vi == m.tabVarIdx
 			sig := v.sig
 			if prefix != "" && strings.HasPrefix(sig, prefix) {
 				sig = boldYellow(prefix) + yellow(sig[len(prefix):])
 			} else {
 				sig = yellow(sig)
 			}
-			m.tabHints = append(m.tabHints, " "+sig+"  "+dim(v.desc)+suffix)
+			desc := dim(v.desc)
+			cmdCount := ""
+			if vi == 0 && totalCmds > 1 {
+				cmdCount = dim(fmt.Sprintf(" [%d/%d]", ci+1, totalCmds))
+			}
+			entry := " " + sig + "  " + desc + cmdCount
+			if isActive {
+				// Highlight active entry with a subtle dark-gray background.
+				entry = "\033[48;5;238m " + ansi.Strip(sig) + "  " + ansi.Strip(desc) + ansi.Strip(cmdCount) + "\033[49m"
+			}
+			m.tabHints = append(m.tabHints, entry)
 		}
 	}
 
@@ -3404,6 +3498,39 @@ func applyTabCompletion(input, completed string) string {
 		return result
 	}
 	return completed
+}
+
+// stripCompletionPlaceholders removes tab-completion placeholder syntax from s:
+// <param> required-parameter markers and [optional] suggestion markers.
+// Applied before submitting input so accepted completions like
+// "/memory show <pat|#id>" dispatch as "/memory show".
+func stripCompletionPlaceholders(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		switch s[i] {
+		case '<':
+			end := strings.IndexByte(s[i:], '>')
+			if end >= 0 {
+				i += end + 1
+			} else {
+				b.WriteByte(s[i])
+				i++
+			}
+		case '[':
+			end := strings.IndexByte(s[i:], ']')
+			if end >= 0 {
+				i += end + 1
+			} else {
+				b.WriteByte(s[i])
+				i++
+			}
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }
 
 // replaceLastToken finds the last token in input matching pred and replaces it
