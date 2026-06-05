@@ -390,6 +390,193 @@ func TestApplyInlineMarkdown_ToolHintNoBleed(t *testing.T) {
 	}
 }
 
+func TestIsTableRow(t *testing.T) {
+	trueCases := []string{
+		"| col1 | col2 | col3 |",
+		"col1 | col2 | col3",
+		"| a | b |",
+	}
+	for _, s := range trueCases {
+		if !isTableRow(s) {
+			t.Errorf("isTableRow(%q) should be true", s)
+		}
+	}
+	falseCases := []string{
+		"no pipes here",
+		"only one | pipe",
+		"",
+		// tool-hint lines with pipes inside grep patterns / shell commands
+		`⚙ Bash: grep -rn "obs\.|otel\.|RecordToken|LogPayload"`,
+		`grep -rn "foo|bar" ./...`,
+		// two pipes but not space-padded and no leading/trailing pipe
+		`cmd1|cmd2|cmd3`,
+	}
+	for _, s := range falseCases {
+		if isTableRow(s) {
+			t.Errorf("isTableRow(%q) should be false", s)
+		}
+	}
+}
+
+func TestColorizeMarkdown_PipeInToolHintNotTable(t *testing.T) {
+	// A tool-hint line containing pipes inside a grep pattern must not be
+	// misidentified as a table row and mis-rendered.
+	input := "\033[2m⚙ Bash: grep -rn \"obs\\.|otel\\.|RecordToken|LogPayload\" ./...\033[0m"
+	got := colorizeMarkdown(input)
+	// Content must be preserved verbatim — no table rendering applied.
+	if !strings.Contains(got, "grep") {
+		t.Errorf("tool hint content lost: %q", got)
+	}
+	if !strings.Contains(got, "RecordToken") {
+		t.Errorf("pipe-separated content inside hint lost: %q", got)
+	}
+	// Must not contain bold (which would indicate table-header rendering).
+	if strings.Contains(got, ansiBold) {
+		t.Errorf("tool hint line should not get table-header bold styling: %q", got)
+	}
+}
+
+func TestColorizeMarkdown_PipeProseLinesNotTable(t *testing.T) {
+	// Pipe-containing prose lines with no separator row must not be rendered as a table.
+	input := "| option A | option B |\n| option C | option D |"
+	got := colorizeMarkdown(input)
+	// No separator row → should NOT get table bold styling.
+	if strings.Contains(got, ansiBold) {
+		t.Errorf("pipe prose without separator row should not get table bold: %q", got)
+	}
+	// Content must be preserved.
+	if !strings.Contains(got, "option A") {
+		t.Errorf("content lost: %q", got)
+	}
+}
+
+func TestIsTableSep(t *testing.T) {
+	trueCases := []string{
+		"| --- | --- | --- |",
+		"|---|---|---|",
+		"| :--- | ---: | :---: |",
+		"--- | --- | ---",
+	}
+	for _, s := range trueCases {
+		if !isTableSep(s) {
+			t.Errorf("isTableSep(%q) should be true", s)
+		}
+	}
+	falseCases := []string{
+		"| col1 | col2 |",
+		"| --- | text |",
+		"no pipes",
+	}
+	for _, s := range falseCases {
+		if isTableSep(s) {
+			t.Errorf("isTableSep(%q) should be false", s)
+		}
+	}
+}
+
+func TestColorizeMarkdown_Table(t *testing.T) {
+	input := "| Header A | Header B |\n| --- | --- |\n| cell 1 | cell 2 |\n| cell 3 | cell 4 |"
+	got := colorizeMarkdown(input)
+
+	// All content must be preserved.
+	for _, want := range []string{"Header A", "Header B", "cell 1", "cell 2", "cell 3", "cell 4"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("table content %q missing in output:\n%q", want, got)
+		}
+	}
+
+	// Header row gets bold styling.
+	if !strings.Contains(got, ansiBold) {
+		t.Errorf("table header should have bold styling:\n%q", got)
+	}
+
+	// Separator row gets dim styling.
+	if !strings.Contains(got, ansiDim) {
+		t.Errorf("table separator should have dim styling:\n%q", got)
+	}
+}
+
+func TestColorizeMarkdown_TableNoFalsePositive(t *testing.T) {
+	// A line with only one pipe should NOT be treated as a table row.
+	input := "See note | above"
+	got := colorizeMarkdown(input)
+	// Should pass through styleLine (no table bold).
+	if strings.Contains(got, ansiBold) {
+		t.Errorf("single-pipe line should not get table header styling:\n%q", got)
+	}
+}
+
+func TestColorizeMarkdown_TableInlineCode(t *testing.T) {
+	// Inline code inside table cells must be styled correctly.
+	input := "| `foo` | bar |\n| --- | --- |\n| baz | `qux` |"
+	got := colorizeMarkdown(input)
+	if !strings.Contains(got, "foo") {
+		t.Errorf("inline code in header cell lost:\n%q", got)
+	}
+	if !strings.Contains(got, "qux") {
+		t.Errorf("inline code in body cell lost:\n%q", got)
+	}
+	if !strings.Contains(got, ansiYellow) {
+		t.Errorf("expected yellow ANSI for inline code in table cells:\n%q", got)
+	}
+}
+
+func TestRenderTableBlock_EqualWidths(t *testing.T) {
+	// Columns must be padded to the widest cell in each column.
+	// Col 0: max("Feature", "New Go code", "New Python code") = 15 ("New Python code")
+	// Col 1: max("Option A", "~250 lines", "~250 lines") = 8 ("Option A" / "~250 lines")
+	rawLines := []string{
+		"| Feature | Option A |",
+		"| --- | --- |",
+		"| New Go code | ~250 lines |",
+		"| New Python code | ~250 lines |",
+	}
+	rendered := renderTableBlock(rawLines)
+	if len(rendered) != 4 {
+		t.Fatalf("expected 4 rendered lines, got %d", len(rendered))
+	}
+
+	// Strip ANSI from each line to inspect padding.
+	stripANSI := func(s string) string {
+		out := []rune{}
+		i := 0
+		r := []rune(s)
+		for i < len(r) {
+			if r[i] == 0x1B && i+1 < len(r) && r[i+1] == '[' {
+				for i < len(r) && r[i] != 'm' {
+					i++
+				}
+				i++
+				continue
+			}
+			out = append(out, r[i])
+			i++
+		}
+		return string(out)
+	}
+
+	plain := make([]string, len(rendered))
+	for i, r := range rendered {
+		plain[i] = stripANSI(r)
+	}
+
+	// All non-separator rows must have the same total length.
+	lengths := []int{}
+	for i, p := range plain {
+		if !isTableSep(rawLines[i]) {
+			lengths = append(lengths, len([]rune(p)))
+		}
+	}
+	if len(lengths) == 0 {
+		t.Fatal("no data rows found")
+	}
+	for i, l := range lengths {
+		if l != lengths[0] {
+			t.Errorf("row %d has width %d, want %d (same as header)\nrows: %v", i, l, lengths[0], plain)
+		}
+	}
+}
+
 func TestApplyInlineMarkdown_MultipleHintsNoBleed(t *testing.T) {
 	// Multiple tool hints followed by plain text with inline code.
 	// None of the plain text lines should be dimmed.

@@ -327,6 +327,10 @@ var reOrderedItem = regexp.MustCompile(`^(\s*)(\d+\.) `)
 // reHRule detects horizontal rules.
 var reHRule = regexp.MustCompile(`^(\*\*\*|---|___)\s*$`)
 
+// reTableSepCell matches a GFM table separator cell: optional leading colon,
+// one or more dashes, optional trailing colon (e.g. "---", ":---:", "---:").
+var reTableSepCell = regexp.MustCompile(`^:?-+:?$`)
+
 // colorizeMarkdown applies light ANSI styling to inline Markdown constructs
 // outside fenced code blocks. Fenced blocks are passed through untouched so
 // they can be handled by colorizeCodeBlocks afterwards.
@@ -378,12 +382,45 @@ func colorizeMarkdown(text string) string {
 func applyInlineMarkdown(text string) string {
 	lines := strings.Split(text, "\n")
 	activeANSI := ""
-	for i, line := range lines {
-		originalLine := line // keep a copy before we prepend activeANSI
+	i := 0
+	for i < len(lines) {
+		originalLine := lines[i]
+		strippedOrig := strings.TrimSpace(originalLine)
+
+		// Table block: collect all contiguous pipe-containing lines, then only
+		// render as a table if a GFM separator row (|---|---| etc.) is present.
+		// Without a separator this is prose that happens to contain pipe chars
+		// (e.g. tool-hint lines, shell commands, regex patterns).
+		if isTableRow(strippedOrig) {
+			j := i
+			for j < len(lines) && isTableRow(strings.TrimSpace(lines[j])) {
+				j++
+			}
+			hasSep := false
+			for k := i; k < j; k++ {
+				if isTableSep(strings.TrimSpace(lines[k])) {
+					hasSep = true
+					break
+				}
+			}
+			if hasSep {
+				rendered := renderTableBlock(lines[i:j])
+				for k, r := range rendered {
+					lines[i+k] = r
+				}
+				activeANSI = "" // tables always end with ansiReset
+				i = j
+				continue
+			}
+			// No separator — fall through and style each line normally.
+		}
+
+		line := originalLine
 		if activeANSI != "" {
 			line = activeANSI + line
 		}
 		styled := styleLine(line)
+
 		// Determine the effective ANSI context for this line: either the
 		// carried-over context from the previous line, or the line's own
 		// leading escape (e.g. a diff line that opens with its own color).
@@ -417,6 +454,7 @@ func applyInlineMarkdown(text string) string {
 		if activeANSI == "" {
 			activeANSI = trailingOpenANSI(lines[i])
 		}
+		i++
 	}
 	return strings.Join(lines, "\n")
 }
@@ -555,6 +593,132 @@ func styleInlineSpans(s string) string {
 	})
 
 	return s
+}
+
+// --- table rendering (balanced mode) ---
+
+// isTableRow reports whether line looks like a GFM table row.
+// A valid row must either start or end with "|", or contain " | " (space-padded
+// separator), AND have at least two pipe characters total. This rejects lines
+// that merely contain pipes inside shell commands, regex patterns, or tool hints.
+func isTableRow(line string) bool {
+	s := strings.TrimSpace(line)
+	if strings.Count(s, "|") < 2 {
+		return false
+	}
+	return strings.HasPrefix(s, "|") || strings.HasSuffix(s, "|") || strings.Contains(s, " | ")
+}
+
+// isTableSep reports whether line is a GFM table separator row ("|---|---|").
+// Every non-empty cell must match reTableSepCell after trimming spaces.
+func isTableSep(line string) bool {
+	s := strings.TrimSpace(line)
+	if !isTableRow(s) {
+		return false
+	}
+	s = strings.Trim(s, "|")
+	for _, cell := range strings.Split(s, "|") {
+		cell = strings.TrimSpace(cell)
+		if cell == "" {
+			continue
+		}
+		if !reTableSepCell.MatchString(cell) {
+			return false
+		}
+	}
+	return true
+}
+
+// splitTableCells splits a raw table row into cell strings, stripping the
+// outer pipes and trimming whitespace from each cell.
+func splitTableCells(line string) []string {
+	s := strings.TrimSpace(line)
+	s = strings.Trim(s, "|")
+	parts := strings.Split(s, "|")
+	cells := make([]string, len(parts))
+	for i, p := range parts {
+		cells[i] = strings.TrimSpace(p)
+	}
+	return cells
+}
+
+// renderTableBlock performs a two-pass render of a contiguous slice of raw
+// table lines. Pass 1: collect all cell text and compute the max visual width
+// per column. Pass 2: emit each row with cells padded to the column width.
+// The first non-separator row is treated as the header (bold+cyan). Separator
+// rows are rendered as a dim rule whose dashes fill each column width.
+func renderTableBlock(rawLines []string) []string {
+	// Pass 1 — split every row into cells and find per-column max widths.
+	allCells := make([][]string, len(rawLines))
+	colWidths := []int{}
+	for i, raw := range rawLines {
+		cells := splitTableCells(raw)
+		allCells[i] = cells
+		for c, cell := range cells {
+			w := len([]rune(cell)) // visual width (rune count)
+			if c >= len(colWidths) {
+				colWidths = append(colWidths, w)
+			} else if w > colWidths[c] {
+				colWidths[c] = w
+			}
+		}
+	}
+
+	// Determine header row index: first non-separator row followed by a sep.
+	headerIdx := -1
+	for i, raw := range rawLines {
+		if !isTableSep(raw) {
+			if i+1 < len(rawLines) && isTableSep(rawLines[i+1]) {
+				headerIdx = i
+			}
+			break
+		}
+	}
+
+	// Pass 2 — render each row with equal-width columns.
+	out := make([]string, len(rawLines))
+	for i, raw := range rawLines {
+		var sb strings.Builder
+		if isTableSep(raw) {
+			// Separator row: dim dashes filling each column width.
+			sb.WriteString(ansiDim)
+			sb.WriteString("|")
+			for c, w := range colWidths {
+				sb.WriteString(" ")
+				sb.WriteString(strings.Repeat("-", w))
+				sb.WriteString(" |")
+				_ = c
+			}
+			sb.WriteString(ansiReset)
+		} else {
+			isHeader := i == headerIdx
+			cells := allCells[i]
+			if isHeader {
+				sb.WriteString(ansiBold + ansiCyan)
+			}
+			sb.WriteString("|")
+			for c, w := range colWidths {
+				sb.WriteString(" ")
+				cell := ""
+				if c < len(cells) {
+					cell = cells[c]
+				}
+				styled := styleInlineSpans(cell)
+				sb.WriteString(styled)
+				// Pad to column width using rune count of the unstyled cell.
+				pad := w - len([]rune(cell))
+				if pad > 0 {
+					sb.WriteString(strings.Repeat(" ", pad))
+				}
+				sb.WriteString(" |")
+			}
+			if isHeader {
+				sb.WriteString(ansiReset)
+			}
+		}
+		out[i] = sb.String()
+	}
+	return out
 }
 
 // --- full mode: glamour ---

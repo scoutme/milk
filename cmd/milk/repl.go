@@ -4276,6 +4276,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAgent.WithOtelDir(od)
 	}
 	localAgent.WithLogContext(cfg.Otel.LogContext)
+	if dbg, err := openLocalDebugLog(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+	} else if dbg != nil {
+		defer dbg.Close()
+		localAgent = localAgent.WithDebugLog(dbg)
+	}
 
 	// Build the escalation-local agent when the escalation target is a second
 	// local provider rather than the Claude CLI.

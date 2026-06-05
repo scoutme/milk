@@ -137,6 +137,12 @@ func run(cmd *cobra.Command, args []string) error {
 		localAgent.WithPermissions(lp, nil)
 	}
 	localAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	if dbg, err := openLocalDebugLog(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+	} else if dbg != nil {
+		defer dbg.Close()
+		localAgent = localAgent.WithDebugLog(dbg)
+	}
 
 	var escalationLocalAgent *local.Agent
 	if !cfg.EscalationAgentConfig().IsCLI() {
@@ -331,6 +337,17 @@ func openCLIDebugLog(cfg config.Config) (*os.File, error) {
 		return nil, nil
 	}
 	path, err := config.CLIDebugLogPath()
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+}
+
+func openLocalDebugLog(cfg config.Config) (*os.File, error) {
+	if !cfg.DebugLocalLog {
+		return nil, nil
+	}
+	path, err := config.LocalDebugLogPath()
 	if err != nil {
 		return nil, err
 	}

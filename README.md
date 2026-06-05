@@ -323,6 +323,17 @@ Side-effecting tools (`bash`, `write_file`, `edit_file`, `http_get`) require use
 | available | unavailable | warns once, stays primary-only |
 | not configured | not configured | setup mode — splash shows `/agent add` guidance |
 
+## Debugging
+
+Two opt-in flags in `~/.milk/config.json` capture raw protocol streams to disk:
+
+| Config key | Log file | Content | Use for |
+| --- | --- | --- | --- |
+| `"debug_claude_code": true` | `~/.milk/claude_debug.ndjson` | Every raw NDJSON line from the Claude CLI subprocess | Claude CLI protocol issues, unexpected event types, streaming gaps |
+| `"debug_local": true` | `~/.milk/local_debug.log` | Every raw SSE line from the local agent HTTP stream (including skipped/unparsed lines) | Dropped tokens, unknown SSE events, parser mismatches |
+
+Both flags default to `false`. The file extensions reflect content format: `.ndjson` is valid Newline-Delimited JSON (pipe through `jq -c`); `.log` is mixed SSE framing text with `data:` / `event:` prefixes and blank separators.
+
 ## Documentation
 
 - [docs/setup.md](docs/setup.md) — full setup guide and local testing procedure

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -127,6 +128,9 @@ type Agent struct {
 	// token counts. Used to persist usage into the session without coupling the
 	// agent to the session package.
 	onTokens func(model, role string, prompt, completion int64)
+	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
+	// including lines that are skipped or fail JSON parsing.
+	debugLog io.Writer
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -382,6 +386,14 @@ func (a *Agent) WithLogContext(v bool) *Agent {
 func (a *Agent) WithOtelDir(dir string) *Agent {
 	a.otelDir = dir
 	return a
+}
+
+// WithDebugLog returns a shallow copy of the agent that writes every raw SSE
+// line from the HTTP stream to w, including skipped and unparseable lines.
+func (a *Agent) WithDebugLog(w io.Writer) *Agent {
+	copy := *a
+	copy.debugLog = w
+	return &copy
 }
 
 // systemPromptShared is the role-independent core: tool rules, memory rules,
@@ -918,10 +930,17 @@ func (a *Agent) scanSSE(
 	textBuf *strings.Builder,
 	out io.Writer,
 ) ([]toolCall, int64, int64, error) {
+	dbg := a.debugLog
 	var promptTokens, completionTokens int64
 	for scanner.Scan() {
 		line := scanner.Text()
+		if dbg != nil {
+			fmt.Fprintln(dbg, line) //nolint:errcheck
+		}
 		if !strings.HasPrefix(line, "data: ") {
+			if dbg != nil {
+				fmt.Fprintf(dbg, "[skip:no-data-prefix] %s\n", line) //nolint:errcheck
+			}
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
@@ -930,6 +949,9 @@ func (a *Agent) scanSSE(
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if dbg != nil {
+				fmt.Fprintf(dbg, "[skip:json-error] %v | raw: %s\n", err, data) //nolint:errcheck
+			}
 			continue
 		}
 		if chunk.Usage != nil {
@@ -974,8 +996,15 @@ func accumulateNativeToolCalls(tcs []toolCall, partialTools map[int]*toolCall) {
 }
 
 func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
+	// Sort indices so tool calls are returned in stream order regardless of
+	// whether the server uses 0-based or 1-based (e.g. Copilot API) indexing.
+	indices := make([]int, 0, len(partialTools))
+	for i := range partialTools {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
 	var out []toolCall
-	for i := 0; i < len(partialTools); i++ {
+	for _, i := range indices {
 		if tc := partialTools[i]; tc != nil && tc.Function.Name != "" {
 			out = append(out, *tc)
 		}

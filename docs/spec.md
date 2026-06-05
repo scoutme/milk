@@ -424,6 +424,14 @@ Controls whether thinking/reasoning tokens are shown in the transcript by defaul
 
 When `true` (default), the first router-triggered escalation automatically keeps subsequent turns on the escalation agent — shown as `<agent> (sticky)` in the status bar. Cleared by `/primary` or a single-turn `/primary <prompt>` override. Set to `false` to re-evaluate routing on every turn. Explicit `/escalate` pinning is unaffected by this setting.
 
+### `debug_claude_code` field
+
+When `true`, every raw NDJSON line emitted by the Claude CLI subprocess is appended to `~/.milk/claude_debug.ndjson`. The `.ndjson` extension reflects the content: each line is a self-contained JSON object, making the file valid Newline-Delimited JSON suitable for `jq` or any NDJSON-aware tool. Useful for diagnosing Claude CLI protocol issues, unexpected event types, or streaming gaps. Default: `false`.
+
+### `debug_local` field
+
+When `true`, every raw SSE line received from the local agent's HTTP stream is appended to `~/.milk/local_debug.log` — including lines that are skipped, blank separator lines, and lines that fail to parse. The `.log` extension reflects the content: SSE frames include `data:` and `event:` prefixes, blank separators, and other protocol framing that is not pure JSON. Useful for diagnosing dropped tokens, unknown event types, or SSE parser mismatches. Default: `false`.
+
 **Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 
 ---
