@@ -522,14 +522,15 @@ func TestColorizeMarkdown_TableInlineCode(t *testing.T) {
 }
 
 func TestRenderTableBlock_EqualWidths(t *testing.T) {
-	// Columns must be padded to the widest cell in each column.
-	// Col 0: max("Feature", "New Go code", "New Python code") = 15 ("New Python code")
-	// Col 1: max("Option A", "~250 lines", "~250 lines") = 8 ("Option A" / "~250 lines")
+	// Columns must be padded to the widest CONTENT cell — separator dashes must
+	// not inflate column widths. Use a wide separator to catch the regression.
+	// Col 0: max("Scope", "Table rendering", "Bug fix") = 15 ("Table rendering")
+	// Col 1: max("What", "Two-pass renderer", "1-based index") = 17 ("Two-pass renderer")
 	rawLines := []string{
-		"| Feature | Option A |",
-		"| --- | --- |",
-		"| New Go code | ~250 lines |",
-		"| New Python code | ~250 lines |",
+		"| Scope | What |",
+		"| ------------------- | ----------------------------------------------------------------- |",
+		"| Table rendering | Two-pass renderer |",
+		"| Bug fix | 1-based index |",
 	}
 	rendered := renderTableBlock(rawLines)
 	if len(rendered) != 4 {

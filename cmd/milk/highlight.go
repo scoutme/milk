@@ -648,12 +648,17 @@ func splitTableCells(line string) []string {
 // The first non-separator row is treated as the header (bold+cyan). Separator
 // rows are rendered as a dim rule whose dashes fill each column width.
 func renderTableBlock(rawLines []string) []string {
-	// Pass 1 — split every row into cells and find per-column max widths.
+	// Pass 1 — split every non-separator row into cells and find per-column max
+	// widths. Separator rows are excluded so their dash counts don't inflate the
+	// column widths beyond what the actual content requires.
 	allCells := make([][]string, len(rawLines))
 	colWidths := []int{}
 	for i, raw := range rawLines {
 		cells := splitTableCells(raw)
 		allCells[i] = cells
+		if isTableSep(strings.TrimSpace(raw)) {
+			continue
+		}
 		for c, cell := range cells {
 			w := len([]rune(cell)) // visual width (rune count)
 			if c >= len(colWidths) {
