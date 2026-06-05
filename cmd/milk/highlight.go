@@ -41,10 +41,10 @@ func ParseColorizeMode(s string) ColorizeMode {
 }
 
 // colorizeTranscriptWrapped is the efficient entry point used by wrappedTranscript.
-// text is already word-wrapped and may contain ANSI sequences from agent labels.
-// It splits on turn boundaries (blank lines outside fenced blocks) so each turn
-// is colorized independently, preventing cross-turn greedy fence matching while
-// keeping multi-blank-line code block bodies intact.
+// text is the raw (unwrapped) transcript; wrapping happens after colorization so
+// that multi-line constructs like tables are detected on intact rows. It splits on
+// turn boundaries (blank lines outside fenced blocks) so each turn is colorized
+// independently, preventing cross-turn greedy fence matching.
 func colorizeTranscriptWrapped(text string, mode ColorizeMode) string {
 	if mode == ColorizeOff {
 		return text

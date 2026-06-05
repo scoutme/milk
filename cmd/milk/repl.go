@@ -1156,19 +1156,22 @@ func (m *model) wrappedTranscript() string {
 		return m.applySelectionHighlight(m.colorizeCached)
 	}
 
-	// Full re-colorize.
+	// Full re-colorize: colorize on the raw (unwrapped) transcript so that
+	// multi-line constructs like tables are detected on intact rows, then
+	// word-wrap the colorized output. Wrapping before colorization would break
+	// long table rows mid-cell, preventing table detection entirely.
 	m.colorizeForce = false
 	m.colorizeLinesSeen = 0
-	plainWrapped := ansi.Wrap(raw, vw, "")
-	colorized := colorizeTranscriptWrapped(plainWrapped, m.colorizeMode)
+	colorized := colorizeTranscriptWrapped(raw, m.colorizeMode)
+	wrapped := ansi.Wrap(colorized, vw, "")
 
 	// Update cache.
-	m.colorizeCached = colorized
+	m.colorizeCached = wrapped
 	m.colorizeTransLen = txLen
 	m.colorizeVPOffset = vpOffset
 	m.colorizeVPWidth = vw
 
-	return m.applySelectionHighlight(colorized)
+	return m.applySelectionHighlight(wrapped)
 }
 
 // applySelectionHighlight applies the selection background highlight to the
@@ -1591,6 +1594,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case thinkChunkMsg:
+		m.currentTurnChars += int64(len(msg.text))
 		m.currentTurnThinking.WriteString(msg.text)
 		m.appendThinking(msg.text)
 		return m, nil
