@@ -388,3 +388,43 @@ func TestAgentPerceptRelevanceGateEnabled_Override_True(t *testing.T) {
 		t.Error("expected per-agent true to override global disabled")
 	}
 }
+
+func TestAgentMaxToolIterations_Default(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{}
+	if got := cfg.AgentMaxToolIterations(ac); got != 20 {
+		t.Errorf("expected default 20, got %d", got)
+	}
+}
+
+func TestAgentMaxToolIterations_GlobalOverride(t *testing.T) {
+	cfg := Config{LocalMaxToolIterations: 30}
+	ac := AgentConfig{}
+	if got := cfg.AgentMaxToolIterations(ac); got != 30 {
+		t.Errorf("expected 30, got %d", got)
+	}
+}
+
+func TestAgentMaxToolIterations_PerAgentOverride(t *testing.T) {
+	cfg := Config{LocalMaxToolIterations: 30}
+	ac := AgentConfig{Limits: &AgentLimits{MaxToolIterations: intPtr(5)}}
+	if got := cfg.AgentMaxToolIterations(ac); got != 5 {
+		t.Errorf("expected per-agent 5, got %d", got)
+	}
+}
+
+func TestAgentMaxToolIterations_Unlimited(t *testing.T) {
+	cfg := Config{LocalMaxToolIterations: -1}
+	ac := AgentConfig{}
+	if got := cfg.AgentMaxToolIterations(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited) for -1 global, got %d", got)
+	}
+}
+
+func TestAgentMaxToolIterations_PerAgentUnlimited(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{MaxToolIterations: intPtr(-1)}}
+	if got := cfg.AgentMaxToolIterations(ac); got != 0 {
+		t.Errorf("expected 0 (unlimited) for per-agent -1, got %d", got)
+	}
+}

@@ -518,6 +518,7 @@ func runLocal(ctx context.Context, cfg config.Config, sess *session.Session, age
 		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(ac, true),
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, true),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
+		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
 	}).WithTagCallbacks(nonce, "primary", "escalation",
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {
@@ -674,6 +675,7 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(escAC, false),
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(escAC, false),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(escAC),
+		MaxToolIterations:    cfg.AgentMaxToolIterations(escAC),
 	}).WithTagCallbacks(nonce, primaryName, escName,
 		func(content string) { sess.CurrentNeed = content; sess.CurrentNeedSetAt = len(sess.History) + 1 },
 		func(content, consumerHint string) {

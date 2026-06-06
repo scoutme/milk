@@ -28,7 +28,7 @@ import (
 
 const inferenceScope = "github.com/scoutme/milk"
 
-const maxToolIterations = 10
+const defaultMaxToolIterations = 20
 
 // EscalationSignal is returned when the local model requests escalation to the escalation agent.
 type EscalationSignal struct {
@@ -91,6 +91,7 @@ type MemConfig struct {
 	ReinjectionTurns     int  // re-inject instruction after N local turns; 0 = disabled
 	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
 	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
+	MaxToolIterations    int  // max consecutive tool-call cycles per turn; 0 = use default (20)
 }
 
 // agentRoleForMetrics returns "escalation" when the agent is configured as the
@@ -601,7 +602,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 	executedKeys := map[string]bool{}
 
-	for i := 0; i < maxToolIterations; i++ {
+	maxIter := a.memCfg.MaxToolIterations
+	if maxIter <= 0 {
+		maxIter = defaultMaxToolIterations
+	}
+	for i := 0; i < maxIter; i++ {
 		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
 			return msgs, err
@@ -639,7 +644,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
-	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxToolIterations)
+	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxIter)
 }
 
 // toolNeedsPermission reports whether a tool requires user approval before execution.

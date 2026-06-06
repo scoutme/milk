@@ -340,6 +340,7 @@ All keys go in `~/.milk/config.json`. Sensible defaults apply when omitted.
 | `local_memory_result_max_bytes` | 2048 | Max byte size of `get_memory` / `list_memory` tool results returned to the local agent per call. Set to -1 for no limit. |
 | `local_memory_reinjection_turns` | 20 | Re-inject memory/need instructions into the local agent's context after this many local turns. Set to -1 to disable. |
 | `local_memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of local agent output. Set to -1 to disable. |
+| `local_max_tool_iterations` | 20 | Max consecutive tool-call / response cycles the local agent may execute per turn before the turn is aborted. Set to -1 for unlimited. |
 
 ### Context budget configuration
 
@@ -395,6 +396,7 @@ All fields are optional. When omitted, the global value (or built-in default) ap
 | `memory_reinjection_turns` | `memory_reinjection_turns` / `local_memory_reinjection_turns` | 20 | Re-inject memory instructions after N turns |
 | `memory_reinjection_bytes` | `memory_reinjection_bytes` / `local_memory_reinjection_bytes` | 40000 | Re-inject memory instructions after N bytes of output |
 | `percept_relevance_gate` | `percept_relevance_gate` | `true` | Enable keyword-intersection filter before percept injection |
+| `max_tool_iterations` | `local_max_tool_iterations` | 20 | Max tool-call cycles per turn (-1 = unlimited) |
 
 ### Remote oversight (Telegram)
 

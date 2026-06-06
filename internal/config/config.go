@@ -144,6 +144,8 @@ type AgentLimits struct {
 	PerceptInjectMaxBytes *int `json:"percept_inject_max_bytes,omitempty"`
 	// PerceptRelevanceGate overrides percept_relevance_gate.
 	PerceptRelevanceGate *bool `json:"percept_relevance_gate,omitempty"`
+	// MaxToolIterations overrides local_max_tool_iterations for this agent.
+	MaxToolIterations *int `json:"max_tool_iterations,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -267,6 +269,11 @@ type Config struct {
 	// accumulated history exceeds this budget, the oldest user+assistant pairs
 	// are dropped until it fits. Default: 24000. Set to 0 for no limit.
 	LocalContextBudgetChars int `json:"local_context_budget_chars,omitempty"`
+
+	// LocalMaxToolIterations caps the number of consecutive tool-call / response
+	// cycles the local agent may execute before the turn is aborted with an error.
+	// Default: 20. Set to 0 to use the default; set to -1 for unlimited.
+	LocalMaxToolIterations int `json:"local_max_tool_iterations,omitempty"`
 
 	// RemoteOversight configures the remote oversight interface. When non-nil
 	// and a backend is configured, agent turn notifications and permission
@@ -601,6 +608,23 @@ func (c Config) AgentPerceptRelevanceGateEnabled(a AgentConfig) bool {
 		return *a.Limits.PerceptRelevanceGate
 	}
 	return c.PerceptRelevanceGateEnabled()
+}
+
+// AgentMaxToolIterations returns the tool-call chain limit for the given agent.
+// Returns 0 to signal "unlimited" when the value resolves to negative.
+// Default: 20.
+func (c Config) AgentMaxToolIterations(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.MaxToolIterations != nil {
+		v := *a.Limits.MaxToolIterations
+		if v < 0 {
+			return 0 // unlimited
+		}
+		return intOr(v, 20)
+	}
+	if c.LocalMaxToolIterations < 0 {
+		return 0 // unlimited
+	}
+	return intOr(c.LocalMaxToolIterations, 20)
 }
 
 // intOr returns v when v > 0, otherwise returns def.
