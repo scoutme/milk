@@ -25,6 +25,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
@@ -4103,6 +4105,18 @@ func stripANSI(s string) string {
 
 // --- Agent dispatch ---
 
+// replTurnSourceLabel returns the "source" label for milk.turns.total based on
+// TUI routing state: user (sticky/force), auto_sticky, or auto (router-decided).
+func replTurnSourceLabel(st *interactiveState) string {
+	if st.stickyEscalate || st.stickyPrimary {
+		return "user"
+	}
+	if st.autoStickyEscalate {
+		return "auto_sticky"
+	}
+	return "auto"
+}
+
 // runTurn routes a prompt to the appropriate agent, writing output to out.
 func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
 	localAgent := agents.local
@@ -4156,6 +4170,8 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	}
 	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
 
+	sourceLabel := replTurnSourceLabel(st)
+	turnStart := time.Now()
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
@@ -4171,6 +4187,20 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 			cliAgent = applyAWSCreds(st.cfg, cliAgent)
 			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}, st.mem, "", out)
 		}
+	}
+	targetLabel := string(target)
+	obs.Inc(turnCtx, milkScope, "milk.turns.total",
+		attribute.String("target", targetLabel),
+		attribute.String("source", sourceLabel),
+	)
+	obs.RecordDuration(turnCtx, milkScope, "milk.turns.latency_ms", time.Since(turnStart),
+		attribute.String("target", targetLabel),
+	)
+	if turnErr != nil {
+		obs.Inc(turnCtx, milkScope, "milk.turns.errors",
+			attribute.String("target", targetLabel),
+			attribute.String("kind", "inference"),
+		)
 	}
 	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
 	if turnErr == nil {
@@ -4261,8 +4291,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		return fmt.Errorf("loading session: %w", err)
 	}
 
+	sessionStart := time.Now()
 	obsShutdown := initObs(cfg)
-	defer func() { obsShutdown(context.Background()) }() //nolint:errcheck
+	defer func() {
+		obs.SetGauge(context.Background(), milkScope, "milk.session.duration_ms",
+			time.Since(sessionStart).Milliseconds(),
+		)
+		obsShutdown(context.Background()) //nolint:errcheck
+	}()
 
 	var mem *memory.Store
 	if dir, err := memoryDir(); err == nil {

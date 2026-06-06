@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -8,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 )
 
 var reCodeFence = regexp.MustCompile("```")
@@ -29,6 +31,10 @@ type signalResult struct {
 // rulesDecision returns a routing decision if the rules layer is conclusive,
 // or Decision{} with Conclusive=false if the configured fallback should be consulted.
 func rulesDecision(prompt string, cfg config.Config) Decision {
+	return rulesDecisionCtx(context.Background(), prompt, cfg)
+}
+
+func rulesDecisionCtx(ctx context.Context, prompt string, cfg config.Config) Decision {
 	r := cfg.Rules
 	lower := strings.ToLower(prompt)
 	approxTokens := utf8.RuneCountInString(prompt) / 4
@@ -55,6 +61,9 @@ func rulesDecision(prompt string, cfg config.Config) Decision {
 	// --- Soft signal scoring ---
 
 	result := scoreSignals(prompt, lower, cfg)
+
+	// Record the raw score whenever soft scoring runs (no hard rule fired first).
+	obs.RecordScore(ctx, float64(result.TotalScore))
 
 	var reasons []string
 	for _, s := range result.Signals {

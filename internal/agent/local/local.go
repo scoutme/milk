@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
@@ -23,6 +25,8 @@ import (
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tags"
 )
+
+const inferenceScope = "github.com/scoutme/milk"
 
 const maxToolIterations = 10
 
@@ -558,6 +562,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Skipped when this agent is acting as the escalation target: by definition
 	// it must handle prompts the primary agent already tried.
 	if !a.skipRepeatCheck && isRepeatedPrompt(history, userPrompt) {
+		obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
+			attribute.String("reason", "repeated_prompt"),
+		)
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
@@ -650,21 +657,39 @@ func toolNeedsPermission(name string) bool {
 // persists the answer. denied is returned as a toolResult string when false.
 func (a *Agent) checkPermission(tool, summary string) (allowed bool, denied string) {
 	if a.skipPerms {
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_grants",
+			attribute.String("name", tool),
+			attribute.String("source", "skip_perms"),
+		)
 		return true, ""
 	}
 	if a.permStore != nil && a.permStore.IsAllowed(tool) {
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_grants",
+			attribute.String("name", tool),
+			attribute.String("source", "store"),
+		)
 		return true, ""
 	}
 	if a.permAsk == nil {
 		// Non-interactive mode: deny and surface a clear error.
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_denials",
+			attribute.String("name", tool),
+		)
 		return false, toolResult{Error: "tool " + tool + " requires permission — run interactively or enable skip-permissions"}.String()
 	}
 	if a.permAsk(tool, summary) {
 		if a.permStore != nil {
 			a.permStore.Allow(tool) //nolint:errcheck
 		}
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_grants",
+			attribute.String("name", tool),
+			attribute.String("source", "interactive"),
+		)
 		return true, ""
 	}
+	obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_denials",
+		attribute.String("name", tool),
+	)
 	return false, toolResult{Error: "tool " + tool + " was denied by user"}.String()
 }
 
@@ -737,12 +762,25 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 				a.cachedCwd = ""
 			}
 		}
+		toolStart := time.Now()
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
+		toolElapsed := time.Since(toolStart)
+		agentRole := agentRoleForMetrics(a.escalationName)
+		obs.Inc(ctx, inferenceScope, "milk.tools.calls",
+			attribute.String("name", tc.Function.Name),
+			attribute.String("agent", agentRole),
+		)
+		obs.RecordDuration(ctx, inferenceScope, "milk.tools.latency_ms", toolElapsed,
+			attribute.String("name", tc.Function.Name),
+		)
 		if escalate {
 			var escalateArgs struct {
 				Reason string `json:"reason"`
 			}
 			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
+			obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
+				attribute.String("reason", "explicit_tool_call"),
+			)
 			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
 		}
 		if isMemoryReadTool(tc.Function.Name) {
@@ -845,14 +883,25 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	inferenceStart := time.Now()
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
+		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
+			attribute.String("model", a.model),
+			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("kind", "http"),
+		)
 		return "", "", nil, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(httpResp.Body)
+		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
+			attribute.String("model", a.model),
+			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("kind", "http"),
+		)
 		return "", "", nil, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
@@ -868,6 +917,11 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		return "", "", nil, err
 	}
 	role := agentRoleForMetrics(a.escalationName)
+	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
+		attribute.String("model", a.model),
+		attribute.String("agent", role),
+		attribute.String("provider", "local"),
+	)
 	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
 	if a.onTokens != nil {
 		a.onTokens(a.model, role, promptTokens, completionTokens)
