@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -25,6 +26,8 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
+
+const milkScope = "github.com/scoutme/milk"
 
 var (
 	flagEscalate bool
@@ -107,8 +110,14 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading session: %w", err)
 	}
 
+	sessionStart := time.Now()
 	obsShutdown := initObs(cfg)
-	defer func() { obsShutdown(context.Background()) }() //nolint:errcheck
+	defer func() {
+		obs.SetGauge(context.Background(), milkScope, "milk.session.duration_ms",
+			time.Since(sessionStart).Milliseconds(),
+		)
+		obsShutdown(context.Background()) //nolint:errcheck
+	}()
 
 	memDir, err := memoryDir()
 	if err != nil {
@@ -209,6 +218,11 @@ func run(cmd *cobra.Command, args []string) error {
 
 	target := resolveTarget(decision.Target, localAvail, escalationAvail)
 
+	targetLabel := string(target)
+	sourceLabel := turnSourceLabel(flagEscalate, flagPrimary)
+
+	turnStart := time.Now()
+	var turnErr error
 	switch target {
 	case router.TargetLocal:
 		if mem != nil {
@@ -217,15 +231,31 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		return runLocal(ctx, cfg, sess, localAgent, mem, prompt)
+		turnErr = runLocal(ctx, cfg, sess, localAgent, mem, prompt)
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
-			return runEscalationLocal(ctx, cfg, sess, escalationLocalAgent, mem, prompt)
+			turnErr = runEscalationLocal(ctx, cfg, sess, escalationLocalAgent, mem, prompt)
+		} else {
+			turnErr = runCLIEscalation(ctx, cfg, sess, cliAgent, prompt, cs, mem)
 		}
-		return runCLIEscalation(ctx, cfg, sess, cliAgent, prompt, cs, mem)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+
+	obs.Inc(ctx, milkScope, "milk.turns.total",
+		attribute.String("target", targetLabel),
+		attribute.String("source", sourceLabel),
+	)
+	obs.RecordDuration(ctx, milkScope, "milk.turns.latency_ms", time.Since(turnStart),
+		attribute.String("target", targetLabel),
+	)
+	if turnErr != nil {
+		obs.Inc(ctx, milkScope, "milk.turns.errors",
+			attribute.String("target", targetLabel),
+			attribute.String("kind", "inference"),
+		)
+	}
+	return turnErr
 }
 
 // cliAgentConfig returns the AgentConfig for the claude-cli backend —
@@ -431,9 +461,22 @@ func resolveTarget(target router.Target, localAvail, escalationAvail bool) route
 	return target
 }
 
-// logStateTransition emits a debug log entry for a session state change.
+// turnSourceLabel returns the "source" label for milk.turns.total based on
+// which flag or routing mode triggered the turn.
+func turnSourceLabel(explicitEscalate, explicitPrimary bool) string {
+	if explicitEscalate || explicitPrimary {
+		return "user"
+	}
+	return "auto"
+}
+
+// logStateTransition emits a debug log entry and metric for a session state change.
 func logStateTransition(sess *session.Session, next session.State, trigger string) {
 	obs.Debug("state transition", "from", string(sess.State), "to", string(next), "trigger", trigger)
+	obs.Inc(context.Background(), milkScope, "milk.session.state_transitions",
+		attribute.String("from", string(sess.State)),
+		attribute.String("to", string(next)),
+	)
 }
 
 const cliLabel = "claude:"

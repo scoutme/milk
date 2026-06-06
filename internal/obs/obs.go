@@ -108,6 +108,18 @@ func RecordTokens(ctx context.Context, model, agentRole string, prompt, completi
 	Debug("tokens", "model", model, "agent", agentRole, "prompt", prompt, "completion", completion)
 }
 
+// RecordScore records a single float64 histogram value for milk.router.score.
+// Called once per soft-scoring pass (i.e. when no hard rule fires).
+func RecordScore(ctx context.Context, score float64) {
+	m := Meter(instrumentationScope)
+	h, err := m.Float64Histogram("milk.router.score")
+	if err != nil {
+		slog.Default().Warn("obs: histogram init failed", "instrument", "milk.router.score", "err", err)
+		return
+	}
+	h.Record(ctx, score)
+}
+
 // SetGauge sets an observable gauge via a callback. Registers a new observable
 // gauge each call — intended for low-frequency gauges (e.g. session end).
 func SetGauge(ctx context.Context, meterName, instrument string, value int64, attrs ...attribute.KeyValue) {

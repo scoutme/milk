@@ -69,17 +69,74 @@ All metrics use the `milk.` namespace per OTel semantic conventions.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `milk.turn.duration` | Histogram (ms) | `agent` | End-to-end turn latency |
-| `milk.tool.calls` | Counter | `tool_name`, `agent` | Tool invocations |
-| `milk.tokens.prompt` | Counter | `model`, `agent` | Prompt tokens consumed per turn |
-| `milk.tokens.completion` | Counter | `model`, `agent` | Completion tokens generated per turn |
-| `milk.tokens.total` | Counter | `model`, `agent` | Total tokens (prompt + completion) per turn |
+**Turn lifecycle**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.turns.total` | Counter | `target=local\|escalation`, `source=user\|auto_sticky\|auto` | Completed turns |
+| `milk.turns.latency_ms` | Histogram | `target=` | End-to-end turn latency |
+| `milk.turns.errors` | Counter | `target=`, `kind=inference` | Turn-level errors |
+| `milk.session.duration_ms` | Gauge | — | Total session wall-clock time (recorded at shutdown) |
+| `milk.session.state_transitions` | Counter | `from=`, `to=` | Session state machine transitions |
+
+**Router**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.router.decisions` | Counter | `target=local\|escalation`, `rule=explicit\|state\|hard_threshold\|soft_score\|classifier\|default` | Routing decisions |
+| `milk.router.classify_latency_ms` | Histogram | `model=` | LLM classifier call latency (only when classifier runs) |
+| `milk.router.score` | Histogram | — | Raw soft-signal score (only when no hard rule fires) |
+| `milk.router.escalation_signals` | Counter | `reason=repeated_prompt\|explicit_tool_call` | Self-escalation from the local tool loop |
+
+**Inference**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.inference.latency_ms` | Histogram | `model=`, `agent=primary\|escalation\|router`, `provider=local\|bedrock` | Time from HTTP request to stream complete |
+| `milk.inference.errors` | Counter | `model=`, `agent=`, `kind=http` | Inference-level errors |
+
+**Tools (local agent)**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.tools.calls` | Counter | `name=`, `agent=primary\|escalation` | Tool invocations |
+| `milk.tools.latency_ms` | Histogram | `name=` | Tool execution latency |
+| `milk.tools.permission_grants` | Counter | `name=`, `source=store\|interactive\|skip_perms` | Approved permission requests |
+| `milk.tools.permission_denials` | Counter | `name=` | Denied permission requests |
+
+**Claude CLI agent**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.claude.turns` | Counter | `mode=first\|resume` | Claude subprocess invocations |
+| `milk.claude.latency_ms` | Histogram | `mode=` | Subprocess wall-clock time |
+| `milk.claude.tool_uses` | Counter | `name=` | Tool calls inside Claude (from `OnToolUse` callback) |
+| `milk.claude.permission_denials` | Counter | — | Permission denials from `ParseResult.PermissionDenials` |
+| `milk.claude.errors` | Counter | `kind=subprocess\|is_error` | Claude subprocess errors |
+
+**Tokens**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `milk.tokens.prompt` | Counter | `model`, `agent` | Prompt tokens consumed |
+| `milk.tokens.completion` | Counter | `model`, `agent` | Completion tokens generated |
+| `milk.tokens.total` | Counter | `model`, `agent` | Total tokens (prompt + completion) |
+
+**Memory**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
 | `milk.memory.percepts_recorded` | Counter | `producer`, `scope` (`session`/`global`) | Percepts written |
 | `milk.memory.percepts_recalled` | Counter | — | `get_memory` invocations |
 | `milk.memory.consolidation.decayed` | Counter | — | Percepts that lost weight |
 | `milk.memory.consolidation.pruned` | Counter | — | Percepts removed (W≤0) |
 | `milk.memory.consolidation.promoted` | Counter | — | Percepts promoted to global |
 | `milk.memory.global_size` | Gauge | — | Percept count in global store after consolidation |
+
+**Self-observability**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
 | `milk.otel.logs_bytes` | Gauge | — | Current size of logs.jsonl |
 | `milk.otel.traces_bytes` | Gauge | — | Current size of traces.jsonl |
 | `milk.otel.metrics_bytes` | Gauge | — | Current size of metrics.jsonl |
@@ -217,12 +274,17 @@ Two OTel tools are exposed to the local agent via `obs.ToolSchemas()`:
 - `get_metrics` + `search_signals` agent tools
 - Size warning on session start; `max_mb` hard cap enforcement
 
-### Phase O2 — Turn and agent coverage
+### Phase O2 — Turn and agent coverage ✓ complete
 
-- Instrument router: `route_decision` log + `milk.route` span
-- Instrument `agent/local`: turn spans, tool call child spans, metrics
-- Instrument `agent/claude`: turn spans, permission event logs
-- Session lifecycle logs
+- `milk.turns.total{target,source}`, `milk.turns.latency_ms{target}`, `milk.turns.errors{target,kind}` — wired in both single-prompt (`main.go`) and REPL (`repl.go`) dispatch paths
+- `milk.session.duration_ms` gauge at shutdown (both paths)
+- `milk.session.state_transitions{from,to}` counter in `logStateTransition`
+- `milk.router.decisions{target,rule}`, `milk.router.classify_latency_ms{model}`, `milk.router.score` — wired in `router.go` / `rules.go`
+- `milk.router.escalation_signals{reason}` — wired at both self-escalation sites in `local.go`
+- `milk.inference.latency_ms{model,agent,provider}`, `milk.inference.errors{model,agent,kind}` — wired in `streamCompletion` (OpenAI path) and `bedrockStreamCompletion` (Bedrock path)
+- `milk.tools.calls{name,agent}`, `milk.tools.latency_ms{name}` — wired in `executeToolCalls`
+- `milk.tools.permission_grants{name,source}`, `milk.tools.permission_denials{name}` — wired in `checkPermission`
+- `milk.claude.turns{mode}`, `milk.claude.latency_ms{mode}`, `milk.claude.tool_uses{name}`, `milk.claude.permission_denials`, `milk.claude.errors{kind}` — wired in `claude.go` `run()`
 
 ---
 

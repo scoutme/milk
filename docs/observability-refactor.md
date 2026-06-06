@@ -186,9 +186,10 @@ All existing metrics (`milk.tokens.*`, `milk.memory.*`) are unchanged.
 
 ---
 
-## Validation checklist (before implementing)
+## Validation checklist
 
-- [ ] Run a session with `/otel` and confirm only `milk.memory.*` and `milk.tokens.*` appear in metrics output
-- [ ] Confirm `milk.turns.total` and `milk.inference.latency_ms` are absent
-- [ ] Confirm router decisions only appear in the debug log, not in metrics
-- [ ] Confirm tool call counts are not queryable via `search_signals type=metrics`
+- [x] Run a session with `/otel` and confirm only `milk.memory.*` and `milk.tokens.*` appear in metrics output (pre-implementation baseline confirmed)
+- [x] Confirm `milk.turns.total` and `milk.inference.latency_ms` are absent (confirmed absent pre-implementation)
+- [x] Confirm router decisions only appear in the debug log, not in metrics (confirmed absent pre-implementation)
+- [x] Confirm tool call counts are not queryable via `search_signals type=metrics` (confirmed absent pre-implementation)
+- [x] All 20 new signals implemented and build+tests pass

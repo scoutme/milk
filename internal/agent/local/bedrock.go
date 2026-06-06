@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/obs"
 )
@@ -248,14 +251,25 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	inferenceStart := time.Now()
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
+		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
+			attribute.String("model", a.model),
+			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("kind", "http"),
+		)
 		return "", "", nil, fmt.Errorf("bedrock unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(httpResp.Body)
+		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
+			attribute.String("model", a.model),
+			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("kind", "http"),
+		)
 		return "", "", nil, fmt.Errorf("bedrock error %d: %s", httpResp.StatusCode, b)
 	}
 
@@ -326,6 +340,13 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			}
 		}
 	}
+
+	role := agentRoleForMetrics(a.escalationName)
+	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
+		attribute.String("model", a.model),
+		attribute.String("agent", role),
+		attribute.String("provider", "bedrock"),
+	)
 
 	// Collect tool calls ordered by content block index.
 	type indexedTC struct {

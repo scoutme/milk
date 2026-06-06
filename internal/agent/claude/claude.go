@@ -8,11 +8,15 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/obs"
 )
+
+const claudeScope = "github.com/scoutme/milk"
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
@@ -262,7 +266,50 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 	}
 	args = append(prefix, args...)
 	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"}, args...)
-	return a.runPipe(ctx, pipeArgs, out)
+
+	// Detect resume vs first turn from the args to set the mode label.
+	mode := "first"
+	for _, a := range pipeArgs {
+		if a == "--resume" {
+			mode = "resume"
+			break
+		}
+	}
+
+	// Wrap onToolUse to also emit the metric counter — avoids modifying all call sites.
+	origOnToolUse := a.onToolUse
+	a.onToolUse = func(name string) {
+		obs.Inc(ctx, claudeScope, "milk.claude.tool_uses",
+			attribute.String("name", name),
+		)
+		if origOnToolUse != nil {
+			origOnToolUse(name)
+		}
+	}
+
+	start := time.Now()
+	res, err := a.runPipe(ctx, pipeArgs, out)
+	elapsed := time.Since(start)
+
+	obs.Inc(ctx, claudeScope, "milk.claude.turns",
+		attribute.String("mode", mode),
+	)
+	obs.RecordDuration(ctx, claudeScope, "milk.claude.latency_ms", elapsed,
+		attribute.String("mode", mode),
+	)
+	if err != nil {
+		obs.Inc(ctx, claudeScope, "milk.claude.errors",
+			attribute.String("kind", "subprocess"),
+		)
+	} else if res.IsError {
+		obs.Inc(ctx, claudeScope, "milk.claude.errors",
+			attribute.String("kind", "is_error"),
+		)
+	}
+	if n := int64(len(res.PermissionDenials)); n > 0 {
+		obs.Add(ctx, claudeScope, "milk.claude.permission_denials", n)
+	}
+	return res, err
 }
 
 // runPipe runs the claude CLI and streams structured JSON output.
