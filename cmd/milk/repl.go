@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -291,6 +293,7 @@ type model struct {
 	tabBeforeCursor string   // beforeCursor snapshot at session start; used for clean cycling
 	tabAfterCursor  string   // afterCursor snapshot at session start
 	tabHints        []string // hint lines shown below viewport while completing a slash command
+	hintIdx         int      // selected inline hint (-1 = none)
 
 	// pending permission request (non-nil while waiting for user y/n) and queue
 	// for tool-use permission prompts that arrive while a prior one is active.
@@ -1779,8 +1782,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	case "enter":
+		if m.hintIdx >= 0 && len(m.tabMatches) == 0 {
+			m.commitHintSelection()
+			m.syncLayout()
+			return m, nil
+		}
 		return m.handleEnter()
 	case "up":
+		if len(m.tabHints) > 0 && len(m.tabMatches) == 0 {
+			m.hintIdx--
+			if m.hintIdx < 0 {
+				m.hintIdx = len(m.tabHints) - 1
+			}
+			m.highlightHint()
+			m.syncLayout()
+			return m, nil
+		}
 		li := m.ta.LineInfo()
 		if m.ta.Line() == 0 && li.RowOffset == 0 {
 			m = m.historyBack()
@@ -1788,6 +1805,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "down":
+		if len(m.tabHints) > 0 && len(m.tabMatches) == 0 {
+			m.hintIdx++
+			if m.hintIdx >= len(m.tabHints) {
+				m.hintIdx = 0
+			}
+			m.highlightHint()
+			m.syncLayout()
+			return m, nil
+		}
 		li := m.ta.LineInfo()
 		if m.ta.Line() == m.ta.LineCount()-1 && li.RowOffset == li.Height-1 {
 			m = m.historyForward()
@@ -1807,6 +1833,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		"ctrl+shift+left", "ctrl+shift+right":
 		return m.handleShiftArrow(msg)
 	case "tab":
+		if m.hintIdx >= 0 && len(m.tabMatches) == 0 {
+			m.commitHintSelection()
+			m.syncLayout()
+			return m, nil
+		}
 		m = m.handleTab(1)
 		return m, nil
 	case "shift+tab":
@@ -1864,6 +1895,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.undoPush(true)
 	cmd = m.updateTA(msg)
+	m.rebuildInlineHints()
 	m.syncLayout()
 	return m, cmd
 }
@@ -3608,6 +3640,250 @@ func replaceLastToken(input string, pred func(string) bool, replacement string) 
 	return input[:lastStart] + replacement + input[lastEnd:], true
 }
 
+// rebuildInlineHints populates tabHints passively while the user types an @-path
+// or a /slash command, without advancing tab-cycling state.
+// Cleared when the token no longer matches either prefix.
+func (m *model) rebuildInlineHints() {
+	if len(m.tabMatches) > 0 {
+		// Tab cycling is active — don't overwrite its hints.
+		return
+	}
+	fullInput := m.ta.Value()
+	lines := strings.Split(fullInput, "\n")
+	curLine := m.ta.Line()
+	if curLine >= len(lines) {
+		curLine = len(lines) - 1
+	}
+	col := m.ta.LineInfo().CharOffset
+	runes := []rune(lines[curLine])
+	if col > len(runes) {
+		col = len(runes)
+	}
+	beforeCursor := string(runes[:col])
+	words := strings.Fields(beforeCursor)
+	if len(words) == 0 {
+		m.tabHints = nil
+		return
+	}
+	last := words[len(words)-1]
+
+	if strings.HasPrefix(last, "@") {
+		pathToken := last[1:]
+		// Determine the root to walk and the fragment to match against.
+		root := m.st.cwd
+		fragment := pathToken
+		absolute := filepath.IsAbs(pathToken)
+		if strings.ContainsRune(pathToken, '/') {
+			// User typed a partial path — walk the deepest complete directory.
+			parent := filepath.Dir(pathToken)
+			if absolute {
+				root = parent
+			} else {
+				root = filepath.Join(m.st.cwd, parent)
+			}
+			fragment = filepath.Base(pathToken)
+			if strings.HasSuffix(pathToken, "/") {
+				// Cursor is at a directory boundary — walk it, no fragment filter.
+				if absolute {
+					root = pathToken
+				} else {
+					root = filepath.Join(m.st.cwd, pathToken)
+				}
+				fragment = ""
+			}
+		}
+		limit := m.viewportHeight() / 2
+		if limit < 1 {
+			limit = 1
+		}
+		// Direct children first, then deeper results up to limit.
+		// When there is no fragment at all (bare "@" or "@ dir/") skip the
+		// recursive walk — there is nothing to filter on and it would fill
+		// the hint list with deep paths before any useful entry appears.
+		direct := expandPath(pathToken, m.st.cwd)
+		var matches []string
+		if fragment == "" {
+			matches = direct
+		} else {
+			seen := make(map[string]bool, len(direct))
+			for _, p := range direct {
+				seen[p] = true
+			}
+			deeper := walkMatches(root, fragment, m.st.cwd, absolute, limit)
+			var extra []string
+			for _, p := range deeper {
+				if !seen[p] {
+					extra = append(extra, p)
+				}
+			}
+			matches = append(direct, extra...)
+		}
+		matches = filterGitIgnored(matches, m.st.cwd)
+		if len(matches) > limit {
+			matches = matches[:limit]
+		}
+		if len(matches) == 0 {
+			m.tabHints = nil
+			m.hintIdx = -1
+			return
+		}
+		raw := make([]string, len(matches))
+		for i, p := range matches {
+			raw[i] = " " + dim("@"+p)
+		}
+		if !stringSlicesEqual(m.tabHints, raw) {
+			m.hintIdx = -1
+		}
+		m.tabHints = raw
+		return
+	}
+
+	if last == "/" || isSlashCmdToken(last) {
+		var hints []string
+		for _, cmd := range slashCommands {
+			if last != "/" && !strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(last)) {
+				continue
+			}
+			vs := cmdVariants[cmd]
+			if len(vs) == 0 {
+				hints = append(hints, " "+dim(cmd))
+				continue
+			}
+			for _, v := range vs {
+				hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+			}
+		}
+		capped := m.capHints(hints)
+		if !stringSlicesEqual(m.tabHints, capped) {
+			m.hintIdx = -1
+		}
+		m.tabHints = capped
+		return
+	}
+
+	m.tabHints = nil
+	m.hintIdx = -1
+}
+
+// highlightHint updates tabHints to visually highlight the entry at hintIdx
+// without touching the textarea.
+func (m *model) highlightHint() {
+	for i, h := range m.tabHints {
+		plain := ansi.Strip(h)
+		if i == m.hintIdx {
+			m.tabHints[i] = "\033[48;5;238m" + plain + "\033[49m"
+		} else {
+			m.tabHints[i] = " " + dim(strings.TrimSpace(plain))
+		}
+	}
+}
+
+// commitHintSelection writes the currently highlighted inline hint into the
+// textarea, replacing the @-path or /command token the user is typing.
+// Returns true when a hint was committed so the caller can skip normal Tab/Enter
+// handling.
+func (m *model) commitHintSelection() bool {
+	if m.hintIdx < 0 || m.hintIdx >= len(m.tabHints) {
+		return false
+	}
+	full := strings.TrimSpace(ansi.Strip(m.tabHints[m.hintIdx]))
+	// Slash-command hints are "sig  desc" — keep only the sig part.
+	raw, _, _ := strings.Cut(full, "  ")
+	raw = strings.TrimSpace(raw)
+
+	fullInput := m.ta.Value()
+	lines := strings.Split(fullInput, "\n")
+	curLine := m.ta.Line()
+	if curLine >= len(lines) {
+		curLine = len(lines) - 1
+	}
+	col := m.ta.LineInfo().CharOffset
+	runes := []rune(lines[curLine])
+	if col > len(runes) {
+		col = len(runes)
+	}
+	beforeCursor := string(runes[:col])
+	afterCursor := string(runes[col:])
+
+	completed := applyTabCompletion(beforeCursor, raw)
+	lines[curLine] = completed + afterCursor
+	m.ta.SetValue(strings.Join(lines, "\n"))
+	precedingLen := 0
+	if curLine > 0 {
+		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
+	}
+	m.ta.SetCursor(precedingLen + len([]rune(completed)))
+
+	m.tabHints = nil
+	m.hintIdx = -1
+	return true
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// capHints trims hints to at most half the current viewport height.
+func (m *model) capHints(hints []string) []string {
+	max := m.viewportHeight() / 2
+	if max < 1 {
+		max = 1
+	}
+	if len(hints) > max {
+		return hints[:max]
+	}
+	return hints
+}
+
+// filterGitIgnored removes paths that git considers ignored.
+// Paths must be relative to cwd. Returns the input slice unchanged on any error.
+func filterGitIgnored(paths []string, cwd string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	// Strip trailing "/" before feeding to git; add it back afterwards.
+	stripped := make([]string, len(paths))
+	for i, p := range paths {
+		stripped[i] = strings.TrimSuffix(p, "/")
+	}
+	cmd := exec.Command("git", append([]string{"check-ignore", "--stdin"}, []string{}...)...)
+	cmd.Dir = cwd
+	cmd.Stdin = bytes.NewBufferString(strings.Join(stripped, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		// exit 1 means "none ignored" — not a real error
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() > 1 {
+			return paths
+		}
+	}
+	ignored := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line != "" {
+			ignored[line] = true
+		}
+	}
+	var kept []string
+	for _, p := range paths {
+		// Exclude .git and anything nested inside it.
+		first := strings.SplitN(filepath.ToSlash(p), "/", 2)[0]
+		if first == ".git" {
+			continue
+		}
+		if !ignored[strings.TrimSuffix(p, "/")] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
 func buildTabMatches(input, cwd string) ([]string, int) {
 	// Never complete when the cursor is between words (trailing whitespace).
 	if input == "" || input[len(input)-1] == ' ' || input[len(input)-1] == '\t' {
@@ -3633,7 +3909,7 @@ func buildTabMatches(input, cwd string) ([]string, int) {
 	}
 	var matches []string
 	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd, last) {
+		if strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(last)) {
 			matches = append(matches, cmd)
 		}
 	}
@@ -3641,6 +3917,22 @@ func buildTabMatches(input, cwd string) ([]string, int) {
 }
 
 func expandPath(prefix, cwd string) []string {
+	// Empty prefix: list cwd contents directly with no name filter.
+	if prefix == "" {
+		entries, err := os.ReadDir(cwd)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range entries {
+			rel := e.Name()
+			if e.IsDir() {
+				rel += "/"
+			}
+			out = append(out, rel)
+		}
+		return out
+	}
 	base := prefix
 	if !filepath.IsAbs(base) {
 		base = filepath.Join(cwd, base)
@@ -3657,7 +3949,7 @@ func expandPath(prefix, cwd string) []string {
 	}
 	var matches []string
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), namePrefix) {
+		if namePrefix == "" || strings.Contains(strings.ToLower(e.Name()), strings.ToLower(namePrefix)) {
 			rel := filepath.Join(dir, e.Name())
 			if !strings.HasPrefix(prefix, "/") {
 				rel, _ = filepath.Rel(cwd, rel)
@@ -3669,6 +3961,41 @@ func expandPath(prefix, cwd string) []string {
 		}
 	}
 	return matches
+}
+
+// walkMatches recursively walks root, collecting paths (relative to cwd when
+// prefix is not absolute) whose base name contains fragment.
+// Stops early once limit entries are collected.
+func walkMatches(root, fragment, cwd string, absolute bool, limit int) []string {
+	var results []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if len(results) >= limit {
+			return filepath.SkipAll
+		}
+		rel := path
+		if !absolute {
+			if r, e := filepath.Rel(cwd, path); e == nil {
+				rel = r
+			}
+		}
+		if d.IsDir() {
+			rel += "/"
+		}
+		if fragment == "" || strings.Contains(strings.ToLower(d.Name()), strings.ToLower(fragment)) {
+			results = append(results, rel)
+		}
+		return nil
+	})
+	return results
 }
 
 // --- Undo/redo ---
