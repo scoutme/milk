@@ -74,8 +74,11 @@ If either condition holds, `runCLIEscalationAgent` downgrades `ContextModeReturn
 ### Local-provider path
 
 `runEscalationLocal` gains mode-awareness (first vs returning, detected from history via
-`EscalationEverActive`) and applies the same staleness check. On every turn, regardless of
-staleness:
+`EscalationEverActive`) and applies the same staleness check. On the first escalation turn,
+`sess.EscalationBrief` is set to the prompt text as a fallback brief when no explicit reason was
+provided to the escalation agent.
+
+On every turn, regardless of staleness:
 
 - **Orientation message:** `BuildDynamicContext` is called with the appropriate mode (first or
   returning) and prepended to the history array as a `role: system` message. This gives the agent
@@ -94,6 +97,11 @@ high-level context.
 
 `EscalationEverActive` and `LastEscalationBoundary` are added to `session.Session` as exported
 helpers for use by the non-CLI path (which does not persist `EscalationSessionID`).
+
+`Session.NeedChangedSinceLastEscalation` guards on `EscalationEverActive` (presence of escalation
+turns in history) rather than `EscalationSessionID != ""`. Local providers never set
+`EscalationSessionID`, so the original guard would have silently disabled the need-staleness
+condition on every local-provider returning turn.
 
 `escalation.FormatPercepts` is exported from the escalation package (previously unexported) to
 allow direct percept injection without routing through `BuildStaticContext`.

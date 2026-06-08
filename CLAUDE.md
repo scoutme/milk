@@ -34,7 +34,7 @@ internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
 - **Escalation agent**: any `agents` entry can be the escalation target — set `escalation_agent` to its name. Defaults to the built-in `claude-cli` entry. Use `/agent switch <name> as escalation` to change it at runtime.
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API. Configured as `provider: "claude-cli"` in `agents`.
-- **Context handoff**: local transcript passed via two `--append-system-prompt-file` flags (static instructions + dynamic summary); escalation agent orients itself
+- **Context handoff**: local transcript passed via two `--append-system-prompt-file` flags (static instructions + dynamic summary) for the CLI path; local providers receive a `BuildDynamicContext` orientation block as a prepended system message. Both paths inject percepts. On stale returning escalations (topic switched or ≥`returning_fresh_start_local_turns` local turns since last escalation, default 8), CLI drops `--resume` and local providers scope history to post-escalation turns only.
 - **ESCALATION_WAITING state**: once the escalation agent asks a follow-up, next turn bypasses router → `--resume`
 - **Self-escalation**: local model can call `escalate(reason)` as a function call
 - **Role-aware system prompt**: primary agent and escalation agent receive different system prompts — the escalation agent knows it is the escalation target and should not escalate further

@@ -172,8 +172,8 @@ func scenariosForEval() (map[string]*session.Session, string) {
 
 	// ── returning-stale-need: topic switched after escalation ──────────
 	staleNeed := &session.Session{
-		State:               session.StateRouting,
-		EscalationSessionID: "esc-session-1",
+		State: session.StateRouting,
+		// No EscalationSessionID: local providers do not persist session IDs.
 		History: []session.Turn{
 			evalTurn(session.RoleUser, session.AgentEscalation, "help me refactor the auth module"),
 			evalTurn(session.RoleAssistant, session.AgentEscalation, escalationReply),
@@ -190,8 +190,8 @@ func scenariosForEval() (map[string]*session.Session, string) {
 
 	// ── returning-stale-gap: 9 local turns since escalation (≥ 8) ─────
 	staleGap := &session.Session{
-		State:               session.StateRouting,
-		EscalationSessionID: "esc-session-2",
+		State: session.StateRouting,
+		// No EscalationSessionID: local providers do not persist session IDs.
 		History: []session.Turn{
 			evalTurn(session.RoleUser, session.AgentEscalation, "help me refactor the auth module"),
 			evalTurn(session.RoleAssistant, session.AgentEscalation, escalationReply),
@@ -214,8 +214,8 @@ func scenariosForEval() (map[string]*session.Session, string) {
 			evalTurn(session.RoleUser, session.AgentLocal, "run benchmarks"),
 			evalTurn(session.RoleAssistant, session.AgentLocal, lw9),
 		},
-		// need is within the local-only block; NeedChangedSinceLastEscalation=false
-		// but turn gap (9 local turns) triggers fresh-start
+		// need set at position 19, last escalation at index 1 → NeedChangedSinceLastEscalation=true
+		// AND turn gap (9 local turns) → both conditions fire
 		CurrentNeed:      "benchmark the session store",
 		CurrentNeedSetAt: 19,
 		EscalationBrief:  "refactor auth module",
@@ -224,8 +224,8 @@ func scenariosForEval() (map[string]*session.Session, string) {
 
 	// ── returning-fresh: 2 local turns, same topic, no stale condition ─
 	fresh := &session.Session{
-		State:               session.StateRouting,
-		EscalationSessionID: "esc-session-3",
+		State: session.StateRouting,
+		// No EscalationSessionID: local providers do not persist session IDs.
 		History: []session.Turn{
 			evalTurn(session.RoleUser, session.AgentEscalation, "help me refactor the auth module"),
 			evalTurn(session.RoleAssistant, session.AgentEscalation, escalationReply),

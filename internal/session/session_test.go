@@ -351,23 +351,25 @@ func TestNeedChangedSinceLastEscalation(t *testing.T) {
 	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
 
 	t.Run("no need set returns false", func(t *testing.T) {
-		s := &Session{EscalationSessionID: "x"}
+		s := &Session{History: []Turn{mkTurn(RoleAssistant, AgentEscalation)}}
 		if s.NeedChangedSinceLastEscalation() {
 			t.Error("want false when no need set")
 		}
 	})
 
-	t.Run("no prior escalation session returns false", func(t *testing.T) {
-		s := &Session{CurrentNeed: "something", CurrentNeedSetAt: 1}
+	t.Run("no prior escalation turns returns false", func(t *testing.T) {
+		// No escalation turns in history — EscalationEverActive=false → false
+		s := &Session{CurrentNeed: "something", CurrentNeedSetAt: 1,
+			History: []Turn{mkTurn(RoleUser, AgentLocal), mkTurn(RoleAssistant, AgentLocal)}}
 		if s.NeedChangedSinceLastEscalation() {
-			t.Error("want false when no escalation session")
+			t.Error("want false when no escalation turns in history")
 		}
 	})
 
-	t.Run("need set after last escalation turn returns true", func(t *testing.T) {
+	t.Run("need set after last escalation turn returns true (no session ID)", func(t *testing.T) {
+		// Local provider: no EscalationSessionID, but escalation turns exist in history.
 		// History: esc turn at index 1; need set at history pos 3 (CurrentNeedSetAt=4)
 		s := &Session{
-			EscalationSessionID: "x",
 			History: []Turn{
 				mkTurn(RoleUser, AgentEscalation),
 				mkTurn(RoleAssistant, AgentEscalation),
@@ -385,7 +387,6 @@ func TestNeedChangedSinceLastEscalation(t *testing.T) {
 	t.Run("need set before last escalation turn returns false", func(t *testing.T) {
 		// History: need set before esc turn; esc turn follows
 		s := &Session{
-			EscalationSessionID: "x",
 			History: []Turn{
 				mkTurn(RoleUser, AgentLocal),
 				mkTurn(RoleAssistant, AgentLocal), // need set here: CurrentNeedSetAt=2

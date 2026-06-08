@@ -385,7 +385,7 @@ func (s *Session) LocalTurnsSinceLastEscalation() int {
 // the most recent escalation assistant turn. Returns false when no need has been
 // set or there is no prior escalation history.
 func (s *Session) NeedChangedSinceLastEscalation() bool {
-	if s.CurrentNeedSetAt == 0 || s.EscalationSessionID == "" {
+	if s.CurrentNeedSetAt == 0 || !EscalationEverActive(s) {
 		return false
 	}
 	// CurrentNeedSetAt is 1-based (len(History)+1 at write time).
