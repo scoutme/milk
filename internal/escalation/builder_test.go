@@ -323,3 +323,22 @@ func TestNeedInstruction_NonceInTag(t *testing.T) {
 		t.Errorf("expected need close tag, got %q", got)
 	}
 }
+
+func TestFormatPercepts_NonEmpty(t *testing.T) {
+	got := FormatPercepts([]string{"user prefers Go", "flat files only"})
+	if !strings.Contains(got, "[Remembered facts]") {
+		t.Error("expected [Remembered facts] header")
+	}
+	if !strings.Contains(got, "user prefers Go") || !strings.Contains(got, "flat files only") {
+		t.Error("expected percept content")
+	}
+}
+
+func TestFormatPercepts_Empty(t *testing.T) {
+	if got := FormatPercepts(nil); got != "" {
+		t.Errorf("expected empty string for nil percepts, got %q", got)
+	}
+	if got := FormatPercepts([]string{}); got != "" {
+		t.Errorf("expected empty string for empty percepts, got %q", got)
+	}
+}

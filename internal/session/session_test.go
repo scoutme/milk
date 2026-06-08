@@ -262,6 +262,53 @@ func TestAddTokens_DoesNotWriteCacheFields(t *testing.T) {
 	}
 }
 
+func TestEscalationEverActive(t *testing.T) {
+	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
+
+	t.Run("no history returns false", func(t *testing.T) {
+		if EscalationEverActive(&Session{}) {
+			t.Error("want false for empty history")
+		}
+	})
+	t.Run("only local turns returns false", func(t *testing.T) {
+		s := &Session{History: []Turn{mkTurn(RoleUser, AgentLocal), mkTurn(RoleAssistant, AgentLocal)}}
+		if EscalationEverActive(s) {
+			t.Error("want false when no escalation turns")
+		}
+	})
+	t.Run("escalation turn present returns true", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			mkTurn(RoleUser, AgentLocal),
+			mkTurn(RoleAssistant, AgentEscalation),
+		}}
+		if !EscalationEverActive(s) {
+			t.Error("want true when escalation turn present")
+		}
+	})
+}
+
+func TestLastEscalationBoundary(t *testing.T) {
+	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
+
+	t.Run("no escalation returns 0", func(t *testing.T) {
+		s := &Session{History: []Turn{mkTurn(RoleAssistant, AgentLocal)}}
+		if got := LastEscalationBoundary(s); got != 0 {
+			t.Errorf("want 0, got %d", got)
+		}
+	})
+	t.Run("returns index after last escalation turn", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			mkTurn(RoleUser, AgentEscalation),        // 0
+			mkTurn(RoleAssistant, AgentEscalation),   // 1 ← last escalation
+			mkTurn(RoleUser, AgentLocal),             // 2
+			mkTurn(RoleAssistant, AgentLocal),        // 3
+		}}
+		if got := LastEscalationBoundary(s); got != 2 {
+			t.Errorf("want 2, got %d", got)
+		}
+	})
+}
+
 func TestLocalTurnsSinceLastEscalation(t *testing.T) {
 	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
 
