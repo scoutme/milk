@@ -262,6 +262,98 @@ func TestAddTokens_DoesNotWriteCacheFields(t *testing.T) {
 	}
 }
 
+func TestLocalTurnsSinceLastEscalation(t *testing.T) {
+	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
+
+	t.Run("no escalation history returns 0", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			mkTurn(RoleUser, AgentLocal),
+			mkTurn(RoleAssistant, AgentLocal),
+		}}
+		if got := s.LocalTurnsSinceLastEscalation(); got != 0 {
+			t.Errorf("want 0, got %d", got)
+		}
+	})
+
+	t.Run("counts local turns after last escalation turn", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			mkTurn(RoleUser, AgentEscalation),
+			mkTurn(RoleAssistant, AgentEscalation), // boundary here
+			mkTurn(RoleUser, AgentLocal),
+			mkTurn(RoleAssistant, AgentLocal),
+			mkTurn(RoleUser, AgentLocal),
+			mkTurn(RoleAssistant, AgentLocal),
+		}}
+		if got := s.LocalTurnsSinceLastEscalation(); got != 2 {
+			t.Errorf("want 2, got %d", got)
+		}
+	})
+
+	t.Run("zero local turns after escalation", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			mkTurn(RoleUser, AgentEscalation),
+			mkTurn(RoleAssistant, AgentEscalation),
+		}}
+		if got := s.LocalTurnsSinceLastEscalation(); got != 0 {
+			t.Errorf("want 0, got %d", got)
+		}
+	})
+}
+
+func TestNeedChangedSinceLastEscalation(t *testing.T) {
+	mkTurn := func(role Role, agent Agent) Turn { return Turn{Role: role, Agent: agent} }
+
+	t.Run("no need set returns false", func(t *testing.T) {
+		s := &Session{EscalationSessionID: "x"}
+		if s.NeedChangedSinceLastEscalation() {
+			t.Error("want false when no need set")
+		}
+	})
+
+	t.Run("no prior escalation session returns false", func(t *testing.T) {
+		s := &Session{CurrentNeed: "something", CurrentNeedSetAt: 1}
+		if s.NeedChangedSinceLastEscalation() {
+			t.Error("want false when no escalation session")
+		}
+	})
+
+	t.Run("need set after last escalation turn returns true", func(t *testing.T) {
+		// History: esc turn at index 1; need set at history pos 3 (CurrentNeedSetAt=4)
+		s := &Session{
+			EscalationSessionID: "x",
+			History: []Turn{
+				mkTurn(RoleUser, AgentEscalation),
+				mkTurn(RoleAssistant, AgentEscalation),
+				mkTurn(RoleUser, AgentLocal),
+				mkTurn(RoleAssistant, AgentLocal),
+			},
+			CurrentNeed:      "new goal",
+			CurrentNeedSetAt: 4, // set at position 3 (0-based), i.e. after esc turn at index 1
+		}
+		if !s.NeedChangedSinceLastEscalation() {
+			t.Error("want true when need set after last escalation turn")
+		}
+	})
+
+	t.Run("need set before last escalation turn returns false", func(t *testing.T) {
+		// History: need set before esc turn; esc turn follows
+		s := &Session{
+			EscalationSessionID: "x",
+			History: []Turn{
+				mkTurn(RoleUser, AgentLocal),
+				mkTurn(RoleAssistant, AgentLocal), // need set here: CurrentNeedSetAt=2
+				mkTurn(RoleUser, AgentEscalation),
+				mkTurn(RoleAssistant, AgentEscalation),
+			},
+			CurrentNeed:      "old goal",
+			CurrentNeedSetAt: 2,
+		}
+		if s.NeedChangedSinceLastEscalation() {
+			t.Error("want false when need set before last escalation turn")
+		}
+	})
+}
+
 func TestAddTurn_SetsTimestampAndUpdatesLastUsed(t *testing.T) {
 	s := &Session{}
 	s.AddTurn(Turn{Role: RoleUser, Content: "hello"})

@@ -788,6 +788,21 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	default:
 		ctxMode = escalation.ContextModeFirst
 	}
+	// Downgrade RETURNING to FIRST when the prior escalation context is stale:
+	// either the user's goal changed since the last escalation turn, or enough
+	// local turns have elapsed that the stored escalation history is no longer
+	// relevant. The re-orientation context files already carry equivalent
+	// guidance, so nothing is lost by dropping --resume in these cases.
+	if ctxMode == escalation.ContextModeReturning {
+		escCfgForFresh := cfg.EscalationAgentConfig()
+		freshThreshold := cfg.AgentReturningFreshStartLocalTurns(escCfgForFresh)
+		needStale := sess.NeedChangedSinceLastEscalation()
+		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
+		if needStale || turnGap {
+			ctxMode = escalation.ContextModeFirst
+			obs.Debug("returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+		}
+	}
 	resuming := ctxMode == escalation.ContextModeResume
 	if ctxMode == escalation.ContextModeFirst {
 		sess.EscalationBrief = brief

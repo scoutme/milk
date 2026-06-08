@@ -428,3 +428,35 @@ func TestAgentMaxToolIterations_PerAgentUnlimited(t *testing.T) {
 		t.Errorf("expected 0 (unlimited) for per-agent -1, got %d", got)
 	}
 }
+
+func TestAgentReturningFreshStartLocalTurns_Default(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{}
+	if got := cfg.AgentReturningFreshStartLocalTurns(ac); got != 8 {
+		t.Errorf("expected default 8, got %d", got)
+	}
+}
+
+func TestAgentReturningFreshStartLocalTurns_GlobalOverride(t *testing.T) {
+	cfg := Config{ReturningFreshStartLocalTurns: 5}
+	ac := AgentConfig{}
+	if got := cfg.AgentReturningFreshStartLocalTurns(ac); got != 5 {
+		t.Errorf("expected global 5, got %d", got)
+	}
+}
+
+func TestAgentReturningFreshStartLocalTurns_PerAgent(t *testing.T) {
+	cfg := Config{ReturningFreshStartLocalTurns: 5}
+	ac := AgentConfig{Limits: &AgentLimits{ReturningFreshStartLocalTurns: intPtr(3)}}
+	if got := cfg.AgentReturningFreshStartLocalTurns(ac); got != 3 {
+		t.Errorf("expected per-agent 3, got %d", got)
+	}
+}
+
+func TestAgentReturningFreshStartLocalTurns_Disabled(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{Limits: &AgentLimits{ReturningFreshStartLocalTurns: intPtr(-1)}}
+	if got := cfg.AgentReturningFreshStartLocalTurns(ac); got != 0 {
+		t.Errorf("expected 0 (disabled) for -1 per-agent, got %d", got)
+	}
+}
