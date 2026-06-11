@@ -31,6 +31,7 @@ import (
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
+	"github.com/scoutme/milk/internal/agent/smolagent"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
@@ -69,11 +70,13 @@ const memoryPollInterval = 5 * time.Second
 // escalationLocal is non-nil when the escalation target is a second local
 // provider (cfg.EscalationAgent names a agents entry); in that case
 // cliAgent may be nil. When escalation goes to the Claude CLI, escalationLocal
-// is nil and claude is non-nil (the default).
+// is nil and cliAgent is non-nil (the default). When escalation goes to a
+// smolagent-cli agent, smolagentAgent is non-nil and cliAgent/escalationLocal are nil.
 type dispatchAgents struct {
 	local           *local.Agent
 	cliAgent        *claude.Agent
-	escalationLocal *local.Agent // non-nil when escalation target is a local provider
+	escalationLocal *local.Agent    // non-nil when escalation target is a local provider
+	smolagentAgent  *smolagent.Agent // non-nil when escalation target is smolagent-cli
 	localAvail      bool
 	escalationAvail bool
 }
@@ -4507,6 +4510,8 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		if escalationLocalAgent != nil {
 			// Escalation is routed to a second local provider, not the Claude CLI.
 			turnErr = runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
+		} else if agents.smolagentAgent != nil {
+			turnErr = runSmolagentEscalationWith(turnCtx, st.cfg, st.sess, agents.smolagentAgent, input, st.mem, "", out)
 		} else {
 			// Refresh credentials before each turn so expiring tokens are renewed.
 			// The credential-process handles its own cache and returns immediately
@@ -4650,11 +4655,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAgent = localAgent.WithDebugLog(dbg)
 	}
 
-	// Build the escalation-local agent when the escalation target is a second
-	// local provider rather than the Claude CLI.
+	// Build the escalation agent: local provider, smolagent-cli, or claude-cli (default).
+	tuiEscAC := cfg.EscalationAgentConfig()
 	var escalationLocalAgent *local.Agent
-	if !cfg.EscalationAgentConfig().IsCLI() {
-		escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())
+	var tuiSmolagentAgent *smolagent.Agent
+	if tuiEscAC.IsSmolagentCLI() {
+		tuiSmolagentAgent = smolagent.New(tuiEscAC)
+	} else if !tuiEscAC.IsSubprocessCLI() {
+		escAC := applyFreshAWSCreds(cfg, tuiEscAC)
 		if escAC.URL != "" {
 			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
 			if od, err := config.OtelDir(); err == nil {
@@ -4683,9 +4691,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	ctx := context.Background()
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
-	//
-	// When escalation is routed to a second local provider, "escalationAvail" really
-	// means "escalation agent available" — ping that instead of the Claude CLI.
 	var localAvail, escalationAvail bool
 	if escalationLocalAgent != nil {
 		localAvail = localAgent.Ping(ctx) == nil
@@ -4695,6 +4700,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 		if !escalationAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — primary only")
+		}
+	} else if tuiSmolagentAgent != nil {
+		localAvail = localAgent.Ping(ctx) == nil
+		escalationAvail = tuiSmolagentAgent.Ping() == nil
+		if !localAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
+		}
+		if !escalationAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: smolagent escalation agent unreachable — primary only")
 		}
 	} else {
 		localAvail, escalationAvail, _ = checkAgentAvailability(ctx, localAgent, cliAgent)
@@ -4737,6 +4751,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		local:           localAgent,
 		cliAgent:        cliAgent,
 		escalationLocal: escalationLocalAgent,
+		smolagentAgent:  tuiSmolagentAgent,
 		localAvail:      localAvail,
 		escalationAvail: escalationAvail,
 	}

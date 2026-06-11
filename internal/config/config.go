@@ -112,6 +112,20 @@ type AgentConfig struct {
 	// AddDirs is a list of extra directories to pass with --add-dir.
 	AddDirs []string `json:"add_dirs,omitempty"`
 
+	// Fields for Provider = "smolagent-cli".
+	// SmolagentBin is the path to the milk-smolagent script (default "milk-smolagent").
+	SmolagentBin string `json:"smolagent_bin,omitempty"`
+	// ActionType selects the smolagents agent class: "code" (default) or "tool_calling".
+	ActionType string `json:"action_type,omitempty"`
+	// ModelType is the smolagents model backend class name (default "OpenAIModel").
+	ModelType string `json:"model_type,omitempty"`
+	// SmolagentTools is the list of built-in smolagents tool names to enable.
+	SmolagentTools []string `json:"smolagent_tools,omitempty"`
+	// MaxSteps caps the smolagents ReAct loop (default 15).
+	MaxSteps int `json:"max_steps,omitempty"`
+	// AuthorizedImports lists Python packages the CodeAgent may import.
+	AuthorizedImports []string `json:"authorized_imports,omitempty"`
+
 	// Limits holds optional per-agent overrides for context caps and injection limits.
 	// Nil fields fall back to the global Config defaults.
 	Limits *AgentLimits `json:"limits,omitempty"`
@@ -156,6 +170,16 @@ type AgentLimits struct {
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
 func (a AgentConfig) IsCLI() bool {
 	return strings.ToLower(strings.TrimSpace(a.Provider)) == "claude-cli"
+}
+
+// IsSmolagentCLI reports whether this agent uses the smolagent-cli backend.
+func (a AgentConfig) IsSmolagentCLI() bool {
+	return strings.ToLower(strings.TrimSpace(a.Provider)) == "smolagent-cli"
+}
+
+// IsSubprocessCLI reports whether this agent runs as a subprocess (claude-cli or smolagent-cli).
+func (a AgentConfig) IsSubprocessCLI() bool {
+	return a.IsCLI() || a.IsSmolagentCLI()
 }
 
 // defaultCLIAgent is the built-in claude-cli entry added when no agent

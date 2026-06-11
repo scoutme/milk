@@ -16,6 +16,8 @@ import (
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
+	"github.com/scoutme/milk/internal/agent/smolagent"
+	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/diff"
@@ -154,10 +156,11 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	var escalationLocalAgent *local.Agent
-	if !cfg.EscalationAgentConfig().IsCLI() {
-		escAC := applyFreshAWSCreds(cfg, cfg.EscalationAgentConfig())
-		if escAC.URL != "" {
-			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
+	escAC := cfg.EscalationAgentConfig()
+	if !escAC.IsSubprocessCLI() {
+		freshEscAC := applyFreshAWSCreds(cfg, escAC)
+		if freshEscAC.URL != "" {
+			escalationLocalAgent = local.NewFromConfig(freshEscAC).AsEscalationTarget(freshEscAC.Name)
 			if od, err := config.OtelDir(); err == nil {
 				escalationLocalAgent.WithOtelDir(od)
 			}
@@ -184,6 +187,11 @@ func run(cmd *cobra.Command, args []string) error {
 		cliAgent = cliAgent.WithDebugLog(dbg)
 	}
 
+	var smolagentAgent *smolagent.Agent
+	if escAC.IsSmolagentCLI() {
+		smolagentAgent = smolagent.New(escAC)
+	}
+
 	var cs *claudesettings.Store
 	if store, err := claudesettings.Open(cwd); err == nil {
 		cs = store
@@ -196,6 +204,12 @@ func run(cmd *cobra.Command, args []string) error {
 		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
 		if !localAvail && !escalationAvail {
 			return fmt.Errorf("neither local inference server nor escalation agent is available")
+		}
+	} else if smolagentAgent != nil {
+		localAvail = localAgent.Ping(ctx) == nil
+		escalationAvail = smolagentAgent.Ping() == nil
+		if !localAvail && !escalationAvail {
+			return fmt.Errorf("neither local inference server nor smolagent escalation agent is available")
 		}
 	} else {
 		localAvail, escalationAvail, err = checkAgentAvailabilityStrict(ctx, localAgent, cliAgent)
@@ -235,6 +249,8 @@ func run(cmd *cobra.Command, args []string) error {
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
 			turnErr = runEscalationLocal(ctx, cfg, sess, escalationLocalAgent, mem, prompt)
+		} else if smolagentAgent != nil {
+			turnErr = runSmolagentEscalation(ctx, cfg, sess, smolagentAgent, prompt, mem)
 		} else {
 			turnErr = runCLIEscalation(ctx, cfg, sess, cliAgent, prompt, cs, mem)
 		}
@@ -644,6 +660,10 @@ func runCLIEscalation(ctx context.Context, cfg config.Config, sess *session.Sess
 	return runCLIEscalationWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem, "")
 }
 
+func runSmolagentEscalation(ctx context.Context, cfg config.Config, sess *session.Session, agent *smolagent.Agent, prompt string, mem *memory.Store, outs ...io.Writer) error {
+	return runSmolagentEscalationWith(ctx, cfg, sess, agent, prompt, mem, "", outs...)
+}
+
 // runEscalationLocal handles escalated turns routed to a second local provider
 // (when cfg.EscalationAgent names an agents entry with a non-claude-cli provider).
 // It injects the session context via the system prompt so the escalation agent
@@ -947,6 +967,121 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	} else {
 		sess.EscalationBrief = ""
 		logStateTransition(sess, session.StateRouting, "CLI escalation done")
+		sess.ForceState(session.StateRouting)
+	}
+	return session.Save(sess)
+}
+
+// runSmolagentEscalationWith handles escalated turns routed to a smolagent-cli agent.
+// It mirrors runCLIEscalationWith but without the permission-denial machinery —
+// smolagents controls its own Python executor and doesn't support milk's stdio
+// permission protocol.
+func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *smolagent.Agent, prompt string, mem *memory.Store, brief string, outs ...io.Writer) error {
+	out := io.Writer(os.Stdout)
+	if len(outs) > 0 && outs[0] != nil {
+		out = outs[0]
+	}
+	escAC := cfg.EscalationAgentConfig()
+	escName := strings.ToLower(strings.TrimSpace(escAC.Name))
+	if escName == "" {
+		escName = "smolagent"
+	}
+	fmt.Fprint(out, bold(blue(escName+":"))+" ")
+	aw := newActivityWriter(out)
+
+	var ctxMode escalation.ContextMode
+	switch {
+	case sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != "":
+		ctxMode = escalation.ContextModeResume
+	case sess.EscalationSessionID != "":
+		ctxMode = escalation.ContextModeReturning
+	default:
+		ctxMode = escalation.ContextModeFirst
+	}
+	if ctxMode == escalation.ContextModeReturning {
+		freshThreshold := cfg.AgentReturningFreshStartLocalTurns(escAC)
+		needStale := sess.NeedChangedSinceLastEscalation()
+		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
+		if needStale || turnGap {
+			ctxMode = escalation.ContextModeFirst
+			obs.Debug("smolagent returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+		}
+	}
+	resuming := ctxMode == escalation.ContextModeResume
+	if ctxMode == escalation.ContextModeFirst {
+		sess.EscalationBrief = brief
+	}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	logStateTransition(sess, session.StateEscalation, "run smolagent escalation")
+	sess.ForceState(session.StateEscalation)
+
+	if sess.EscalationNonce == "" {
+		sess.EscalationNonce = claude.GenerateNonce()
+	}
+	nonce := sess.EscalationNonce
+
+	primaryName := cfg.ActiveAgent().Name
+	escalationName := escAC.Name
+	if mem != nil {
+		agent = agent.WithOnPercept(func(content, consumerHint string) {
+			var consumer memory.Consumer
+			switch consumerHint {
+			case primaryName:
+				consumer = memory.ConsumerLocal
+			case escalationName:
+				consumer = memory.ConsumerEscalation
+			}
+			_, err := mem.Record(ctx, content, memory.ProducerEscalation, consumer, memory.Roles{}, false)
+			_ = err
+		}, nonce, primaryName, escalationName)
+	}
+	agent = agent.WithOnNeed(func(content string) {
+		sess.CurrentNeed = content
+		sess.CurrentNeedSetAt = len(sess.History) + 1
+	}, nonce)
+
+	injectInstructions := shouldInjectMemoryInstructions(cfg, sess, resuming)
+	if injectInstructions {
+		sess.MemoryInstructionInjectedAt = sess.EscalationTurnCount()
+	}
+
+	staticCtx := escalation.BuildStaticContext(nonce, perceptsForEscalation(cfg, mem, prompt), ctxMode, injectInstructions, primaryName, escalationName)
+	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
+
+	var (
+		smolRes subprocess.ParseResult
+		runErr  error
+	)
+	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sess.EscalationSessionID != "") {
+		smolRes, runErr = agent.RunResume(ctx, sess.EscalationSessionID, staticCtx, dynamicCtx, prompt, aw)
+	} else {
+		var newSessID string
+		newSessID, smolRes, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, aw)
+		if runErr == nil {
+			sess.EscalationSessionID = newSessID
+		}
+	}
+	aw.Done()
+	if runErr != nil {
+		return runErr
+	}
+
+	escModel := escAC.Model
+	if escModel == "" {
+		escModel = escAC.Name
+	}
+	obs.RecordTokens(ctx, escModel, "escalation", smolRes.InputTokens, smolRes.OutputTokens)
+	sess.AddTokensFull(escModel, "escalation", smolRes.InputTokens, smolRes.OutputTokens, smolRes.CacheCreationInputTokens, smolRes.CacheReadInputTokens)
+	obs.Debug("tokens (smolagent)", "input", smolRes.InputTokens, "output", smolRes.OutputTokens, "cost_usd", smolRes.TotalCostUSD)
+
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: smolRes.Text})
+	sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
+	if smolRes.EndsWithQ {
+		logStateTransition(sess, session.StateEscalationWaiting, "smolagent escalation ended with question")
+		sess.ForceState(session.StateEscalationWaiting)
+	} else {
+		sess.EscalationBrief = ""
+		logStateTransition(sess, session.StateRouting, "smolagent escalation done")
 		sess.ForceState(session.StateRouting)
 	}
 	return session.Save(sess)
