@@ -146,6 +146,11 @@ type AgentLimits struct {
 	PerceptRelevanceGate *bool `json:"percept_relevance_gate,omitempty"`
 	// MaxToolIterations overrides local_max_tool_iterations for this agent.
 	MaxToolIterations *int `json:"max_tool_iterations,omitempty"`
+	// ReturningFreshStartLocalTurns overrides returning_fresh_start_local_turns for
+	// this agent. When non-zero, a ContextModeReturning escalation is downgraded to
+	// a fresh start (no --resume) when this many local turns have elapsed since the
+	// last escalation turn. Set to -1 to disable the turn-gap check for this agent.
+	ReturningFreshStartLocalTurns *int `json:"returning_fresh_start_local_turns,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -274,6 +279,14 @@ type Config struct {
 	// cycles the local agent may execute before the turn is aborted with an error.
 	// Default: 20. Set to 0 to use the default; set to -1 for unlimited.
 	LocalMaxToolIterations int `json:"local_max_tool_iterations,omitempty"`
+
+	// ReturningFreshStartLocalTurns is the number of local-agent turns since the
+	// last escalation turn after which a ContextModeReturning escalation is
+	// downgraded to a fresh start (no --resume). The prior escalation session is
+	// considered stale at that point; the re-orientation context files already
+	// provide equivalent guidance. Default: 8. Set to 0 to disable the turn-gap
+	// condition entirely (need-staleness check is unaffected).
+	ReturningFreshStartLocalTurns int `json:"returning_fresh_start_local_turns,omitempty"`
 
 	// RemoteOversight configures the remote oversight interface. When non-nil
 	// and a backend is configured, agent turn notifications and permission
@@ -560,6 +573,21 @@ func (c Config) AgentMemoryReinjectionByteThreshold(a AgentConfig, useLocalDefau
 		return c.LocalMemoryReinjectionByteThreshold()
 	}
 	return c.MemoryReinjectionByteThreshold()
+}
+
+// AgentReturningFreshStartLocalTurns returns the local-turn threshold after which
+// a ContextModeReturning escalation is treated as a fresh start (no --resume),
+// for the given agent. Falls back to the global ReturningFreshStartLocalTurns.
+// Returns 0 when the turn-gap condition is disabled.
+func (c Config) AgentReturningFreshStartLocalTurns(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.ReturningFreshStartLocalTurns != nil {
+		v := *a.Limits.ReturningFreshStartLocalTurns
+		if v < 0 {
+			return 0
+		}
+		return intOr(v, 8)
+	}
+	return intOr(c.ReturningFreshStartLocalTurns, 8)
 }
 
 // AgentMemoryResultMaxByteCount returns the memory tool result size cap for the

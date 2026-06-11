@@ -123,13 +123,14 @@ func BuildContext(sess *session.Session, nonce string, percepts []string, mode C
 	return dynamic + static
 }
 
-// formatPercepts renders a [Remembered facts] block when percepts is non-empty.
-func formatPercepts(percepts []string) string {
+// FormatPercepts renders a [Remembered facts] block when percepts is non-empty.
+// Exported so non-CLI escalation paths can inject percepts as a standalone message.
+func FormatPercepts(percepts []string) string {
 	if len(percepts) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n[Remembered facts]\n")
+	b.WriteString("[Remembered facts]\n")
 	for _, p := range percepts {
 		b.WriteString("- ")
 		b.WriteString(p)
@@ -137,6 +138,9 @@ func formatPercepts(percepts []string) string {
 	}
 	return b.String()
 }
+
+// formatPercepts is the internal alias used by BuildStaticContext.
+func formatPercepts(percepts []string) string { return FormatPercepts(percepts) }
 
 // NeedInstruction returns the system-prompt fragment that instructs both agents
 // to emit a <milk:need:NONCE> tag when the user switches context, so milk can

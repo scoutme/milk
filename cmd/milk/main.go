@@ -662,14 +662,55 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 	fmt.Fprint(out, bold(blue(escName+":"))+" ")
 	aw := newActivityWriter(out)
 
-	// Build history that the escalation agent should see: all turns, not just
-	// the primary-local ones, so it has full context.
-	history := escalationLocalHistory(sess, prompt)
+	// Determine whether this is the first escalation or a return after local work,
+	// and apply the same staleness check used for the CLI path.
+	isFirst := !session.EscalationEverActive(sess)
+	ctxMode := escalation.ContextModeReturning
+	if isFirst {
+		ctxMode = escalation.ContextModeFirst
+		sess.EscalationBrief = prompt // use prompt as brief when no explicit reason was given
+	} else {
+		freshThreshold := cfg.AgentReturningFreshStartLocalTurns(escAC)
+		needStale := sess.NeedChangedSinceLastEscalation()
+		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
+		if needStale || turnGap {
+			ctxMode = escalation.ContextModeFirst
+			obs.Debug("escalation-local returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+		}
+	}
+
+	// Build the orientation block: identity, brief, current need, local summary.
+	// Injected as a system message prepended to the history so the agent knows its
+	// role and the current task context regardless of what the raw history contains.
+	orientationText := escalation.BuildDynamicContext(sess, ctxMode)
+
+	// Build history. On a fresh-start returning turn, scope to turns since the last
+	// escalation boundary so stale prior escalation turns are excluded from the
+	// messages array. On first escalation or a genuine continuation, include all turns.
+	var history []local.Message
+	if ctxMode == escalation.ContextModeFirst && !isFirst {
+		history = escalationLocalHistoryFresh(sess, prompt)
+	} else {
+		history = escalationLocalHistory(sess, prompt)
+	}
+
+	// Prepend the orientation as a system message so it frames all subsequent turns.
+	if orientationText != "" {
+		history = append([]local.Message{{Role: "system", Content: orientationText}}, history...)
+	}
+
+	// Inject percepts as a system message prepended before the history.
+	// The tag instructions (need/percept nonce) are handled by WithTagCallbacks/Run;
+	// we only need the [Remembered facts] block here.
+	primaryName := cfg.ActiveAgent().Name
+	percepts := perceptsForEscalation(cfg, mem, prompt)
+	if perceptsText := escalation.FormatPercepts(percepts); perceptsText != "" {
+		history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
+	}
 
 	// Configure the agent before trimming so SystemOverheadChars accounts for
 	// any memory instruction that will be injected on this turn.
 	nonce := claude.GenerateNonce()
-	primaryName := cfg.ActiveAgent().Name
 	agent = agent.WithMemConfig(local.MemConfig{
 		ResultMaxBytes:       cfg.AgentMemoryResultMaxByteCount(escAC),
 		ReinjectionTurns:     cfg.AgentMemoryReinjectionTurnThreshold(escAC, false),
@@ -695,7 +736,7 @@ func runEscalationLocal(ctx context.Context, cfg config.Config, sess *session.Se
 
 	msgBudget := cfg.AgentMessageBudget(escAC)
 	if msgBudget > 0 {
-		overhead := agent.SystemOverheadChars(sess)
+		overhead := agent.SystemOverheadChars(sess) + len(orientationText)
 		if overhead < msgBudget {
 			msgBudget -= overhead
 		}
@@ -768,6 +809,31 @@ func escalationLocalHistory(sess *session.Session, prompt string) []local.Messag
 	return msgs
 }
 
+// escalationLocalHistoryFresh is like escalationLocalHistory but only includes
+// turns since the last escalation boundary (i.e. turns after the most recent
+// escalation assistant turn). Used on stale-returning turns to avoid passing
+// the full prior escalation history through the messages array.
+func escalationLocalHistoryFresh(sess *session.Session, prompt string) []local.Message {
+	var msgs []local.Message
+	for _, t := range sess.History[session.LastEscalationBoundary(sess):] {
+		switch t.Role {
+		case session.RoleUser:
+			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
+		case session.RoleAssistant:
+			if t.Content == "" {
+				continue
+			}
+			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
+		case session.RoleToolResult:
+			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+		}
+	}
+	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" && msgs[n-1].Content == prompt {
+		msgs = msgs[:n-1]
+	}
+	return msgs
+}
+
 func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *claude.Agent, prompt string, input inputReader, pc permContext, mem *memory.Store, brief string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
@@ -787,6 +853,21 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 		ctxMode = escalation.ContextModeReturning
 	default:
 		ctxMode = escalation.ContextModeFirst
+	}
+	// Downgrade RETURNING to FIRST when the prior escalation context is stale:
+	// either the user's goal changed since the last escalation turn, or enough
+	// local turns have elapsed that the stored escalation history is no longer
+	// relevant. The re-orientation context files already carry equivalent
+	// guidance, so nothing is lost by dropping --resume in these cases.
+	if ctxMode == escalation.ContextModeReturning {
+		escCfgForFresh := cfg.EscalationAgentConfig()
+		freshThreshold := cfg.AgentReturningFreshStartLocalTurns(escCfgForFresh)
+		needStale := sess.NeedChangedSinceLastEscalation()
+		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
+		if needStale || turnGap {
+			ctxMode = escalation.ContextModeFirst
+			obs.Debug("returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+		}
 	}
 	resuming := ctxMode == escalation.ContextModeResume
 	if ctxMode == escalation.ContextModeFirst {

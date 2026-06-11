@@ -355,6 +355,71 @@ func (s *Session) EscalationOutputBytesSince(afterTurnIndex int) int {
 	return total
 }
 
+// LocalTurnsSinceLastEscalation returns the number of local-agent assistant turns
+// that have occurred after the most recent escalation assistant turn.
+// Returns 0 when there is no prior escalation history (ContextModeFirst case).
+func (s *Session) LocalTurnsSinceLastEscalation() int {
+	// lastEscalationBoundary returns 0 when there are no escalation turns,
+	// which would count all turns from the start — guard that case explicitly.
+	hasEscalation := false
+	for _, t := range s.History {
+		if t.Agent == AgentEscalation {
+			hasEscalation = true
+			break
+		}
+	}
+	if !hasEscalation {
+		return 0
+	}
+	boundary := lastEscalationBoundary(s.History)
+	count := 0
+	for _, t := range s.History[boundary:] {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			count++
+		}
+	}
+	return count
+}
+
+// NeedChangedSinceLastEscalation reports whether CurrentNeed was updated after
+// the most recent escalation assistant turn. Returns false when no need has been
+// set or there is no prior escalation history.
+func (s *Session) NeedChangedSinceLastEscalation() bool {
+	if s.CurrentNeedSetAt == 0 || !EscalationEverActive(s) {
+		return false
+	}
+	// CurrentNeedSetAt is 1-based (len(History)+1 at write time).
+	// Count escalation assistant turns up to that point — if fewer turns had
+	// occurred than now, the need was set after the last escalation turn.
+	needHistoryPos := s.CurrentNeedSetAt - 1 // convert to 0-based history index
+	for i := needHistoryPos; i < len(s.History); i++ {
+		if s.History[i].Role == RoleAssistant && s.History[i].Agent == AgentEscalation {
+			return false // an escalation turn happened after the need was set
+		}
+	}
+	return true
+}
+
+// EscalationEverActive reports whether the escalation agent has ever produced a
+// turn in this session. Used by non-CLI escalation paths that do not persist an
+// EscalationSessionID to distinguish first escalation from a return.
+func EscalationEverActive(s *Session) bool {
+	for _, t := range s.History {
+		if t.Agent == AgentEscalation {
+			return true
+		}
+	}
+	return false
+}
+
+// LastEscalationBoundary returns the history index of the first turn after the
+// most recent escalation assistant turn. Returns 0 when there are no escalation
+// turns. Exported for use by non-CLI escalation paths that need to scope history
+// to turns since the last escalation boundary.
+func LastEscalationBoundary(s *Session) int {
+	return lastEscalationBoundary(s.History)
+}
+
 // EscalationMostRecent reports whether the escalation agent was the most recently
 // active agent — i.e. there is at least one escalation assistant turn after the
 // last local assistant turn. Used to decide whether to inject LastEscalationSummary
