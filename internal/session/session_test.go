@@ -298,10 +298,10 @@ func TestLastEscalationBoundary(t *testing.T) {
 	})
 	t.Run("returns index after last escalation turn", func(t *testing.T) {
 		s := &Session{History: []Turn{
-			mkTurn(RoleUser, AgentEscalation),        // 0
-			mkTurn(RoleAssistant, AgentEscalation),   // 1 ← last escalation
-			mkTurn(RoleUser, AgentLocal),             // 2
-			mkTurn(RoleAssistant, AgentLocal),        // 3
+			mkTurn(RoleUser, AgentEscalation),      // 0
+			mkTurn(RoleAssistant, AgentEscalation), // 1 ← last escalation
+			mkTurn(RoleUser, AgentLocal),           // 2
+			mkTurn(RoleAssistant, AgentLocal),      // 3
 		}}
 		if got := LastEscalationBoundary(s); got != 2 {
 			t.Errorf("want 2, got %d", got)

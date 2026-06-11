@@ -178,10 +178,10 @@ func scenariosForCLIEval() map[string]*session.Session {
 
 func TestEval_EscalationCLI(t *testing.T) {
 	const (
-		nonce         = "abc123"
-		primaryName   = "primary"
+		nonce          = "abc123"
+		primaryName    = "primary"
 		escalationName = "claude"
-		threshold     = 8 // default returning_fresh_start_local_turns
+		threshold      = 8 // default returning_fresh_start_local_turns
 	)
 	percepts := []string{
 		"user prefers Go over Python",
@@ -192,14 +192,14 @@ func TestEval_EscalationCLI(t *testing.T) {
 	order := []string{"first", "returning-stale-need", "returning-stale-gap", "returning-fresh"}
 
 	type result struct {
-		baseMode        escalation.ContextMode
-		newMode         escalation.ContextMode
-		baseStaticBytes int
+		baseMode         escalation.ContextMode
+		newMode          escalation.ContextMode
+		baseStaticBytes  int
 		baseDynamicBytes int
-		newStaticBytes  int
-		newDynamicBytes int
-		needStale       bool
-		turnGap         bool
+		newStaticBytes   int
+		newDynamicBytes  int
+		needStale        bool
+		turnGap          bool
 	}
 	results := make(map[string]result, len(order))
 
