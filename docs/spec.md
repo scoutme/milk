@@ -53,6 +53,49 @@ ESCALATION_WAITING → user --primary flag → back to ROUTING
 
 ---
 
+## Project layout
+
+```
+cmd/milk/
+  main.go           Cobra root command (single-prompt mode); builds TurnRunner instances
+  repl.go           bubbletea TUI — transcript viewport, textarea, status bar, /agent switch
+  runner.go         TurnRunner interface + three implementations (localRunner, cliRunner, subprocessRunner)
+  dispatch.go       runPrimary / runEscalation — role-specific session bookkeeping shared by single-shot and TUI
+  interactive.go    slash commands, tab completion, prompt label helpers
+  ansi.go           ANSI colour helpers and activity spinner
+  panel_memory.go   right-side memory panel (/panel memory)
+
+internal/
+  config/           config loading and defaults (~/.milk/config.json)
+  session/          session state machine + JSON store (~/.milk/sessions/)
+  router/           routing: rules layer → weighted scorer → primary-model classifier
+  agent/local/      OpenAI-compat HTTP client; Bedrock Converse native path; SigV4/Bearer/token_cmd
+                    auth transports; tool loop; streaming tool-format FSM detector
+  agent/claude/     claude CLI subprocess driver; stream-json parser; permission-prompt protocol
+  agent/subprocess/ generic subprocess agent: NDJSON stream protocol, tag interception
+                    (<milk:need:>, <milk:percept:>, <milk:escalate:>)
+  agent/aider/      aider-cli provider (wraps subprocess agent)
+  agent/smolagent/  smolagent-cli provider (wraps subprocess agent)
+  escalation/       context builders: static instruction block + dynamic summary sent to escalation agent
+  memory/           Percept store; NREM decay/prune/promote consolidation (~/.milk/memory/)
+  obs/              OpenTelemetry file exporters (~/.milk/otel/)
+  claudesettings/   ~/.claude/settings.json reader (allowed tools, directories, AWS refresh command)
+  oversight/        remote oversight interface (Telegram notifier)
+  tags/             milk tag constants (<milk:need:>, <milk:percept:>, <milk:escalate:>)
+```
+
+### Agent dispatch layers
+
+```
+TurnRunner.Execute()       provider-specific inference (one of three implementations)
+       │
+runPrimary / runEscalation role-specific session bookkeeping (dispatch.go)
+       │
+run() / runTurn()          single-shot or TUI entry point; builds runners, drives router
+```
+
+---
+
 ## Router
 
 Decision order per turn:

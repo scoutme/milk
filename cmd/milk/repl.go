@@ -69,15 +69,15 @@ const memoryPanelInner = 32 // usable inner chars; scrollbar is a separate colum
 const memoryPollInterval = 5 * time.Second
 
 // dispatchAgents holds the agents and their availability for a turn.
-// escalationLocal is non-nil when the escalation target is a second local
-// provider (cfg.EscalationAgent names a agents entry); in that case
-// cliAgent may be nil. When escalation goes to the Claude CLI, escalationLocal
-// is nil and cliAgent is non-nil (the default). When escalation goes to a
-// subprocess agent (smolagent-cli, aider-cli), subprocessAgent is non-nil and
-// cliAgent/escalationLocal are nil.
-// When the primary agent is a subprocess provider, subprocessPrimary is non-nil
-// and local may be nil.
+// primary and escalation are the TurnRunner instances used for dispatch.
+// local is kept for router classification and in-place credential refresh.
+// cliAgent, escalationLocal, subprocessAgent, subprocessPrimary are kept for
+// TUI callback wiring in dispatchAgent and live-rebuild in commitSwitchAgent.
 type dispatchAgents struct {
+	// TurnRunner dispatch targets (set from runREPL / commitSwitchAgent)
+	primary    TurnRunner
+	escalation TurnRunner
+	// Underlying typed agents (needed for TUI callback wiring and live-rebuild)
 	local             *local.Agent
 	cliAgent          *claude.Agent
 	escalationLocal   *local.Agent      // non-nil when escalation target is a local provider
@@ -132,6 +132,7 @@ type remoteInputMsg struct{ text string }
 
 type permRequestMsg struct {
 	prompt string
+	label  string // status-bar label; defaults to "[allow?]" when empty
 	respCh chan string
 }
 
@@ -204,8 +205,12 @@ type tuiInputReader struct {
 }
 
 func (r *tuiInputReader) readLine(prompt string) (string, error) {
+	return r.readLineLabeled(prompt, "")
+}
+
+func (r *tuiInputReader) readLineLabeled(prompt, label string) (string, error) {
 	respCh := make(chan string, 1)
-	r.send(permRequestMsg{prompt: prompt, respCh: respCh})
+	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh})
 	return <-respCh, nil
 }
 
@@ -1389,7 +1394,7 @@ func (m *model) statusBar() string {
 	bar := left + strings.Repeat(" ", gap) + right
 	if isTTY {
 		if m.pendingPerm != nil {
-			return styleStatusBarPerm.Width(m.width).Render(bar)
+			return styleStatusBarPerm.Width(m.width).Render(ansi.Strip(bar))
 		}
 		return styleStatusBar.Width(m.width).Render(bar)
 	}
@@ -1406,7 +1411,11 @@ func (m *model) statusAgent() string {
 	}
 	agent := dim(agentLabel(m.st))
 	if m.pendingPerm != nil {
-		return "? " + agent + " [allow?]"
+		lbl := m.pendingPerm.label
+		if lbl == "" {
+			lbl = "[allow?]"
+		}
+		return "? " + agent + " " + lbl
 	}
 	if m.busy {
 		frame := yellow(bold(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]))
@@ -1688,6 +1697,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				m.agents.local = newAgent
 				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+				m.agents.primary = newLocalRunner(newAgent, activeLocalAgentConfig(m.st.cfg).Name)
 				m.rtr = router.New(m.st.cfg, newAgent)
 			}
 			// For token_cmd providers the transport already holds the token
@@ -2888,6 +2898,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+		m.agents.primary = newLocalRunner(newAgent, name)
 		m.rtr = router.New(m.st.cfg, newAgent)
 		m.credStatus = ""
 		m.credLabel = ""
@@ -2923,9 +2934,12 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		}
 		escAC := applyFreshAWSCreds(m.st.cfg, m.st.cfg.EscalationAgentConfig())
 		if escAC.IsCLI() {
-			// claude-cli: no local.Agent needed, just update config.
+			// claude-cli: rebuild cliRunner from current cliAgent.
 			m.agents.escalationLocal = nil
+			m.agents.subprocessAgent = nil
 			m.agents.escalationAvail = true
+			m.agents.escalation = newCLIRunner(m.agents.cliAgent, name,
+				permContext{cs: m.st.cs}, func() inputReader { return newStdinInputReader() })
 		} else if escAC.URL != "" {
 			newEsc := local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
 			if od, err := config.OtelDir(); err == nil {
@@ -2938,6 +2952,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 			})
 			m.agents.escalationLocal = newEsc
 			m.agents.escalationAvail = newEsc.Ping(m.ctx) == nil
+			m.agents.escalation = newLocalRunner(newEsc, name)
 		}
 		m.appendTranscript(fmt.Sprintf("%s escalation agent → %s\n", milkTag(), bold(name)))
 		m.appendTranscript(execAgent(m.st) + "\n")
@@ -3161,38 +3176,42 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	tuiAgents := agents
 	ir0 := &tuiInputReader{send: send}
 	if agents.cliAgent != nil {
-		tuiAgents.cliAgent = agents.cliAgent.
+		tuiCliAgent := agents.cliAgent.
 			WithSkipPermissions(st.skipPermissions).
 			WithOnToolUse(func(name string) {
 				send(toolUseMsg{name: name})
 			}).
 			WithOnToolUseReady(func(name string, input map[string]any) {
-				var hint string
+				// AskUserQuestion is handled entirely by milk's selection prompt —
+				// suppress the ⚙ hint here to keep the transcript clean.
 				if name == "AskUserQuestion" {
-					if rendered := formatAskUserQuestion(input); rendered != "" {
-						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n%s\n", name, rendered)
-					} else {
-						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
-					}
+					return
+				}
+				var hint string
+				summary := cliToolArgSummary(input)
+				if summary != "" {
+					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
 				} else {
-					summary := cliToolArgSummary(input)
-					if summary != "" {
-						hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
-					} else {
-						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
-					}
-					if st.cfg.RemoteOversight.NotifyToolsEnabled() {
-						st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
-					}
-					// Inline diff for file edits.
-					if d := cliToolDiff(name, input); d != "" {
-						hint += d
-					}
+					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+				}
+				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+				}
+				if d := cliToolDiff(name, input); d != "" {
+					hint += d
 				}
 				send(chunkMsg{text: hint})
 			}).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
+		tuiAgents.cliAgent = tuiCliAgent
+		// Only rebuild escalation runner as cliRunner when cliAgent IS the escalation target.
+		if agents.escalationLocal == nil && agents.subprocessAgent == nil {
+			escName := agents.escalation.Name()
+			tuiAgents.escalation = newCLIRunner(tuiCliAgent, escName,
+				permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash},
+				func() inputReader { return ir0 })
+		}
 	}
 
 	// Wire local-agent permissions: persistent store + TUI ask callback.
@@ -3201,14 +3220,18 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	localPermStore := st.localPerms
 	localPermAsk := makeLocalPermAsk(ir0, localPermStore)
 	if agents.local != nil {
-		tuiAgents.local = agents.local.
+		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk)
+		tuiAgents.local = tuiLocalAgent
+		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
 	if agents.escalationLocal != nil {
-		tuiAgents.escalationLocal = agents.escalationLocal.
+		tuiEscLocal := agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk)
+		tuiAgents.escalationLocal = tuiEscLocal
+		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
 	return m, tea.Batch(
 		spinnerTick(),
@@ -3327,6 +3350,8 @@ func (m model) historyBack() model {
 		m.histIdx--
 	}
 	m.ta.SetValue(h[m.histIdx])
+	m.hintIdx = -1
+	m.tabHints = nil
 	m.taClearSel()
 	return m
 }
@@ -3343,6 +3368,8 @@ func (m model) historyForward() model {
 	} else {
 		m.ta.SetValue(h[m.histIdx])
 	}
+	m.hintIdx = -1
+	m.tabHints = nil
 	m.taClearSel()
 	return m
 }
@@ -4489,9 +4516,6 @@ func replTurnSourceLabel(st *interactiveState) string {
 
 // runTurn routes a prompt to the appropriate agent, writing output to out.
 func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
-	localAgent := agents.local
-	cliAgent := agents.cliAgent
-	escalationLocalAgent := agents.escalationLocal
 	localAvail := agents.localAvail
 	escalationAvail := agents.escalationAvail
 
@@ -4525,13 +4549,6 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	}
 	defer func() { st.activeFallbackTarget = "" }()
 
-	var inputR inputReader
-	if len(ir) > 0 && ir[0] != nil {
-		inputR = ir[0]
-	} else {
-		inputR = newStdinInputReader()
-	}
-
 	targetName := "local"
 	agentName := st.cfg.ActiveAgent().Name
 	if target == router.TargetEscalation {
@@ -4545,24 +4562,15 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		if agents.subprocessPrimary != nil {
-			turnErr = runSubprocessPrimaryWith(turnCtx, st.cfg, st.sess, agents.subprocessPrimary, input, st.mem, out)
-		} else {
-			turnErr = runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
+		if mem := st.mem; mem != nil {
+			defer func() {
+				_ = mem.Consolidate()
+				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
+			}()
 		}
+		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out)
 	case router.TargetEscalation:
-		if escalationLocalAgent != nil {
-			// Escalation is routed to a second local provider, not the Claude CLI.
-			turnErr = runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
-		} else if agents.subprocessAgent != nil {
-			turnErr = runSubprocessEscalationWith(turnCtx, st.cfg, st.sess, agents.subprocessAgent, input, st.mem, "", out)
-		} else {
-			// Refresh credentials before each turn so expiring tokens are renewed.
-			// The credential-process handles its own cache and returns immediately
-			// when the token is still fresh, so this is cheap in the common case.
-			cliAgent = applyAWSCreds(st.cfg, cliAgent)
-			turnErr = runCLIEscalationWith(turnCtx, st.cfg, st.sess, cliAgent, input, inputR, permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}, st.mem, "", out)
-		}
+		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out)
 	}
 	targetLabel := string(target)
 	obs.Inc(turnCtx, milkScope, "milk.turns.total",
@@ -4819,7 +4827,33 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		})
 	}
 
+	// Build TurnRunner instances for dispatch.
+	var primaryRunner TurnRunner
+	switch {
+	case tuiSubprocessPrimaryAgent != nil:
+		primaryRunner = newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
+	case localAgent != nil:
+		primaryRunner = newLocalRunner(localAgent, tuiPrimaryAC.Name)
+	}
+	var escalationRunner TurnRunner
+	switch {
+	case tuiSubprocessAgent != nil:
+		escalationRunner = newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
+	case escalationLocalAgent != nil:
+		escalationRunner = newLocalRunner(escalationLocalAgent, tuiEscAC.Name)
+	default:
+		cliAC := cliAgentConfig(cfg)
+		escName := cliAC.Name
+		if escName == "" {
+			escName = "claude"
+		}
+		escalationRunner = newCLIRunner(cliAgent, escName,
+			permContext{cs: cs}, func() inputReader { return newStdinInputReader() })
+	}
+
 	agents := dispatchAgents{
+		primary:           primaryRunner,
+		escalation:        escalationRunner,
 		local:             localAgent,
 		cliAgent:          cliAgent,
 		escalationLocal:   escalationLocalAgent,
