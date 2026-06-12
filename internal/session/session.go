@@ -2,9 +2,12 @@ package session
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 type State string
 
@@ -81,6 +84,13 @@ type Session struct {
 	// instruction block (which embeds the nonce in tag patterns) remain
 	// byte-identical across turns, preserving Claude's prompt-cache prefix.
 	EscalationNonce string `json:"escalation_nonce,omitempty"`
+
+	// PrimarySessionID is the subprocess session ID for a subprocess primary agent
+	// (smolagent-cli, aider-cli). Mirrors EscalationSessionID for the primary slot.
+	PrimarySessionID string `json:"primary_session_id,omitempty"`
+	// PrimaryNonce is the stable nonce for the primary subprocess agent's instruction
+	// blocks. Generated once on the first primary-subprocess turn, then reused.
+	PrimaryNonce string `json:"primary_nonce,omitempty"`
 
 	// MemoryInstructionInjectedAt is the escalation turn count at which the
 	// memory/need instruction block was last injected. Zero means never injected.
@@ -225,7 +235,7 @@ func renderTurns(turns []Turn) string {
 				}
 			} else {
 				flushTool()
-				fmt.Fprintf(&b, "Assistant (%s): %s\n", t.Agent, t.Content)
+				fmt.Fprintf(&b, "Assistant (%s): %s\n", t.Agent, ansiEscRe.ReplaceAllString(t.Content, ""))
 			}
 		case RoleToolResult:
 			// Don't flush on tool results — they belong to the preceding tool call run.

@@ -4,6 +4,8 @@ milk supports multiple agent backends. Use `/agent add` in the TUI to register t
 
 Each backend is stored as a named entry under `agents` in `~/.milk/config.json`. The active primary agent is set by `agent`; the escalation agent is set by `escalation_agent`.
 
+For local hardware setup (llama.cpp, CUDA, model download) and the local testing procedure, see [docs/setup.md](setup.md).
+
 ---
 
 ## Claude Code CLI
@@ -276,6 +278,159 @@ The command is run with `sh -c`, so environment variables and shell syntax work.
 
 ---
 
+## aider
+
+**Provider**: `aider-cli` — runs `milk-aider` as a subprocess. The adapter script (in `scripts/`) invokes aider in non-interactive message mode and streams its output back as milk NDJSON events.
+
+### Step 1 — Install aider
+
+```sh
+pip install aider-chat
+aider --version
+```
+
+### Step 2 — Install milk-aider
+
+The adapter ships with milk. Put it on your PATH:
+
+```sh
+cp scripts/milk-aider ~/.local/bin/milk-aider
+chmod +x ~/.local/bin/milk-aider
+milk-aider --help
+```
+
+### Step 3 — Add the backend entry
+
+Pointing aider at a local llama.cpp server:
+
+```json
+{
+  "name": "aider",
+  "provider": "aider-cli",
+  "model": "openai/qwen2.5-coder-7b-instruct",
+  "url": "http://localhost:8080/v1",
+  "api_key": "local"
+}
+```
+
+Or using a cloud provider (aider uses your shell's `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` when `api_key` is omitted):
+
+```json
+{
+  "name": "aider",
+  "provider": "aider-cli",
+  "model": "claude-opus-4-5"
+}
+```
+
+Set as the escalation agent:
+
+```json
+{
+  "escalation_agent": "aider"
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `provider` | string | required | Must be `"aider-cli"` |
+| `bin` | string | `"milk-aider"` | Path to the adapter script |
+| `model` | string | — | Model identifier passed to `--model` (e.g. `claude-opus-4-5`, `openai/qwen...`) |
+| `url` | string | — | OpenAI-compatible API base URL (`--openai-api-base`); for local servers |
+| `api_key` | string | — | API key (`--openai-api-key`); omit to use shell env vars |
+| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to milk-aider (e.g. `["--auto-commits", "--files", "src/**/*.go"]`) |
+
+### Step 4 — Verify
+
+```sh
+milk --new --escalate "list the Go files in this directory"
+```
+
+Expected: aider's response streamed into the TUI, with file-edit hints shown for any edits it makes.
+
+### Notes
+
+- aider is invoked with `--yes-always --no-pretty --no-git` to run non-interactively. Git integration is off by default; pass `"--auto-commits"` in `extra_args` to re-enable it.
+- Context files (milk's static + dynamic system prompt) are passed to aider via `--read`. Aider reads them as reference material but does not modify them.
+- Token counts are not available from aider's stdout; the `result` event will report zero tokens. Cost tracking via `/usage` will show zeros for this provider.
+
+---
+
+## smolagents (HuggingFace)
+
+**Provider**: `smolagent-cli` — runs `milk-smolagent` as a subprocess. The adapter script (in `scripts/`) wraps HuggingFace smolagents and translates its stream events to milk's NDJSON protocol.
+
+### Step 1 — Install smolagents
+
+```sh
+pip install smolagents[litellm]
+```
+
+The `litellm` extra is needed for `LiteLLMModel` (default driver for OpenAI-compatible endpoints):
+
+| Model driver | Install |
+|---|---|
+| `LiteLLMModel` (OpenAI-compat, default) | `pip install smolagents[litellm]` |
+| `HfApiModel` (HuggingFace Inference API) | `pip install smolagents` |
+| `TransformersModel` (local model weights) | `pip install smolagents[transformers]` |
+
+### Step 2 — Install milk-smolagent
+
+The adapter ships with milk. Put it on your PATH:
+
+```sh
+cp scripts/milk-smolagent ~/.local/bin/milk-smolagent
+chmod +x ~/.local/bin/milk-smolagent
+milk-smolagent --help
+```
+
+### Step 3 — Add the backend entry
+
+```json
+{
+  "name": "smolagent",
+  "provider": "smolagent-cli",
+  "model_type": "LiteLLMModel",
+  "model": "openai/qwen2.5-coder-7b-instruct",
+  "url": "http://localhost:8080/v1",
+  "api_key": "local",
+  "action_type": "code",
+  "max_steps": 6
+}
+```
+
+Set this as the escalation agent in the root config:
+
+```json
+{
+  "escalation_agent": "smolagent"
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `provider` | string | required | Must be `"smolagent-cli"` |
+| `bin` | string | `"milk-smolagent"` | Path to the adapter script |
+| `model_type` | string | `"LiteLLMModel"` | smolagents model driver: `LiteLLMModel`, `HfApiModel`, `TransformersModel` |
+| `model` | string | required | Model identifier passed to `--model-id` |
+| `url` | string | — | API base URL (`--api-base`); for LiteLLMModel pointing at a local server |
+| `api_key` | string | — | API key (`--api-key`); use `"local"` for unauthenticated local servers |
+| `action_type` | string | `"code"` | `"code"` (CodeAgent) or `"toolcalling"` (ToolCallingAgent) |
+| `smolagent_tools` | array | `["bash"]` | Tools available to the agent |
+| `authorized_imports` | array | — | Python module import allowlist (CodeAgent only) |
+| `max_steps` | int | `6` | Max reasoning steps per turn |
+| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to milk-smolagent |
+
+### Step 4 — Verify
+
+```sh
+milk --new --escalate "say hello"
+```
+
+Expected: streamed response with step/observation progress visible in the TUI.
+
+---
+
 ## Full config reference
 
 ### Inference-server `agents` entry fields
@@ -316,3 +471,135 @@ The command is run with `sh -c`, so environment variables and shell syntax work.
 | `agent` | string | first non-cli entry | Name of the active primary backend |
 | `escalation_agent` | string | `"claude"` | Name of the escalation backend |
 | `aws_auth_refresh` | bool | false | Run the Claude Code credential-process command before each Bedrock call |
+
+---
+
+## Memory configuration
+
+All keys go in `~/.milk/config.json`. Sensible defaults apply when omitted.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `percept_inject_max` | 25 | Max percepts injected into Claude context per turn. Lowest-weight percepts are dropped. Set to 0 for no limit. |
+| `percept_inject_max_bytes` | 2048 | Max byte size of percept content injected into Claude context per turn. Set to 0 for no limit. |
+| `percept_store_max` | 0 (unlimited) | Max percepts kept in the global store. Lowest-weight non-core percepts are pruned after NREM consolidation. |
+| `percept_relevance_gate` | true | Skip percepts with zero keyword overlap with the current prompt before injection (Claude context block and local agent `list_memory` results). Set to false to disable. |
+| `memory_reinjection_turns` | 20 | Re-inject memory/need instructions into Claude context after this many escalation turns (guards against Claude-side context truncation). Set to 0 to disable. |
+| `memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of Claude output. Set to 0 to disable. |
+| `local_memory_result_max_bytes` | 2048 | Max byte size of `get_memory` / `list_memory` tool results returned to the local agent per call. Set to -1 for no limit. |
+| `local_memory_reinjection_turns` | 20 | Re-inject memory/need instructions into the local agent's context after this many local turns. Set to -1 to disable. |
+| `local_memory_reinjection_bytes` | 40000 | Re-inject memory/need instructions after this many bytes of local agent output. Set to -1 to disable. |
+| `local_max_tool_iterations` | 20 | Max consecutive tool-call / response cycles the local agent may execute per turn before the turn is aborted. Set to -1 for unlimited. |
+
+---
+
+## Context budget configuration
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `context_budget_chars` | 12000 | Max characters per summary brick (`last_local_summary` / `last_claude_summary`) injected into the escalation system prompt. Oldest turns are dropped first. |
+| `local_context_budget_chars` | 24000 | Max total characters in the local agent's `messages` array per turn. Oldest user+assistant pairs are dropped when over budget. Set to 0 for no limit. |
+
+---
+
+## Per-agent limit overrides
+
+Any entry in the `agents` array accepts a `limits` object that overrides the global context and memory settings for that specific agent. This lets you, for example, give a small Bedrock model a tighter context window without affecting the primary agent.
+
+```json
+{
+  "agents": [
+    {
+      "name": "haiku-aws",
+      "provider": "bedrock",
+      "model": "anthropic.claude-haiku-4-5",
+      "limits": {
+        "context_budget_chars": 6000,
+        "message_budget_chars": 12000,
+        "percept_inject_max": 5,
+        "percept_inject_max_bytes": 512,
+        "memory_result_max_bytes": 1024,
+        "memory_reinjection_turns": 10,
+        "memory_reinjection_bytes": 20000,
+        "percept_relevance_gate": true
+      }
+    }
+  ]
+}
+```
+
+All fields are optional. When omitted, the global value (or built-in default) applies.
+
+**Integer field semantics:**
+
+| Value | Meaning |
+|-------|---------|
+| omitted / `null` | Use global config value |
+| `0` | Use built-in hardcoded default |
+| positive integer | Use this exact value |
+| negative (e.g. `-1`) | Disabled / unlimited |
+
+| Field | Global key | Built-in default | Description |
+|-------|-----------|-----------------|-------------|
+| `context_budget_chars` | `context_budget_chars` | 12000 | Max chars per summary brick injected into the escalation system prompt |
+| `message_budget_chars` | `local_context_budget_chars` | 24000 | Max chars in message history per turn (oldest pairs dropped when over budget) |
+| `percept_inject_max` | `percept_inject_max` | 25 | Max percepts injected per turn |
+| `percept_inject_max_bytes` | `percept_inject_max_bytes` | 2048 | Max total bytes of injected percept content |
+| `memory_result_max_bytes` | `local_memory_result_max_bytes` | 2048 | Max bytes of a `get_memory` / `list_memory` tool result |
+| `memory_reinjection_turns` | `memory_reinjection_turns` / `local_memory_reinjection_turns` | 20 | Re-inject memory instructions after N turns |
+| `memory_reinjection_bytes` | `memory_reinjection_bytes` / `local_memory_reinjection_bytes` | 40000 | Re-inject memory instructions after N bytes of output |
+| `percept_relevance_gate` | `percept_relevance_gate` | `true` | Enable keyword-intersection filter before percept injection |
+| `max_tool_iterations` | `local_max_tool_iterations` | 20 | Max tool-call cycles per turn (-1 = unlimited) |
+
+---
+
+## Remote oversight (Telegram)
+
+Forward agent activity and permission prompts to a mobile device.
+
+**Quick setup** (interactive wizard):
+
+```
+/setup telegram
+```
+
+Follows the prompts: paste your bot token from @BotFather, send the bot a message, and milk resolves your chat ID automatically and saves the config.
+
+**Manual config** (`~/.milk/config.json`):
+
+```json
+{
+  "remote_oversight": {
+    "backend": "telegram",
+    "telegram": {
+      "token": "<bot-token-from-botfather>",
+      "chat_id": <your-numeric-chat-id>
+    },
+    "perm_timeout_secs": 120,
+    "timeout_action": "deny",
+    "notify_tools": true
+  }
+}
+```
+
+**Enable / disable at runtime** (credentials are preserved):
+
+```
+/setup telegram on
+/setup telegram off
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `""` | Transport backend. `"telegram"` to enable; `""` to disable. |
+| `perm_timeout_secs` | 120 | How long to wait for a remote permission reply before falling back to `timeout_action`. |
+| `timeout_action` | `"deny"` | Action when remote permission reply times out. `"allow"` or `"deny"`. |
+| `notify_tools` | true | Forward escalation agent tool-call notifications. |
+
+**What gets forwarded:**
+- Turn start (agent name, target, prompt snippet)
+- Tool calls (name + key argument)
+- Agent response text (capped at 3000 chars)
+- Permission prompts with y/n reply — first response (TUI or Telegram) wins
+
+**Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Ignored while an agent turn is in progress.

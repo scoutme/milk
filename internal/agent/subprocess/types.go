@@ -43,6 +43,11 @@ type ParseOpts struct {
 	// OnNeed is called when a <milk:need:NONCE>…</milk:need:NONCE> tag is intercepted.
 	OnNeed    func(content string)
 	NeedNonce string
+	// OnEscalate is called when a <milk:escalate:NONCE>…</milk:escalate:NONCE> tag
+	// is intercepted, signalling that the subprocess primary agent wants to hand off
+	// the current turn to the escalation agent. The tag body is the reason string.
+	OnEscalate    func(reason string)
+	EscalateNonce string
 	// DebugLog receives every raw line from the subprocess stdout when non-nil.
 	DebugLog io.Writer
 }
@@ -54,6 +59,9 @@ type ParseResult struct {
 	Text      string
 	EndsWithQ bool // true if the final text ends with a question mark
 	IsError   bool
+	// EscalationReason is non-empty when the subprocess primary agent emitted a
+	// <milk:escalate:NONCE> tag requesting hand-off to the escalation agent.
+	EscalationReason string
 	// Token usage from the result event (may be zero if not reported).
 	InputTokens              int64
 	OutputTokens             int64

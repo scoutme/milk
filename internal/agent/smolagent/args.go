@@ -3,26 +3,26 @@ package smolagent
 import (
 	"fmt"
 	"os/exec"
-	"strings"
 
+	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/config"
 )
 
 // argBuilder implements subprocess.ArgBuilder for the milk-smolagent CLI.
 type argBuilder struct {
-	bin              string
-	modelType        string
-	modelID          string
-	apiBase          string
-	apiKey           string
-	actionType       string
-	tools            []string
+	bin               string
+	modelType         string
+	modelID           string
+	apiBase           string
+	apiKey            string
+	actionType        string
+	tools             []string
 	authorizedImports []string
-	maxSteps         int
+	maxSteps          int
 }
 
 func newArgBuilder(ac config.AgentConfig) *argBuilder {
-	bin := ac.SmolagentBin
+	bin := ac.Bin
 	if bin == "" {
 		bin = "milk-smolagent"
 	}
@@ -39,15 +39,15 @@ func newArgBuilder(ac config.AgentConfig) *argBuilder {
 		maxSteps = 15
 	}
 	return &argBuilder{
-		bin:              bin,
-		modelType:        modelType,
-		modelID:          ac.Model,
-		apiBase:          ac.URL,
-		apiKey:           ac.APIKey,
-		actionType:       actionType,
-		tools:            ac.SmolagentTools,
+		bin:               bin,
+		modelType:         modelType,
+		modelID:           ac.Model,
+		apiBase:           ac.URL,
+		apiKey:            ac.APIKey,
+		actionType:        actionType,
+		tools:             ac.SmolagentTools,
 		authorizedImports: ac.AuthorizedImports,
-		maxSteps:         maxSteps,
+		maxSteps:          maxSteps,
 	}
 }
 
@@ -108,14 +108,7 @@ func (b *argBuilder) Ping() error {
 	return nil
 }
 
-// WithAPIKey returns a copy of the argBuilder with apiKey set.
-func (b *argBuilder) withAPIKey(key string) *argBuilder {
-	c := *b
-	c.apiKey = key
-	return &c
-}
-
-// labelString returns a display-friendly string for the agent.
-func (b *argBuilder) labelString() string {
-	return strings.ToLower(b.actionType) + "-agent"
+// New constructs a subprocess.Agent backed by milk-smolagent.
+func New(ac config.AgentConfig) *subprocess.Agent {
+	return subprocess.NewAgent(newArgBuilder(ac), &Parser{})
 }

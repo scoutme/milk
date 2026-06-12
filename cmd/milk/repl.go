@@ -29,9 +29,11 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/agent/smolagent"
+	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
@@ -71,14 +73,18 @@ const memoryPollInterval = 5 * time.Second
 // provider (cfg.EscalationAgent names a agents entry); in that case
 // cliAgent may be nil. When escalation goes to the Claude CLI, escalationLocal
 // is nil and cliAgent is non-nil (the default). When escalation goes to a
-// smolagent-cli agent, smolagentAgent is non-nil and cliAgent/escalationLocal are nil.
+// subprocess agent (smolagent-cli, aider-cli), subprocessAgent is non-nil and
+// cliAgent/escalationLocal are nil.
+// When the primary agent is a subprocess provider, subprocessPrimary is non-nil
+// and local may be nil.
 type dispatchAgents struct {
-	local           *local.Agent
-	cliAgent        *claude.Agent
-	escalationLocal *local.Agent    // non-nil when escalation target is a local provider
-	smolagentAgent  *smolagent.Agent // non-nil when escalation target is smolagent-cli
-	localAvail      bool
-	escalationAvail bool
+	local             *local.Agent
+	cliAgent          *claude.Agent
+	escalationLocal   *local.Agent      // non-nil when escalation target is a local provider
+	subprocessAgent   *subprocess.Agent // non-nil when escalation target is a subprocess provider
+	subprocessPrimary *subprocess.Agent // non-nil when primary is a subprocess provider
+	localAvail        bool
+	escalationAvail   bool
 }
 
 // --- TUI message types ---
@@ -698,6 +704,12 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseButtonRight:
 		if ev.Action == tea.MouseActionPress {
+			// Finalize any in-progress drag selection that lost its release event
+			// (release can be dropped when pointer drifts outside viewport bounds).
+			if m.selText == "" && m.selAnchorLine >= 0 && m.selDragging {
+				m.selText = m.selectionText()
+				m.setViewportContent()
+			}
 			// Transcript selection takes priority; then keyboard input selection.
 			if m.selText != "" {
 				copyToClipboard(m.selText)
@@ -726,25 +738,45 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// transcriptLines returns the lines of the currently displayed transcript area
-// (welcome screen when empty, wrapped transcript otherwise), without selection
-// highlighting applied. Used for selection text extraction.
-func (m *model) transcriptLines() []string {
-	if m.transcript.Len() == 0 {
-		return strings.Split(m.welcomeScreen(), "\n")
+// transcriptPlainLines returns the viewport content as plain-text lines with
+// ANSI stripped. It uses the same rendered source (m.colorizeCached) that the
+// viewport displays, so that mouse column/line coordinates align exactly with
+// the rune indices in the returned lines. Falls back to a fresh render when
+// the cache is empty (e.g. ColorizeOff mode or before first paint).
+func (m *model) transcriptPlainLines() []string {
+	var wrapped string
+	if m.colorizeCached != "" {
+		// Fast path: cache already holds the wrapped+colorized content.
+		wrapped = m.colorizeCached
+	} else {
+		// Slow path: render fresh so selection coordinates are still correct.
+		vw := m.vpWidth()
+		if m.transcript.Len() == 0 {
+			wrapped = m.welcomeScreen()
+		} else {
+			raw := m.activeTranscript().String()
+			if vw <= 0 {
+				wrapped = raw
+			} else {
+				colorized := colorizeTranscriptWrapped(raw, m.colorizeMode)
+				wrapped = ansi.Wrap(colorized, vw, "")
+			}
+		}
 	}
-	vw := m.vpWidth()
-	raw := m.transcript.String()
-	if vw <= 0 {
-		return strings.Split(raw, "\n")
+	lines := strings.Split(wrapped, "\n")
+	for i, l := range lines {
+		lines[i] = ansi.Strip(l)
 	}
-	return strings.Split(ansi.Wrap(raw, vw, ""), "\n")
+	return lines
 }
 
 // selectionText extracts the plain text between the selection anchor and end,
-// respecting column boundaries on the first and last lines.
+// respecting column boundaries on the first and last lines. It uses
+// transcriptPlainLines so that coordinates match the rendered viewport exactly,
+// avoiding drift caused by table padding or markdown colorization changing line
+// lengths relative to the raw transcript.
 func (m *model) selectionText() string {
-	lines := m.transcriptLines()
+	lines := m.transcriptPlainLines()
 	loLine, loCol := m.selAnchorLine, m.selAnchorCol
 	hiLine, hiCol := m.selEndLine, m.selEndCol
 	if hiLine < loLine || (hiLine == loLine && hiCol < loCol) {
@@ -758,7 +790,7 @@ func (m *model) selectionText() string {
 	}
 	var sb strings.Builder
 	for i := loLine; i <= hiLine; i++ {
-		plain := []rune(ansi.Strip(lines[i]))
+		plain := []rune(lines[i]) // already stripped by transcriptPlainLines
 		start, end := 0, len(plain)
 		if i == loLine {
 			if loCol < len(plain) {
@@ -822,7 +854,8 @@ func (m *model) clearSelection() {
 func (m *model) taCursorOffset() int {
 	lines := strings.Split(m.ta.Value(), "\n")
 	row := m.ta.Line()
-	col := m.ta.LineInfo().ColumnOffset
+	li := m.ta.LineInfo()
+	col := li.StartColumn + li.ColumnOffset // rune offset within logical line
 	offset := 0
 	for i := 0; i < row && i < len(lines); i++ {
 		offset += len([]rune(lines[i])) + 1 // +1 for the '\n'
@@ -3127,47 +3160,51 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	tuiAgents := agents
 	ir0 := &tuiInputReader{send: send}
-	tuiAgents.cliAgent = agents.cliAgent.
-		WithSkipPermissions(st.skipPermissions).
-		WithOnToolUse(func(name string) {
-			send(toolUseMsg{name: name})
-		}).
-		WithOnToolUseReady(func(name string, input map[string]any) {
-			var hint string
-			if name == "AskUserQuestion" {
-				if rendered := formatAskUserQuestion(input); rendered != "" {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n%s\n", name, rendered)
+	if agents.cliAgent != nil {
+		tuiAgents.cliAgent = agents.cliAgent.
+			WithSkipPermissions(st.skipPermissions).
+			WithOnToolUse(func(name string) {
+				send(toolUseMsg{name: name})
+			}).
+			WithOnToolUseReady(func(name string, input map[string]any) {
+				var hint string
+				if name == "AskUserQuestion" {
+					if rendered := formatAskUserQuestion(input); rendered != "" {
+						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n%s\n", name, rendered)
+					} else {
+						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+					}
 				} else {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+					summary := cliToolArgSummary(input)
+					if summary != "" {
+						hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+					} else {
+						hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+					}
+					if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+						st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+					}
+					// Inline diff for file edits.
+					if d := cliToolDiff(name, input); d != "" {
+						hint += d
+					}
 				}
-			} else {
-				summary := cliToolArgSummary(input)
-				if summary != "" {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
-				} else {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
-				}
-				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
-					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
-				}
-				// Inline diff for file edits.
-				if d := cliToolDiff(name, input); d != "" {
-					hint += d
-				}
-			}
-			send(chunkMsg{text: hint})
-		}).
-		WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
-		WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
+				send(chunkMsg{text: hint})
+			}).
+			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
+			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
+	}
 
 	// Wire local-agent permissions: persistent store + TUI ask callback.
 	// Both the primary and escalation-local agents share the same store and ask
 	// callback — they operate in the same cwd and grants should be shared.
 	localPermStore := st.localPerms
 	localPermAsk := makeLocalPermAsk(ir0, localPermStore)
-	tuiAgents.local = agents.local.
-		WithSkipPermissions(st.skipPermissions).
-		WithPermissions(localPermStore, localPermAsk)
+	if agents.local != nil {
+		tuiAgents.local = agents.local.
+			WithSkipPermissions(st.skipPermissions).
+			WithPermissions(localPermStore, localPermAsk)
+	}
 	if agents.escalationLocal != nil {
 		tuiAgents.escalationLocal = agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
@@ -3416,7 +3453,8 @@ func (m model) handleTab(dir int) model {
 	lineInput := lines[curLine]
 
 	// Split at cursor column so completion works on the token under the cursor.
-	col := m.ta.LineInfo().CharOffset
+	li := m.ta.LineInfo()
+	col := li.StartColumn + li.ColumnOffset
 	if col > len([]rune(lineInput)) {
 		col = len([]rune(lineInput))
 	}
@@ -3657,7 +3695,8 @@ func (m *model) rebuildInlineHints() {
 	if curLine >= len(lines) {
 		curLine = len(lines) - 1
 	}
-	col := m.ta.LineInfo().CharOffset
+	li := m.ta.LineInfo()
+	col := li.StartColumn + li.ColumnOffset
 	runes := []rune(lines[curLine])
 	if col > len(runes) {
 		col = len(runes)
@@ -3800,7 +3839,8 @@ func (m *model) commitHintSelection() bool {
 	if curLine >= len(lines) {
 		curLine = len(lines) - 1
 	}
-	col := m.ta.LineInfo().CharOffset
+	li := m.ta.LineInfo()
+	col := li.StartColumn + li.ColumnOffset // rune offset within logical line
 	runes := []rune(lines[curLine])
 	if col > len(runes) {
 		col = len(runes)
@@ -4505,13 +4545,17 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		turnErr = runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
+		if agents.subprocessPrimary != nil {
+			turnErr = runSubprocessPrimaryWith(turnCtx, st.cfg, st.sess, agents.subprocessPrimary, input, st.mem, out)
+		} else {
+			turnErr = runLocal(turnCtx, st.cfg, st.sess, localAgent, st.mem, input, out)
+		}
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
 			// Escalation is routed to a second local provider, not the Claude CLI.
 			turnErr = runEscalationLocal(turnCtx, st.cfg, st.sess, escalationLocalAgent, st.mem, input, out)
-		} else if agents.smolagentAgent != nil {
-			turnErr = runSmolagentEscalationWith(turnCtx, st.cfg, st.sess, agents.smolagentAgent, input, st.mem, "", out)
+		} else if agents.subprocessAgent != nil {
+			turnErr = runSubprocessEscalationWith(turnCtx, st.cfg, st.sess, agents.subprocessAgent, input, st.mem, "", out)
 		} else {
 			// Refresh credentials before each turn so expiring tokens are renewed.
 			// The credential-process handles its own cache and returns immediately
@@ -4639,29 +4683,48 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	// Build the local agent without blocking on credential refresh. If
-	// aws_auth_refresh is enabled, the agent starts with no/stale credentials
-	// and a background goroutine refreshes them after the TUI is running.
-	baseAC := activeLocalAgentConfig(cfg)
-	localAgent := local.NewFromConfig(baseAC)
-	if od, err := config.OtelDir(); err == nil {
-		localAgent.WithOtelDir(od)
-	}
-	localAgent.WithLogContext(cfg.Otel.LogContext)
-	if dbg, err := openLocalDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		defer dbg.Close()
-		localAgent = localAgent.WithDebugLog(dbg)
+	// Build the primary agent. When the active agent is a subprocess provider
+	// (smolagent-cli, aider-cli), bypass the HTTP local agent.
+	tuiPrimaryAC := cfg.ActiveAgent()
+	var localAgent *local.Agent
+	var tuiSubprocessPrimaryAgent *subprocess.Agent
+	if tuiPrimaryAC.IsSubprocessCLI() {
+		switch {
+		case tuiPrimaryAC.IsSmolagentCLI():
+			tuiSubprocessPrimaryAgent = smolagent.New(tuiPrimaryAC)
+		case tuiPrimaryAC.IsAiderCLI():
+			tuiSubprocessPrimaryAgent = aider.New(tuiPrimaryAC)
+		}
+	} else {
+		// Build the local agent without blocking on credential refresh. If
+		// aws_auth_refresh is enabled, the agent starts with no/stale credentials
+		// and a background goroutine refreshes them after the TUI is running.
+		baseAC := activeLocalAgentConfig(cfg)
+		localAgent = local.NewFromConfig(baseAC)
+		if od, err := config.OtelDir(); err == nil {
+			localAgent.WithOtelDir(od)
+		}
+		localAgent.WithLogContext(cfg.Otel.LogContext)
+		if dbg, err := openLocalDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			defer dbg.Close()
+			localAgent = localAgent.WithDebugLog(dbg)
+		}
 	}
 
-	// Build the escalation agent: local provider, smolagent-cli, or claude-cli (default).
+	// Build the escalation agent: local provider, subprocess (smolagent-cli, aider-cli), or claude-cli (default).
 	tuiEscAC := cfg.EscalationAgentConfig()
 	var escalationLocalAgent *local.Agent
-	var tuiSmolagentAgent *smolagent.Agent
-	if tuiEscAC.IsSmolagentCLI() {
-		tuiSmolagentAgent = smolagent.New(tuiEscAC)
-	} else if !tuiEscAC.IsSubprocessCLI() {
+	var tuiSubprocessAgent *subprocess.Agent
+	switch {
+	case tuiEscAC.IsSmolagentCLI():
+		tuiSubprocessAgent = smolagent.New(tuiEscAC)
+	case tuiEscAC.IsAiderCLI():
+		tuiSubprocessAgent = aider.New(tuiEscAC)
+	default:
+	}
+	if !tuiEscAC.IsSubprocessCLI() {
 		escAC := applyFreshAWSCreds(cfg, tuiEscAC)
 		if escAC.URL != "" {
 			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
@@ -4692,7 +4755,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
 	var localAvail, escalationAvail bool
-	if escalationLocalAgent != nil {
+	if tuiSubprocessPrimaryAgent != nil {
+		localAvail = tuiSubprocessPrimaryAgent.Ping() == nil
+		escalationAvail = true // CLI/local escalation checked lazily
+		if !localAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: "+tuiPrimaryAC.Name+" primary agent unreachable")
+		}
+	} else if escalationLocalAgent != nil {
 		localAvail = localAgent.Ping(ctx) == nil
 		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
 		if !localAvail {
@@ -4701,21 +4770,22 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if !escalationAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — primary only")
 		}
-	} else if tuiSmolagentAgent != nil {
+	} else if tuiSubprocessAgent != nil {
 		localAvail = localAgent.Ping(ctx) == nil
-		escalationAvail = tuiSmolagentAgent.Ping() == nil
+		escalationAvail = tuiSubprocessAgent.Ping() == nil
 		if !localAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
 		}
 		if !escalationAvail {
-			fmt.Fprintln(os.Stderr, milkTag()+" warning: smolagent escalation agent unreachable — primary only")
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: "+tuiEscAC.Name+" escalation agent unreachable — primary only")
 		}
 	} else {
 		localAvail, escalationAvail, _ = checkAgentAvailability(ctx, localAgent, cliAgent)
 	}
 
+	// Pass nil routeLocalAgent when primary is a subprocess (no classifier available).
 	var routeLocalAgent *local.Agent
-	if localAvail {
+	if localAvail && localAgent != nil {
 		routeLocalAgent = localAgent
 	}
 	rtr := router.New(cfg, routeLocalAgent)
@@ -4738,9 +4808,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	// Wire token persistence callbacks now that st is available; closures reference
 	// st.sess so they always write to the current session even after /new.
-	localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-		st.sess.AddTokens(model, role, prompt, completion)
-	})
+	if localAgent != nil {
+		localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			st.sess.AddTokens(model, role, prompt, completion)
+		})
+	}
 	if escalationLocalAgent != nil {
 		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
 			st.sess.AddTokens(model, role, prompt, completion)
@@ -4748,12 +4820,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	agents := dispatchAgents{
-		local:           localAgent,
-		cliAgent:        cliAgent,
-		escalationLocal: escalationLocalAgent,
-		smolagentAgent:  tuiSmolagentAgent,
-		localAvail:      localAvail,
-		escalationAvail: escalationAvail,
+		local:             localAgent,
+		cliAgent:          cliAgent,
+		escalationLocal:   escalationLocalAgent,
+		subprocessAgent:   tuiSubprocessAgent,
+		subprocessPrimary: tuiSubprocessPrimaryAgent,
+		localAvail:        localAvail,
+		escalationAvail:   escalationAvail,
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
@@ -4762,7 +4835,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if needsAWSRefresh(cfg) {
 		m.credRefreshing = true
 		m.credLabel = "AWS"
-	} else if needsTokenCmdRefresh(cfg) {
+	} else if localAgent != nil && needsTokenCmdRefresh(cfg) {
 		m.credRefreshing = true
 		m.credLabel = "token"
 	}
@@ -4785,7 +4858,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			creds, err := claude.ResolveAWSCredsContext(refreshCtx, awsCmd)
 			return credRefreshReadyMsg{label: "AWS", creds: creds, err: err}
 		}
-	} else if needsTokenCmdRefresh(cfg) {
+	} else if localAgent != nil && needsTokenCmdRefresh(cfg) {
 		m.credRefreshInit = func() tea.Msg {
 			err := localAgent.WarmToken()
 			return credRefreshReadyMsg{label: "token", err: err}
@@ -4796,9 +4869,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
-	localAgent.WithOnSigV4Refresh(func(err error) {
-		p.Send(credRefreshReadyMsg{label: "AWS", err: err})
-	})
+	if localAgent != nil {
+		localAgent.WithOnSigV4Refresh(func(err error) {
+			p.Send(credRefreshReadyMsg{label: "AWS", err: err})
+		})
+	}
 
 	// Wire remote input: messages from the oversight backend are injected as turns.
 	if tn, ok := st.notifier.(interface {

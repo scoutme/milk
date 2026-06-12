@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["smolagents[litellm]"]
+# ///
 """
 milk-smolagent — subprocess bridge between milk and HuggingFace smolagents.
 
@@ -97,8 +100,8 @@ def run(args):
         )
 
     if instructions:
-        # Prepend instructions as an extra system prompt block.
-        agent.system_prompt = (agent.system_prompt or "") + "\n\n" + instructions
+        existing = agent.prompt_templates.get("system_prompt", "") or ""
+        agent.prompt_templates["system_prompt"] = existing + "\n\n" + instructions
 
     emit({
         "type": "system",
@@ -135,12 +138,7 @@ def _handle_event(event):
     """Translate a smolagents StreamEvent to milk NDJSON."""
     type_name = type(event).__name__
 
-    if type_name == "ChatMessageStreamDelta":
-        text = getattr(event, "content", "") or ""
-        if text:
-            emit({"type": "text_delta", "text": text})
-
-    elif type_name == "ActionStep":
+    if type_name == "ActionStep":
         step_num = getattr(event, "step_number", 0) or 0
         thought = ""
         code = ""

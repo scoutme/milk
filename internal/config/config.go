@@ -113,8 +113,6 @@ type AgentConfig struct {
 	AddDirs []string `json:"add_dirs,omitempty"`
 
 	// Fields for Provider = "smolagent-cli".
-	// SmolagentBin is the path to the milk-smolagent script (default "milk-smolagent").
-	SmolagentBin string `json:"smolagent_bin,omitempty"`
 	// ActionType selects the smolagents agent class: "code" (default) or "tool_calling".
 	ActionType string `json:"action_type,omitempty"`
 	// ModelType is the smolagents model backend class name (default "OpenAIModel").
@@ -125,6 +123,11 @@ type AgentConfig struct {
 	MaxSteps int `json:"max_steps,omitempty"`
 	// AuthorizedImports lists Python packages the CodeAgent may import.
 	AuthorizedImports []string `json:"authorized_imports,omitempty"`
+
+	// ExtraArgs holds raw CLI arguments appended verbatim to the subprocess command.
+	// Used by aider-cli and any future subprocess provider to pass provider-specific
+	// flags without requiring dedicated config fields.
+	ExtraArgs []string `json:"extra_args,omitempty"`
 
 	// Limits holds optional per-agent overrides for context caps and injection limits.
 	// Nil fields fall back to the global Config defaults.
@@ -177,9 +180,14 @@ func (a AgentConfig) IsSmolagentCLI() bool {
 	return strings.ToLower(strings.TrimSpace(a.Provider)) == "smolagent-cli"
 }
 
-// IsSubprocessCLI reports whether this agent runs as a subprocess (claude-cli or smolagent-cli).
+// IsAiderCLI reports whether this agent uses the aider-cli backend.
+func (a AgentConfig) IsAiderCLI() bool {
+	return strings.ToLower(strings.TrimSpace(a.Provider)) == "aider-cli"
+}
+
+// IsSubprocessCLI reports whether this agent runs as a subprocess (claude-cli, smolagent-cli, or aider-cli).
 func (a AgentConfig) IsSubprocessCLI() bool {
-	return a.IsCLI() || a.IsSmolagentCLI()
+	return a.IsCLI() || a.IsSmolagentCLI() || a.IsAiderCLI()
 }
 
 // defaultCLIAgent is the built-in claude-cli entry added when no agent
@@ -719,20 +727,21 @@ func (c Config) effectiveAgents() []AgentConfig {
 }
 
 // ActiveAgent returns the resolved AgentConfig to use as the primary agent.
-// Skips claude-cli entries — the primary agent must be an inference-server backend.
-// Selects by name from agents (case-insensitive), falls back to the first
-// non-claude-cli entry, or returns an empty config when none exists.
+// When agent is set by name, any entry type is accepted — including subprocess
+// providers (smolagent-cli, aider-cli) — so they can be used as the primary.
+// The fallback scan still skips subprocess entries so an unconfigured setup
+// doesn't accidentally select one.
 func (c Config) ActiveAgent() AgentConfig {
 	agents := c.effectiveAgents()
 	if c.Agent != "" {
 		for _, a := range agents {
-			if strings.EqualFold(a.Name, c.Agent) && !a.IsCLI() {
-				return a
+			if strings.EqualFold(a.Name, c.Agent) {
+				return a // explicit name: always honour, even subprocess providers
 			}
 		}
 	}
 	for _, a := range agents {
-		if !a.IsCLI() {
+		if !a.IsSubprocessCLI() {
 			return a
 		}
 	}

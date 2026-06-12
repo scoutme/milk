@@ -11,6 +11,7 @@ import (
 
 const NeedOpenPrefix = "<milk:need:"
 const PerceptOpenPrefix = "<milk:percept:"
+const EscalateOpenPrefix = "<milk:escalate:"
 
 // PerceptTagPair returns the open and close tag strings for the given nonce.
 // e.g. nonce "ab1c2d" → "<milk:percept:ab1c2d>", "</milk:percept:ab1c2d>"

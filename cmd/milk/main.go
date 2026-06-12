@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/agent/smolagent"
@@ -133,26 +134,40 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	ac := applyFreshAWSCreds(cfg, activeLocalAgentConfig(cfg))
-	localAgent := local.NewFromConfig(ac)
-	if od, err := config.OtelDir(); err == nil {
-		localAgent.WithOtelDir(od)
-	}
-	localAgent.WithLogContext(cfg.Otel.LogContext)
-	localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-		sess.AddTokens(model, role, prompt, completion)
-	})
-	// Single-prompt mode: wire permissions (no interactive ask — tools are denied
-	// unless dangerously_skip_permissions is on or already granted in the store).
-	if lp, err := local.OpenPermStore(cwd); err == nil {
-		localAgent.WithPermissions(lp, nil)
-	}
-	localAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
-	if dbg, err := openLocalDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		defer dbg.Close()
-		localAgent = localAgent.WithDebugLog(dbg)
+	// Build the primary agent. When the active agent is a subprocess provider
+	// (smolagent-cli, aider-cli), bypass the HTTP local agent entirely.
+	primaryAC := cfg.ActiveAgent()
+	var subprocessPrimaryAgent *subprocess.Agent
+	var localAgent *local.Agent
+	if primaryAC.IsSubprocessCLI() {
+		switch {
+		case primaryAC.IsSmolagentCLI():
+			subprocessPrimaryAgent = smolagent.New(primaryAC)
+		case primaryAC.IsAiderCLI():
+			subprocessPrimaryAgent = aider.New(primaryAC)
+		}
+	} else {
+		ac := applyFreshAWSCreds(cfg, primaryAC)
+		localAgent = local.NewFromConfig(ac)
+		if od, err := config.OtelDir(); err == nil {
+			localAgent.WithOtelDir(od)
+		}
+		localAgent.WithLogContext(cfg.Otel.LogContext)
+		localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
+			sess.AddTokens(model, role, prompt, completion)
+		})
+		// Single-prompt mode: wire permissions (no interactive ask — tools are denied
+		// unless dangerously_skip_permissions is on or already granted in the store).
+		if lp, err := local.OpenPermStore(cwd); err == nil {
+			localAgent.WithPermissions(lp, nil)
+		}
+		localAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+		if dbg, err := openLocalDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			defer dbg.Close()
+			localAgent = localAgent.WithDebugLog(dbg)
+		}
 	}
 
 	var escalationLocalAgent *local.Agent
@@ -187,9 +202,12 @@ func run(cmd *cobra.Command, args []string) error {
 		cliAgent = cliAgent.WithDebugLog(dbg)
 	}
 
-	var smolagentAgent *smolagent.Agent
-	if escAC.IsSmolagentCLI() {
-		smolagentAgent = smolagent.New(escAC)
+	var subprocessAgent *subprocess.Agent
+	switch {
+	case escAC.IsSmolagentCLI():
+		subprocessAgent = smolagent.New(escAC)
+	case escAC.IsAiderCLI():
+		subprocessAgent = aider.New(escAC)
 	}
 
 	var cs *claudesettings.Store
@@ -197,19 +215,25 @@ func run(cmd *cobra.Command, args []string) error {
 		cs = store
 	}
 
-	// When escalation is a second local provider, ping it instead of the Claude CLI.
 	var localAvail, escalationAvail bool
-	if escalationLocalAgent != nil {
+	if subprocessPrimaryAgent != nil {
+		// Subprocess primary: ping it for localAvail; escalation is always the CLI/local.
+		localAvail = subprocessPrimaryAgent.Ping() == nil
+		if !localAvail {
+			fmt.Fprintf(os.Stderr, "%s warning: %s primary agent unreachable\n", milkTag(), primaryAC.Name)
+		}
+		escalationAvail = true // CLI/local escalation availability checked lazily
+	} else if escalationLocalAgent != nil {
 		localAvail = localAgent.Ping(ctx) == nil
 		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
 		if !localAvail && !escalationAvail {
 			return fmt.Errorf("neither local inference server nor escalation agent is available")
 		}
-	} else if smolagentAgent != nil {
+	} else if subprocessAgent != nil {
 		localAvail = localAgent.Ping(ctx) == nil
-		escalationAvail = smolagentAgent.Ping() == nil
+		escalationAvail = subprocessAgent.Ping() == nil
 		if !localAvail && !escalationAvail {
-			return fmt.Errorf("neither local inference server nor smolagent escalation agent is available")
+			return fmt.Errorf("neither local inference server nor %s escalation agent is available", escAC.Name)
 		}
 	} else {
 		localAvail, escalationAvail, err = checkAgentAvailabilityStrict(ctx, localAgent, cliAgent)
@@ -218,9 +242,10 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Router uses nil localAgent when the inference server is unreachable (skips classifier)
+	// Router uses nil localAgent when the primary is a subprocess (no classifier)
+	// or when the HTTP inference server is unreachable.
 	var routeLocalAgent *local.Agent
-	if localAvail {
+	if localAvail && localAgent != nil {
 		routeLocalAgent = localAgent
 	}
 	rtr := router.New(cfg, routeLocalAgent)
@@ -245,12 +270,16 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runLocal(ctx, cfg, sess, localAgent, mem, prompt)
+		if subprocessPrimaryAgent != nil {
+			turnErr = runSubprocessPrimary(ctx, cfg, sess, subprocessPrimaryAgent, prompt, mem)
+		} else {
+			turnErr = runLocal(ctx, cfg, sess, localAgent, mem, prompt)
+		}
 	case router.TargetEscalation:
 		if escalationLocalAgent != nil {
 			turnErr = runEscalationLocal(ctx, cfg, sess, escalationLocalAgent, mem, prompt)
-		} else if smolagentAgent != nil {
-			turnErr = runSmolagentEscalation(ctx, cfg, sess, smolagentAgent, prompt, mem)
+		} else if subprocessAgent != nil {
+			turnErr = runSubprocessEscalation(ctx, cfg, sess, subprocessAgent, prompt, mem)
 		} else {
 			turnErr = runCLIEscalation(ctx, cfg, sess, cliAgent, prompt, cs, mem)
 		}
@@ -660,8 +689,8 @@ func runCLIEscalation(ctx context.Context, cfg config.Config, sess *session.Sess
 	return runCLIEscalationWith(ctx, cfg, sess, agent, prompt, newStdinInputReader(), permContext{cs: cs}, mem, "")
 }
 
-func runSmolagentEscalation(ctx context.Context, cfg config.Config, sess *session.Session, agent *smolagent.Agent, prompt string, mem *memory.Store, outs ...io.Writer) error {
-	return runSmolagentEscalationWith(ctx, cfg, sess, agent, prompt, mem, "", outs...)
+func runSubprocessEscalation(ctx context.Context, cfg config.Config, sess *session.Session, agent *subprocess.Agent, prompt string, mem *memory.Store, outs ...io.Writer) error {
+	return runSubprocessEscalationWith(ctx, cfg, sess, agent, prompt, mem, "", outs...)
 }
 
 // runEscalationLocal handles escalated turns routed to a second local provider
@@ -972,11 +1001,10 @@ func runCLIEscalationWith(ctx context.Context, cfg config.Config, sess *session.
 	return session.Save(sess)
 }
 
-// runSmolagentEscalationWith handles escalated turns routed to a smolagent-cli agent.
-// It mirrors runCLIEscalationWith but without the permission-denial machinery —
-// smolagents controls its own Python executor and doesn't support milk's stdio
-// permission protocol.
-func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *smolagent.Agent, prompt string, mem *memory.Store, brief string, outs ...io.Writer) error {
+// runSubprocessEscalationWith handles escalated turns routed to any subprocess-backed
+// agent (smolagent-cli, aider-cli, or future providers). No permission-denial machinery
+// — subprocess agents manage their own execution environment.
+func runSubprocessEscalationWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *subprocess.Agent, prompt string, mem *memory.Store, brief string, outs ...io.Writer) error {
 	out := io.Writer(os.Stdout)
 	if len(outs) > 0 && outs[0] != nil {
 		out = outs[0]
@@ -984,7 +1012,7 @@ func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *se
 	escAC := cfg.EscalationAgentConfig()
 	escName := strings.ToLower(strings.TrimSpace(escAC.Name))
 	if escName == "" {
-		escName = "smolagent"
+		escName = "subprocess"
 	}
 	fmt.Fprint(out, bold(blue(escName+":"))+" ")
 	aw := newActivityWriter(out)
@@ -1004,7 +1032,7 @@ func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *se
 		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
 		if needStale || turnGap {
 			ctxMode = escalation.ContextModeFirst
-			obs.Debug("smolagent returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+			obs.Debug(escName+" returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
 		}
 	}
 	resuming := ctxMode == escalation.ContextModeResume
@@ -1012,7 +1040,7 @@ func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *se
 		sess.EscalationBrief = brief
 	}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
-	logStateTransition(sess, session.StateEscalation, "run smolagent escalation")
+	logStateTransition(sess, session.StateEscalation, "run "+escName+" escalation")
 	sess.ForceState(session.StateEscalation)
 
 	if sess.EscalationNonce == "" {
@@ -1049,14 +1077,14 @@ func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *se
 	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
 
 	var (
-		smolRes subprocess.ParseResult
-		runErr  error
+		res    subprocess.ParseResult
+		runErr error
 	)
 	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sess.EscalationSessionID != "") {
-		smolRes, runErr = agent.RunResume(ctx, sess.EscalationSessionID, staticCtx, dynamicCtx, prompt, aw)
+		res, runErr = agent.RunResume(ctx, sess.EscalationSessionID, staticCtx, dynamicCtx, prompt, aw)
 	} else {
 		var newSessID string
-		newSessID, smolRes, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, aw)
+		newSessID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, aw)
 		if runErr == nil {
 			sess.EscalationSessionID = newSessID
 		}
@@ -1070,20 +1098,167 @@ func runSmolagentEscalationWith(ctx context.Context, cfg config.Config, sess *se
 	if escModel == "" {
 		escModel = escAC.Name
 	}
-	obs.RecordTokens(ctx, escModel, "escalation", smolRes.InputTokens, smolRes.OutputTokens)
-	sess.AddTokensFull(escModel, "escalation", smolRes.InputTokens, smolRes.OutputTokens, smolRes.CacheCreationInputTokens, smolRes.CacheReadInputTokens)
-	obs.Debug("tokens (smolagent)", "input", smolRes.InputTokens, "output", smolRes.OutputTokens, "cost_usd", smolRes.TotalCostUSD)
+	obs.RecordTokens(ctx, escModel, "escalation", res.InputTokens, res.OutputTokens)
+	sess.AddTokensFull(escModel, "escalation", res.InputTokens, res.OutputTokens, res.CacheCreationInputTokens, res.CacheReadInputTokens)
+	obs.Debug("tokens ("+escName+")", "input", res.InputTokens, "output", res.OutputTokens, "cost_usd", res.TotalCostUSD)
 
-	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: smolRes.Text})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
 	sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
-	if smolRes.EndsWithQ {
-		logStateTransition(sess, session.StateEscalationWaiting, "smolagent escalation ended with question")
+	if res.EndsWithQ {
+		logStateTransition(sess, session.StateEscalationWaiting, escName+" escalation ended with question")
 		sess.ForceState(session.StateEscalationWaiting)
 	} else {
 		sess.EscalationBrief = ""
-		logStateTransition(sess, session.StateRouting, "smolagent escalation done")
+		logStateTransition(sess, session.StateRouting, escName+" escalation done")
 		sess.ForceState(session.StateRouting)
 	}
+	return session.Save(sess)
+}
+
+func runSubprocessPrimary(ctx context.Context, cfg config.Config, sess *session.Session, agent *subprocess.Agent, prompt string, mem *memory.Store, outs ...io.Writer) error {
+	return runSubprocessPrimaryWith(ctx, cfg, sess, agent, prompt, mem, outs...)
+}
+
+// runSubprocessPrimaryWith handles turns where the primary agent is a subprocess
+// provider (smolagent-cli, aider-cli). It mirrors runSubprocessEscalationWith but
+// records turns as AgentLocal, uses PrimarySessionID/PrimaryNonce, and transitions
+// through StateLocal rather than StateEscalation.
+func runSubprocessPrimaryWith(ctx context.Context, cfg config.Config, sess *session.Session, agent *subprocess.Agent, prompt string, mem *memory.Store, outs ...io.Writer) error {
+	out := io.Writer(os.Stdout)
+	if len(outs) > 0 && outs[0] != nil {
+		out = outs[0]
+	}
+	ac := cfg.ActiveAgent()
+	agentName := strings.ToLower(strings.TrimSpace(ac.Name))
+	if agentName == "" {
+		agentName = "primary"
+	}
+	fmt.Fprint(out, bold(green(agentName+":"))+" ")
+	aw := newActivityWriter(out)
+
+	var ctxMode escalation.ContextMode
+	switch {
+	case sess.PrimarySessionID != "":
+		ctxMode = escalation.ContextModeReturning
+	default:
+		ctxMode = escalation.ContextModeFirst
+	}
+	resuming := false // subprocess primary has no waiting state
+
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+	logStateTransition(sess, session.StateLocal, "run "+agentName+" primary")
+	sess.ForceState(session.StateLocal)
+
+	if sess.PrimaryNonce == "" {
+		sess.PrimaryNonce = claude.GenerateNonce()
+	}
+	nonce := sess.PrimaryNonce
+
+	primaryName := ac.Name
+	escalationName := cfg.EscalationAgentConfig().Name
+	if mem != nil {
+		agent = agent.WithOnPercept(func(content, consumerHint string) {
+			var consumer memory.Consumer
+			switch consumerHint {
+			case escalationName:
+				consumer = memory.ConsumerEscalation
+			default:
+				consumer = memory.ConsumerLocal
+			}
+			_, err := mem.Record(ctx, content, memory.ProducerLocal, consumer, memory.Roles{}, false)
+			_ = err
+		}, nonce, primaryName, escalationName)
+	}
+	agent = agent.WithOnNeed(func(content string) {
+		sess.CurrentNeed = content
+		sess.CurrentNeedSetAt = len(sess.History) + 1
+	}, nonce)
+	var escalationReason string
+	agent = agent.WithOnEscalate(func(reason string) {
+		escalationReason = reason
+	}, nonce)
+
+	injectInstructions := shouldInjectPrimaryMemoryInstructions(cfg, sess, resuming)
+	if injectInstructions {
+		sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount() + 1
+	}
+
+	staticCtx := escalation.BuildPrimaryStaticContext(nonce, perceptsForEscalation(cfg, mem, prompt), ctxMode, injectInstructions, primaryName, escalationName)
+	dynamicCtx := escalation.BuildPrimaryDynamicContext(sess, ctxMode)
+
+	var (
+		res    subprocess.ParseResult
+		runErr error
+	)
+	if ctxMode == escalation.ContextModeReturning && sess.PrimarySessionID != "" {
+		res, runErr = agent.RunResume(ctx, sess.PrimarySessionID, staticCtx, dynamicCtx, prompt, aw)
+	} else {
+		var newSessID string
+		newSessID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, aw)
+		if runErr == nil {
+			sess.PrimarySessionID = newSessID
+		}
+	}
+	aw.Done()
+	if runErr != nil {
+		return runErr
+	}
+
+	model := ac.Model
+	if model == "" {
+		model = ac.Name
+	}
+	obs.RecordTokens(ctx, model, "primary", res.InputTokens, res.OutputTokens)
+	sess.AddTokensFull(model, "primary", res.InputTokens, res.OutputTokens, res.CacheCreationInputTokens, res.CacheReadInputTokens)
+	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens, "cost_usd", res.TotalCostUSD)
+
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: res.Text})
+	sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
+
+	if escalationReason != "" {
+		fmt.Fprintf(out, "\n%s %s requested escalation: %s\n", milkTag(), agentName, escalationReason)
+		if sess.CurrentNeed == "" {
+			sess.CurrentNeed = prompt
+			sess.CurrentNeedSetAt = len(sess.History)
+		}
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
+		logStateTransition(sess, session.StateRouting, agentName+" self-escalation")
+		sess.ForceState(session.StateRouting)
+		session.Save(sess) //nolint:errcheck
+
+		escAC := cfg.EscalationAgentConfig()
+		if escAC.IsSubprocessCLI() {
+			// Escalation target is itself a subprocess (e.g. smolagents as escalation).
+			// Build the subprocess escalation agent and delegate.
+			var escSubAgent *subprocess.Agent
+			switch {
+			case escAC.IsSmolagentCLI():
+				escSubAgent = smolagent.New(escAC)
+			case escAC.IsAiderCLI():
+				escSubAgent = aider.New(escAC)
+			}
+			if escSubAgent != nil {
+				return runSubprocessEscalationWith(ctx, cfg, sess, escSubAgent, prompt, mem, escalationReason, out)
+			}
+		}
+		if !escAC.IsCLI() {
+			freshEscAC := applyFreshAWSCreds(cfg, escAC)
+			if freshEscAC.URL != "" {
+				escAgent := local.NewFromConfig(freshEscAC).AsEscalationTarget(freshEscAC.Name)
+				return runEscalationLocal(ctx, cfg, sess, escAgent, mem, prompt, out)
+			}
+		}
+		escalateAgent := newCLIAgent(cliAgentConfig(cfg))
+		escalateAgent = applyAWSCreds(cfg, escalateAgent)
+		var localCs *claudesettings.Store
+		if cwd, err := os.Getwd(); err == nil {
+			localCs, _ = claudesettings.Open(cwd)
+		}
+		return runCLIEscalationWith(ctx, cfg, sess, escalateAgent, prompt, newStdinInputReader(), permContext{cs: localCs}, mem, escalationReason, out)
+	}
+
+	logStateTransition(sess, session.StateRouting, agentName+" primary done")
+	sess.ForceState(session.StateRouting)
 	return session.Save(sess)
 }
 
@@ -1172,6 +1347,33 @@ func shouldInjectMemoryInstructions(cfg config.Config, sess *session.Session, re
 		return true
 	}
 	bytesSince := sess.EscalationOutputBytesSince(sess.MemoryInstructionInjectedAt)
+	if byteThreshold > 0 && bytesSince >= byteThreshold {
+		return true
+	}
+	return false
+}
+
+// shouldInjectPrimaryMemoryInstructions mirrors shouldInjectMemoryInstructions
+// for the subprocess primary path, using LocalTurnCount and LocalMemoryInstructionInjectedAt.
+func shouldInjectPrimaryMemoryInstructions(cfg config.Config, sess *session.Session, resuming bool) bool {
+	if !resuming {
+		return true
+	}
+	ac := cfg.ActiveAgent()
+	turnThreshold := cfg.AgentMemoryReinjectionTurnThreshold(ac, true)
+	byteThreshold := cfg.AgentMemoryReinjectionByteThreshold(ac, true)
+	if turnThreshold == 0 && byteThreshold == 0 {
+		return false
+	}
+	injectedAt := sess.LocalMemoryInstructionInjectedAt
+	if injectedAt > 0 {
+		injectedAt-- // convert from 1-based to 0-based turn count
+	}
+	turnsSince := sess.LocalTurnCount() - injectedAt
+	if turnThreshold > 0 && turnsSince >= turnThreshold {
+		return true
+	}
+	bytesSince := sess.LocalOutputBytesSince(injectedAt)
 	if byteThreshold > 0 && bytesSince >= byteThreshold {
 		return true
 	}
