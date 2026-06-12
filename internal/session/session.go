@@ -86,7 +86,7 @@ type Session struct {
 	EscalationNonce string `json:"escalation_nonce,omitempty"`
 
 	// PrimarySessionID is the subprocess session ID for a subprocess primary agent
-	// (smolagent-cli, aider-cli). Mirrors EscalationSessionID for the primary slot.
+	// (subprocess, aider-cli). Mirrors EscalationSessionID for the primary slot.
 	PrimarySessionID string `json:"primary_session_id,omitempty"`
 	// PrimaryNonce is the stable nonce for the primary subprocess agent's instruction
 	// blocks. Generated once on the first primary-subprocess turn, then reused.

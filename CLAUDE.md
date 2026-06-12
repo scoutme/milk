@@ -27,7 +27,7 @@ internal/agent/local/         # OpenAI-compat client + Bedrock Converse native p
 internal/agent/claude/        # claude CLI subprocess + stream-json parser
 internal/agent/subprocess/    # generic subprocess agent (NDJSON protocol); base for aider and smolagent
 internal/agent/aider/         # aider-cli provider (wraps subprocess agent)
-internal/agent/smolagent/     # smolagent-cli provider (wraps subprocess agent)
+internal/agent/smolagent/     # subprocess provider (wraps subprocess agent)
 internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)

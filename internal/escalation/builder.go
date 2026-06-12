@@ -120,7 +120,7 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 }
 
 // BuildPrimaryDynamicContext assembles the turn-specific context for a subprocess
-// primary agent (smolagent-cli, aider-cli). Unlike BuildDynamicContext it does NOT
+// primary agent (subprocess, aider-cli). Unlike BuildDynamicContext it does NOT
 // inject LastLocalSummary (the agent's own prior turns — redundant and large); instead
 // it injects LastEscalationSummary so the primary knows what the escalation agent did.
 //

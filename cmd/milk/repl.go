@@ -4692,13 +4692,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	// Build the primary agent. When the active agent is a subprocess provider
-	// (smolagent-cli, aider-cli), bypass the HTTP local agent.
+	// (subprocess, aider-cli), bypass the HTTP local agent.
 	tuiPrimaryAC := cfg.ActiveAgent()
 	var localAgent *local.Agent
 	var tuiSubprocessPrimaryAgent *subprocess.Agent
-	if tuiPrimaryAC.IsSubprocessCLI() {
+	if tuiPrimaryAC.IsExternalProcess() && !tuiPrimaryAC.IsCLI() {
 		switch {
-		case tuiPrimaryAC.IsSmolagentCLI():
+		case tuiPrimaryAC.IsSubprocess():
 			tuiSubprocessPrimaryAgent = smolagent.New(tuiPrimaryAC)
 		case tuiPrimaryAC.IsAiderCLI():
 			tuiSubprocessPrimaryAgent = aider.New(tuiPrimaryAC)
@@ -4721,18 +4721,18 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	// Build the escalation agent: local provider, subprocess (smolagent-cli, aider-cli), or claude-cli (default).
+	// Build the escalation agent: local provider, subprocess (subprocess, aider-cli), or claude-cli (default).
 	tuiEscAC := cfg.EscalationAgentConfig()
 	var escalationLocalAgent *local.Agent
 	var tuiSubprocessAgent *subprocess.Agent
 	switch {
-	case tuiEscAC.IsSmolagentCLI():
+	case tuiEscAC.IsSubprocess():
 		tuiSubprocessAgent = smolagent.New(tuiEscAC)
 	case tuiEscAC.IsAiderCLI():
 		tuiSubprocessAgent = aider.New(tuiEscAC)
 	default:
 	}
-	if !tuiEscAC.IsSubprocessCLI() {
+	if !tuiEscAC.IsExternalProcess() || tuiEscAC.IsCLI() {
 		escAC := applyFreshAWSCreds(cfg, tuiEscAC)
 		if escAC.URL != "" {
 			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)

@@ -209,10 +209,10 @@ func run(cmd *cobra.Command, args []string) error {
 // Also returns the underlying *local.Agent when it exists (needed for the router classifier).
 func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *session.Session) (TurnRunner, *local.Agent, error) {
 	primaryAC := cfg.ActiveAgent()
-	if primaryAC.IsSubprocessCLI() {
+	if primaryAC.IsExternalProcess() && !primaryAC.IsCLI() {
 		var sp *subprocess.Agent
 		switch {
-		case primaryAC.IsSmolagentCLI():
+		case primaryAC.IsSubprocess():
 			sp = smolagent.New(primaryAC)
 		case primaryAC.IsAiderCLI():
 			sp = aider.New(primaryAC)
@@ -252,10 +252,10 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, sess *session.Session) (TurnRunner, error) {
 	escAC := cfg.EscalationAgentConfig()
 
-	if escAC.IsSubprocessCLI() {
+	if escAC.IsExternalProcess() && !escAC.IsCLI() {
 		var sp *subprocess.Agent
 		switch {
-		case escAC.IsSmolagentCLI():
+		case escAC.IsSubprocess():
 			sp = smolagent.New(escAC)
 		case escAC.IsAiderCLI():
 			sp = aider.New(escAC)

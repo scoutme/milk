@@ -75,7 +75,7 @@ internal/
   agent/subprocess/ generic subprocess agent: NDJSON stream protocol, tag interception
                     (<milk:need:>, <milk:percept:>, <milk:escalate:>)
   agent/aider/      aider-cli provider (wraps subprocess agent)
-  agent/smolagent/  smolagent-cli provider (wraps subprocess agent)
+  agent/smolagent/  subprocess provider (wraps subprocess agent)
   escalation/       context builders: static instruction block + dynamic summary sent to escalation agent
   memory/           Percept store; NREM decay/prune/promote consolidation (~/.milk/memory/)
   obs/              OpenTelemetry file exporters (~/.milk/otel/)

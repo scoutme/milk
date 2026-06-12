@@ -358,7 +358,7 @@ Expected: aider's response streamed into the TUI, with file-edit hints shown for
 
 ## smolagents (HuggingFace)
 
-**Provider**: `smolagent-cli` — runs `milk-smolagent` as a subprocess. The adapter script (in `scripts/`) wraps HuggingFace smolagents and translates its stream events to milk's NDJSON protocol.
+**Provider**: `subprocess` — runs `milk-smolagent` as a subprocess. The adapter script (in `scripts/`) wraps HuggingFace smolagents and translates its stream events to milk's NDJSON protocol.
 
 ### Step 1 — Install smolagents
 
@@ -389,7 +389,7 @@ milk-smolagent --help
 ```json
 {
   "name": "smolagent",
-  "provider": "smolagent-cli",
+  "provider": "subprocess",
   "model_type": "LiteLLMModel",
   "model": "openai/qwen2.5-coder-7b-instruct",
   "url": "http://localhost:8080/v1",
@@ -409,7 +409,7 @@ Set this as the escalation agent in the root config:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `provider` | string | required | Must be `"smolagent-cli"` |
+| `provider` | string | required | Must be `"subprocess"` |
 | `bin` | string | `"milk-smolagent"` | Path to the adapter script |
 | `model_type` | string | `"LiteLLMModel"` | smolagents model driver: `LiteLLMModel`, `HfApiModel`, `TransformersModel` |
 | `model` | string | required | Model identifier passed to `--model-id` |
