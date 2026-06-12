@@ -285,13 +285,13 @@ func TestEval_EscalationLocal(t *testing.T) {
 		baseSumm := srv.lastSummary()
 		baseHasEsc := srv.hasEscalationTurns(escalationReply)
 
-		// ── new path: live runEscalationLocal ─────────────────────────────
+		// ── new path: live runEscalation (via localRunner) ───────────────
 		newSess := *orig
 		newSess.History = append([]session.Turn(nil), orig.History...)
 		newAgent := local.NewFromConfig(cfg.EscalationAgentConfig()).AsEscalationTarget("esc")
 		var newOut strings.Builder
-		if err := runEscalationLocal(context.Background(), cfg, &newSess, newAgent, nil, prompt, &newOut); err != nil {
-			t.Errorf("scenario %q: runEscalationLocal: %v", name, err)
+		if err := runEscalation(context.Background(), cfg, &newSess, newLocalRunner(newAgent, "esc"), "", nil, prompt, &newOut); err != nil {
+			t.Errorf("scenario %q: runEscalation: %v", name, err)
 		}
 		newChars := srv.lastChars()
 		newSumm := srv.lastSummary()
