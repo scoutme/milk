@@ -1,0 +1,257 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["smolagents[litellm]"]
+# ///
+"""
+milk-smolagent — subprocess bridge between milk and HuggingFace smolagents.
+
+Implements the milk subprocess protocol: emits NDJSON on stdout so that
+milk's Go subprocess runner can parse it. Designed to be invoked per-turn
+by milk's smolagent-cli provider.
+
+Install: pip install smolagents
+Usage: milk-smolagent [options] -- "user prompt"
+"""
+
+import argparse
+import json
+import sys
+import os
+
+
+def emit(obj: dict):
+    print(json.dumps(obj), flush=True)
+
+
+def build_model(model_type: str, model_id: str, api_base: str | None, api_key: str | None):
+    from smolagents import (
+        InferenceClientModel,
+        OpenAIServerModel,
+        LiteLLMModel,
+        TransformersModel,
+    )
+    mt = model_type.lower()
+    if mt in ("openaimodel", "openaiservicemodel"):
+        kwargs = {"model_id": model_id}
+        if api_base:
+            kwargs["api_base"] = api_base
+        if api_key:
+            kwargs["api_key"] = api_key
+        return OpenAIServerModel(**kwargs)
+    elif mt == "inferenceclientmodel":
+        kwargs = {"model_id": model_id}
+        if api_key:
+            kwargs["token"] = api_key
+        return InferenceClientModel(**kwargs)
+    elif mt == "litellmmodel":
+        kwargs = {"model_id": model_id}
+        if api_base:
+            kwargs["api_base"] = api_base
+        if api_key:
+            kwargs["api_key"] = api_key
+        return LiteLLMModel(**kwargs)
+    elif mt == "transformersmodel":
+        return TransformersModel(model_id=model_id)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type!r}")
+
+
+def run(args):
+    # Read and concatenate context files (static + dynamic system prompt injection).
+    instructions_parts = []
+    for path in args.append_system_prompt_file or []:
+        try:
+            with open(path) as f:
+                instructions_parts.append(f.read().strip())
+        except OSError:
+            pass
+    instructions = "\n\n".join(p for p in instructions_parts if p) or None
+
+    model = build_model(args.model_type, args.model_id or "", args.api_base, args.api_key)
+
+    from smolagents import CodeAgent, ToolCallingAgent
+    from smolagents.tools import Tool
+
+    # Resolve built-in tool names to instances.
+    tools = []
+    for name in args.tools or []:
+        try:
+            tool = _resolve_tool(name)
+            if tool is not None:
+                tools.append(tool)
+        except Exception as e:
+            emit({"type": "system", "warning": f"could not load tool {name!r}: {e}"})
+
+    action_type = (args.action_type or "code").lower()
+    if action_type == "code":
+        agent = CodeAgent(
+            tools=tools,
+            model=model,
+            max_steps=args.max_steps or 15,
+            additional_authorized_imports=args.authorized_imports or [],
+            verbosity_level=0,
+        )
+    else:
+        agent = ToolCallingAgent(
+            tools=tools,
+            model=model,
+            max_steps=args.max_steps or 15,
+            verbosity_level=0,
+        )
+
+    if instructions:
+        existing = agent.prompt_templates.get("system_prompt", "") or ""
+        agent.prompt_templates["system_prompt"] = existing + "\n\n" + instructions
+
+    emit({
+        "type": "system",
+        "session_id": args.session_id or "",
+        "agent": "smolagent",
+        "version": "1",
+    })
+
+    prompt = " ".join(args.prompt)
+    input_tokens = 0
+    output_tokens = 0
+
+    try:
+        for event in agent.run(prompt, stream=True, reset=True):
+            _handle_event(event)
+            # Accumulate token counts if available.
+            if hasattr(event, "token_usage") and event.token_usage:
+                tu = event.token_usage
+                input_tokens += getattr(tu, "input_tokens", 0) or 0
+                output_tokens += getattr(tu, "output_tokens", 0) or 0
+    except Exception as exc:
+        emit({"type": "result", "is_error": True, "error": str(exc)})
+        sys.exit(1)
+
+    emit({
+        "type": "result",
+        "is_error": False,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    })
+
+
+def _handle_event(event):
+    """Translate a smolagents StreamEvent to milk NDJSON."""
+    type_name = type(event).__name__
+
+    if type_name == "ActionStep":
+        step_num = getattr(event, "step_number", 0) or 0
+        thought = ""
+        code = ""
+        # model_output_message may contain the reasoning/code.
+        msg = getattr(event, "model_output_message", None)
+        if msg is not None:
+            content = getattr(msg, "content", None)
+            if isinstance(content, str):
+                thought = content
+            elif isinstance(content, list):
+                for block in content:
+                    if getattr(block, "type", None) == "text":
+                        thought = getattr(block, "text", "") or ""
+                        break
+
+        # tool_calls carry the code for CodeAgent.
+        tool_calls = getattr(event, "tool_calls", None) or []
+        for tc in tool_calls:
+            args = getattr(tc, "arguments", {}) or {}
+            if isinstance(args, dict):
+                code = args.get("code", "") or args.get("answer", "") or ""
+            elif isinstance(args, str):
+                code = args
+            if code:
+                break
+
+        if thought or code:
+            emit({"type": "step", "number": step_num, "thought": thought, "code": code})
+
+        obs = getattr(event, "observations", None)
+        if obs:
+            emit({"type": "observation", "number": step_num, "content": str(obs)})
+
+    elif type_name == "FinalAnswerStep":
+        answer = getattr(event, "final_answer", None)
+        if answer is not None:
+            emit({"type": "final_answer", "text": str(answer)})
+
+    elif type_name == "PlanningStep":
+        plan = getattr(event, "plan", None)
+        if plan:
+            emit({"type": "text_delta", "text": f"\n[plan]\n{plan}\n"})
+
+    # ToolCall, ToolOutput, ActionOutput — absorbed into ActionStep above; skip standalone.
+
+
+def _resolve_tool(name: str):
+    """Return a smolagents Tool instance for a built-in tool name, or None."""
+    name_lower = name.lower()
+    try:
+        if name_lower == "web_search":
+            from smolagents.tools import DuckDuckGoSearchTool
+            return DuckDuckGoSearchTool()
+        elif name_lower == "visit_webpage":
+            from smolagents.tools import VisitWebpageTool
+            return VisitWebpageTool()
+        elif name_lower == "python_interpreter":
+            from smolagents.tools import PythonInterpreterTool
+            return PythonInterpreterTool()
+        elif name_lower == "final_answer":
+            return None  # built-in, always present
+    except ImportError:
+        pass
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="milk subprocess bridge for smolagents",
+        add_help=True,
+    )
+    parser.add_argument("--model-type", default="OpenAIModel",
+                        help="smolagents model class (OpenAIModel, InferenceClientModel, LiteLLMModel, TransformersModel)")
+    parser.add_argument("--model-id", default="",
+                        help="model identifier / HF repo ID")
+    parser.add_argument("--api-base", default=None,
+                        help="inference server base URL")
+    parser.add_argument("--api-key", default=None,
+                        help="API key / Bearer token")
+    parser.add_argument("--action-type", default="code",
+                        choices=["code", "tool_calling"],
+                        help="agent class: code (CodeAgent) or tool_calling (ToolCallingAgent)")
+    parser.add_argument("--tools", nargs="*", default=[],
+                        help="built-in smolagents tool names to enable")
+    parser.add_argument("--authorized-imports", nargs="*", default=[],
+                        help="Python packages the CodeAgent may import")
+    parser.add_argument("--max-steps", type=int, default=15,
+                        help="maximum ReAct loop steps")
+    parser.add_argument("--session-id", default="",
+                        help="informational session ID echoed in the system event")
+    parser.add_argument("--append-system-prompt-file", action="append",
+                        dest="append_system_prompt_file", metavar="PATH",
+                        help="file whose contents are appended to the system prompt (may be repeated)")
+    parser.add_argument("--verbosity", type=int, default=1,
+                        help="0=quiet, 1=steps, 2=full")
+    parser.add_argument("prompt", nargs=argparse.REMAINDER,
+                        help="user prompt (after --)")
+
+    args = parser.parse_args()
+
+    # Strip leading "--" separator that milk passes before the prompt.
+    if args.prompt and args.prompt[0] == "--":
+        args.prompt = args.prompt[1:]
+
+    if not args.prompt:
+        parser.error("prompt is required")
+
+    try:
+        run(args)
+    except Exception as exc:
+        emit({"type": "result", "is_error": True, "error": str(exc)})
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -4,7 +4,8 @@ Switch models, not context. Routes prompts between a local LLM (any OpenAI-compa
 
 ## Quick orientation
 
-- [docs/setup.md](docs/setup.md) — inference server setup, tested models, local testing procedure
+- [docs/setup.md](docs/setup.md) — local inference server setup (llama.cpp), tested models, local testing procedure
+- [docs/providers.md](docs/providers.md) — all agent/provider config (Claude CLI, Bedrock, OpenRouter, smolagents, …), memory/context tuning, remote oversight
 - [docs/spec.md](docs/spec.md) — full product and architecture spec
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records (why things are the way they are)
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch naming, conventional commits, per-step branch plan
@@ -12,8 +13,10 @@ Switch models, not context. Routes prompts between a local LLM (any OpenAI-compa
 ## Project structure
 
 ```
-cmd/milk/main.go              # Cobra root command, single-prompt mode
+cmd/milk/main.go              # Cobra root command, single-prompt mode; buildPrimaryRunner / buildEscalationRunner
 cmd/milk/repl.go              # bubbletea TUI (transcript + textarea + status bar)
+cmd/milk/runner.go            # TurnRunner interface + localRunner / cliRunner / subprocessRunner implementations
+cmd/milk/dispatch.go          # runPrimary / runEscalation — role-specific session bookkeeping
 cmd/milk/interactive.go       # slash commands, tab completion, prompt label
 cmd/milk/ansi.go              # ANSI color helpers and spinner
 cmd/milk/panel_memory.go      # right-side memory panel (open by default, toggle /panel memory)
@@ -22,6 +25,9 @@ internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)
 internal/agent/local/         # OpenAI-compat client + Bedrock Converse native path + auth transports (SigV4, Bearer, custom headers) + tool loop + stream detector
 internal/agent/claude/        # claude CLI subprocess + stream-json parser
+internal/agent/subprocess/    # generic subprocess agent (NDJSON protocol); base for aider and smolagent
+internal/agent/aider/         # aider-cli provider (wraps subprocess agent)
+internal/agent/smolagent/     # subprocess provider (wraps subprocess agent)
 internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)

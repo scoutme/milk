@@ -910,3 +910,62 @@ func sendControlResponse(w io.Writer, requestID, behavior string) {
 	}
 	fmt.Fprintf(w, "%s\n", b) //nolint:errcheck
 }
+
+// ParseAskUserQuestionInput extracts the questions array from an AskUserQuestion
+// control_request input map. Returns nil when the structure is absent or malformed.
+func ParseAskUserQuestionInput(input map[string]any) []AskUserQuestion {
+	raw, _ := input["questions"].([]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]AskUserQuestion, 0, len(raw))
+	for _, r := range raw {
+		m, _ := r.(map[string]any)
+		if m == nil {
+			continue
+		}
+		q := AskUserQuestion{
+			Question:    stringField(m, "question"),
+			Header:      stringField(m, "header"),
+			MultiSelect: boolField(m, "multiSelect"),
+		}
+		if opts, ok := m["options"].([]any); ok {
+			for _, o := range opts {
+				om, _ := o.(map[string]any)
+				if om == nil {
+					continue
+				}
+				q.Options = append(q.Options, AskUserQuestionOption{
+					Label:       stringField(om, "label"),
+					Description: stringField(om, "description"),
+				})
+			}
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// AskUserQuestion is a single question from an AskUserQuestion tool call.
+type AskUserQuestion struct {
+	Question    string
+	Header      string
+	MultiSelect bool
+	Options     []AskUserQuestionOption
+}
+
+// AskUserQuestionOption is one selectable option in an AskUserQuestion.
+type AskUserQuestionOption struct {
+	Label       string
+	Description string
+}
+
+func stringField(m map[string]any, key string) string {
+	v, _ := m[key].(string)
+	return v
+}
+
+func boolField(m map[string]any, key string) bool {
+	v, _ := m[key].(bool)
+	return v
+}

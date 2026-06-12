@@ -112,6 +112,23 @@ type AgentConfig struct {
 	// AddDirs is a list of extra directories to pass with --add-dir.
 	AddDirs []string `json:"add_dirs,omitempty"`
 
+	// Fields for Provider = "subprocess".
+	// ActionType selects the smolagents agent class: "code" (default) or "tool_calling".
+	ActionType string `json:"action_type,omitempty"`
+	// ModelType is the smolagents model backend class name (default "OpenAIModel").
+	ModelType string `json:"model_type,omitempty"`
+	// SmolagentTools is the list of built-in smolagents tool names to enable.
+	SmolagentTools []string `json:"smolagent_tools,omitempty"`
+	// MaxSteps caps the smolagents ReAct loop (default 15).
+	MaxSteps int `json:"max_steps,omitempty"`
+	// AuthorizedImports lists Python packages the CodeAgent may import.
+	AuthorizedImports []string `json:"authorized_imports,omitempty"`
+
+	// ExtraArgs holds raw CLI arguments appended verbatim to the subprocess command.
+	// Used by aider-cli, subprocess, and any future external-process provider to pass provider-specific
+	// flags without requiring dedicated config fields.
+	ExtraArgs []string `json:"extra_args,omitempty"`
+
 	// Limits holds optional per-agent overrides for context caps and injection limits.
 	// Nil fields fall back to the global Config defaults.
 	Limits *AgentLimits `json:"limits,omitempty"`
@@ -156,6 +173,21 @@ type AgentLimits struct {
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
 func (a AgentConfig) IsCLI() bool {
 	return strings.ToLower(strings.TrimSpace(a.Provider)) == "claude-cli"
+}
+
+// IsSubprocess reports whether this agent uses the generic subprocess provider.
+func (a AgentConfig) IsSubprocess() bool {
+	return strings.ToLower(strings.TrimSpace(a.Provider)) == "subprocess"
+}
+
+// IsAiderCLI reports whether this agent uses the aider-cli backend.
+func (a AgentConfig) IsAiderCLI() bool {
+	return strings.ToLower(strings.TrimSpace(a.Provider)) == "aider-cli"
+}
+
+// IsExternalProcess reports whether this agent runs as an external process (claude-cli, subprocess, or aider-cli).
+func (a AgentConfig) IsExternalProcess() bool {
+	return a.IsCLI() || a.IsSubprocess() || a.IsAiderCLI()
 }
 
 // defaultCLIAgent is the built-in claude-cli entry added when no agent
@@ -695,20 +727,21 @@ func (c Config) effectiveAgents() []AgentConfig {
 }
 
 // ActiveAgent returns the resolved AgentConfig to use as the primary agent.
-// Skips claude-cli entries — the primary agent must be an inference-server backend.
-// Selects by name from agents (case-insensitive), falls back to the first
-// non-claude-cli entry, or returns an empty config when none exists.
+// When agent is set by name, any entry type is accepted — including subprocess
+// providers (subprocess, aider-cli) — so they can be used as the primary.
+// The fallback scan still skips subprocess entries so an unconfigured setup
+// doesn't accidentally select one.
 func (c Config) ActiveAgent() AgentConfig {
 	agents := c.effectiveAgents()
 	if c.Agent != "" {
 		for _, a := range agents {
-			if strings.EqualFold(a.Name, c.Agent) && !a.IsCLI() {
-				return a
+			if strings.EqualFold(a.Name, c.Agent) {
+				return a // explicit name: always honour, even subprocess providers
 			}
 		}
 	}
 	for _, a := range agents {
-		if !a.IsCLI() {
+		if !a.IsExternalProcess() {
 			return a
 		}
 	}

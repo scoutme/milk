@@ -51,6 +51,17 @@ func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injec
 	return b.String()
 }
 
+// BuildPrimaryStaticContext is like BuildStaticContext but prepends the escalation
+// instruction for subprocess primary agents (aider, smolagents). It is not included
+// for escalation agents, which should never self-escalate.
+func BuildPrimaryStaticContext(nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+	base := BuildStaticContext(nonce, percepts, mode, injectInstructions, primaryName, escalationName)
+	if base == "" {
+		return ""
+	}
+	return EscalateInstruction(nonce) + base
+}
+
 // BuildDynamicContext assembles the turn-specific part of the system-prompt context
 // for a CLI escalation. It includes everything that may change each turn: the identity
 // block, escalation brief, current need, and the rolling primary-agent summary.
@@ -108,6 +119,44 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 	return b.String()
 }
 
+// BuildPrimaryDynamicContext assembles the turn-specific context for a subprocess
+// primary agent (subprocess, aider-cli). Unlike BuildDynamicContext it does NOT
+// inject LastLocalSummary (the agent's own prior turns — redundant and large); instead
+// it injects LastEscalationSummary so the primary knows what the escalation agent did.
+//
+// ContextModeFirst:     identity · current need
+// ContextModeReturning: identity · current need · escalation summary (if changed)
+// ContextModeResume:    "" (primary subprocess has no waiting state; never called)
+func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string {
+	if mode == ContextModeResume {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(identityBlock)
+
+	if sess.CurrentNeed != "" {
+		var turnsAgo int
+		if sess.CurrentNeedSetAt > 0 {
+			turnsAgo = len(sess.History) - (sess.CurrentNeedSetAt - 1)
+		}
+		if turnsAgo >= 4 {
+			b.WriteString("[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n")
+		} else {
+			b.WriteString("[Current user goal]\n")
+		}
+		b.WriteString(sess.CurrentNeed)
+		b.WriteString("\n\n")
+	}
+
+	if mode == ContextModeReturning && sess.LastEscalationSummary != "" {
+		b.WriteString("[Recent escalation agent activity]\n")
+		b.WriteString(sess.LastEscalationSummary)
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 // BuildContext is the legacy single-string builder kept for callers that have not
 // yet been migrated to the split BuildStaticContext/BuildDynamicContext API.
 // Deprecated: prefer BuildStaticContext + BuildDynamicContext to enable per-part
@@ -141,6 +190,22 @@ func FormatPercepts(percepts []string) string {
 
 // formatPercepts is the internal alias used by BuildStaticContext.
 func formatPercepts(percepts []string) string { return FormatPercepts(percepts) }
+
+// EscalateInstruction returns the system-prompt fragment that tells a subprocess
+// primary agent how to request escalation to the escalation agent. It is only
+// included in the system prompt sent to subprocess primaries (aider, smolagents),
+// not to the escalation agent itself.
+func EscalateInstruction(nonce string) string {
+	openTag := "<milk:escalate:" + nonce + ">"
+	closeTag := "</milk:escalate:" + nonce + ">"
+	return "[Milk escalation]\n" +
+		"You are a primary agent. If the user's request requires capabilities you do not have " +
+		"(e.g. web search, GitHub API, external tools, complex multi-step reasoning beyond your scope), " +
+		"emit the following tag and then stop — do not attempt the task yourself:\n" +
+		"  " + openTag + "one sentence explaining why escalation is needed" + closeTag + "\n" +
+		"The tag is intercepted by milk and triggers hand-off to the escalation agent. " +
+		"It is never shown to the user. Only emit it when you genuinely cannot fulfil the request.\n\n"
+}
 
 // NeedInstruction returns the system-prompt fragment that instructs both agents
 // to emit a <milk:need:NONCE> tag when the user switches context, so milk can
