@@ -212,27 +212,28 @@ func (a *Agent) RunResume(ctx context.Context, claudeSessionID, staticContext, d
 	return a.run(ctx, args, out)
 }
 
-// appendContextFiles writes non-empty context strings to temp files, appends the
-// corresponding --append-system-prompt-file flags to args, and returns a cleanup
-// function that removes the temp files. The caller must call cleanup() when done.
+// appendContextFiles writes the combined context to a single temp file and appends
+// --append-system-prompt-file to args. The Claude CLI only honours the last
+// --append-system-prompt-file flag when multiple are provided, so static and
+// dynamic context must be concatenated into one file. The caller must call
+// the returned cleanup function when done.
 func appendContextFiles(args []string, staticContext, dynamicContext string) ([]string, func()) {
-	var paths []string
-	for _, content := range []string{staticContext, dynamicContext} {
-		if content == "" {
-			continue
+	combined := staticContext
+	if dynamicContext != "" {
+		if combined != "" {
+			combined += "\n"
 		}
-		f, err := writeTempContext(content)
-		if err != nil {
-			continue
-		}
-		paths = append(paths, f)
-		args = append(args, "--append-system-prompt-file", f)
+		combined += dynamicContext
 	}
-	return args, func() {
-		for _, p := range paths {
-			os.Remove(p) //nolint:errcheck
-		}
+	if combined == "" {
+		return args, func() {}
 	}
+	f, err := writeTempContext(combined)
+	if err != nil {
+		return args, func() {}
+	}
+	args = append(args, "--append-system-prompt-file", f)
+	return args, func() { os.Remove(f) } //nolint:errcheck
 }
 
 // writeTempContext writes content to a temp file and returns its path.

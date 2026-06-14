@@ -858,6 +858,136 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// ValidationWarning describes a configuration problem found at startup.
+type ValidationWarning struct {
+	Agent   string // agent name (empty = global)
+	Message string
+}
+
+func (w ValidationWarning) String() string {
+	if w.Agent == "" {
+		return w.Message
+	}
+	return fmt.Sprintf("agent %q: %s", w.Agent, w.Message)
+}
+
+// knownProviders is the set of built-in provider strings (lowercased).
+var knownProviders = map[string]bool{
+	"":           true, // "" == local
+	"local":      true,
+	"bedrock":    true,
+	"claude-cli": true,
+	"aider-cli":  true,
+	"subprocess": true,
+}
+
+// requiresURL returns true for providers that need an HTTP url.
+func requiresURL(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "claude-cli":
+		return false
+	default:
+		return true
+	}
+}
+
+// requiresAuth returns true for providers that need api_key or token_cmd.
+func requiresAuth(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "", "local", "bedrock", "claude-cli", "aider-cli", "subprocess":
+		return false
+	default: // bearer or any custom bearer-style name
+		return true
+	}
+}
+
+// Validate checks the loaded configuration for common misconfigurations and
+// returns a slice of human-readable warnings. It never hard-fails; the caller
+// decides how to surface them (stderr at startup, TUI transcript, etc.).
+func Validate(cfg Config) []ValidationWarning {
+	var ws []ValidationWarning
+	warn := func(agent, msg string) {
+		ws = append(ws, ValidationWarning{Agent: agent, Message: msg})
+	}
+
+	effective := cfg.effectiveAgents()
+
+	for _, a := range effective {
+		p := strings.ToLower(strings.TrimSpace(a.Provider))
+
+		// Unknown provider string (skip the built-in claude placeholder).
+		if a.Name != "claude" || a.Provider != "" {
+			if !knownProviders[p] {
+				// custom bearer-style names are acceptable — only warn for obvious typos.
+				// We can't distinguish "mybearer" from a typo without more context,
+				// so we skip this check for non-empty unknown strings.
+				_ = p
+			}
+		}
+
+		// HTTP providers must have a url.
+		if requiresURL(a.Provider) && a.URL == "" {
+			warn(a.Name, fmt.Sprintf("url is required for provider %q — run /init or edit config", providerDisplay(a.Provider)))
+		}
+
+		// Auth-requiring providers must have api_key or token_cmd.
+		if requiresAuth(a.Provider) && a.APIKey == "" && a.TokenCmd == "" {
+			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /init or edit config", providerDisplay(a.Provider)))
+		}
+	}
+
+	// Validate agent selector resolves.
+	if cfg.Agent != "" {
+		found := false
+		for _, a := range effective {
+			if strings.EqualFold(a.Name, cfg.Agent) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			warn("", fmt.Sprintf("agent %q not found in agents list — run /init or edit config", cfg.Agent))
+		}
+	}
+
+	// Validate escalation_agent selector resolves (when explicitly set).
+	if cfg.EscalationAgent != "" && !strings.EqualFold(cfg.EscalationAgent, "claude") {
+		found := false
+		for _, a := range effective {
+			if strings.EqualFold(a.Name, cfg.EscalationAgent) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /init or edit config", cfg.EscalationAgent))
+		}
+	}
+
+	return ws
+}
+
+func providerDisplay(p string) string {
+	if p == "" {
+		return "local"
+	}
+	return p
+}
+
+// InitConfig builds a minimal valid Config from one primary agent entry and an
+// optional escalation agent entry. It sets sensible defaults (default_route,
+// otel) and selects the primary agent by name. The result is ready to Save().
+func InitConfig(primary AgentConfig, escalation *AgentConfig) Config {
+	cfg := defaults()
+	cfg.Agents = []AgentConfig{primary}
+	cfg.Agent = primary.Name
+	if escalation != nil {
+		cfg.Agents = append(cfg.Agents, *escalation)
+		cfg.EscalationAgent = escalation.Name
+	}
+	return cfg
+}
+
 func Save(cfg Config) error {
 	dir, err := Dir()
 	if err != nil {

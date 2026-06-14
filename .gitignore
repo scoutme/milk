@@ -21,3 +21,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# aider
+.aider.*

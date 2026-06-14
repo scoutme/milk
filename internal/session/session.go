@@ -103,6 +103,11 @@ type Session struct {
 	// Mirrors the CurrentNeedSetAt encoding to avoid the turn-0 collision.
 	LocalMemoryInstructionInjectedAt int `json:"local_memory_instruction_injected_at,omitempty"`
 
+	// ForceFreshEscalation is a transient flag set by /escalate fresh to force
+	// ContextModeFirst on the next escalation turn, bypassing the normal
+	// Returning/Resume detection. Cleared immediately after use. Not persisted.
+	ForceFreshEscalation bool `json:"-"`
+
 	// Tokens holds cumulative token usage for this session, keyed by "model\x00role".
 	// Persisted so /usage can show totals from prior runs of the same session.
 	Tokens map[string]*TokenUsage `json:"tokens,omitempty"`
@@ -159,12 +164,13 @@ func emptyEscalationSession(turns []Turn, charThreshold int) bool {
 }
 
 // lastEscalationBoundary returns the index of the first turn after the most recent
-// Claude session ends (i.e. the first local or user turn after the last Claude
-// assistant turn). Returns 0 when there are no Claude turns.
+// escalation assistant turn. Returns 0 when there are no escalation assistant turns.
+// Only assistant turns are considered — user turns with Agent==AgentEscalation are
+// conversation scaffolding and must not shift the boundary.
 func lastEscalationBoundary(history []Turn) int {
 	last := -1
 	for i, t := range history {
-		if t.Agent == AgentEscalation {
+		if t.Role == RoleAssistant && t.Agent == AgentEscalation {
 			last = i
 		}
 	}
@@ -175,12 +181,13 @@ func lastEscalationBoundary(history []Turn) int {
 }
 
 // lastLocalBoundary returns the index of the first turn after the most recent
-// local agent session ends (i.e. the first escalation or user turn after the
-// last local assistant turn). Returns 0 when there are no local turns.
+// local assistant turn. Returns 0 when there are no local assistant turns.
+// Only assistant turns are considered — user turns with Agent==AgentLocal are
+// conversation scaffolding and must not shift the boundary.
 func lastLocalBoundary(history []Turn) int {
 	last := -1
 	for i, t := range history {
-		if t.Agent == AgentLocal {
+		if t.Role == RoleAssistant && t.Agent == AgentLocal {
 			last = i
 		}
 	}

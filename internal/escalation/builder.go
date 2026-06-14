@@ -38,9 +38,8 @@ const (
 // injectInstructions gates whether the tag-instruction and percept blocks are included
 // (false on re-injection turns that have not crossed the threshold).
 func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
-	if mode == ContextModeResume {
-		return ""
-	}
+	// On ContextModeResume the static block is suppressed unless the re-injection
+	// threshold has been crossed (injectInstructions=true overrides the suppression).
 	if !injectInstructions {
 		return ""
 	}

@@ -340,6 +340,9 @@ type model struct {
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
 
+	// pending /init wizard
+	pendingInit *initWizardState
+
 	// prompt width (visual columns) set by the most recent refreshPrompt call;
 	// used by taRows() to compute the exact content wrap width.
 	promptWidth int
@@ -375,6 +378,9 @@ type model struct {
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
 
+	// startupWarnings holds config validation warnings to print once the TUI is ready.
+	startupWarnings []string
+
 	// Per-agent session token totals; updated at turn end from the in-memory accumulator.
 	primaryPrompt     int64
 	primaryCompletion int64
@@ -399,11 +405,10 @@ type model struct {
 
 	// colorize cache: avoid re-running chroma/glamour on every streamed token.
 	// The cache is invalidated when the transcript grows by ≥ colorizeLineThresh
-	// new lines, or when the viewport offset/width changes, or when the caller
-	// explicitly sets colorizeForce = true (e.g. after agentDoneMsg, scroll, resize).
+	// new lines, or when the viewport width changes, or when the caller
+	// explicitly sets colorizeForce = true (e.g. after agentDoneMsg, resize).
 	colorizeCached    string // last colorized output
 	colorizeTransLen  int    // transcript byte length when cache was built
-	colorizeVPOffset  int    // vp.YOffset when cache was built
 	colorizeVPWidth   int    // vpWidth when cache was built
 	colorizeForce     bool   // if true, bypass cache on next render
 	colorizeLinesSeen int    // new lines since last full re-colorize
@@ -638,22 +643,14 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if inPanel && ev.Action == tea.MouseActionPress {
 			const panelRowStart = 2 // same header offset as the main viewport
 			panelLine := m.panelOffset + (ev.Y - panelRowStart)
-			ids := buildPanelLineIDs(m.mem, sessionBricks{
-				currentNeed:      m.st.sess.CurrentNeed,
-				lastLocalSummary: m.st.sess.LastLocalSummary,
-				escalationBrief:  m.st.sess.EscalationBrief,
-			})
+			ids := buildPanelLineIDs(m.mem, m.currentSessionBricks())
 			if panelLine >= 0 && panelLine < len(ids) {
 				id := ids[panelLine]
 				if id != "" {
 					now := time.Now()
 					if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
 						// Double-click: print brick or percept details to transcript.
-						bricks := sessionBricks{
-							currentNeed:      m.st.sess.CurrentNeed,
-							lastLocalSummary: m.st.sess.LastLocalSummary,
-							escalationBrief:  m.st.sess.EscalationBrief,
-						}
+						bricks := m.currentSessionBricks()
 						var result string
 						if content := brickContent(id, bricks); content != "" {
 							result = milkTag() + " [" + id + "]\n" + content
@@ -1021,15 +1018,21 @@ func (m *model) welcomeScreen() string {
 		"",
 	}
 
+	primaryName := m.st.primaryAgentName()
+	escName := m.st.escalationAgentName()
+
 	switch {
 	case !m.hasInferenceAgent:
-		// No provider configured at all — show setup guidance regardless of Claude.
+		// No provider configured at all — show setup guidance.
 		lines = append(lines,
-			yellow("no local agent configured"),
+			yellow("no primary agent configured"),
 			"",
-			dim("quickstart — add a backend with /agent add:"),
+			dim("run the setup wizard to get started:"),
+			"› /config init",
 			"",
-			dim("llama.cpp · Ollama"),
+			dim("or add a backend directly:"),
+			"",
+			dim("llama.cpp · Ollama · vLLM"),
 			"› /agent add url=http://localhost:8080 provider=local model=qwen2.5-coder",
 			"",
 			dim("AWS Bedrock"),
@@ -1038,12 +1041,8 @@ func (m *model) welcomeScreen() string {
 			dim("OpenRouter · Together · Groq"),
 			"› /agent add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
 			"",
-			dim("Claude Code CLI"),
-			"› /agent add name=claude provider=claude-cli",
-			"",
 		)
 		if !escalationAvail {
-			escName := m.st.escalationAgentName()
 			lines = append(lines,
 				dim(escName+" not available — escalation disabled"),
 				"",
@@ -1054,27 +1053,30 @@ func (m *model) welcomeScreen() string {
 		lines = append(lines,
 			yellow("no agents available"),
 			"",
-			dim("local agent unreachable — check your provider config with /agent"),
-			dim(m.st.escalationAgentName()+" not available — escalation disabled"),
+			dim(primaryName+" unreachable — check your provider config with /agent"),
+			dim(escName+" not available — escalation disabled"),
 			"",
 			dim("/help for available commands"),
 		)
 	case !localAvail:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim("local agent unreachable — use /agent to check or switch backends"),
+			dim(primaryName+" unreachable — use /agent to check or switch backends"),
 			dim("/help for available commands"),
 		)
 	case !escalationAvail:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim(m.st.escalationAgentName()+" not available — escalation disabled"),
+			dim(escName+" not available — escalation disabled"),
 			dim("/help for available commands"),
 		)
 	default:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim("/help for available commands"),
+			"",
+			dim("routing: "+primaryName+" ↔ "+escName+"  ·  /escalate to pin  ·  /primary to unpin"),
+			dim("/panel memory — memory panel  ·  /think on — reasoning tokens  ·  --new — fresh session"),
+			dim("/help for all commands  ·  /config init to reconfigure"),
 		)
 	}
 
@@ -1171,11 +1173,10 @@ func (m *model) wrappedTranscript() string {
 	}
 
 	txLen := tx.Len()
-	vpOffset := m.vp.YOffset
-
-	// Check cache validity: skip heavy colorization if viewport and content
-	// position haven't changed significantly since the last full render.
-	vpChanged := vw != m.colorizeVPWidth || vpOffset != m.colorizeVPOffset
+	// Check cache validity: width change requires re-wrap; YOffset is not a cache
+	// key because colorization covers the full transcript regardless of scroll
+	// position, and GotoBottom legitimately advances YOffset after every append.
+	vpChanged := vw != m.colorizeVPWidth
 	txGrew := txLen - m.colorizeTransLen
 
 	// Count new lines since last re-colorize to decide if threshold is met.
@@ -1214,7 +1215,6 @@ func (m *model) wrappedTranscript() string {
 	// Update cache.
 	m.colorizeCached = wrapped
 	m.colorizeTransLen = txLen
-	m.colorizeVPOffset = vpOffset
 	m.colorizeVPWidth = vw
 
 	return m.applySelectionHighlight(wrapped)
@@ -1594,6 +1594,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingTelegramSetup != nil {
 			return m.handleTelegramSetupKey(msg)
 		}
+		if m.pendingInit != nil {
+			return m.handleInitWizardKey(msg)
+		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
 		}
@@ -1742,6 +1745,10 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	if !m.ready {
 		m.vp = viewport.New(vw, vpH)
 		m.ready = true
+		for _, w := range m.startupWarnings {
+			m.appendTranscript(yellow("config warning: ") + w + "\n")
+		}
+		m.startupWarnings = nil
 		m.refreshPrompt()
 		m.setViewportContent()
 		m.vp.GotoBottom()
@@ -1885,9 +1892,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m = m.handleTab(1)
+		m.syncLayout()
 		return m, nil
 	case "shift+tab":
 		m = m.handleTab(-1)
+		m.syncLayout()
 		return m, nil
 	case "ctrl+t":
 		m = m.toggleThinking()
@@ -2080,6 +2089,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	}
 	if cmd == cmdSetup {
 		return m.handleSetupCmd(strings.TrimSpace(rest))
+	}
+	if cmd == cmdConfig {
+		return m.handleConfigCmd(strings.TrimSpace(rest))
 	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
@@ -2718,6 +2730,469 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	} else {
 		m.appendTranscript(milkTag() + " use /agent switch " + ac.Name + " to activate it\n")
 	}
+	return m
+}
+
+// isCopilotURL returns true when the URL looks like a GitHub Copilot API endpoint.
+func isCopilotURL(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, "copilot-api") ||
+		strings.Contains(lower, "copilot.githubusercontent.com") ||
+		strings.Contains(lower, "github.com/copilot") ||
+		strings.Contains(lower, "api.githubcopilot.com")
+}
+
+// isAzureURL returns true when the URL looks like an Azure OpenAI endpoint.
+func isAzureURL(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, ".cognitiveservices.azure.com") ||
+		strings.Contains(lower, ".openai.azure.com")
+}
+
+// azureDeployment extracts the deployment name from an Azure OpenAI URL, or "".
+// Handles both /openai and /openai/deployments/<name> patterns.
+func azureDeployment(u string) string {
+	lower := strings.ToLower(u)
+	const marker = "/deployments/"
+	if idx := strings.Index(lower, marker); idx >= 0 {
+		rest := u[idx+len(marker):]
+		if sl := strings.Index(rest, "/"); sl >= 0 {
+			rest = rest[:sl]
+		}
+		return rest
+	}
+	return ""
+}
+
+// copilotHostname extracts the GHE hostname from a Copilot API URL for use in
+// "gh auth token --hostname". For github.com Copilot it returns "".
+func copilotHostname(u string) string {
+	lower := strings.ToLower(u)
+	// GHE pattern: copilot-api.<org>.ghe.com  →  hostname = <org>.ghe.com
+	if idx := strings.Index(lower, "copilot-api."); idx >= 0 {
+		rest := u[idx+len("copilot-api."):]
+		if sl := strings.Index(rest, "/"); sl >= 0 {
+			rest = rest[:sl]
+		}
+		return rest
+	}
+	return ""
+}
+
+// handleConfigCmd dispatches /config, /config init, /config open.
+func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(sub) {
+	case "init":
+		return m.handleConfigInitCmd()
+	case "open":
+		return m.handleConfigOpenCmd()
+	case "":
+		dir, err := config.Dir()
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+			return m, nil
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s error reading config: %v\n", milkTag(), err))
+			return m, nil
+		}
+		m.colorizeForce = true
+		m.appendTranscript(milkTag() + " ~/.milk/config.json\n```json\n" + string(data) + "\n```\n")
+		return m, nil
+	default:
+		m.appendTranscript(milkTag() + " usage: /config | /config init | /config open\n")
+		return m, nil
+	}
+}
+
+// handleConfigOpenCmd opens ~/.milk/config.json in $EDITOR or xdg-open.
+func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
+	dir, err := config.Dir()
+	if err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+		return m, nil
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	editor := os.Getenv("EDITOR")
+	var cmd *exec.Cmd
+	if editor != "" {
+		cmd = exec.Command(editor, cfgPath)
+	} else {
+		cmd = exec.Command("xdg-open", cfgPath)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Start(); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error opening editor: %v\n", milkTag(), err))
+		return m, nil
+	}
+	m.appendTranscript(fmt.Sprintf("%s opened %s\n", milkTag(), cfgPath))
+	return m, nil
+}
+
+// handleConfigInitCmd starts the /config init TUI wizard.
+func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
+	m.pendingInit = &initWizardState{step: initStepName, escCLI: true}
+	m.appendTranscript(milkTag() + " setup wizard — configure primary and escalation agents\n\n" +
+		milkTag() + " primary agent name [local]: ")
+	m.ta.Reset()
+	return m, nil
+}
+
+// initWizardNeedsURL reports whether the provider requires a URL.
+func initWizardNeedsURL(provider string) bool {
+	return strings.ToLower(provider) != "claude-cli"
+}
+
+// initWizardNeedsAuth reports whether the provider requires api_key / token_cmd.
+func initWizardNeedsAuth(provider string) bool {
+	switch strings.ToLower(provider) {
+	case "", "local", "bedrock", "claude-cli", "aider-cli", "subprocess":
+		return false
+	default: // bearer or any custom bearer-style name
+		return true
+	}
+}
+
+// initWizardNeedsAWSRegion reports whether the provider requires aws_region.
+func initWizardNeedsAWSRegion(provider string) bool {
+	return strings.ToLower(provider) == "bedrock"
+}
+
+// initWizardNeedsChatPath reports whether the provider may need a non-standard chat path.
+// Always true for bearer — Copilot and Azure both deviate from the standard path.
+func initWizardNeedsChatPath(provider string) bool {
+	return strings.ToLower(provider) == "bearer"
+}
+
+// initWizardNextStep advances past the current step based on what fields are needed.
+func initWizardNextStep(st *initWizardState) initWizardStep {
+	p := st.primary.Provider
+	switch st.step {
+	case initStepName:
+		return initStepProvider
+	case initStepProvider:
+		if initWizardNeedsURL(p) {
+			return initStepURL
+		}
+		return initStepEscalation
+	case initStepURL:
+		if initWizardNeedsChatPath(p) {
+			return initStepChatPath
+		}
+		return initStepModel
+	case initStepChatPath:
+		return initStepModel
+	case initStepModel:
+		if initWizardNeedsAuth(p) {
+			return initStepAuth
+		}
+		if initWizardNeedsAWSRegion(p) {
+			return initStepAWSRegion
+		}
+		return initStepEscalation
+	case initStepAuth:
+		// blank api_key → go ask for token_cmd instead
+		if st.primary.APIKey == "" {
+			return initStepTokenCmd
+		}
+		if initWizardNeedsAWSRegion(p) {
+			return initStepAWSRegion
+		}
+		return initStepEscalation
+	case initStepTokenCmd:
+		if initWizardNeedsAWSRegion(p) {
+			return initStepAWSRegion
+		}
+		return initStepEscalation
+	case initStepAWSRegion:
+		return initStepEscalation
+	case initStepEscalation:
+		return initStepOpenConfig
+	case initStepOpenConfig:
+		return initStepDone
+	}
+	return initStepDone
+}
+
+// initWizardPrompt returns the prompt text for a given wizard step.
+func initWizardPrompt(st *initWizardState) string {
+	switch st.step {
+	case initStepProvider:
+		return milkTag() + " provider — select:\n" +
+			"  1) local       llama.cpp · Ollama · vLLM · LM Studio (plain HTTP)\n" +
+			"  2) bedrock     AWS Bedrock Converse API\n" +
+			"  3) bearer      OpenRouter · Together.ai · Groq · GitHub Copilot · any Bearer-token API\n" +
+			"  4) claude-cli  Claude Code CLI (no HTTP server needed)\n" +
+			"  5) aider-cli   aider subprocess\n" +
+			"  6) subprocess  generic NDJSON subprocess\n" +
+			milkTag() + " choice [1]: "
+	case initStepURL:
+		hint := ""
+		if st.primary.Provider == "bearer" {
+			hint = " (e.g. https://openrouter.ai/api/v1  ·  https://copilot-api.<org>.ghe.com  ·  https://<res>.cognitiveservices.azure.com/openai)"
+		} else if st.primary.Provider == "local" {
+			hint = " (e.g. http://localhost:8080)"
+		}
+		return milkTag() + " server URL" + hint + ": "
+	case initStepChatPath:
+		defPath := "/v1/chat/completions"
+		if isCopilotURL(st.primary.URL) {
+			defPath = "/chat/completions"
+		} else if isAzureURL(st.primary.URL) {
+			dep := azureDeployment(st.primary.URL)
+			if dep == "" {
+				dep = "<deployment>"
+			}
+			defPath = "/deployments/" + dep + "/chat/completions"
+		}
+		return milkTag() + fmt.Sprintf(" chat path [%s]: ", defPath)
+	case initStepModel:
+		hint := ""
+		if isCopilotURL(st.primary.URL) {
+			hint = " (e.g. claude-sonnet-4.6  or  gpt-4o)"
+		} else if isAzureURL(st.primary.URL) {
+			hint = " (Azure deployment name, e.g. gpt-4.1)"
+		} else if st.primary.Provider == "bearer" {
+			hint = " (e.g. meta-llama/llama-3.1-8b-instruct)"
+		} else if st.primary.Provider == "bedrock" {
+			hint = " (model ARN)"
+		}
+		return milkTag() + " model name" + hint + ": "
+	case initStepAuth:
+		hint := ""
+		if isAzureURL(st.primary.URL) {
+			hint = "\n" + dim("  hint: Azure uses an 'api-key' header, not Bearer — paste your Azure API key here")
+		} else if isCopilotURL(st.primary.URL) {
+			host := copilotHostname(st.primary.URL)
+			if host != "" {
+				hint = "\n" + dim(fmt.Sprintf("  hint: leave blank and use token_cmd = 'gh auth token --hostname %s'", host))
+			} else {
+				hint = "\n" + dim("  hint: leave blank and use token_cmd = 'gh auth token'")
+			}
+		}
+		return milkTag() + " API key (leave blank to use token_cmd instead)" + hint + "\n" + milkTag() + " API key: "
+	case initStepTokenCmd:
+		hint := ""
+		if isCopilotURL(st.primary.URL) {
+			host := copilotHostname(st.primary.URL)
+			if host != "" {
+				hint = fmt.Sprintf(" [gh auth token --hostname %s]", host)
+			} else {
+				hint = " [gh auth token]"
+			}
+		} else {
+			hint = " (e.g. 'gh auth token' or 'op read op://vault/item/field')"
+		}
+		return milkTag() + " token command" + hint + ": "
+	case initStepAWSRegion:
+		return milkTag() + " AWS region (e.g. us-east-1): "
+	case initStepEscalation:
+		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
+	case initStepOpenConfig:
+		return milkTag() + " open config in editor now? [y/N]: "
+	}
+	return ""
+}
+
+// handleInitWizardKey handles keypresses during the /init wizard.
+func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingInit = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript(answer + "\n")
+
+		st := m.pendingInit
+		providerMap := map[string]string{
+			"1": "local", "2": "bedrock", "3": "bearer",
+			"4": "claude-cli", "5": "aider-cli", "6": "subprocess",
+		}
+
+		switch st.step {
+		case initStepName:
+			if answer == "" {
+				answer = "local"
+			}
+			st.primary.Name = answer
+
+		case initStepProvider:
+			if answer == "" {
+				answer = "1"
+			}
+			provider, ok := providerMap[answer]
+			if !ok {
+				m.appendTranscript(milkTag() + " invalid choice — enter 1–6\n" + initWizardPrompt(st))
+				return m, nil
+			}
+			st.primary.Provider = provider
+
+		case initStepURL:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " URL is required\n" + initWizardPrompt(st))
+				return m, nil
+			}
+			st.primary.URL = answer
+			// GitHub Copilot: preset the standard headers automatically.
+			if isCopilotURL(answer) {
+				st.primary.Headers = map[string]string{
+					"Copilot-Integration-Id": "vscode-chat",
+					"Editor-Plugin-Version":  "copilot-chat/0.49.0",
+					"Editor-Version":         "vscode/1.121.0",
+					"X-GitHub-Api-Version":   "2026-01-09",
+				}
+				m.appendTranscript(dim("  (GitHub Copilot detected — headers preset automatically)\n"))
+			} else if isAzureURL(answer) {
+				m.appendTranscript(dim("  (Azure OpenAI detected — api-key header will be used)\n"))
+			}
+
+		case initStepChatPath:
+			if answer == "" {
+				// apply the suggested default shown in the prompt
+				if isCopilotURL(st.primary.URL) {
+					answer = "/chat/completions"
+				} else if isAzureURL(st.primary.URL) {
+					dep := azureDeployment(st.primary.URL)
+					if dep == "" {
+						dep = st.primary.Model
+					}
+					answer = "/deployments/" + dep + "/chat/completions"
+				} else {
+					answer = "/v1/chat/completions"
+				}
+			}
+			// Only store if non-standard to keep config minimal.
+			if answer != "/v1/chat/completions" {
+				st.primary.ChatPath = answer
+			}
+
+		case initStepModel:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " model name is required\n" + initWizardPrompt(st))
+				return m, nil
+			}
+			st.primary.Model = answer
+
+		case initStepAuth:
+			// Azure: store key in headers["api-key"], not as a Bearer token.
+			if answer != "" && isAzureURL(st.primary.URL) {
+				if st.primary.Headers == nil {
+					st.primary.Headers = map[string]string{}
+				}
+				st.primary.Headers["api-key"] = answer
+			} else {
+				st.primary.APIKey = answer
+			}
+			// blank → next step will be initStepTokenCmd (handled by nextStep logic)
+
+		case initStepTokenCmd:
+			// blank → apply the suggested default shown in brackets
+			if answer == "" && isCopilotURL(st.primary.URL) {
+				host := copilotHostname(st.primary.URL)
+				if host != "" {
+					answer = "gh auth token --hostname " + host
+				} else {
+					answer = "gh auth token"
+				}
+			}
+			st.primary.TokenCmd = answer
+
+		case initStepAWSRegion:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " AWS region is required for Bedrock\n" + initWizardPrompt(st))
+				return m, nil
+			}
+			st.primary.AWSRegion = answer
+
+		case initStepEscalation:
+			lower := strings.ToLower(answer)
+			st.escCLI = lower != "n" && lower != "no"
+
+		case initStepOpenConfig:
+			m.pendingInit = nil
+			lower := strings.ToLower(answer)
+			if lower == "y" || lower == "yes" {
+				newM, _ := m.handleConfigOpenCmd()
+				m = newM.(model)
+			}
+			return m, nil
+		}
+
+		st.step = initWizardNextStep(st)
+		if st.step == initStepOpenConfig {
+			// Write config before asking about opening editor.
+			m = m.commitInitWizard(st)
+		}
+		if st.step == initStepDone {
+			m.pendingInit = nil
+			return m, nil
+		}
+		m.appendTranscript(initWizardPrompt(st))
+		return m, nil
+	}
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
+
+// commitInitWizard writes the config and shows next steps.
+func (m model) commitInitWizard(st *initWizardState) model {
+	var escalation *config.AgentConfig
+	if st.escCLI {
+		e := config.AgentConfig{Name: "claude", Provider: "claude-cli"}
+		escalation = &e
+	}
+	cfg := config.InitConfig(st.primary, escalation)
+	if err := config.Save(cfg); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+		return m
+	}
+
+	// Apply the new config to the live state so the session picks it up immediately.
+	m.st.cfg = cfg
+	m.hasInferenceAgent = cfg.HasInferenceAgent()
+
+	provider := st.primary.Provider
+	if provider == "" {
+		provider = "local"
+	}
+	m.appendTranscript("\n" + milkTag() + " config written to ~/.milk/config.json\n\n")
+	if strings.ToLower(provider) == "claude-cli" {
+		m.appendTranscript(fmt.Sprintf("%s primary: %s  (%s)\n", milkTag(), bold(st.primary.Name), provider))
+	} else {
+		chatPath := st.primary.ChatPath
+		if chatPath == "" {
+			chatPath = "/v1/chat/completions"
+		}
+		m.appendTranscript(fmt.Sprintf("%s primary: %s  (%s%s | %s | %s)\n",
+			milkTag(), bold(st.primary.Name), st.primary.URL, chatPath, st.primary.Model, provider))
+	}
+	if escalation != nil {
+		m.appendTranscript(fmt.Sprintf("%s escalation: %s  (claude-cli)\n", milkTag(), bold(escalation.Name)))
+	}
+	// Post-completion hints for fields the wizard doesn't ask for.
+	var hints []string
+	if st.primary.Provider == "bedrock" {
+		hints = append(hints, dim("  tip: if you use short-lived STS credentials, add aws_refresh_cmd to your agent config to auto-renew on 403"))
+	}
+	if isCopilotURL(st.primary.URL) || isAzureURL(st.primary.URL) {
+		hints = append(hints, dim("  tip: set limits.message_budget_chars in your agent config to cap context size (e.g. 800000 for Copilot/Azure)"))
+	}
+	if len(hints) > 0 {
+		m.appendTranscript("\n")
+		for _, h := range hints {
+			m.appendTranscript(h + "\n")
+		}
+	}
+	m.appendTranscript("\n" + milkTag() + " ready — type a message to start, or /help for all commands\n")
 	return m
 }
 
@@ -4732,7 +5207,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tuiSubprocessAgent = aider.New(tuiEscAC)
 	default:
 	}
-	if !tuiEscAC.IsExternalProcess() || tuiEscAC.IsCLI() {
+	if !tuiEscAC.IsExternalProcess() {
 		escAC := applyFreshAWSCreds(cfg, tuiEscAC)
 		if escAC.URL != "" {
 			escalationLocalAgent = local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
@@ -4865,6 +5340,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.hasInferenceAgent = cfg.HasInferenceAgent()
+	for _, w := range config.Validate(cfg) {
+		m.startupWarnings = append(m.startupWarnings, w.String())
+	}
 	m.colorizeMode = ParseColorizeMode(cfg.Colorization)
 	if needsAWSRefresh(cfg) {
 		m.credRefreshing = true

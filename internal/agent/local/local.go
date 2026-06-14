@@ -471,7 +471,7 @@ func normalizePrompt(s string) string {
 // matches the current prompt, add 1/distance to the score, where distance is
 // the 1-based position counting back from the current turn through user turns
 // only (the immediately preceding user turn has distance 1, the one before
-// that distance 2, etc.). If the accumulated score ≥ 1.0, escalation fires.
+// that distance 2, etc.). If the accumulated score ≥ 0.9, escalation fires.
 //
 // Examples (→ = match, · = no match, rightmost = most recent user turn):
 //
@@ -490,7 +490,7 @@ func normalizePrompt(s string) string {
 const minRepeatCheckLen = 20
 
 const repetitionWindow = 10     // number of recent user turns to consider
-const repetitionThreshold = 0.6 // escalate when score exceeds this
+const repetitionThreshold = 0.9 // escalate when score exceeds this
 
 // shouldInjectMemoryInstruction returns true when the memory/need instruction
 // block should be appended to the local agent's messages for this turn.

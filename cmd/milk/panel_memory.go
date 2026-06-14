@@ -19,6 +19,10 @@ type sessionBricks struct {
 	escalationBrief       string
 	primaryName           string // configured name of the primary agent (used as brick label)
 	escalationName        string // configured name of the escalation agent (used as brick label)
+	needStale             bool   // need changed since last escalation → will trigger fresh-start
+	contextStale          bool   // local turn gap exceeded threshold → will trigger fresh-start
+	localTurnsSince       int    // local assistant turns since last escalation (0 if never escalated)
+	freshThreshold        int    // threshold at which contextStale fires
 }
 
 const recentThreshold = 60 * time.Second
@@ -40,14 +44,7 @@ func (m *model) renderMemoryPanel(h int) string {
 		return strings.Repeat("\n", h)
 	}
 
-	bricks := sessionBricks{
-		currentNeed:           m.st.sess.CurrentNeed,
-		lastLocalSummary:      m.st.sess.LastLocalSummary,
-		lastEscalationSummary: m.st.sess.LastEscalationSummary,
-		escalationBrief:       m.st.sess.EscalationBrief,
-		primaryName:           m.st.cfg.ActiveAgent().Name,
-		escalationName:        m.st.cfg.EscalationAgentConfig().Name,
-	}
+	bricks := m.currentSessionBricks()
 	all := buildPanelLines(m.mem, inner, bricks)
 	total := len(all)
 
@@ -76,17 +73,30 @@ func (m *model) renderMemoryPanel(h int) string {
 	return strings.Join(rows, "\n")
 }
 
-// renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
-// a ▌ thumb when the panel content overflows, or a blank column otherwise.
-func (m *model) renderPanelScrollbar(h int) string {
-	bricks := sessionBricks{
+// currentSessionBricks builds a sessionBricks snapshot from the current model state,
+// including staleness flags derived from the active config and session.
+func (m *model) currentSessionBricks() sessionBricks {
+	escAC := m.st.cfg.EscalationAgentConfig()
+	threshold := m.st.cfg.AgentReturningFreshStartLocalTurns(escAC)
+	turnsSince := m.st.sess.LocalTurnsSinceLastEscalation()
+	return sessionBricks{
 		currentNeed:           m.st.sess.CurrentNeed,
 		lastLocalSummary:      m.st.sess.LastLocalSummary,
 		lastEscalationSummary: m.st.sess.LastEscalationSummary,
 		escalationBrief:       m.st.sess.EscalationBrief,
 		primaryName:           m.st.cfg.ActiveAgent().Name,
-		escalationName:        m.st.cfg.EscalationAgentConfig().Name,
+		escalationName:        escAC.Name,
+		needStale:             m.st.sess.NeedChangedSinceLastEscalation(),
+		contextStale:          threshold > 0 && turnsSince >= threshold,
+		localTurnsSince:       turnsSince,
+		freshThreshold:        threshold,
 	}
+}
+
+// renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
+// a ▌ thumb when the panel content overflows, or a blank column otherwise.
+func (m *model) renderPanelScrollbar(h int) string {
+	bricks := m.currentSessionBricks()
 	all := buildPanelLines(m.mem, memoryPanelInner, bricks)
 	total := len(all)
 	needsBar := total > h
@@ -192,11 +202,22 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 		escalationLabel = "escalation"
 	}
 	addLine("")
+	// Compute staleness ratio for gradient colouring of escalation bricks.
+	// ratio 0=fresh, 1=fully stale; shown as a colour gradient on the content text.
+	var escRatio float64
+	if bricks.contextStale {
+		escRatio = 1
+	} else if bricks.freshThreshold > 0 && bricks.localTurnsSince > 0 {
+		escRatio = float64(bricks.localTurnsSince) / float64(bricks.freshThreshold)
+	}
+	escStale := bricks.contextStale
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
-	addBrickLines(&lines, "need", bricks.currentNeed, inner)
-	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner)
-	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner)
-	addBrickLines(&lines, "brief", bricks.escalationBrief, inner)
+	addBrickLines(&lines, "need", bricks.currentNeed, inner, bricks.needStale, 0)
+	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner, false, 0)
+	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner, escStale, escRatio)
+	addBrickLines(&lines, "brief", bricks.escalationBrief, inner, escStale, escRatio)
+	addLine("")
+	addLine(stalenessLegend(inner))
 
 	return lines
 }
@@ -218,61 +239,89 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 		bullet = "★ "
 	}
 	shortID := perceptIDShort(p) + " " // e.g. "#a3f2c1 "
-	wStr := fmt.Sprintf("%.2f", p.W)
-	if badge := consumerBadge(p); badge != "" {
-		wStr = badge + " " + wStr
-	}
+
+	// Badge (consumer hint) still shown when present, but no numeric weight.
+	badge := consumerBadge(p)
 
 	// Visual widths (ANSI chars do not affect display width)
 	bulletW := utf8.RuneCountInString(bullet)
 	idW := utf8.RuneCountInString(shortID)
-	// First line: bullet + id + content + pad + " " + wStr
-	firstW := max(inner-bulletW-idW-1-len(wStr), 8)
+	badgeW := 0
+	if badge != "" {
+		// badge is rendered dim, so strip ANSI for width calc
+		badgeW = utf8.RuneCountInString(" [P]") // "[E]" same width
+	}
+	// First line: bullet + id + content (no weight string)
+	firstW := max(inner-bulletW-idW-badgeW, 8)
 	contW := max(inner-2, 8) // "  " continuation indent
 
 	wrapped := wordWrap(p.Content, firstW, contW, 2)
 
+	// Staleness gradient: ratio = 1 - W (high weight = fresh/bright, low = stale/orange)
+	ratio := 1.0 - p.W
+	tint := staleContentColor(ratio)
+
 	for i, line := range wrapped {
 		var out string
+		idPart := dim(shortID)
 		if i == 0 {
-			textPad := max(firstW-utf8.RuneCountInString(line), 0)
-			idPart := dim(shortID)
-			raw := bullet + idPart + line + strings.Repeat(" ", textPad) + " " + wStr
 			if recent {
-				// Re-colorize: keep id dim but highlight the rest bold+yellow
-				raw = bullet + idPart + colorize(line+strings.Repeat(" ", textPad)+" "+wStr, "\033[1;33m")
+				// Recent highlight takes priority over gradient
+				suffix := ""
+				if badge != "" {
+					suffix = " " + badge
+				}
+				out = bullet + idPart + colorize(line+suffix, "\033[1;33m")
+			} else {
+				suffix := ""
+				if badge != "" {
+					suffix = " " + badge
+				}
+				out = bullet + idPart + colorize(line+suffix, tint)
 			}
-			out = raw
 		} else {
 			// Continuation lines: indent only (no bullet/star/id)
-			raw := "  " + line
 			if recent {
-				out = colorize(raw, "\033[1;33m")
+				out = colorize("  "+line, "\033[1;33m")
 			} else {
-				out = raw
+				out = colorize("  "+line, tint)
 			}
 		}
 		*lines = append(*lines, out)
 	}
 }
 
-// addBrickLines appends lines for a single summary brick: a label line and up
-// to 3 wrapped content lines, or "(empty)" when value is blank.
-func addBrickLines(lines *[]string, label, value string, inner int) {
-	labelStr := dim("  " + label + ": ")
-	labelW := utf8.RuneCountInString("  " + label + ": ")
+// addBrickLines appends lines for a single summary brick.
+// ratio in [0,1] drives a staleness gradient on the content text; ratio=0 is
+// neutral, ratio=1 is fully stale. stale=true also appends a dim "(stale)" label.
+func addBrickLines(lines *[]string, label, value string, inner int, stale bool, ratio float64) {
+	suffix := ""
+	if stale {
+		suffix = "(stale)"
+	}
+	dimSuffix := ""
+	suffixW := 0
+	if suffix != "" {
+		dimSuffix = dim(suffix + " ")
+		suffixW = utf8.RuneCountInString(suffix + " ")
+	}
+	labelStr := dim("  "+label+": ") + dimSuffix
+	labelW := utf8.RuneCountInString("  "+label+": ") + suffixW
 	if value == "" {
-		*lines = append(*lines, labelStr+dim("—"))
+		// Don't show staleness annotation when content is absent (dash placeholder).
+		*lines = append(*lines, dim("  "+label+": ")+dim("—"))
 		return
 	}
 	firstW := max(inner-labelW, 8)
 	contW := max(inner-4, 8)
 	wrapped := wordWrap(value, firstW, contW, 3)
+	tint := staleContentColor(ratio)
+	renderLine := func(s string) string { return colorize(s, tint) }
 	for i, line := range wrapped {
 		if i == 0 {
-			*lines = append(*lines, labelStr+line)
+			*lines = append(*lines, labelStr+renderLine(line))
 		} else {
-			*lines = append(*lines, "    "+line)
+			*lines = append(*lines, "    "+renderLine(line))
 		}
 	}
 }
@@ -391,6 +440,8 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	addBrick(primaryLabel, bricks.lastLocalSummary)
 	addBrick(escalationLabel, bricks.lastEscalationSummary)
 	addBrick("brief", bricks.escalationBrief)
+	add("") // blank before legend
+	add("") // staleness legend line
 
 	return ids
 }

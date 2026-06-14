@@ -223,10 +223,20 @@ func TestBuildStaticContext_ContainsInstructions(t *testing.T) {
 	}
 }
 
-func TestBuildStaticContext_EmptyOnResume(t *testing.T) {
-	got := BuildStaticContext("n1", []string{"a fact"}, ContextModeResume, true, "primary", "claude")
+func TestBuildStaticContext_EmptyOnResumeNoReinjection(t *testing.T) {
+	got := BuildStaticContext("n1", []string{"a fact"}, ContextModeResume, false, "primary", "claude")
 	if got != "" {
-		t.Errorf("static context should be empty on resume, got %q", got)
+		t.Errorf("static context should be empty on resume when injectInstructions=false, got %q", got)
+	}
+}
+
+func TestBuildStaticContext_ReinjectedOnResumeWhenThresholdCrossed(t *testing.T) {
+	got := BuildStaticContext("n1", []string{"a fact"}, ContextModeResume, true, "primary", "claude")
+	if got == "" {
+		t.Error("static context should be re-injected on resume when injectInstructions=true")
+	}
+	if !strings.Contains(got, "milk:percept") {
+		t.Error("re-injected static context should contain memory instruction")
 	}
 }
 

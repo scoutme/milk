@@ -100,8 +100,8 @@ func TestIsRepeatedPrompt_TwoMatches_Escalate(t *testing.T) {
 	}
 }
 
-func TestIsRepeatedPrompt_TwoMatchesAboveThreshold_Escalate(t *testing.T) {
-	// Matches at distance 2 and 3: score = 0.5 + 1/3 = 0.83 > 0.6 → escalate.
+func TestIsRepeatedPrompt_TwoMatchesBelowThreshold_NoEscalate(t *testing.T) {
+	// Matches at distance 2 and 3: score = 0.5 + 1/3 = 0.83 < 0.9 → no escalation.
 	history := []Message{
 		{Role: "user", Content: "unrelated"}, // distance 4
 		{Role: "assistant", Content: "a"},
@@ -112,9 +112,9 @@ func TestIsRepeatedPrompt_TwoMatchesAboveThreshold_Escalate(t *testing.T) {
 		{Role: "user", Content: "unrelated"}, // distance 1
 		{Role: "assistant", Content: "d"},
 	}
-	// score = 0.5 + 1/3 = 0.83 > 0.6 → escalate
-	if !isRepeatedPrompt(history, longPrompt) {
-		t.Error("want true: matches at distance 2 and 3, score 0.83 > threshold 0.6")
+	// score = 0.5 + 1/3 = 0.83 < 0.9 → no escalation
+	if isRepeatedPrompt(history, longPrompt) {
+		t.Error("want false: matches at distance 2 and 3, score 0.83 below threshold 0.9")
 	}
 }
 

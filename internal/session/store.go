@@ -185,6 +185,13 @@ func Load(id string) (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	// Clear CurrentNeed if it was already fulfilled before the session ended:
+	// if any escalation assistant turn occurred after CurrentNeedSetAt, the need
+	// was handled and should not be shown as active on resume.
+	if s.CurrentNeed != "" && !s.NeedChangedSinceLastEscalation() {
+		s.CurrentNeed = ""
+		s.CurrentNeedSetAt = 0
+	}
 	return &s, nil
 }
 

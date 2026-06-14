@@ -35,11 +35,36 @@ const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
 const cmdSetup = "/setup"
+const cmdConfig = "/config"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
+
+// initWizardState tracks state for the /config init TUI wizard.
+type initWizardState struct {
+	step    initWizardStep
+	primary config.AgentConfig
+	escCLI  bool // whether to use default claude-cli escalation
+}
+
+type initWizardStep int
+
+const (
+	initStepGreet      initWizardStep = iota // display greeting, advance immediately
+	initStepName                             // ask agent name
+	initStepProvider                         // ask provider (menu 1–6)
+	initStepURL                              // ask URL (providers that need it)
+	initStepChatPath                         // ask chat_path (bearer only, skip if standard)
+	initStepModel                            // ask model
+	initStepAuth                             // ask api_key (blank → go to initStepTokenCmd)
+	initStepTokenCmd                         // ask token_cmd
+	initStepAWSRegion                        // ask aws_region (bedrock only)
+	initStepEscalation                       // ask escalation agent choice
+	initStepOpenConfig                       // ask whether to open config in editor
+	initStepDone
+)
 
 // telegramSetupState tracks state for the /setup telegram wizard.
 type telegramSetupState struct {
@@ -65,6 +90,8 @@ const interactiveHelp = `
 ── Routing ──────────────────────────────────────────────────────────────
   /escalate              pin all turns to escalation agent (/primary to unpin)
   /escalate <msg>        force this turn to escalation agent, then resume routing
+  /escalate fresh        force a new escalation context (new session + memory instructions re-injected)
+  /escalate fresh <msg>  same, single-turn override
   /primary               pin all turns to primary agent (/escalate to unpin)
   /primary <msg>         force this turn to primary agent, then resume routing
 
@@ -118,6 +145,9 @@ const interactiveHelp = `
   /otel trim             archive current OTel files and start fresh
 
 ── Setup ─────────────────────────────────────────────────────────────────
+  /config                print the current config (~/.milk/config.json)
+  /config init           run the setup wizard (configure primary + escalation agents)
+  /config open           open config in $EDITOR / system default editor
   /setup telegram        configure Telegram remote oversight interactively
   /setup telegram on     enable Telegram (credentials must already be configured)
   /setup telegram off    disable Telegram (credentials are preserved)
@@ -192,6 +222,11 @@ type interactiveState struct {
 	activeFallbackTarget string
 }
 
+// primaryAgentName returns the display name of the configured primary agent.
+func (st *interactiveState) primaryAgentName() string {
+	return st.cfg.ActiveAgent().Name
+}
+
 // escalationAgentName returns the display name of the configured escalation agent.
 func (st *interactiveState) escalationAgentName() string {
 	return st.cfg.EscalationAgentConfig().Name
@@ -251,6 +286,20 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdEscalate:
 		st.forcePrimary = false
 		st.stickyPrimary = false
+		if prompt == "fresh" || strings.HasPrefix(prompt, "fresh ") {
+			// /escalate fresh [msg]: force ContextModeFirst on the next escalation turn,
+			// dropping the existing session ID and nonce so Claude starts with clean context.
+			rest := strings.TrimPrefix(strings.TrimPrefix(prompt, "fresh"), " ")
+			st.sess.ForceFreshEscalation = true
+			st.forceEscalate = rest != ""
+			if rest == "" {
+				st.stickyEscalate = true
+				output = milkTag() + " fresh escalation context — next turn starts a new " + blue(st.escalationAgentName()) + " session"
+			} else {
+				output = milkTag() + " fresh escalation context for this turn"
+			}
+			return false, rest, output
+		}
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to escalation agent.
 			st.stickyEscalate = true
@@ -283,6 +332,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// handleSlashCommand. Guard to prevent "unknown command" output.
 	case cmdSetup:
 		// Handled in repl.go (needs model state). No-op here.
+	case cmdConfig:
+		// Handled in repl.go (needs model state and config path). No-op here.
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}

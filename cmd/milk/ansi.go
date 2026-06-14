@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,66 @@ func pulse(s string, frame int) string {
 		return s
 	}
 	return pulseColors[frame%len(pulseColors)] + s + ansiReset
+}
+
+// staleContentColor returns a truecolor ANSI code that grades from bright
+// near-white (ratio=0, fresh) through amber (ratio≈0.5) to a muted orange-red
+// (ratio≥1, fully stale). ratio is clamped to [0,1].
+// No dim modifier is used — brightness is encoded in the RGB values so fresh
+// bricks appear at full terminal brightness and age visibly as turns accumulate.
+func staleContentColor(ratio float64) string {
+	if !isTTY {
+		return ansiDim
+	}
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	// Truecolor gradient, no \033[2m dim modifier:
+	//   ratio=0   → (220, 218, 215)  bright near-white  (full brightness, fresh)
+	//   ratio=0.5 → (195, 130, 55)   amber              (warming, mid-age)
+	//   ratio=1   → (175, 65,  40)   muted orange-red   (clearly stale)
+	lerp := func(a, b int, t float64) int {
+		return a + int(float64(b-a)*t)
+	}
+	var r, g, b int
+	if ratio <= 0.5 {
+		t := ratio * 2
+		r = lerp(220, 195, t)
+		g = lerp(218, 130, t)
+		b = lerp(215, 55, t)
+	} else {
+		t := (ratio - 0.5) * 2
+		r = lerp(195, 175, t)
+		g = lerp(130, 65, t)
+		b = lerp(55, 40, t)
+	}
+	return fmt.Sprintf("\033[0;38;2;%d;%d;%dm", r, g, b)
+}
+
+// stalenessLegend returns a single line showing "fresh" on the left and "stale"
+// on the right, with every character coloured by its position in the gradient.
+// The line is padded/trimmed to exactly inner display columns.
+func stalenessLegend(inner int) string {
+	if !isTTY || inner <= 0 {
+		return ""
+	}
+	const left = "fresh"
+	const right = "stale"
+	// Fill: "fresh" + spaces + "stale", total = inner chars.
+	fill := max(inner-len(left)-len(right), 0)
+	runes := []rune(left + strings.Repeat("·", fill) + right)
+	if len(runes) > inner {
+		runes = runes[:inner]
+	}
+	var out strings.Builder
+	for i, ch := range runes {
+		ratio := float64(i) / float64(len(runes)-1)
+		out.WriteString(colorize(string(ch), staleContentColor(ratio)))
+	}
+	return out.String()
 }
 
 // logoMark is the diamond glyph used in the header.

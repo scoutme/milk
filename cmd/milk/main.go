@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -105,6 +106,10 @@ func run(cmd *cobra.Command, args []string) error {
 
 	if prompt == "" {
 		return runREPL(cfg, cwd, flagNew, flagSession)
+	}
+
+	for _, w := range config.Validate(cfg) {
+		fmt.Fprintf(os.Stderr, "%s config warning: %s\n", milkTag(), w)
 	}
 
 	sess, err := loadSessionForRun(cwd)
@@ -1142,6 +1147,12 @@ func sessionToMessages(sess *session.Session) []local.Message {
 			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
 		}
 	}
+	// runPrimary adds the current user turn to session history before calling
+	// Execute, but local.Agent.Run appends userPrompt separately — drop the
+	// trailing user message here to avoid sending the same prompt twice.
+	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" {
+		msgs = msgs[:n-1]
+	}
 	return msgs
 }
 
@@ -1231,34 +1242,203 @@ func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) 
 	return out
 }
 
+// runInitWizard runs the CLI-mode init wizard, writes ~/.milk/config.json,
+// and prints next-step guidance on success.
+func runInitWizard() error {
+	sc := bufio.NewScanner(os.Stdin)
+	ask := func(prompt string) string {
+		fmt.Print(prompt)
+		if !sc.Scan() {
+			return ""
+		}
+		return strings.TrimSpace(sc.Text())
+	}
+	askDefault := func(prompt, def string) string {
+		v := ask(prompt)
+		if v == "" {
+			return def
+		}
+		return v
+	}
+
+	fmt.Println("milk config init — interactive setup")
+	fmt.Println()
+
+	name := askDefault("Primary agent name [local]: ", "local")
+
+	fmt.Println()
+	fmt.Println("Select primary agent provider:")
+	fmt.Println("  1) local        — llama.cpp, Ollama, vLLM, LM Studio (plain HTTP)")
+	fmt.Println("  2) bedrock      — AWS Bedrock Converse API")
+	fmt.Println("  3) bearer       — OpenRouter, Together.ai, Groq, GitHub Copilot, any Bearer-token API")
+	fmt.Println("  4) claude-cli   — Claude Code CLI subprocess (no HTTP server needed)")
+	fmt.Println("  5) aider-cli    — aider subprocess")
+	fmt.Println("  6) subprocess   — generic NDJSON subprocess agent")
+	choice := askDefault("Choice [1]: ", "1")
+	providerMap := map[string]string{
+		"1": "local", "2": "bedrock", "3": "bearer",
+		"4": "claude-cli", "5": "aider-cli", "6": "subprocess",
+	}
+	provider, ok := providerMap[choice]
+	if !ok {
+		provider = "local"
+	}
+
+	primary := config.AgentConfig{Name: name, Provider: provider}
+	fmt.Println()
+	switch provider {
+	case "local":
+		primary.URL = ask("Server URL (e.g. http://localhost:8080): ")
+		primary.Model = ask("Model name: ")
+	case "bedrock":
+		primary.URL = ask("Bedrock endpoint URL (e.g. https://bedrock-runtime.<region>.amazonaws.com): ")
+		primary.Model = ask("Model ARN: ")
+		primary.AWSRegion = ask("AWS region (e.g. us-east-1): ")
+	case "bearer":
+		primary.URL = ask("Server URL (e.g. https://openrouter.ai/api/v1  ·  https://copilot-api.<org>.ghe.com  ·  https://<res>.cognitiveservices.azure.com/openai): ")
+		switch {
+		case isCopilotURL(primary.URL):
+			primary.Headers = map[string]string{
+				"Copilot-Integration-Id": "vscode-chat",
+				"Editor-Plugin-Version":  "copilot-chat/0.49.0",
+				"Editor-Version":         "vscode/1.121.0",
+				"X-GitHub-Api-Version":   "2026-01-09",
+			}
+			fmt.Println("  (GitHub Copilot detected — headers preset automatically)")
+			chatPath := askDefault("Chat path [/chat/completions]: ", "/chat/completions")
+			if chatPath != "/v1/chat/completions" {
+				primary.ChatPath = chatPath
+			}
+			primary.Model = ask("Model name (e.g. claude-sonnet-4.6 or gpt-4o): ")
+			hint := "gh auth token"
+			if h := copilotHostname(primary.URL); h != "" {
+				hint = "gh auth token --hostname " + h
+			}
+			apiKey := ask("API key (leave blank to use token_cmd instead): ")
+			if apiKey != "" {
+				primary.APIKey = apiKey
+			} else {
+				primary.TokenCmd = askDefault(fmt.Sprintf("Token command [%s]: ", hint), hint)
+			}
+		case isAzureURL(primary.URL):
+			fmt.Println("  (Azure OpenAI detected — api-key header will be used)")
+			dep := azureDeployment(primary.URL)
+			primary.Model = askDefault("Deployment/model name (e.g. gpt-4.1): ", dep)
+			defPath := "/deployments/" + primary.Model + "/chat/completions"
+			chatPath := askDefault(fmt.Sprintf("Chat path [%s]: ", defPath), defPath)
+			if chatPath != "/v1/chat/completions" {
+				primary.ChatPath = chatPath
+			}
+			apiKey := ask("Azure API key: ")
+			if apiKey != "" {
+				primary.Headers = map[string]string{"api-key": apiKey}
+			}
+		default:
+			chatPath := askDefault("Chat path [/v1/chat/completions]: ", "/v1/chat/completions")
+			if chatPath != "/v1/chat/completions" {
+				primary.ChatPath = chatPath
+			}
+			primary.Model = ask("Model name: ")
+			apiKey := ask("API key (leave blank to use token_cmd instead): ")
+			if apiKey != "" {
+				primary.APIKey = apiKey
+			} else {
+				primary.TokenCmd = ask("Token command (e.g. 'gh auth token' or 'op read op://vault/item/field'): ")
+			}
+		}
+	case "aider-cli", "subprocess":
+		primary.URL = ask("Server URL: ")
+		primary.Model = ask("Model name: ")
+	case "claude-cli":
+		// nothing required
+	}
+
+	fmt.Println()
+	escChoice := askDefault("Escalation agent — use Claude Code CLI? [Y/n]: ", "y")
+	var escalation *config.AgentConfig
+	if strings.ToLower(escChoice) != "n" {
+		e := config.AgentConfig{Name: "claude", Provider: "claude-cli"}
+		escalation = &e
+	}
+
+	cfg := config.InitConfig(primary, escalation)
+	if err := config.Save(cfg); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("config written to ~/.milk/config.json")
+	fmt.Println()
+	fmt.Println("next steps:")
+	fmt.Println("  milk               — start the TUI")
+	fmt.Println("  milk /config init  — re-run this wizard inside the TUI")
+	if escalation != nil {
+		fmt.Println("  /escalate          — pin a turn to Claude Code for complex work")
+	}
+	if primary.Provider == "bedrock" {
+		fmt.Println()
+		fmt.Println("tip: if you use short-lived STS credentials, add aws_refresh_cmd to your agent config to auto-renew on 403")
+	}
+	if isCopilotURL(primary.URL) || isAzureURL(primary.URL) {
+		fmt.Println()
+		fmt.Println("tip: set limits.message_budget_chars in your agent config to cap context size (e.g. 800000 for Copilot/Azure)")
+	}
+	return nil
+}
+
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Print effective configuration",
+	Short: "Print config as JSON (milk config open | init for more)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			return err
-		}
-		ac := cfg.ActiveAgent()
-		cac := cliAgentConfig(cfg)
-		fmt.Printf("agent:          %s\n", cfg.Agent)
-		fmt.Printf("agent_url:      %s\n", ac.URL)
-		fmt.Printf("agent_model:    %s\n", ac.Model)
-		fmt.Printf("cli_bin:     %s\n", cac.Bin)
-		fmt.Printf("default_route:  %s\n", cfg.DefaultRoute)
-		fmt.Printf("escalate_above_tokens: %d\n", cfg.Rules.EscalateAboveTokens)
-		fmt.Printf("local_below_tokens:    %d\n", cfg.Rules.LocalBelowTokens)
-		fmt.Printf("escalate_keywords:     %v\n", cfg.Rules.EscalateKeywords)
-		fmt.Printf("local_verbs:           %v\n", cfg.Rules.LocalVerbs)
-		fmt.Printf("escalate_verbs:        %v\n", cfg.Rules.EscalateVerbs)
-		fmt.Printf("escalate_threshold:    %d\n", cfg.Rules.EscalateThreshold)
-		fmt.Printf("local_threshold:       %d\n", cfg.Rules.LocalThreshold)
-		fmt.Printf("local_verb_weight:     %d\n", cfg.Rules.LocalVerbWeight)
-		fmt.Printf("escalate_verb_weight:  %d\n", cfg.Rules.EscalateVerbWeight)
-		fmt.Printf("path_ref_weight:       %d\n", cfg.Rules.PathRefWeight)
-		fmt.Printf("code_block_weight:     %d\n", cfg.Rules.CodeBlockWeight)
-		fmt.Printf("open_question_weight:  %d\n", cfg.Rules.OpenQuestionWeight)
-		fmt.Printf("classifier_fallback:   %s\n", cfg.Rules.ClassifierFallback)
-		return nil
+		return runConfigPrint()
 	},
+}
+
+func init() {
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "init",
+		Short: "Interactive setup wizard — configure primary and escalation agents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInitWizard()
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "open",
+		Short: "Open config in $EDITOR or system default editor",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigOpen()
+		},
+	})
+}
+
+func runConfigPrint() error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func runConfigOpen() error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	editor := os.Getenv("EDITOR")
+	var cmd *exec.Cmd
+	if editor != "" {
+		cmd = exec.Command(editor, cfgPath)
+	} else {
+		cmd = exec.Command("xdg-open", cfgPath)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
 }

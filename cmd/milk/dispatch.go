@@ -142,8 +142,22 @@ func runEscalation(
 	fmt.Fprint(out, bold(blue(agentName+":"))+" ")
 	aw := newActivityWriter(out)
 
+	forceFresh := sess.ForceFreshEscalation
+	if forceFresh {
+		sess.ForceFreshEscalation = false
+		sess.EscalationSessionID = ""
+		sess.EscalationNonce = ""
+		sess.MemoryInstructionInjectedAt = 0
+		sess.CurrentNeed = ""
+		sess.CurrentNeedSetAt = 0
+		obs.Debug(agentName + " force-fresh-escalation: context reset")
+	}
+
 	var ctxMode escalation.ContextMode
 	switch {
+	case forceFresh:
+		// /escalate fresh: always start a new session regardless of history.
+		ctxMode = escalation.ContextModeFirst
 	case sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != "":
 		ctxMode = escalation.ContextModeResume
 	case sess.EscalationSessionID != "" || session.EscalationEverActive(sess):
@@ -160,6 +174,8 @@ func runEscalation(
 		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
 		if needStale || turnGap {
 			ctxMode = escalation.ContextModeFirst
+			sess.CurrentNeed = ""
+			sess.CurrentNeedSetAt = 0
 			obs.Debug(agentName+" returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
 		}
 	}
@@ -225,6 +241,8 @@ func runEscalation(
 		sess.ForceState(session.StateEscalationWaiting)
 	} else {
 		sess.EscalationBrief = ""
+		sess.CurrentNeed = ""
+		sess.CurrentNeedSetAt = 0
 		logStateTransition(sess, session.StateRouting, agentName+" escalation done")
 		sess.ForceState(session.StateRouting)
 	}
