@@ -14,13 +14,12 @@ import (
 // display in the memory panel.
 type sessionBricks struct {
 	currentNeed           string
-	needHistory           []string // all needs expressed this session, oldest first
 	lastLocalSummary      string
 	lastEscalationSummary string
 	escalationBrief       string
 	primaryName           string // configured name of the primary agent (used as brick label)
 	escalationName        string // configured name of the escalation agent (used as brick label)
-	needStale             bool   // need changed since last escalation → will trigger fresh-start
+	needStale             bool   // unused in panel — kept for future use
 	contextStale          bool   // local turn gap exceeded threshold → will trigger fresh-start
 	localTurnsSince       int    // local assistant turns since last escalation (0 if never escalated)
 	freshThreshold        int    // threshold at which contextStale fires
@@ -82,7 +81,6 @@ func (m *model) currentSessionBricks() sessionBricks {
 	turnsSince := m.st.sess.LocalTurnsSinceLastEscalation()
 	return sessionBricks{
 		currentNeed:           m.st.sess.CurrentNeed,
-		needHistory:           m.st.sess.NeedHistory,
 		lastLocalSummary:      m.st.sess.LastLocalSummary,
 		lastEscalationSummary: m.st.sess.LastEscalationSummary,
 		escalationBrief:       m.st.sess.EscalationBrief,
@@ -214,15 +212,7 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	}
 	escStale := bricks.contextStale
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
-	addBrickLines(&lines, "need", bricks.currentNeed, inner, bricks.needStale, 0)
-	// Show prior needs dimmed — only when there is an active current need,
-	// since currentNeed is cleared on load when the need was already fulfilled.
-	if bricks.currentNeed != "" && len(bricks.needHistory) > 1 {
-		prior := bricks.needHistory[:len(bricks.needHistory)-1]
-		for i := len(prior) - 1; i >= 0; i-- {
-			addBrickLines(&lines, "", dim(prior[i]), inner, false, 0)
-		}
-	}
+	addBrickLines(&lines, "need", bricks.currentNeed, inner, false, 0)
 	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner, false, 0)
 	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner, escStale, escRatio)
 	addBrickLines(&lines, "brief", bricks.escalationBrief, inner, escStale, escRatio)
@@ -447,13 +437,6 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	add("") // blank
 	add("") // CONTEXT BRICKS header
 	addBrick("need", bricks.currentNeed)
-	// Prior needs: one addBrick call per entry so line counts match buildPanelLines.
-	if bricks.currentNeed != "" && len(bricks.needHistory) > 1 {
-		prior := bricks.needHistory[:len(bricks.needHistory)-1]
-		for i := len(prior) - 1; i >= 0; i-- {
-			addBrick("", prior[i])
-		}
-	}
 	addBrick(primaryLabel, bricks.lastLocalSummary)
 	addBrick(escalationLabel, bricks.lastEscalationSummary)
 	addBrick("brief", bricks.escalationBrief)
@@ -475,16 +458,7 @@ func brickContent(id string, bricks sessionBricks) string {
 	}
 	switch id {
 	case "need":
-		if len(bricks.needHistory) <= 1 {
-			return bricks.currentNeed
-		}
-		var b strings.Builder
-		b.WriteString("current: " + bricks.currentNeed)
-		b.WriteString("\nhistory:")
-		for i := len(bricks.needHistory) - 2; i >= 0; i-- {
-			b.WriteString("\n  " + bricks.needHistory[i])
-		}
-		return b.String()
+		return bricks.currentNeed
 	case primaryLabel:
 		return bricks.lastLocalSummary
 	case escalationLabel:

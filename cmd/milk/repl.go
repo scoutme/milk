@@ -430,6 +430,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 	ta := buildTextarea()
 	return model{
 		histIdx:             -1,
+		hintIdx:             -1,
 		ctx:                 ctx,
 		st:                  st,
 		rtr:                 rtr,

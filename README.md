@@ -26,7 +26,7 @@ When the primary model cannot handle a task, it calls `escalate(reason)` and mil
 | Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
 | Go 1.21+ | build from source only | no (pre-built binaries available) |
 
-The primary agent supports multiple backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, and any OpenAI-compatible server. The escalation agent can be any of the above, or the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`) — a powerful option when available but not required.
+Both the primary and escalation agents support the same set of backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, any OpenAI-compatible server (`provider: ""` or `"local"`), the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`), [aider](https://aider.chat) (`provider: "aider-cli"`), and generic subprocess agents (`provider: "subprocess"`). Either role can use any backend; there is no backend tied exclusively to primary or escalation.
 
 If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
 
@@ -265,7 +265,18 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
 
 `agent` names the active primary backend. `escalation_agent` names which backend handles escalated turns — any entry in `agents`, not necessarily the Claude CLI. Use `/agent switch <name> as primary|escalation` to change roles at runtime.
 
-Supported `provider` values: omit (or `""`) for no-auth/local, `"bedrock"` (AWS SigV4), `"bearer"` (API key), `"claude-cli"` (Claude Code CLI subprocess). For Azure OpenAI, omit `provider` and pass `"api-key": "..."` under `headers`.
+Supported `provider` values:
+
+| Value | Backend |
+| --- | --- |
+| omit or `""` / `"local"` | OpenAI-compatible HTTP server, no auth |
+| `"bedrock"` | AWS Bedrock, SigV4 signing, native Converse API |
+| `"claude-cli"` | Claude Code CLI subprocess |
+| `"aider-cli"` | aider subprocess |
+| `"subprocess"` | generic subprocess agent (smolagents and similar) |
+| anything else | Bearer-token HTTP (OpenRouter, Groq, Together.ai, GitHub Models, …) |
+
+For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}` under `headers`.
 
 **`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 
