@@ -415,6 +415,7 @@ const systemPromptShared = `Rules:
   - User states a preference, decision, or fact → call record_memory NOW.
   - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. Strip any leading "#" from the ID before passing it. Never say "done" or confirm the action without actually calling the tool.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
+**MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session.
 - The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:

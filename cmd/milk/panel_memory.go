@@ -215,8 +215,9 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	escStale := bricks.contextStale
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
 	addBrickLines(&lines, "need", bricks.currentNeed, inner, bricks.needStale, 0)
-	// Show prior needs (all except the current one) dimmed below the current need.
-	if len(bricks.needHistory) > 1 {
+	// Show prior needs dimmed — only when there is an active current need,
+	// since currentNeed is cleared on load when the need was already fulfilled.
+	if bricks.currentNeed != "" && len(bricks.needHistory) > 1 {
 		prior := bricks.needHistory[:len(bricks.needHistory)-1]
 		for i := len(prior) - 1; i >= 0; i-- {
 			addBrickLines(&lines, "", dim(prior[i]), inner, false, 0)
@@ -447,7 +448,7 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	add("") // CONTEXT BRICKS header
 	addBrick("need", bricks.currentNeed)
 	// Prior needs: one addBrick call per entry so line counts match buildPanelLines.
-	if len(bricks.needHistory) > 1 {
+	if bricks.currentNeed != "" && len(bricks.needHistory) > 1 {
 		prior := bricks.needHistory[:len(bricks.needHistory)-1]
 		for i := len(prior) - 1; i >= 0; i-- {
 			addBrick("", prior[i])
