@@ -306,7 +306,9 @@ type model struct {
 	tabPrefix       string   // what the user had typed when Tab was first pressed
 	tabBeforeCursor string   // beforeCursor snapshot at session start; used for clean cycling
 	tabAfterCursor  string   // afterCursor snapshot at session start
-	tabHints        []string // hint lines shown below viewport while completing a slash command
+	tabSubcmdMode   bool     // true when tabMatches holds full sigs (subcommand/trailing-space mode)
+	tabHints        []string // hint lines shown below viewport (may have one entry highlighted)
+	tabHintsBase    []string // same lines without any highlight; source of truth for highlightHint
 	hintIdx         int      // selected inline hint (-1 = none)
 
 	// pending permission request (non-nil while waiting for user y/n) and queue
@@ -1835,17 +1837,38 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	case "enter":
-		if m.hintIdx >= 0 && len(m.tabMatches) == 0 {
+		if len(m.tabMatches) > 0 {
+			// Tab cycling is active: accept the already-inserted completion and
+			// clear cycling state without submitting.
+			m.tabMatches = nil
+			m.tabIdx = -1
+			m.tabCmdIdx = 0
+			m.tabVarIdx = 0
+			m.tabBeforeCursor = ""
+			m.tabAfterCursor = ""
+			m.tabPrefix = ""
+			m.tabSubcmdMode = false
+			m.tabHints = nil
+			m.tabHintsBase = nil
+			m.hintIdx = -1
+			m.syncLayout()
+			return m, nil
+		}
+		if m.hintIdx >= 0 {
 			m.commitHintSelection()
 			m.syncLayout()
 			return m, nil
 		}
 		return m.handleEnter()
 	case "up":
-		if len(m.tabHints) > 0 && len(m.tabMatches) == 0 {
+		if len(m.tabHints) > 0 {
 			m.hintIdx--
 			if m.hintIdx < 0 {
 				m.hintIdx = len(m.tabHints) - 1
+			}
+			if len(m.tabMatches) > 0 {
+				m.syncTabIdxFromHint()
+				m = m.insertActiveCompletion()
 			}
 			m.highlightHint()
 			m.syncLayout()
@@ -1858,10 +1881,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "down":
-		if len(m.tabHints) > 0 && len(m.tabMatches) == 0 {
+		if len(m.tabHints) > 0 {
 			m.hintIdx++
 			if m.hintIdx >= len(m.tabHints) {
 				m.hintIdx = 0
+			}
+			if len(m.tabMatches) > 0 {
+				m.syncTabIdxFromHint()
+				m = m.insertActiveCompletion()
 			}
 			m.highlightHint()
 			m.syncLayout()
@@ -1917,7 +1944,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.tabBeforeCursor = ""
 	m.tabAfterCursor = ""
 	m.tabPrefix = ""
+	m.tabSubcmdMode = false
 	m.tabHints = nil
+	m.tabHintsBase = nil
 
 	// When a keyboard selection is active, special keys act on it.
 	if m.taSelText() != "" {
@@ -2018,7 +2047,9 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.tabBeforeCursor = ""
 		m.tabAfterCursor = ""
 		m.tabPrefix = ""
+		m.tabSubcmdMode = false
 		m.tabHints = nil
+		m.tabHintsBase = nil
 		m.syncLayout()
 		return m, nil
 	}
@@ -2040,7 +2071,9 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	m.tabBeforeCursor = ""
 	m.tabAfterCursor = ""
 	m.tabPrefix = ""
+	m.tabSubcmdMode = false
 	m.tabHints = nil
+	m.tabHintsBase = nil
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
@@ -3827,6 +3860,7 @@ func (m model) historyBack() model {
 	m.ta.SetValue(h[m.histIdx])
 	m.hintIdx = -1
 	m.tabHints = nil
+	m.tabHintsBase = nil
 	m.taClearSel()
 	return m
 }
@@ -3845,6 +3879,7 @@ func (m model) historyForward() model {
 	}
 	m.hintIdx = -1
 	m.tabHints = nil
+	m.tabHintsBase = nil
 	m.taClearSel()
 	return m
 }
@@ -3966,21 +4001,32 @@ func (m model) handleTab(dir int) model {
 
 	// Build or reuse the match list.
 	if len(m.tabMatches) == 0 || curLine != m.tabLine {
-		m.tabMatches, m.tabIdx = buildTabMatches(beforeCursor, m.st.cwd)
+		var replaceBase string
+		m.tabMatches, m.tabIdx, replaceBase = buildTabMatches(beforeCursor, m.st.cwd)
 		m.tabLine = curLine
 		if len(m.tabMatches) == 0 {
 			return m
 		}
 		m.tabPrefix = tabInputPrefix(beforeCursor)
-		m.tabBeforeCursor = beforeCursor
+		// For subcommand completions, replaceBase is the slash-command token (e.g.
+		// "/memory"). applyTabCompletion will replace from there, discarding any
+		// partial subcommand the user had typed. For normal completions it's "".
+		m.tabSubcmdMode = replaceBase != ""
+		if replaceBase != "" {
+			m.tabBeforeCursor = replaceBase
+		} else {
+			m.tabBeforeCursor = beforeCursor
+		}
 		m.tabAfterCursor = afterCursor
 		m.tabCmdIdx = 0
 		m.tabVarIdx = 0
 		if dir < 0 {
 			// Shift+Tab from scratch: start at the last entry of the last command.
 			m.tabCmdIdx = len(m.tabMatches) - 1
-			if vs, ok := cmdVariants[m.tabMatches[m.tabCmdIdx]]; ok && len(vs) > 0 {
-				m.tabVarIdx = len(vs) - 1
+			if !m.tabSubcmdMode {
+				if vs, ok := cmdVariants[m.tabMatches[m.tabCmdIdx]]; ok && len(vs) > 0 {
+					m.tabVarIdx = len(vs) - 1
+				}
 			}
 		}
 	} else {
@@ -4028,46 +4074,131 @@ func (m model) handleTab(dir int) model {
 	// Cursor goes after the completed token (before afterCursor).
 	m.ta.SetCursor(precedingLen + len([]rune(completedBefore)))
 
-	// Build hint panel: all variants of all matching commands, with the active
-	// entry highlighted via reverse video.
-	m.tabHints = nil
+	// Build hint panel base: all variants styled (yellow sig + dim desc) but
+	// without any highlight. highlightHint then overlays the active entry.
+	m.tabHintsBase = nil
 	prefix := m.tabPrefix
-	totalCmds := len(m.tabMatches)
-	for ci, cmd := range m.tabMatches {
-		vs := cmdVariants[cmd]
-		if len(vs) == 0 {
-			// No registered variants (e.g. @-path or unlisted command) — one entry.
-			isActive := ci == m.tabCmdIdx
-			entry := yellow(cmd)
-			if isActive {
-				entry = "\033[48;5;238m" + ansi.Strip(entry) + "\033[49m"
+	if m.tabSubcmdMode {
+		// Each match is a full sig — one hint line per entry, desc looked up from cmdVariants.
+		for _, sig := range m.tabMatches {
+			styledSig := yellow(sig)
+			desc := ""
+			// Find the matching variant to get the description.
+			cmd := strings.Fields(sig)[0]
+			for _, v := range cmdVariants[cmd] {
+				if v.sig == sig {
+					desc = "  " + dim(v.desc)
+					break
+				}
 			}
-			m.tabHints = append(m.tabHints, " "+entry)
-			continue
+			m.tabHintsBase = append(m.tabHintsBase, " "+styledSig+desc)
 		}
-		for vi, v := range vs {
-			isActive := ci == m.tabCmdIdx && vi == m.tabVarIdx
-			sig := v.sig
-			if prefix != "" && strings.HasPrefix(sig, prefix) {
-				sig = boldYellow(prefix) + yellow(sig[len(prefix):])
-			} else {
-				sig = yellow(sig)
+	} else {
+		totalCmds := len(m.tabMatches)
+		for ci, cmd := range m.tabMatches {
+			vs := cmdVariants[cmd]
+			if len(vs) == 0 {
+				// No registered variants (e.g. @-path or unlisted command) — one entry.
+				m.tabHintsBase = append(m.tabHintsBase, " "+yellow(cmd))
+				continue
 			}
-			desc := dim(v.desc)
-			cmdCount := ""
-			if vi == 0 && totalCmds > 1 {
-				cmdCount = dim(fmt.Sprintf(" [%d/%d]", ci+1, totalCmds))
+			for vi, v := range vs {
+				sig := v.sig
+				if prefix != "" && strings.HasPrefix(sig, prefix) {
+					sig = boldYellow(prefix) + yellow(sig[len(prefix):])
+				} else {
+					sig = yellow(sig)
+				}
+				desc := dim(v.desc)
+				cmdCount := ""
+				if vi == 0 && totalCmds > 1 {
+					cmdCount = dim(fmt.Sprintf(" [%d/%d]", ci+1, totalCmds))
+				}
+				m.tabHintsBase = append(m.tabHintsBase, " "+sig+"  "+desc+cmdCount)
 			}
-			entry := " " + sig + "  " + desc + cmdCount
-			if isActive {
-				// Highlight active entry with a subtle dark-gray background.
-				entry = "\033[48;5;238m " + ansi.Strip(sig) + "  " + ansi.Strip(desc) + ansi.Strip(cmdCount) + "\033[49m"
-			}
-			m.tabHints = append(m.tabHints, entry)
 		}
 	}
+	// hintIdx is the flat index of the active (tabCmdIdx, tabVarIdx) entry.
+	// In subcommand mode each match is one line so flatIdx == tabCmdIdx.
+	m.hintIdx = m.tabCmdIdx
+	if !m.tabSubcmdMode {
+		flatIdx := 0
+		for ci, cmd := range m.tabMatches {
+			vs := cmdVariants[cmd]
+			count := 1
+			if len(vs) > 0 {
+				count = len(vs)
+			}
+			if ci == m.tabCmdIdx {
+				flatIdx += m.tabVarIdx
+				break
+			}
+			flatIdx += count
+		}
+		m.hintIdx = flatIdx
+	}
+
+	m.tabHints = make([]string, len(m.tabHintsBase))
+	copy(m.tabHints, m.tabHintsBase)
+	m.highlightHint()
 
 	m.syncLayout()
+	return m
+}
+
+// syncTabIdxFromHint converts the flat hintIdx back into (tabCmdIdx, tabVarIdx).
+// Called when arrow keys move hintIdx while tab-cycling is active.
+func (m *model) syncTabIdxFromHint() {
+	if m.tabSubcmdMode {
+		m.tabCmdIdx = m.hintIdx
+		m.tabVarIdx = 0
+		return
+	}
+	flat := m.hintIdx
+	for ci, cmd := range m.tabMatches {
+		vs := cmdVariants[cmd]
+		count := 1
+		if len(vs) > 0 {
+			count = len(vs)
+		}
+		if flat < count {
+			m.tabCmdIdx = ci
+			m.tabVarIdx = flat
+			m.tabIdx = ci
+			return
+		}
+		flat -= count
+	}
+	// Fallback: clamp to last entry.
+	m.tabCmdIdx = len(m.tabMatches) - 1
+	m.tabVarIdx = 0
+}
+
+// insertActiveCompletion inserts the completion for the current (tabCmdIdx, tabVarIdx)
+// into the textarea. Mirrors the insertion logic in handleTab so arrows and Tab
+// produce identical textarea state.
+func (m model) insertActiveCompletion() model {
+	completed := m.tabMatches[m.tabCmdIdx]
+	completionToken := completed
+	if !m.tabSubcmdMode {
+		if vs, ok := cmdVariants[completed]; ok && len(vs) > 0 && m.tabVarIdx < len(vs) {
+			completionToken = vs[m.tabVarIdx].sig
+		}
+	}
+	fullInput := m.ta.Value()
+	lines := strings.Split(fullInput, "\n")
+	curLine := m.tabLine
+	if curLine >= len(lines) {
+		curLine = len(lines) - 1
+	}
+	completedBefore := applyTabCompletion(m.tabBeforeCursor, completionToken)
+	lines[curLine] = completedBefore + m.tabAfterCursor
+	m.ta.SetValue(strings.Join(lines, "\n"))
+	precedingLen := 0
+	if curLine > 0 {
+		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
+	}
+	m.ta.SetCursor(precedingLen + len([]rune(completedBefore)))
 	return m
 }
 
@@ -4207,6 +4338,7 @@ func (m *model) rebuildInlineHints() {
 	words := strings.Fields(beforeCursor)
 	if len(words) == 0 {
 		m.tabHints = nil
+		m.tabHintsBase = nil
 		return
 	}
 	last := words[len(words)-1]
@@ -4267,18 +4399,14 @@ func (m *model) rebuildInlineHints() {
 			matches = matches[:limit]
 		}
 		if len(matches) == 0 {
-			m.tabHints = nil
-			m.hintIdx = -1
+			m.setHints(nil)
 			return
 		}
 		raw := make([]string, len(matches))
 		for i, p := range matches {
 			raw[i] = " " + dim("@"+p)
 		}
-		if !stringSlicesEqual(m.tabHints, raw) {
-			m.hintIdx = -1
-		}
-		m.tabHints = raw
+		m.setHints(m.capHints(raw))
 		return
 	}
 
@@ -4297,27 +4425,88 @@ func (m *model) rebuildInlineHints() {
 				hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
 			}
 		}
-		capped := m.capHints(hints)
-		if !stringSlicesEqual(m.tabHints, capped) {
-			m.hintIdx = -1
-		}
-		m.tabHints = capped
+		m.setHints(m.capHints(hints))
 		return
 	}
 
-	m.tabHints = nil
-	m.hintIdx = -1
+	// Passive subcommand hints: cursor is on a non-slash word and the preceding
+	// token is a known command with variants. e.g. "/memory sh" while typing.
+	if len(words) >= 2 {
+		prev := words[len(words)-2]
+		if isSlashCmdToken(prev) {
+			if vs := cmdVariants[prev]; len(vs) > 0 {
+				lower := strings.ToLower(last)
+				var hints []string
+				for _, v := range vs {
+					sigWords := strings.Fields(v.sig)
+					if len(sigWords) >= 2 && strings.HasPrefix(strings.ToLower(sigWords[1]), lower) {
+						hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+					}
+				}
+				m.setHints(m.capHints(hints))
+				return
+			}
+		}
+	}
+
+	// Trailing space after a known slash command: show all its subcommand hints.
+	if len(beforeCursor) > 0 && (beforeCursor[len(beforeCursor)-1] == ' ' || beforeCursor[len(beforeCursor)-1] == '\t') {
+		if len(words) >= 1 {
+			prev := words[len(words)-1]
+			if isSlashCmdToken(prev) {
+				if vs := cmdVariants[prev]; len(vs) > 0 {
+					var hints []string
+					for _, v := range vs {
+						hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+					}
+					m.setHints(m.capHints(hints))
+					return
+				}
+			}
+		}
+	}
+
+	m.setHints(nil)
+}
+
+// setHints replaces the hint list and resets the highlight. Both tabHints and
+// tabHintsBase are updated together so highlightHint always has the styled
+// base to restore non-active entries from.
+func (m *model) setHints(hints []string) {
+	changed := !stringSlicesEqual(m.tabHintsBase, hints)
+	m.tabHintsBase = hints
+	m.tabHints = make([]string, len(hints))
+	copy(m.tabHints, hints)
+	if changed {
+		m.hintIdx = -1
+	}
+	m.highlightHint()
 }
 
 // highlightHint updates tabHints to visually highlight the entry at hintIdx
-// without touching the textarea.
+// without touching the textarea. Non-active entries are restored from
+// tabHintsBase so their original styling (yellow, dim, etc.) is preserved.
 func (m *model) highlightHint() {
-	for i, h := range m.tabHints {
-		plain := ansi.Strip(h)
+	if m.hintIdx < 0 {
+		// No selection — restore all entries from base.
+		copy(m.tabHints, m.tabHintsBase)
+		return
+	}
+	for i := range m.tabHints {
 		if i == m.hintIdx {
-			m.tabHints[i] = "\033[48;5;238m" + plain + "\033[49m"
+			const bg = "\033[48;5;238m"
+			if len(m.tabMatches) > 0 {
+				// Tab-cycling: base already has yellow/boldYellow/dim styling — preserve
+				// it and inject bg, re-applying after any full-reset mid-line.
+				styled := strings.ReplaceAll(m.tabHintsBase[i], "\033[0m", "\033[0m"+bg)
+				m.tabHints[i] = bg + styled + "\033[0m"
+			} else {
+				// Passive hints: base is dim — render selected entry as yellow on dark-grey.
+				plain := ansi.Strip(m.tabHintsBase[i])
+				m.tabHints[i] = bg + yellow(plain) + "\033[0m"
+			}
 		} else {
-			m.tabHints[i] = " " + dim(strings.TrimSpace(plain))
+			m.tabHints[i] = m.tabHintsBase[i]
 		}
 	}
 }
@@ -4360,6 +4549,7 @@ func (m *model) commitHintSelection() bool {
 	m.ta.SetCursor(precedingLen + len([]rune(completed)))
 
 	m.tabHints = nil
+	m.tabHintsBase = nil
 	m.hintIdx = -1
 	return true
 }
@@ -4429,15 +4619,34 @@ func filterGitIgnored(paths []string, cwd string) []string {
 	return kept
 }
 
-func buildTabMatches(input, cwd string) ([]string, int) {
-	// Never complete when the cursor is between words (trailing whitespace).
-	if input == "" || input[len(input)-1] == ' ' || input[len(input)-1] == '\t' {
-		return nil, 0
-	}
+// buildTabMatches returns (matches, initialIdx, replaceBase).
+// replaceBase is the portion of input that should be used as the snapshot for
+// applyTabCompletion: normally "" (caller uses beforeCursor as-is), but set to
+// the slash-command token (e.g. "/memory") for subcommand completions so that
+// the whole "/cmd sub…" sequence is replaced in one step.
+func buildTabMatches(input, cwd string) ([]string, int, string) {
 	words := strings.Fields(input)
 	if len(words) == 0 {
-		return nil, 0
+		return nil, 0, ""
 	}
+
+	// Trailing whitespace after a known slash command → subcommand listing.
+	// e.g. "/memory " → list all /memory variants.
+	trailingSpace := input != "" && (input[len(input)-1] == ' ' || input[len(input)-1] == '\t')
+	if trailingSpace {
+		last := words[len(words)-1]
+		if isSlashCmdToken(last) {
+			if vs := cmdVariants[last]; len(vs) > 0 {
+				sigs := make([]string, len(vs))
+				for i, v := range vs {
+					sigs[i] = v.sig
+				}
+				return sigs, 0, last
+			}
+		}
+		return nil, 0, ""
+	}
+
 	// Only complete the last word — the token the cursor is actively on.
 	last := words[len(words)-1]
 	if strings.HasPrefix(last, "@") {
@@ -4447,10 +4656,36 @@ func buildTabMatches(input, cwd string) ([]string, int) {
 		for j, m := range matches {
 			atMatches[j] = "@" + m
 		}
-		return atMatches, 0
+		return atMatches, 0, ""
 	}
+
+	// Partial subcommand: cursor is on a non-slash token and the preceding word
+	// is a known slash command with variants. e.g. "/memory sh" → filter to sigs
+	// whose subcommand portion starts with "sh".
+	if !isSlashCmdToken(last) && len(words) >= 2 {
+		prev := words[len(words)-2]
+		if isSlashCmdToken(prev) {
+			if vs := cmdVariants[prev]; len(vs) > 0 {
+				var sigs []string
+				lower := strings.ToLower(last)
+				for _, v := range vs {
+					// v.sig is "/cmd sub …" — compare the word after the command.
+					sigWords := strings.Fields(v.sig)
+					if len(sigWords) >= 2 && strings.HasPrefix(strings.ToLower(sigWords[1]), lower) {
+						sigs = append(sigs, v.sig)
+					}
+				}
+				if len(sigs) > 0 {
+					return sigs, 0, prev
+				}
+			}
+		}
+		return nil, 0, ""
+	}
+
+	// Top-level slash command prefix completion. e.g. "/mem" → ["/memory", …]
 	if !isSlashCmdToken(last) {
-		return nil, 0
+		return nil, 0, ""
 	}
 	var matches []string
 	for _, cmd := range slashCommands {
@@ -4458,7 +4693,7 @@ func buildTabMatches(input, cwd string) ([]string, int) {
 			matches = append(matches, cmd)
 		}
 	}
-	return matches, 0
+	return matches, 0, ""
 }
 
 func expandPath(prefix, cwd string) []string {

@@ -119,7 +119,7 @@ const interactiveHelp = `
   /memory global         list only global percepts
   /memory session        list only session percepts
   /memory <pat>          list percepts whose content matches <pat>
-  /memory show <pat|#id> show full details of matching percepts
+  /memory show <pat|#id>  show full details of matching percepts
   /forget <pat|#id>      delete a percept (asks for confirmation)
   /panel memory          toggle the memory panel (right side)
 
