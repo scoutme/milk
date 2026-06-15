@@ -64,8 +64,10 @@ type Session struct {
 	// CurrentNeedSetAt is len(History)+1 at the time CurrentNeed was last written
 	// (1-based: 0 is the unset sentinel, ≥1 encodes a real position).
 	// Used to detect stale needs that may already have been fulfilled.
-	CurrentNeed      string `json:"current_need,omitempty"`
-	CurrentNeedSetAt int    `json:"current_need_set_at,omitempty"`
+	// NeedHistory accumulates every distinct need expressed this session, oldest first.
+	CurrentNeed      string   `json:"current_need,omitempty"`
+	CurrentNeedSetAt int      `json:"current_need_set_at,omitempty"`
+	NeedHistory      []string `json:"need_history,omitempty"`
 	// EscalationBrief is set when the local model calls escalate(reason).
 	// It is tactical and ephemeral: overwritten on each agent-triggered escalation.
 	EscalationBrief string `json:"escalation_brief,omitempty"`
@@ -415,6 +417,19 @@ func (s *Session) NeedChangedSinceLastEscalation() bool {
 		}
 	}
 	return true
+}
+
+// RecordNeed sets CurrentNeed and appends to NeedHistory when the value is new.
+// Idempotent: calling with the same text as the current need is a no-op.
+func (s *Session) RecordNeed(body string) {
+	if body == "" || body == s.CurrentNeed {
+		return
+	}
+	s.CurrentNeed = body
+	s.CurrentNeedSetAt = len(s.History)
+	if len(s.NeedHistory) == 0 || s.NeedHistory[len(s.NeedHistory)-1] != body {
+		s.NeedHistory = append(s.NeedHistory, body)
+	}
 }
 
 // EscalationEverActive reports whether the escalation agent has ever produced a

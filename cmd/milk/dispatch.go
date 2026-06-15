@@ -62,10 +62,7 @@ func runPrimary(
 	}
 
 	cbs := TurnCallbacks{
-		OnNeed: func(body string) {
-			sess.CurrentNeed = body
-			sess.CurrentNeedSetAt = len(sess.History)
-		},
+		OnNeed:     func(body string) { sess.RecordNeed(body) },
 		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
 		OnEscalate: func(reason string) {}, // captured via TurnResult.EscalationReason
 	}
@@ -101,8 +98,7 @@ func runPrimary(
 	if res.EscalationReason != "" {
 		fmt.Fprintf(out, "\n%s %s requested escalation: %s\n", milkTag(), agentName, res.EscalationReason)
 		if sess.CurrentNeed == "" {
-			sess.CurrentNeed = prompt
-			sess.CurrentNeedSetAt = len(sess.History)
+			sess.RecordNeed(prompt)
 		}
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(cfg.EscalationAgentConfig()))
 		logStateTransition(sess, session.StateRouting, agentName+" self-escalation")
@@ -174,8 +170,6 @@ func runEscalation(
 		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
 		if needStale || turnGap {
 			ctxMode = escalation.ContextModeFirst
-			sess.CurrentNeed = ""
-			sess.CurrentNeedSetAt = 0
 			obs.Debug(agentName+" returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
 		}
 	}
@@ -203,10 +197,7 @@ func runEscalation(
 	}
 
 	cbs := TurnCallbacks{
-		OnNeed: func(body string) {
-			sess.CurrentNeed = body
-			sess.CurrentNeedSetAt = len(sess.History)
-		},
+		OnNeed:    func(body string) { sess.RecordNeed(body) },
 		OnPercept: buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
 	}
 
@@ -241,8 +232,6 @@ func runEscalation(
 		sess.ForceState(session.StateEscalationWaiting)
 	} else {
 		sess.EscalationBrief = ""
-		sess.CurrentNeed = ""
-		sess.CurrentNeedSetAt = 0
 		logStateTransition(sess, session.StateRouting, agentName+" escalation done")
 		sess.ForceState(session.StateRouting)
 	}

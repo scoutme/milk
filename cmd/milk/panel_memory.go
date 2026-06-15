@@ -14,6 +14,7 @@ import (
 // display in the memory panel.
 type sessionBricks struct {
 	currentNeed           string
+	needHistory           []string // all needs expressed this session, oldest first
 	lastLocalSummary      string
 	lastEscalationSummary string
 	escalationBrief       string
@@ -81,6 +82,7 @@ func (m *model) currentSessionBricks() sessionBricks {
 	turnsSince := m.st.sess.LocalTurnsSinceLastEscalation()
 	return sessionBricks{
 		currentNeed:           m.st.sess.CurrentNeed,
+		needHistory:           m.st.sess.NeedHistory,
 		lastLocalSummary:      m.st.sess.LastLocalSummary,
 		lastEscalationSummary: m.st.sess.LastEscalationSummary,
 		escalationBrief:       m.st.sess.EscalationBrief,
@@ -213,6 +215,13 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	escStale := bricks.contextStale
 	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
 	addBrickLines(&lines, "need", bricks.currentNeed, inner, bricks.needStale, 0)
+	// Show prior needs (all except the current one) dimmed below the current need.
+	if len(bricks.needHistory) > 1 {
+		prior := bricks.needHistory[:len(bricks.needHistory)-1]
+		for i := len(prior) - 1; i >= 0; i-- {
+			addBrickLines(&lines, "", dim(prior[i]), inner, false, 0)
+		}
+	}
 	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner, false, 0)
 	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner, escStale, escRatio)
 	addBrickLines(&lines, "brief", bricks.escalationBrief, inner, escStale, escRatio)
@@ -437,6 +446,13 @@ func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
 	add("") // blank
 	add("") // CONTEXT BRICKS header
 	addBrick("need", bricks.currentNeed)
+	// Prior needs: one addBrick call per entry so line counts match buildPanelLines.
+	if len(bricks.needHistory) > 1 {
+		prior := bricks.needHistory[:len(bricks.needHistory)-1]
+		for i := len(prior) - 1; i >= 0; i-- {
+			addBrick("", prior[i])
+		}
+	}
 	addBrick(primaryLabel, bricks.lastLocalSummary)
 	addBrick(escalationLabel, bricks.lastEscalationSummary)
 	addBrick("brief", bricks.escalationBrief)
@@ -458,7 +474,16 @@ func brickContent(id string, bricks sessionBricks) string {
 	}
 	switch id {
 	case "need":
-		return bricks.currentNeed
+		if len(bricks.needHistory) <= 1 {
+			return bricks.currentNeed
+		}
+		var b strings.Builder
+		b.WriteString("current: " + bricks.currentNeed)
+		b.WriteString("\nhistory:")
+		for i := len(bricks.needHistory) - 2; i >= 0; i-- {
+			b.WriteString("\n  " + bricks.needHistory[i])
+		}
+		return b.String()
 	case primaryLabel:
 		return bricks.lastLocalSummary
 	case escalationLabel:
