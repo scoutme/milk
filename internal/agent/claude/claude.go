@@ -437,6 +437,16 @@ func filterEnv(env []string, stripKeys ...string) []string {
 	return out
 }
 
+// IsInvalidSession reports whether err indicates that the Claude CLI rejected a
+// --resume session ID because the session no longer exists in its store (e.g.
+// evicted after a restart, tmp-dir cleanup, or CLI upgrade).
+func IsInvalidSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "No conversation found with session ID")
+}
+
 // filterKnownWarnings removes known benign stderr lines that Claude emits even
 // on success (e.g. the 3-second stdin-wait warning when no stdin data arrives).
 func filterKnownWarnings(stderr string) string {

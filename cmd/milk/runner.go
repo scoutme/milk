@@ -257,6 +257,20 @@ func (r *cliRunner) Execute(
 	)
 	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
 		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, firstBuf)
+		if runErr != nil && claude.IsInvalidSession(runErr) {
+			// Stale session ID — Claude's store no longer has this session (evicted,
+			// CLI upgrade, machine restart, etc.). Discard the buffer, notify the
+			// user inline, and fall back to a fresh RunFirst with full context.
+			firstBuf.Reset()
+			fmt.Fprintf(out, "\n\033[2m[Claude session refreshed — previous session no longer available]\033[0m\n\n")
+			staticCtx = escalation.BuildStaticContext(nonce, percepts, escalation.ContextModeFirst, injectInstructions, primaryName, escalationName)
+			dynamicCtx = escalation.BuildDynamicContext(sess, escalation.ContextModeFirst)
+			var newID string
+			newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, firstBuf)
+			if runErr == nil {
+				sessionID = newID
+			}
+		}
 	} else {
 		var newID string
 		newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, firstBuf)

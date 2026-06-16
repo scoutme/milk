@@ -1265,10 +1265,11 @@ func (m *model) applySelectionHighlight(content string) string {
 	return strings.Join(lines, "\n")
 }
 
-// viewportHeight is the full terminal height minus the header bar, two separator newlines, status bar, and hint lines.
-// View() layout: headerBar + "\n" + mainArea + "\n" + statusBar → chrome = 1+1+1+1 = 4 lines.
+// viewportHeight is the full terminal height minus the chrome lines.
+// View() layout: headerBar(2) + "\n" + mainArea + "\n" + statusBar(1) → chrome = 3.
+// The "\n" separators don't add lines; they separate existing ones. BorderBottom adds the second header row.
 func (m *model) viewportHeight() int {
-	h := m.height - 4 - len(m.tabHints)
+	h := m.height - 3 - len(m.tabHints)
 	return max(h, 3)
 }
 
