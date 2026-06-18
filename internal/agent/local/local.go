@@ -228,7 +228,7 @@ func New(baseURL, model string) *Agent {
 	return &Agent{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		client:  &http.Client{},
 	}
 }
 
@@ -293,7 +293,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			chatPath:         ac.ChatPath,
 			skipHealthCheck:  true,
 			useBedrockNative: true,
-			client:           &http.Client{Timeout: 5 * time.Minute, Transport: sv4},
+			client:           &http.Client{Transport: sv4},
 			sigv4:            sv4,
 		}
 	case "", "local":
@@ -334,7 +334,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		model:    ac.Model,
 		chatPath: ac.ChatPath,
 		tokenCmd: tct,
-		client:   &http.Client{Timeout: 5 * time.Minute, Transport: transport},
+		client:   &http.Client{Transport: transport},
 	}
 }
 

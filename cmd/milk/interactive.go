@@ -261,6 +261,21 @@ var promptFriendly = map[string]bool{
 	cmdOtel:     true,
 }
 
+// busySafeCommands are slash commands that can run while an agent turn is in progress.
+// All are read-only or display-only and never dispatch a new agent turn.
+var busySafeCommands = map[string]bool{
+	"/help":     true,
+	cmdThink:    true,
+	cmdColorize: true,
+	cmdPanel:    true,
+	cmdHistory:  true,
+	cmdMemory:   true,
+	cmdUsage:    true,
+	cmdMetrics:  true,
+	cmdExport:   true,
+	cmdPaste:    true,
+}
+
 // handleSlashCommand processes a slash command with optional surrounding prompt text.
 // Returns (exit, prompt-to-dispatch, output): exit=true means quit the loop,
 // prompt is non-empty when the command should be followed by an immediate dispatch,

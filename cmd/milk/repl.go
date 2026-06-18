@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -508,6 +509,7 @@ func (m *model) inputLocked() bool { return m.busy }
 // handleBusyKey handles key events while an agent turn is running.
 // It intercepts the three busy-specific cases, then delegates to handleKey
 // for all navigation, editing, history, undo/redo, and viewport scroll.
+// Safe slash commands (display/read-only) are executed immediately even during a turn.
 func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -518,6 +520,23 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", "ctrl+m":
+		input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
+		if cmd, rest, found := extractSlashCommand(input); found {
+			if busySafeCommands[cmd] {
+				// Safe command: execute immediately without clearing busy state.
+				m.ta.Reset()
+				m.tabMatches = nil
+				m.tabIdx = -1
+				m.tabHints = nil
+				m.tabHintsBase = nil
+				m.syncLayout()
+				label := promptLabel(m.st)
+				m.appendTranscript(label + colorizeTokens(input) + "\n")
+				return m.handleSlashInput(cmd, rest)
+			}
+			m.busyHint = cmd + " unavailable while agent is responding"
+			return m, busyHintClearCmd()
+		}
 		m.busyHint = "agent is responding — Ctrl+C to interrupt"
 		return m, busyHintClearCmd()
 	case "tab":
@@ -601,7 +620,17 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		m.interrupted = false
 		m.appendTranscript(dim("[interrupted]") + "\n")
 	} else if msg.err != nil {
-		m.appendTranscript(milkTag() + " error: " + msg.err.Error() + "\n")
+		errText := msg.err.Error()
+		switch {
+		case isContextCanceled(msg.err):
+			// Turn was cancelled by the user — already handled by m.interrupted;
+			// this branch catches any late-arriving cancellation that slipped through.
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		case isContextDeadlineExceeded(msg.err):
+			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond within " + agentTimeout.String() + "\n")
+		default:
+			m.appendTranscript(milkTag() + " error: " + errText + "\n")
+		}
 	}
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
@@ -622,6 +651,14 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 	m.syncLayout()
 	return m, nil
+}
+
+func isContextCanceled(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
+func isContextDeadlineExceeded(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1266,10 +1303,13 @@ func (m *model) applySelectionHighlight(content string) string {
 }
 
 // viewportHeight is the full terminal height minus the chrome lines.
-// View() layout: headerBar(2) + "\n" + mainArea + "\n" + statusBar(1) → chrome = 3.
-// The "\n" separators don't add lines; they separate existing ones. BorderBottom adds the second header row.
+// View() layout: headerBar + "\n" + mainArea + "\n" + statusBar; the "\n" separators don't add lines.
+// Chrome heights are measured from the rendered output so growth in either bar automatically reduces
+// the viewport rather than pushing the header off-screen.
 func (m *model) viewportHeight() int {
-	h := m.height - 3 - len(m.tabHints)
+	header := strings.Count(m.headerBar(), "\n") + 1
+	status := strings.Count(m.statusBar(), "\n") + 1
+	h := m.height - header - status - len(m.tabHints)
 	return max(h, 3)
 }
 
