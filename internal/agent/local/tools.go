@@ -114,15 +114,63 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 			"type": "function",
 			"function": map[string]any{
 				"name":        "edit_file",
-				"description": "Replace an exact string in a file with new content. Fails if old_string is not found or is ambiguous (appears more than once).",
+				"description": "Replace a string in a file. By default requires the string to be unique; set replace_all=true to replace every occurrence.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"path":       map[string]any{"type": "string", "description": "Absolute or relative file path"},
-						"old_string": map[string]any{"type": "string", "description": "Exact string to replace (must be unique in the file)"},
-						"new_string": map[string]any{"type": "string", "description": "Replacement string"},
+						"path":        map[string]any{"type": "string", "description": "Absolute or relative file path"},
+						"old_string":  map[string]any{"type": "string", "description": "Exact string to replace (must be unique unless replace_all is true)"},
+						"new_string":  map[string]any{"type": "string", "description": "Replacement string"},
+						"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness (default false)"},
 					},
 					"required": []string{"path", "old_string", "new_string"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "delete_file",
+				"description": "Delete a file from disk.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Absolute or relative file path to delete"},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "move_file",
+				"description": "Move or rename a file. Creates destination parent directories as needed.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"source":      map[string]any{"type": "string", "description": "Source file path"},
+						"destination": map[string]any{"type": "string", "description": "Destination file path"},
+					},
+					"required": []string{"source", "destination"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "http_request",
+				"description": "Make an HTTP request with any method. Use for POST/PUT/DELETE or when custom headers or a request body are needed.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"method":    map[string]any{"type": "string", "description": "HTTP method (GET, POST, PUT, PATCH, DELETE, …); default GET"},
+						"url":       map[string]any{"type": "string", "description": "URL to request"},
+						"headers":   map[string]any{"type": "object", "description": "Optional request headers as key-value pairs"},
+						"body":      map[string]any{"type": "string", "description": "Optional request body"},
+						"max_bytes": map[string]any{"type": "integer", "description": "Maximum response bytes to return (default 8192)"},
+					},
+					"required": []string{"url"},
 				},
 			},
 		},
@@ -195,6 +243,7 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 	if sess != nil {
 		base = append(base, exportSessionSchema())
 		base = append(base, currentNeedSchema())
+		base = append(base, getContextStatsSchema())
 	}
 	return base
 }
@@ -253,6 +302,12 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return runWriteFile(args)
 	case "edit_file":
 		return runEditFile(args)
+	case "delete_file":
+		return runDeleteFile(args)
+	case "move_file":
+		return runMoveFile(args)
+	case "http_request":
+		return runHTTPRequest(ctx, args)
 	case "list_dir":
 		return runListDir(args)
 	case "http_get":
@@ -293,6 +348,8 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return dispatchExportSession(sess, argsJSON), false
 	case "current_need":
 		return dispatchCurrentNeed(sess, argsJSON), false
+	case "get_context_stats":
+		return dispatchGetContextStats(sess, argsJSON), false
 	case "escalate":
 		return "", true // caller checks the bool
 	default:
@@ -612,6 +669,7 @@ func runEditFile(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
+	replaceAll, _ := args["replace_all"].(bool)
 	path = filepath.Clean(expandTilde(path))
 
 	data, err := os.ReadFile(path)
@@ -624,13 +682,20 @@ func runEditFile(args map[string]any) (string, bool) {
 	if count == 0 {
 		return toolResult{Error: "old_string not found in " + path}.String(), false
 	}
-	if count > 1 {
-		return toolResult{Error: fmt.Sprintf("old_string is ambiguous: found %d occurrences in %s", count, path)}.String(), false
+	if !replaceAll && count > 1 {
+		return toolResult{Error: fmt.Sprintf("old_string is ambiguous: found %d occurrences in %s; use replace_all=true to replace all", count, path)}.String(), false
 	}
 
-	updated := strings.Replace(content, oldStr, newStr, 1)
+	n := 1
+	if replaceAll {
+		n = -1
+	}
+	updated := strings.Replace(content, oldStr, newStr, n)
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return toolResult{Error: err.Error()}.String(), false
+	}
+	if replaceAll {
+		return toolResult{Output: fmt.Sprintf("edited %s (%d replacements)", path, count)}.String(), false
 	}
 	return toolResult{Output: "edited " + path}.String(), false
 }
@@ -660,6 +725,103 @@ func runListDir(args map[string]any) (string, bool) {
 		lines = append(lines, fmt.Sprintf("%-6s  %8d  %s", kind, size, e.Name()))
 	}
 	return toolResult{Output: strings.Join(lines, "\n")}.String(), false
+}
+
+func runDeleteFile(args map[string]any) (string, bool) {
+	path, _ := args["path"].(string)
+	path = filepath.Clean(expandTilde(path))
+	if err := os.Remove(path); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{Output: "deleted " + path}.String(), false
+}
+
+func runMoveFile(args map[string]any) (string, bool) {
+	src, _ := args["source"].(string)
+	dst, _ := args["destination"].(string)
+	src = filepath.Clean(expandTilde(src))
+	dst = filepath.Clean(expandTilde(dst))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{Output: fmt.Sprintf("moved %s → %s", src, dst)}.String(), false
+}
+
+func runHTTPRequest(ctx context.Context, args map[string]any) (string, bool) {
+	url, _ := args["url"].(string)
+	method, _ := args["method"].(string)
+	if method == "" {
+		method = http.MethodGet
+	}
+	body, _ := args["body"].(string)
+	maxBytes := 8192
+	if v, ok := args["max_bytes"]; ok {
+		if n, ok := v.(float64); ok {
+			maxBytes = int(n)
+		}
+	}
+
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), url, bodyReader)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	if hdrs, ok := args["headers"].(map[string]any); ok {
+		for k, v := range hdrs {
+			if sv, ok := v.(string); ok {
+				req.Header.Set(k, sv)
+			}
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
+	if err != nil {
+		return toolResult{Error: err.Error()}.String(), false
+	}
+	return toolResult{Output: string(respBody), ExitCode: resp.StatusCode}.String(), false
+}
+
+func getContextStatsSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "get_context_stats",
+			"description": "Return the current session's context usage: history turn counts, total history character count, and the configured message budget. Useful for self-regulating before hitting context limits.",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+				"required":   []string{},
+			},
+		},
+	}
+}
+
+func dispatchGetContextStats(sess *session.Session, _ string) string {
+	if sess == nil {
+		return toolResult{Error: "no active session"}.String()
+	}
+	totalChars := 0
+	for _, t := range sess.History {
+		totalChars += len(t.Content)
+	}
+	out := fmt.Sprintf(
+		"local_turns=%d escalation_turns=%d total_history_turns=%d total_history_chars=%d",
+		sess.LocalTurnCount(),
+		sess.EscalationTurnCount(),
+		len(sess.History),
+		totalChars,
+	)
+	return toolResult{Output: out}.String()
 }
 
 func runHTTPGet(ctx context.Context, args map[string]any) (string, bool) {

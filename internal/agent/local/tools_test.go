@@ -223,3 +223,103 @@ func TestUnknownTool(t *testing.T) {
 		t.Errorf("expected unknown tool error, got %q", result)
 	}
 }
+
+func TestEditFile_ReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "f.txt")
+	os.WriteFile(f, []byte("foo bar foo"), 0o600)
+
+	args := `{"path":"` + f + `","old_string":"foo","new_string":"baz","replace_all":true}`
+	result, _ := dispatchTool(context.Background(), "edit_file", args, nil, nil, "")
+	if strings.Contains(result, "error") {
+		t.Fatalf("unexpected error: %q", result)
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "baz bar baz" {
+		t.Errorf("expected all occurrences replaced, got %q", string(got))
+	}
+}
+
+func TestEditFile_AmbiguousWithoutReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "f.txt")
+	os.WriteFile(f, []byte("foo foo"), 0o600)
+
+	args := `{"path":"` + f + `","old_string":"foo","new_string":"baz"}`
+	result, _ := dispatchTool(context.Background(), "edit_file", args, nil, nil, "")
+	if !strings.Contains(result, "ambiguous") {
+		t.Errorf("expected ambiguous error, got %q", result)
+	}
+	if !strings.Contains(result, "replace_all") {
+		t.Errorf("expected hint about replace_all, got %q", result)
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "todelete.txt")
+	os.WriteFile(f, []byte("bye"), 0o600)
+
+	args := `{"path":"` + f + `"}`
+	result, _ := dispatchTool(context.Background(), "delete_file", args, nil, nil, "")
+	if strings.Contains(result, "error") {
+		t.Fatalf("unexpected error: %q", result)
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Error("file should have been deleted")
+	}
+}
+
+func TestDeleteFile_Missing(t *testing.T) {
+	result, _ := dispatchTool(context.Background(), "delete_file", `{"path":"/nonexistent/file.txt"}`, nil, nil, "")
+	if !strings.Contains(result, "error") && !strings.Contains(result, "no such file") {
+		t.Errorf("expected error for missing file, got %q", result)
+	}
+}
+
+func TestMoveFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	dst := filepath.Join(dir, "sub", "dst.txt")
+	os.WriteFile(src, []byte("content"), 0o600)
+
+	args := `{"source":"` + src + `","destination":"` + dst + `"}`
+	result, _ := dispatchTool(context.Background(), "move_file", args, nil, nil, "")
+	if strings.Contains(result, "error") {
+		t.Fatalf("unexpected error: %q", result)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("source file should be gone after move")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("destination not found: %v", err)
+	}
+	if string(got) != "content" {
+		t.Errorf("expected content preserved, got %q", string(got))
+	}
+}
+
+func TestGetContextStats(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: "hello"})
+	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "world"})
+
+	result, _ := dispatchTool(context.Background(), "get_context_stats", `{}`, sess, nil, "")
+	if !strings.Contains(result, "local_turns=1") {
+		t.Errorf("expected local_turns=1, got %q", result)
+	}
+	if !strings.Contains(result, "total_history_turns=2") {
+		t.Errorf("expected total_history_turns=2, got %q", result)
+	}
+	if !strings.Contains(result, "total_history_chars=10") {
+		t.Errorf("expected total_history_chars=10 (hello+world), got %q", result)
+	}
+}
+
+func TestGetContextStats_NoSession(t *testing.T) {
+	result, _ := dispatchTool(context.Background(), "get_context_stats", `{}`, nil, nil, "")
+	if !strings.Contains(result, "error") {
+		t.Errorf("expected error with nil session, got %q", result)
+	}
+}

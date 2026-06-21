@@ -97,3 +97,32 @@ func TestMessagesCharCount(t *testing.T) {
 		t.Errorf("expected 10, got %d", got)
 	}
 }
+
+// TestTrimLocalMessages_OverheadExceedsBudget verifies that when system
+// overhead is larger than the full message budget the remaining budget is
+// clamped to 1 (forcing all history dropped) rather than left at the original
+// budget value (the pre-fix bug that caused unbounded context growth).
+func TestTrimLocalMessages_OverheadExceedsBudget(t *testing.T) {
+	in := msgs(
+		"user", "first question",
+		"assistant", "first answer",
+		"user", "second question",
+		"assistant", "second answer",
+	)
+	msgBudget := 100
+	overhead := 150 // exceeds budget
+
+	// Replicate the fixed runner logic: clamp to 1 when overhead >= budget so
+	// trimLocalMessages doesn't interpret 0 as "no limit".
+	remaining := msgBudget - overhead
+	if remaining < 1 {
+		remaining = 1
+	}
+	got, trimmed := trimLocalMessages(in, remaining)
+	if !trimmed {
+		t.Error("expected all history trimmed when overhead exceeds budget")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 messages remaining, got %d", len(got))
+	}
+}

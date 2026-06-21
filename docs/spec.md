@@ -149,10 +149,14 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
   - `grep(pattern string, path string, recursive bool) → matches`
   - `read_file(path string, offset int, limit int) → content`
   - `write_file(path string, content string) → ok` — creates parent directories; expands `~`
-  - `edit_file(path string, old_string string, new_string string) → ok` — exact-string replacement, rejects ambiguous matches; expands `~`
+  - `edit_file(path string, old_string string, new_string string, replace_all bool) → ok` — exact-string replacement; rejects ambiguous matches unless `replace_all=true`; expands `~`
+  - `delete_file(path string) → ok` — removes a file from disk; permission-gated
+  - `move_file(source string, destination string) → ok` — renames/relocates a file; creates destination parent directories; permission-gated
   - `list_dir(path string) → entries` — names, types, sizes; expands `~`
-  - `http_get(url string, max_bytes int) → body` — bounded HTTP fetch
+  - `http_get(url string, max_bytes int) → body` — bounded HTTP GET
+  - `http_request(method string, url string, headers object, body string, max_bytes int) → body, status` — generic HTTP request; permission-gated
   - `get_session_context() → history` — returns the full shared session history (both agents) so the primary model can see prior escalation turns
+  - `get_context_stats() → stats` — returns current history turn counts and total character size so the agent can self-regulate before hitting context limits
 - Self-escalation: primary model may return `escalate(reason string)` as a tool call to trigger promotion
 - Role-aware system prompt: primary agent sees the `escalate` tool and is told to use it for tasks beyond its capabilities; escalation agent does not see the `escalate` tool and is told it is the escalation target
 

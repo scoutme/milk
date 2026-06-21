@@ -147,9 +147,7 @@ func (r *localRunner) Execute(
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
 			overhead := agent.SystemOverheadChars(sess) + len(orientationText)
-			if overhead < msgBudget {
-				msgBudget -= overhead
-			}
+			msgBudget = max(1, msgBudget-overhead)
 		}
 		if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
 			history = trimmed
@@ -161,9 +159,7 @@ func (r *localRunner) Execute(
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
 			overhead := agent.SystemOverheadChars(sess)
-			if overhead < msgBudget {
-				msgBudget -= overhead
-			}
+			msgBudget = max(1, msgBudget-overhead)
 		}
 		if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
 			history = trimmed

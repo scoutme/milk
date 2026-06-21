@@ -652,7 +652,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 // Read-only and internal tools are always permitted; side-effecting tools require a grant.
 func toolNeedsPermission(name string) bool {
 	switch name {
-	case "bash", "write_file", "edit_file", "http_get":
+	case "bash", "write_file", "edit_file", "delete_file", "move_file", "http_get", "http_request":
 		return true
 	}
 	return false
