@@ -20,7 +20,7 @@ The design below extracts the RFC's **cognitive model** and maps it onto milk's 
 | Memory API Gateway | `get_memory` and `record_memory` local agent tools |
 | Confidence Weight | `w float64` on each Percept, decays per session |
 | Inter-Percept edges | stored in Engram as typed relation records |
-| Raw signal ingestion | local agent and Claude both record Percepts; local via tool call, Claude via nonce-tagged emission |
+| Raw signal ingestion | local HTTP agents record Percepts via tool calls (milk provides the tools directly); embedded agents spawned via CLI/subprocess (e.g. Claude Code) request Percept writes via nonce-tagged emission, which milk's stream layer intercepts and executes |
 | Vector DB + semantic recall | Phase 2 — currently keyword substring matching in `Store.Query` |
 | NL synthesis | local model answers recall query using retrieved Percepts as context |
 
