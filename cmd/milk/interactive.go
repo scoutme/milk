@@ -47,6 +47,12 @@ type initWizardState struct {
 	step    initWizardStep
 	primary config.AgentConfig
 	escCLI  bool // whether to use default claude-cli escalation
+	// limits step
+	largeCtx         bool
+	limitToolIter    int // max_tool_iterations override (0 = not set)
+	limitMsgBudget   int // message_budget_chars override (0 = not set)
+	limitCtxBudget   int // context_budget_chars override (0 = not set)
+	limitsSubStep    int // 0=ask large? 1=tool_iter 2=msg_budget 3=ctx_budget
 }
 
 type initWizardStep int
@@ -61,6 +67,7 @@ const (
 	initStepAuth                             // ask api_key (blank → go to initStepTokenCmd)
 	initStepTokenCmd                         // ask token_cmd
 	initStepAWSRegion                        // ask aws_region (bedrock only)
+	initStepLimits                           // ask large context window + limit overrides
 	initStepEscalation                       // ask escalation agent choice
 	initStepOpenConfig                       // ask whether to open config in editor
 	initStepDone

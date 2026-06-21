@@ -551,6 +551,8 @@ All fields are optional. When omitted, the global value (or built-in default) ap
 | `percept_relevance_gate` | `percept_relevance_gate` | `true` | Enable keyword-intersection filter before percept injection |
 | `max_tool_iterations` | `local_max_tool_iterations` | 20 | Max tool-call cycles per turn (-1 = unlimited) |
 
+> **Tip — large context window agents:** If your primary agent has a large context window (e.g. Copilot, GPT-4o, Claude 3.7), use `limits` to raise `max_tool_iterations` (suggest `100`), `message_budget_chars` (suggest `3000000`), and `context_budget_chars` (suggest `200000`). The `milk config init` wizard prompts for these automatically when you answer "y" to the large context window question.
+
 ---
 
 ## Remote oversight (Telegram)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -2967,7 +2968,7 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		if initWizardNeedsAWSRegion(p) {
 			return initStepAWSRegion
 		}
-		return initStepEscalation
+		return initStepLimits
 	case initStepAuth:
 		// blank api_key → go ask for token_cmd instead
 		if st.primary.APIKey == "" {
@@ -2976,13 +2977,15 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		if initWizardNeedsAWSRegion(p) {
 			return initStepAWSRegion
 		}
-		return initStepEscalation
+		return initStepLimits
 	case initStepTokenCmd:
 		if initWizardNeedsAWSRegion(p) {
 			return initStepAWSRegion
 		}
-		return initStepEscalation
+		return initStepLimits
 	case initStepAWSRegion:
+		return initStepLimits
+	case initStepLimits:
 		return initStepEscalation
 	case initStepEscalation:
 		return initStepOpenConfig
@@ -3064,6 +3067,18 @@ func initWizardPrompt(st *initWizardState) string {
 		return milkTag() + " token command" + hint + ": "
 	case initStepAWSRegion:
 		return milkTag() + " AWS region (e.g. us-east-1): "
+	case initStepLimits:
+		switch st.limitsSubStep {
+		case 0:
+			return milkTag() + " does this agent have a large context window? [y/N]: "
+		case 1:
+			return milkTag() + fmt.Sprintf(" max_tool_iterations [100]: ")
+		case 2:
+			return milkTag() + fmt.Sprintf(" message_budget_chars [3000000]: ")
+		case 3:
+			return milkTag() + fmt.Sprintf(" context_budget_chars [200000]: ")
+		}
+		return ""
 	case initStepEscalation:
 		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
 	case initStepOpenConfig:
@@ -3190,6 +3205,54 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			lower := strings.ToLower(answer)
 			st.escCLI = lower != "n" && lower != "no"
 
+		case initStepLimits:
+			switch st.limitsSubStep {
+			case 0:
+				// large context window?
+				lower := strings.ToLower(answer)
+				st.largeCtx = lower == "y" || lower == "yes"
+				if !st.largeCtx {
+					// skip to escalation directly
+					st.step = initStepEscalation
+					m.appendTranscript(initWizardPrompt(st))
+					return m, nil
+				}
+				st.limitsSubStep = 1
+				m.appendTranscript(initWizardPrompt(st))
+				return m, nil
+			case 1:
+				v := 100
+				if answer != "" {
+					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
+						v = n
+					}
+				}
+				st.limitToolIter = v
+				st.limitsSubStep = 2
+				m.appendTranscript(initWizardPrompt(st))
+				return m, nil
+			case 2:
+				v := 3000000
+				if answer != "" {
+					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
+						v = n
+					}
+				}
+				st.limitMsgBudget = v
+				st.limitsSubStep = 3
+				m.appendTranscript(initWizardPrompt(st))
+				return m, nil
+			case 3:
+				v := 200000
+				if answer != "" {
+					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
+						v = n
+					}
+				}
+				st.limitCtxBudget = v
+				// all limit sub-steps done — fall through to next step
+			}
+
 		case initStepOpenConfig:
 			m.pendingInit = nil
 			lower := strings.ToLower(answer)
@@ -3224,6 +3287,23 @@ func (m model) commitInitWizard(st *initWizardState) model {
 	if st.escCLI {
 		e := config.AgentConfig{Name: "claude", Provider: "claude-cli"}
 		escalation = &e
+	}
+	// Apply per-agent limits if the user chose large context window.
+	if st.largeCtx && (st.limitToolIter > 0 || st.limitMsgBudget > 0 || st.limitCtxBudget > 0) {
+		lim := &config.AgentLimits{}
+		if st.limitToolIter > 0 {
+			v := st.limitToolIter
+			lim.MaxToolIterations = &v
+		}
+		if st.limitMsgBudget > 0 {
+			v := st.limitMsgBudget
+			lim.MessageBudgetChars = &v
+		}
+		if st.limitCtxBudget > 0 {
+			v := st.limitCtxBudget
+			lim.ContextBudgetChars = &v
+		}
+		st.primary.Limits = lim
 	}
 	cfg := config.InitConfig(st.primary, escalation)
 	if err := config.Save(cfg); err != nil {

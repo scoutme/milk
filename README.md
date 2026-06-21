@@ -280,6 +280,14 @@ For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}`
 
 **`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 
+**`milk config init`** (or `/config init` in the REPL) — interactive setup wizard. Guides you through:
+- Agent name, provider, URL, model, authentication
+- Context window size — if the agent has a large context window, sets `max_tool_iterations`, `message_budget_chars`, and `context_budget_chars` with sensible defaults (100 / 3,000,000 / 200,000)
+- Escalation agent configuration
+- Option to open the config file in `$EDITOR` at the end
+
+**`milk config open`** (or `/config open` in the REPL) — open `~/.milk/config.json` in `$EDITOR` or the system default editor.
+
 ### Session storage
 
 Sessions persist under `~/.milk/sessions/`. By default, `milk` resumes the most recent session for the current directory. Multiple named sessions can coexist in the same directory.
