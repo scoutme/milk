@@ -48,11 +48,11 @@ type initWizardState struct {
 	primary config.AgentConfig
 	escCLI  bool // whether to use default claude-cli escalation
 	// limits step
-	largeCtx         bool
-	limitToolIter    int // max_tool_iterations override (0 = not set)
-	limitMsgBudget   int // message_budget_chars override (0 = not set)
-	limitCtxBudget   int // context_budget_chars override (0 = not set)
-	limitsSubStep    int // 0=ask large? 1=tool_iter 2=msg_budget 3=ctx_budget
+	largeCtx       bool
+	limitToolIter  int // max_tool_iterations override (0 = not set)
+	limitMsgBudget int // message_budget_chars override (0 = not set)
+	limitCtxBudget int // context_budget_chars override (0 = not set)
+	limitsSubStep  int // 0=ask large? 1=tool_iter 2=msg_budget 3=ctx_budget
 }
 
 type initWizardStep int
