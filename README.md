@@ -132,6 +132,11 @@ Starts an interactive session. The status bar shows the current routing state, a
 | `/colorize` | Show current transcript colorization mode |
 | `/colorize off\|fenced\|balanced\|full` | Switch colorization mode live (`balanced` = default; `full` = experimental glamour) |
 | `/think on\|off` | Show or hide reasoning/thinking tokens in transcript |
+| `/need <goal>` | Set the current session goal (shown in memory panel; injected into escalation context) |
+| `/config` | Print effective config JSON in transcript |
+| `/config init` | Run the interactive setup wizard |
+| `/config open` | Open `~/.milk/config.json` in the configured editor |
+| `/open <path>` | Open any file in the configured editor (`@path` notation supported) |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |
@@ -286,7 +291,7 @@ For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}`
 - Escalation agent configuration
 - Option to open the config file in `$EDITOR` at the end
 
-**`milk config open`** (or `/config open` in the REPL) — open `~/.milk/config.json` in `$EDITOR` or the system default editor.
+**`milk config open`** (or `/config open` in the REPL) — open `~/.milk/config.json` in the configured editor. The editor is selected from the `config_editors` list in config (default: `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`). Override by setting `config_editors` to an ordered list of commands, e.g. `["code --wait", "$EDITOR", "nano"]`.
 
 ### Session storage
 

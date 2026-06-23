@@ -117,6 +117,7 @@ type Agent struct {
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
 	permStore        *PermStore
 	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
+	onOpenFile       func(path string) error         // opens a file in the editor; nil = deny (non-TUI)
 	client           *http.Client
 	detectedFormat   ToolFormat         // confirmed format from last tool-bearing turn
 	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
@@ -372,6 +373,13 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 	copy := *a
 	copy.skipPerms = skip
 	return &copy
+}
+
+// WithOnOpenFile registers a callback that opens a file in the editor (TUI-side).
+// When nil, open_file calls are rejected with a clear error.
+func (a *Agent) WithOnOpenFile(fn func(path string) error) *Agent {
+	a.onOpenFile = fn
+	return a
 }
 
 // WithOnTokens registers a callback invoked after each inference call with the
@@ -767,6 +775,22 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			if p, _ := listArgs["path"].(string); p == "" || p == sess.CWD || p == "." {
 				a.cachedCwd = ""
 			}
+		}
+		if tc.Function.Name == "open_file" {
+			var openArgs struct {
+				Path string `json:"path"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &openArgs) //nolint:errcheck
+			if a.onOpenFile == nil {
+				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Error: "open_file is only available in interactive (TUI) mode"}.String(), ToolCallID: tc.ID})
+				continue
+			}
+			if err := a.onOpenFile(openArgs.Path); err != nil {
+				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Error: err.Error()}.String(), ToolCallID: tc.ID})
+			} else {
+				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Output: "file opened in editor"}.String(), ToolCallID: tc.ID})
+			}
+			continue
 		}
 		toolStart := time.Now()
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)

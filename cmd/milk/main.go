@@ -1430,13 +1430,42 @@ func runConfigOpen() error {
 		return err
 	}
 	cfgPath := filepath.Join(dir, "config.json")
-	editor := os.Getenv("EDITOR")
-	var cmd *exec.Cmd
-	if editor != "" {
-		cmd = exec.Command(editor, cfgPath)
-	} else {
-		cmd = exec.Command("xdg-open", cfgPath)
+
+	// Load config to check for config_editors override.
+	cfg, _ := config.Load()
+
+	// Build candidate list from config_editors (with env expansion) or built-in defaults.
+	// $EDITOR and $VISUAL are regular entries, expanded at runtime.
+	defaultEditors := []string{"$EDITOR", "$VISUAL", "nano", "vim", "vi"}
+	list := cfg.ConfigEditors
+	if len(list) == 0 {
+		list = defaultEditors
 	}
+	var candidates []string
+	for _, e := range list {
+		expanded := os.ExpandEnv(e)
+		if expanded != "" {
+			candidates = append(candidates, expanded)
+		}
+	}
+
+	var editorCmd string
+	var editorArgs []string
+	for _, c := range candidates {
+		parts := strings.Fields(c)
+		if len(parts) == 0 {
+			continue
+		}
+		if _, lerr := exec.LookPath(parts[0]); lerr == nil {
+			editorCmd = parts[0]
+			editorArgs = parts[1:]
+			break
+		}
+	}
+	if editorCmd == "" {
+		return fmt.Errorf("no editor found — set $EDITOR or configure config_editors in config")
+	}
+	cmd := exec.Command(editorCmd, append(editorArgs, cfgPath)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

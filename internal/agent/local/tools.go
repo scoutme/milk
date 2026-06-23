@@ -130,6 +130,20 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 		{
 			"type": "function",
 			"function": map[string]any{
+				"name":        "open_file",
+				"description": "Open a file in the user's editor (interactive TUI mode only). Uses the same editor list as /config open: $EDITOR, $VISUAL, nano, vim, vi — or config_editors if set.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": "Absolute or relative file path to open"},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
 				"name":        "delete_file",
 				"description": "Delete a file from disk.",
 				"parameters": map[string]any{

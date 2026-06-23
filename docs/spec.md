@@ -157,6 +157,7 @@ Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injecte
   - `http_request(method string, url string, headers object, body string, max_bytes int) → body, status` — generic HTTP request; permission-gated
   - `get_session_context() → history` — returns the full shared session history (both agents) so the primary model can see prior escalation turns
   - `get_context_stats() → stats` — returns current history turn counts and total character size so the agent can self-regulate before hitting context limits
+  - `open_file(path string) → ok` — opens a file in the configured editor (same resolution as `/config open` and `/open`); useful when the user asks the agent to open a file for review
 - Self-escalation: primary model may return `escalate(reason string)` as a tool call to trigger promotion
 - Role-aware system prompt: primary agent sees the `escalate` tool and is told to use it for tasks beyond its capabilities; escalation agent does not see the `escalate` tool and is told it is the escalation target
 
@@ -296,7 +297,7 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/config`, `/open`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
@@ -339,6 +340,33 @@ The mode is persisted to `~/.milk/config.json` immediately and takes effect on t
 | `/think off` | Hide thinking tokens; a `[thinking…]` placeholder is shown instead |
 
 The toggle is retroactive — both transcript variants (full and no-think) are maintained in parallel during streaming, so switching is instantaneous with no rebuild. The default is configurable via `show_reasoning` in `~/.milk/config.json` (default: `true`). Applies to both primary model `<think>` blocks and Claude extended thinking tokens.
+
+**/need** sets the current goal for the session. The primary agent is instructed to call this tool automatically when the user states a new objective:
+
+```
+/need <one-sentence goal>
+```
+
+The goal is shown in the memory panel and injected into escalation context so the escalation agent knows what is being worked on.
+
+**/config** manages the milk configuration:
+
+| Subcommand | Action |
+|---|---|
+| `/config` | Print current config JSON in the transcript |
+| `/config init` | Run the interactive setup wizard (create or update `~/.milk/config.json`) |
+| `/config open` | Open `~/.milk/config.json` in the configured editor |
+
+The editor used by `/config open` is selected from the `config_editors` list (see Configuration). The same commands are available on the CLI as `milk config`, `milk config init`, `milk config open`.
+
+**/open** opens any file in the configured editor:
+
+```
+/open <path>
+/open @<path>   (@ prefix is stripped automatically)
+```
+
+The same editor resolution as `/config open` is used. The agent can also open files via the `open_file` tool when asked to do so.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -466,6 +494,17 @@ Controls transcript syntax and Markdown rendering. Applied per turn to avoid ANS
 ### `show_reasoning` field
 
 Controls whether thinking/reasoning tokens are shown in the transcript by default. Can be overridden live with `/think on|off`. When `false`, thinking blocks are replaced with a `[thinking…]` placeholder. Omit or set to `true` to show reasoning (default).
+
+### `config_editors` field
+
+Ordered list of editor commands tried by `/config open` and `/open`. The first command found on `$PATH` is used. Environment variables (e.g. `$EDITOR`, `$VISUAL`) are expanded before lookup.
+
+Default (when omitted): `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`
+
+Example — prefer VS Code, fall back to `$EDITOR`:
+```json
+"config_editors": ["code --wait", "$EDITOR", "nano"]
+```
 
 ### `sticky_escalation` field
 

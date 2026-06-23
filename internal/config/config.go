@@ -324,6 +324,14 @@ type Config struct {
 	// and a backend is configured, agent turn notifications and permission
 	// prompts are forwarded to the configured backend (e.g. Telegram).
 	RemoteOversight *RemoteOversightConfig `json:"remote_oversight,omitempty"`
+
+	// ConfigEditors is an ordered list of editor commands tried by
+	// "milk config open" / "/config open". The first command found on
+	// PATH is used. Entries may include "$EDITOR" or "$VISUAL" tokens
+	// which are expanded at runtime. If omitted, the default list is:
+	// ["$EDITOR", "$VISUAL", "nano", "vim", "vi"]
+	// Example: ["code --wait", "$EDITOR", "nano"]
+	ConfigEditors []string `json:"config_editors,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.

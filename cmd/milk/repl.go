@@ -132,6 +132,17 @@ type credRefreshReadyMsg struct {
 // remoteInputMsg carries a prompt injected from the remote oversight interface.
 type remoteInputMsg struct{ text string }
 
+type configReloadMsg struct{}
+type errMsg struct{ err error }
+
+// openFileMsg is sent by the agent goroutine (or /open command) to request that
+// the TUI open a file in the editor. The goroutine blocks on respCh until the
+// editor exits. path is the resolved file path to open.
+type openFileMsg struct {
+	path   string
+	respCh chan error // nil when sent from /open (no goroutine waiting)
+}
+
 type permRequestMsg struct {
 	prompt string
 	label  string // status-bar label; defaults to "[allow?]" when empty
@@ -1082,10 +1093,19 @@ func (m *model) welcomeScreen() string {
 			dim("OpenRouter · Together · Groq"),
 			"› /agent add url=https://openrouter.ai/api/v1 provider=bearer api_key=<key> model=<id>",
 			"",
+			dim("GitHub Copilot"),
+			"› /agent add provider=copilot model=gpt-4o",
+			"",
+			dim("Claude CLI"),
+			"› /agent add provider=claude-cli model=claude-sonnet-4-5",
+			"",
+			dim("Aider / custom subprocess"),
+			"› /agent add provider=aider-cli model=<model>",
+			"",
 		)
 		if !escalationAvail {
 			lines = append(lines,
-				dim(escName+" not available — escalation disabled"),
+				dim("no escalation agent configured — run /config init to add one"),
 				"",
 			)
 		}
@@ -1108,16 +1128,20 @@ func (m *model) welcomeScreen() string {
 	case !escalationAvail:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
-			dim(escName+" not available — escalation disabled"),
-			dim("/help for available commands"),
+			"",
+			dim("routing: "+primaryName+"  ·  escalation disabled"),
+			dim("run /config init to add an escalation agent"),
+			"",
+			dim("/help for all commands  ·  /config init to reconfigure"),
 		)
 	default:
 		lines = append(lines,
 			dim("type a message and press Enter to start"),
 			"",
 			dim("routing: "+primaryName+" ↔ "+escName+"  ·  /escalate to pin  ·  /primary to unpin"),
-			dim("/panel memory — memory panel  ·  /think on — reasoning tokens  ·  --new — fresh session"),
-			dim("/help for all commands  ·  /config init to reconfigure"),
+			dim("/need — set current goal  ·  /panel memory — memory panel  ·  /think on — reasoning tokens"),
+			dim("/config — view config  ·  /config init — reconfigure  ·  /config open — edit in $EDITOR"),
+			dim("--new — fresh session  ·  --resume — resume last session  ·  /help for all commands"),
 		)
 	}
 
@@ -1763,6 +1787,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case configReloadMsg:
+		m.appendTranscript(milkTag() + " config closed — restart milk to apply any changes\n")
+		return m, nil
+
+	case openFileMsg:
+		return m.handleOpenFileMsg(msg)
+
+	case errMsg:
+		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), msg.err))
+		return m, nil
+
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
@@ -1898,9 +1933,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.hintIdx >= 0 {
-			m.commitHintSelection()
-			m.syncLayout()
-			return m, nil
+			if m.commitHintSelection() {
+				m.syncLayout()
+				return m, nil
+			}
+			m.hintIdx = -1
 		}
 		return m.handleEnter()
 	case "up":
@@ -2168,6 +2205,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	}
 	if cmd == cmdConfig {
 		return m.handleConfigCmd(strings.TrimSpace(rest))
+	}
+	if cmd == cmdOpen {
+		return m.handleOpenCmd(rest)
 	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
@@ -2883,6 +2923,7 @@ func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 }
 
 // handleConfigOpenCmd opens ~/.milk/config.json in $EDITOR or xdg-open.
+// Uses tea.ExecProcess so the TUI is properly suspended while the editor runs.
 func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
 	dir, err := config.Dir()
 	if err != nil {
@@ -2890,22 +2931,93 @@ func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	cfgPath := filepath.Join(dir, "config.json")
-	editor := os.Getenv("EDITOR")
-	var cmd *exec.Cmd
-	if editor != "" {
-		cmd = exec.Command(editor, cfgPath)
-	} else {
-		cmd = exec.Command("xdg-open", cfgPath)
-	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Start(); err != nil {
-		m.appendTranscript(fmt.Sprintf("%s error opening editor: %v\n", milkTag(), err))
+	cmd := m.openInEditor(cfgPath)
+	if cmd == nil {
+		m.appendTranscript(fmt.Sprintf("%s no editor found — set $EDITOR or configure config_editors in config\n", milkTag()))
 		return m, nil
 	}
-	m.appendTranscript(fmt.Sprintf("%s opened %s\n", milkTag(), cfgPath))
-	return m, nil
+	m.appendTranscript(fmt.Sprintf("%s opening %s…\n", milkTag(), cfgPath))
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return errMsg{err: fmt.Errorf("editor exited with error: %w", err)}
+		}
+		return configReloadMsg{}
+	})
+}
+
+// resolveEditorCmd returns the editor executable and any extra args from the
+// config_editors list (or built-in defaults). Returns ("", nil) when nothing is found.
+func (m model) resolveEditorCmd() (string, []string) {
+	defaultEditors := []string{"$EDITOR", "$VISUAL", "nano", "vim", "vi"}
+	list := m.st.cfg.ConfigEditors
+	if len(list) == 0 {
+		list = defaultEditors
+	}
+	var candidates []string
+	for _, e := range list {
+		expanded := os.ExpandEnv(e)
+		if expanded != "" {
+			candidates = append(candidates, expanded)
+		}
+	}
+	for _, c := range candidates {
+		parts := strings.Fields(c)
+		if len(parts) == 0 {
+			continue
+		}
+		if _, err := exec.LookPath(parts[0]); err == nil {
+			return parts[0], parts[1:]
+		}
+	}
+	return "", nil
+}
+
+// openInEditor builds an exec.Cmd for opening path in the resolved editor.
+// Returns nil when no editor is found.
+func (m model) openInEditor(path string) *exec.Cmd {
+	editorCmd, editorArgs := m.resolveEditorCmd()
+	if editorCmd == "" {
+		return nil
+	}
+	return exec.Command(editorCmd, append(editorArgs, path)...)
+}
+
+// handleOpenCmd handles /open <path>: resolves the path and opens it in the editor.
+func (m model) handleOpenCmd(path string) (tea.Model, tea.Cmd) {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "@") // support /open @cmd/milk/repl.go notation
+	if path == "" {
+		m.appendTranscript(milkTag() + " usage: /open <file>  or  /open @<file>\n")
+		return m, nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(m.st.cwd, path)
+	}
+	return m, func() tea.Msg { return openFileMsg{path: path} }
+}
+
+// handleOpenFileMsg opens path in the editor via tea.ExecProcess.
+// If msg.respCh is non-nil (agent tool call), the result is sent back to unblock the goroutine.
+func (m model) handleOpenFileMsg(msg openFileMsg) (tea.Model, tea.Cmd) {
+	cmd := m.openInEditor(msg.path)
+	if cmd == nil {
+		errOut := fmt.Errorf("no editor found — set $EDITOR or configure config_editors in config")
+		m.appendTranscript(fmt.Sprintf("%s %v\n", milkTag(), errOut))
+		if msg.respCh != nil {
+			msg.respCh <- errOut
+		}
+		return m, nil
+	}
+	m.appendTranscript(fmt.Sprintf("%s opening %s…\n", milkTag(), msg.path))
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if msg.respCh != nil {
+			msg.respCh <- err
+		}
+		if err != nil {
+			return errMsg{err: fmt.Errorf("editor exited with error: %w", err)}
+		}
+		return nil
+	})
 }
 
 // handleConfigInitCmd starts the /config init TUI wizard.
@@ -3849,17 +3961,24 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	// callback — they operate in the same cwd and grants should be shared.
 	localPermStore := st.localPerms
 	localPermAsk := makeLocalPermAsk(ir0, localPermStore)
+	localOpenFile := func(path string) error {
+		respCh := make(chan error, 1)
+		send(openFileMsg{path: path, respCh: respCh})
+		return <-respCh
+	}
 	if agents.local != nil {
 		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
-			WithPermissions(localPermStore, localPermAsk)
+			WithPermissions(localPermStore, localPermAsk).
+			WithOnOpenFile(localOpenFile)
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
 	if agents.escalationLocal != nil {
 		tuiEscLocal := agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
-			WithPermissions(localPermStore, localPermAsk)
+			WithPermissions(localPermStore, localPermAsk).
+			WithOnOpenFile(localOpenFile)
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
@@ -4368,39 +4487,54 @@ func applyTabCompletion(input, completed string) string {
 // <param> required-parameter markers and [optional] suggestion markers.
 // Applied before submitting input so accepted completions like
 // "/memory show <pat|#id>" dispatch as "/memory show".
+//
+// Stripping is surgical: placeholders are only removed from tokens that
+// immediately follow a slash-command token anywhere in a line. Normal user
+// text like "[foo]" or "<tag>" that does not follow a "/cmd" word is left
+// untouched. Stripping mode exits as soon as a non-placeholder, non-slash
+// word is encountered.
 func stripCompletionPlaceholders(s string) string {
-	// Process line by line to preserve newlines in multiline input.
-	// Placeholders only appear in slash-command completions (single-line),
-	// so stripping and collapsing spaces per-line is safe.
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		var b strings.Builder
-		j := 0
-		for j < len(line) {
-			switch line[j] {
-			case '<':
-				end := strings.IndexByte(line[j:], '>')
-				if end >= 0 {
-					j += end + 1
-				} else {
-					b.WriteByte(line[j])
-					j++
-				}
-			case '[':
-				end := strings.IndexByte(line[j:], ']')
-				if end >= 0 {
-					j += end + 1
-				} else {
-					b.WriteByte(line[j])
-					j++
-				}
-			default:
-				b.WriteByte(line[j])
-				j++
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			continue
+		}
+		// Check if any word in the line is a slash-command token.
+		hasSlash := false
+		for _, w := range words {
+			if strings.HasPrefix(w, "/") {
+				hasSlash = true
+				break
 			}
 		}
-		// Collapse multiple spaces within the line but preserve the line itself.
-		lines[i] = strings.Join(strings.Fields(b.String()), " ")
+		if !hasSlash {
+			continue
+		}
+		// Rebuild word-by-word: strip placeholders only while in slash-cmd mode.
+		out := make([]string, 0, len(words))
+		stripping := false
+		for _, w := range words {
+			if strings.HasPrefix(w, "/") {
+				stripping = true
+				out = append(out, w)
+				continue
+			}
+			if stripping {
+				// A placeholder is a word that is entirely wrapped in <…> or […].
+				if (strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">")) ||
+					(strings.HasPrefix(w, "[") && strings.HasSuffix(w, "]")) {
+					// Drop this placeholder token.
+					continue
+				}
+				// Non-placeholder word — exit stripping mode and keep the word.
+				stripping = false
+			}
+			out = append(out, w)
+		}
+		// Preserve leading whitespace from original line.
+		lead := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = lead + strings.Join(out, " ")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -4461,6 +4595,7 @@ func (m *model) rebuildInlineHints() {
 	if len(words) == 0 {
 		m.tabHints = nil
 		m.tabHintsBase = nil
+		m.hintIdx = -1
 		return
 	}
 	last := words[len(words)-1]
@@ -4597,6 +4732,11 @@ func (m *model) rebuildInlineHints() {
 func (m *model) setHints(hints []string) {
 	changed := !stringSlicesEqual(m.tabHintsBase, hints)
 	m.tabHintsBase = hints
+	if len(hints) == 0 {
+		m.tabHints = nil
+		m.hintIdx = -1
+		return
+	}
 	m.tabHints = make([]string, len(hints))
 	copy(m.tabHints, hints)
 	if changed {

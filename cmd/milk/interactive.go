@@ -36,9 +36,10 @@ const cmdColorize = "/colorize"
 const cmdThink = "/think"
 const cmdSetup = "/setup"
 const cmdConfig = "/config"
+const cmdOpen = "/open"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -155,6 +156,7 @@ const interactiveHelp = `
   /config                print the current config (~/.milk/config.json)
   /config init           run the setup wizard (configure primary + escalation agents)
   /config open           open config in $EDITOR / system default editor
+  /open <file>           open any file in $EDITOR (agent can also call the open_file tool)
   /setup telegram        configure Telegram remote oversight interactively
   /setup telegram on     enable Telegram (credentials must already be configured)
   /setup telegram off    disable Telegram (credentials are preserved)
@@ -356,6 +358,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// Handled in repl.go (needs model state). No-op here.
 	case cmdConfig:
 		// Handled in repl.go (needs model state and config path). No-op here.
+	case cmdOpen:
+		// Handled in repl.go (needs tea.ExecProcess). No-op here.
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
