@@ -132,6 +132,23 @@ type AgentConfig struct {
 	// Limits holds optional per-agent overrides for context caps and injection limits.
 	// Nil fields fall back to the global Config defaults.
 	Limits *AgentLimits `json:"limits,omitempty"`
+
+	// Tools is an optional per-agent override/extension of Config.AgentTools.
+	// An entry whose Agent name matches a global entry replaces it; new names are appended.
+	Tools []AgentToolEntry `json:"tools,omitempty"`
+}
+
+// AgentToolEntry defines a peer agent that can be called as a tool by another agent.
+type AgentToolEntry struct {
+	Agent       string `json:"agent"`
+	Description string `json:"description"`
+	Enabled     *bool  `json:"enabled,omitempty"` // nil = true
+}
+
+// IsEnabled reports whether this tool entry is enabled.
+// Returns true when Enabled is nil (default on) or explicitly true.
+func (e AgentToolEntry) IsEnabled() bool {
+	return e.Enabled == nil || *e.Enabled
 }
 
 // AgentLimits holds optional per-agent overrides for context caps and injection
@@ -210,6 +227,10 @@ type Config struct {
 	// Defaults to "claude" (the built-in claude-cli entry).
 	// Set to the name of any agents entry to route escalated turns there.
 	EscalationAgent string `json:"escalation_agent,omitempty"`
+
+	// AgentTools is the global list of peer agents available as tools to all agents.
+	// Per-agent entries in AgentConfig.Tools shadow or extend this list.
+	AgentTools []AgentToolEntry `json:"agent_tools,omitempty"`
 
 	DefaultRoute string     `json:"default_route,omitempty"`
 	Rules        Rules      `json:"rules"`
@@ -722,6 +743,62 @@ func (c Config) StickyEscalationEnabled() bool {
 	return *c.StickyEscalation
 }
 
+// EffectiveToolAgents returns the merged list of peer-agent tool entries for the
+// named caller agent. It starts with the global AgentTools list, applies
+// per-agent overrides from the caller's Tools field (replacing global entries by
+// name and appending new ones), then filters out:
+//   - entries with Agent == callerName (cycle guard)
+//   - entries whose Agent name is not found in effectiveAgents()
+//   - entries where !IsEnabled()
+func (c Config) EffectiveToolAgents(callerName string) []AgentToolEntry {
+	// Start with a copy of the global list.
+	result := make([]AgentToolEntry, len(c.AgentTools))
+	copy(result, c.AgentTools)
+
+	// Find caller's per-agent config and apply overrides.
+	for _, ac := range c.Agents {
+		if !strings.EqualFold(ac.Name, callerName) {
+			continue
+		}
+		for _, te := range ac.Tools {
+			replaced := false
+			for i, existing := range result {
+				if strings.EqualFold(existing.Agent, te.Agent) {
+					result[i] = te
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				result = append(result, te)
+			}
+		}
+		break
+	}
+
+	// Build a set of known agent names for fast lookup.
+	effectiveNames := make(map[string]bool)
+	for _, ac := range c.effectiveAgents() {
+		effectiveNames[strings.ToLower(ac.Name)] = true
+	}
+
+	// Filter: cycle guard, unknown agents, disabled entries.
+	filtered := result[:0:0]
+	for _, te := range result {
+		if strings.EqualFold(te.Agent, callerName) {
+			continue // cycle guard
+		}
+		if !effectiveNames[strings.ToLower(te.Agent)] {
+			continue // silently drop unknown agent names
+		}
+		if !te.IsEnabled() {
+			continue
+		}
+		filtered = append(filtered, te)
+	}
+	return filtered
+}
+
 // effectiveAgents returns Agents with the built-in claude-cli entry appended
 // if no entry named "claude" already exists. This ensures there is always a
 // claude-cli agent available without requiring it to be in every config file.
@@ -892,7 +969,7 @@ var knownProviders = map[string]bool{
 // requiresURL returns true for providers that need an HTTP url.
 func requiresURL(p string) bool {
 	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "claude-cli":
+	case "claude-cli", "aider-cli", "subprocess":
 		return false
 	default:
 		return true
@@ -935,12 +1012,12 @@ func Validate(cfg Config) []ValidationWarning {
 
 		// HTTP providers must have a url.
 		if requiresURL(a.Provider) && a.URL == "" {
-			warn(a.Name, fmt.Sprintf("url is required for provider %q — run /init or edit config", providerDisplay(a.Provider)))
+			warn(a.Name, fmt.Sprintf("url is required for provider %q — run /config init or edit config", providerDisplay(a.Provider)))
 		}
 
 		// Auth-requiring providers must have api_key or token_cmd.
 		if requiresAuth(a.Provider) && a.APIKey == "" && a.TokenCmd == "" {
-			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /init or edit config", providerDisplay(a.Provider)))
+			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /config init or edit config", providerDisplay(a.Provider)))
 		}
 	}
 
@@ -954,7 +1031,7 @@ func Validate(cfg Config) []ValidationWarning {
 			}
 		}
 		if !found {
-			warn("", fmt.Sprintf("agent %q not found in agents list — run /init or edit config", cfg.Agent))
+			warn("", fmt.Sprintf("agent %q not found in agents list — run /config init or edit config", cfg.Agent))
 		}
 	}
 
@@ -968,7 +1045,7 @@ func Validate(cfg Config) []ValidationWarning {
 			}
 		}
 		if !found {
-			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /init or edit config", cfg.EscalationAgent))
+			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /config init or edit config", cfg.EscalationAgent))
 		}
 	}
 

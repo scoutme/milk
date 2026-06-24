@@ -87,6 +87,7 @@ type dispatchAgents struct {
 	subprocessPrimary *subprocess.Agent // non-nil when primary is a subprocess provider
 	localAvail        bool
 	escalationAvail   bool
+	toolRunners       map[string]TurnRunner // lazily built tool-agent runners, keyed by agent name
 }
 
 // --- TUI message types ---
@@ -1820,6 +1821,11 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
+	// Propagate terminal width to local agent for tool hint truncation.
+	if m.agents.local != nil {
+		m.agents.local.SetTermWidth(msg.Width)
+	}
+
 	vw := m.vpWidth()
 	vpH := m.viewportHeight()
 	if !m.ready {
@@ -2590,6 +2596,10 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 		inline := strings.TrimSpace(arg[len("add"):])
 		return m.startAddAgent(inline), nil
 
+	case arg == "tool", strings.HasPrefix(arg, "tool "):
+		sub := strings.TrimSpace(strings.TrimPrefix(arg, "tool"))
+		m.appendTranscript(execAgentTool(sub, m.st) + "\n")
+
 	default:
 		m.appendTranscript(milkTag() + " usage: /agent [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
 	}
@@ -3031,7 +3041,22 @@ func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
 
 // initWizardNeedsURL reports whether the provider requires a URL.
 func initWizardNeedsURL(provider string) bool {
-	return strings.ToLower(provider) != "claude-cli"
+	switch strings.ToLower(provider) {
+	case "claude-cli", "aider-cli", "subprocess":
+		return false
+	default:
+		return true
+	}
+}
+
+// initWizardNeedsModel reports whether the provider requires a model name.
+func initWizardNeedsModel(provider string) bool {
+	switch strings.ToLower(provider) {
+	case "claude-cli":
+		return false
+	default:
+		return true
+	}
 }
 
 // initWizardNeedsAuth reports whether the provider requires api_key / token_cmd.
@@ -3064,6 +3089,9 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepProvider:
 		if initWizardNeedsURL(p) {
 			return initStepURL
+		}
+		if initWizardNeedsModel(p) {
+			return initStepModel
 		}
 		return initStepEscalation
 	case initStepURL:
@@ -3100,6 +3128,8 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepLimits:
 		return initStepEscalation
 	case initStepEscalation:
+		return initStepAgentTools
+	case initStepAgentTools:
 		return initStepOpenConfig
 	case initStepOpenConfig:
 		return initStepDone
@@ -3149,6 +3179,10 @@ func initWizardPrompt(st *initWizardState) string {
 			hint = " (e.g. meta-llama/llama-3.1-8b-instruct)"
 		} else if st.primary.Provider == "bedrock" {
 			hint = " (model ARN)"
+		} else if st.primary.Provider == "aider-cli" {
+			hint = " (e.g. gpt-4o  or  claude-3-5-sonnet-20241022)"
+		} else if st.primary.Provider == "subprocess" {
+			hint = " (forwarded to subprocess via --model)"
 		}
 		return milkTag() + " model name" + hint + ": "
 	case initStepAuth:
@@ -3193,6 +3227,8 @@ func initWizardPrompt(st *initWizardState) string {
 		return ""
 	case initStepEscalation:
 		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
+	case initStepAgentTools:
+		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated) or leave blank to skip: "
 	case initStepOpenConfig:
 		return milkTag() + " open config in editor now? [y/N]: "
 	}
@@ -3276,7 +3312,7 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 		case initStepModel:
-			if answer == "" {
+			if answer == "" && initWizardNeedsModel(st.primary.Provider) {
 				m.appendTranscript(milkTag() + " model name is required\n" + initWizardPrompt(st))
 				return m, nil
 			}
@@ -3316,6 +3352,13 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case initStepEscalation:
 			lower := strings.ToLower(answer)
 			st.escCLI = lower != "n" && lower != "no"
+
+		case initStepAgentTools:
+			// answer is a comma-separated list of agent names to enable as tools.
+			// Blank means skip. We record the choices; they will be applied in commitInitWizard.
+			if strings.TrimSpace(answer) != "" {
+				st.toolAgentNames = splitCommaNames(answer)
+			}
 
 		case initStepLimits:
 			switch st.limitsSubStep {
@@ -3376,6 +3419,11 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		st.step = initWizardNextStep(st)
+		// Skip the agent-tools step when the config has only one agent
+		// (no peer agents to expose as tools yet).
+		if st.step == initStepAgentTools && len(m.st.cfg.Agents) <= 1 {
+			st.step = initStepOpenConfig
+		}
 		if st.step == initStepOpenConfig {
 			// Write config before asking about opening editor.
 			m = m.commitInitWizard(st)
@@ -3418,6 +3466,16 @@ func (m model) commitInitWizard(st *initWizardState) model {
 		st.primary.Limits = lim
 	}
 	cfg := config.InitConfig(st.primary, escalation)
+	// Add tool-agent entries from wizard step.
+	for _, name := range st.toolAgentNames {
+		if strings.EqualFold(name, st.primary.Name) {
+			continue // skip self-reference
+		}
+		cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
+			Agent:       name,
+			Description: "Specialist agent. Describe its capabilities here.",
+		})
+	}
 	if err := config.Save(cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
@@ -3911,6 +3969,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	st := m.st
 	rtr := m.rtr
 	agents := m.agents
+	termWidth := m.width
 
 	send := func(msg tea.Msg) { st.program.Send(msg) }
 	st.toolFutures = map[string]chan string{}
@@ -3930,7 +3989,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					return
 				}
 				var hint string
-				summary := cliToolArgSummary(input)
+				summary := truncateToolSummary(name, cliToolArgSummary(input), termWidth)
 				if summary != "" {
 					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
 				} else {
@@ -3987,7 +4046,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		func() tea.Msg {
 			defer cancel()
 			sw := &sendWriter{send: send}
-			err := runTurn(turnCtx, st, rtr, tuiAgents, input, sw, ir0)
+			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
 			return agentDoneMsg{err: err}
 		},
 	)
@@ -4511,24 +4570,42 @@ func stripCompletionPlaceholders(s string) string {
 		if !hasSlash {
 			continue
 		}
-		// Rebuild word-by-word: strip placeholders only while in slash-cmd mode.
+		// Rebuild word-by-word: once a slash-command token is seen, drop every
+		// placeholder token (<…> or […]) on the rest of that line. Non-placeholder
+		// tokens are always kept. Stripping mode stays active for the whole line.
 		out := make([]string, 0, len(words))
 		stripping := false
+		inGroup := byte(0) // '<' or '[' when inside a multi-word placeholder group
 		for _, w := range words {
 			if strings.HasPrefix(w, "/") {
 				stripping = true
+				inGroup = 0
 				out = append(out, w)
 				continue
 			}
 			if stripping {
-				// A placeholder is a word that is entirely wrapped in <…> or […].
-				if (strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">")) ||
-					(strings.HasPrefix(w, "[") && strings.HasSuffix(w, "]")) {
-					// Drop this placeholder token.
+				// Continue consuming a multi-word placeholder group.
+				if inGroup != 0 {
+					closer := map[byte]byte{'<': '>', '[': ']'}[inGroup]
+					if strings.HasSuffix(w, string(closer)) {
+						inGroup = 0
+					}
 					continue
 				}
-				// Non-placeholder word — exit stripping mode and keep the word.
-				stripping = false
+				// A placeholder is a word (or group start) entirely wrapped in <…> or […].
+				if (strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">")) ||
+					(strings.HasPrefix(w, "[") && strings.HasSuffix(w, "]")) {
+					continue
+				}
+				// Start of a multi-word placeholder group.
+				if strings.HasPrefix(w, "<") {
+					inGroup = '<'
+					continue
+				}
+				if strings.HasPrefix(w, "[") {
+					inGroup = '['
+					continue
+				}
 			}
 			out = append(out, w)
 		}
@@ -4704,6 +4781,31 @@ func (m *model) rebuildInlineHints() {
 				return
 			}
 		}
+		// Compound command: e.g. "/agent tool l" → base="/agent", mid="tool", typing="l"
+		if len(words) >= 3 {
+			base := words[len(words)-3]
+			mid := words[len(words)-2]
+			if isSlashCmdToken(base) && !isSlashCmdToken(mid) {
+				if vs := cmdVariants[base]; len(vs) > 0 {
+					lower := strings.ToLower(last)
+					prefix := base + " " + mid + " "
+					var hints []string
+					for _, v := range vs {
+						if !strings.HasPrefix(v.sig+" ", prefix) {
+							continue
+						}
+						sigWords := strings.Fields(v.sig)
+						if len(sigWords) >= 3 && strings.HasPrefix(strings.ToLower(sigWords[2]), lower) {
+							hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+						}
+					}
+					if len(hints) > 0 {
+						m.setHints(m.capHints(hints))
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// Trailing space after a known slash command: show all its subcommand hints.
@@ -4718,6 +4820,26 @@ func (m *model) rebuildInlineHints() {
 					}
 					m.setHints(m.capHints(hints))
 					return
+				}
+			}
+			// Compound trailing space: e.g. "/agent tool " → base="/agent", sub="tool"
+			if len(words) >= 2 {
+				base := words[len(words)-2]
+				sub := words[len(words)-1]
+				if isSlashCmdToken(base) && !isSlashCmdToken(sub) {
+					if vs := cmdVariants[base]; len(vs) > 0 {
+						prefix := base + " " + sub + " "
+						var hints []string
+						for _, v := range vs {
+							if strings.HasPrefix(v.sig+" ", prefix) {
+								hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+							}
+						}
+						if len(hints) > 0 {
+							m.setHints(m.capHints(hints))
+							return
+						}
+					}
 				}
 			}
 		}
@@ -5487,7 +5609,7 @@ func replTurnSourceLabel(st *interactiveState) string {
 }
 
 // runTurn routes a prompt to the appropriate agent, writing output to out.
-func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
+func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents *dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
 	localAvail := agents.localAvail
 	escalationAvail := agents.escalationAvail
 
@@ -5540,7 +5662,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out)
+		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents)
 	case router.TargetEscalation:
 		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out)
 	}

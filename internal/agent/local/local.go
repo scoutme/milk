@@ -103,6 +103,10 @@ func agentRoleForMetrics(escalationName string) string {
 	return "primary"
 }
 
+// ToolAgentDispatcher is called when the agent issues an agent_* tool call.
+// agentName is the unsanitised agent name (e.g. "aider", not "agent_aider").
+type ToolAgentDispatcher func(ctx context.Context, agentName, request string, out io.Writer) (string, error)
+
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
 // or the AWS Bedrock Converse API when useBedrockNative is true.
 type Agent struct {
@@ -137,6 +141,13 @@ type Agent struct {
 	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
 	// including lines that are skipped or fail JSON parsing.
 	debugLog io.Writer
+	// toolAgentEntries is the list of peer agents available as tools for this agent.
+	toolAgentEntries []config.AgentToolEntry
+	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
+	toolAgentDispatcher ToolAgentDispatcher
+	// termWidth is the current terminal width used to truncate tool hint lines.
+	// 0 means no truncation.
+	termWidth int
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -149,6 +160,27 @@ func (a *Agent) AsEscalationTarget(name string) *Agent {
 	copy.skipRepeatCheck = true
 	copy.escalationName = name
 	return &copy
+}
+
+// WithToolAgentEntries returns a shallow copy of the agent configured with
+// the given peer-agent tool entries. These entries are passed to schemas() so
+// the LLM can call peer agents as tools.
+func (a *Agent) WithToolAgentEntries(entries []config.AgentToolEntry) *Agent {
+	copy := *a
+	copy.toolAgentEntries = entries
+	return &copy
+}
+
+// SetTermWidth updates the terminal width used for tool hint truncation.
+// Should be called whenever the TUI receives a WindowSizeMsg.
+func (a *Agent) SetTermWidth(w int) {
+	a.termWidth = w
+}
+
+// SetToolAgentDispatcher wires the callback that is invoked when the agent
+// issues an agent_* tool call.
+func (a *Agent) SetToolAgentDispatcher(fn ToolAgentDispatcher) {
+	a.toolAgentDispatcher = fn
 }
 
 // WithTagCallbacks returns a shallow copy of the agent configured to intercept
@@ -598,7 +630,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
-	tools := schemas(mem, a.otelDir, sess)
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
 
 	if a.tagNonce != "" {
 		if a.onNeed != nil {
@@ -748,7 +780,29 @@ func capMemToolResult(result string, maxBytes int) string {
 func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 	for _, tc := range toolCalls {
-		printToolLine(out, tc)
+		if strings.HasPrefix(tc.Function.Name, "agent_") && a.toolAgentDispatcher != nil {
+			var reqArgs struct {
+				Request string `json:"request"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
+			agentName := tc.Function.Name[len("agent_"):]
+			fmt.Fprintf(out, "\n⚙ calling agent %s…\n", agentName)
+			result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
+			if err != nil {
+				obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
+					attribute.String("agent", agentName),
+				)
+				result = toolResult{Error: err.Error()}.String()
+			} else {
+				result = toolResult{Output: result}.String()
+			}
+			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
+				attribute.String("agent", agentName),
+			)
+			msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
+			continue
+		}
+		printToolLine(out, tc, a.termWidth)
 		args := tc.Function.Arguments
 		if len(args) > 120 {
 			args = args[:120] + "…"
@@ -827,12 +881,24 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 // printToolLine writes a one-line dim tool-usage hint to out before a tool is
 // dispatched, mirroring what Claude shows for permission requests.
 // Format:  ⚙ <name>: <short summary of key argument>
-func printToolLine(out io.Writer, tc toolCall) {
+// termWidth is the current terminal width (0 = no truncation).
+func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 	var args map[string]any
 	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
 
 	summary := toolArgSummary(args)
 	if summary != "" {
+		prefix := "⚙ " + tc.Function.Name + ": "
+		if termWidth > 0 {
+			maxSummary := termWidth - len(prefix) - 4 // 4 = margin
+			if maxSummary < 10 {
+				maxSummary = 10
+			}
+			runes := []rune(summary)
+			if len(runes) > maxSummary {
+				summary = string(runes[:maxSummary-1]) + "…"
+			}
+		}
 		fmt.Fprintf(out, "\n\033[2m⚙ %s: %s\033[0m\n", tc.Function.Name, summary)
 	} else {
 		fmt.Fprintf(out, "\n\033[2m⚙ %s\033[0m\n", tc.Function.Name)
@@ -867,12 +933,10 @@ func toolDiff(name, argsJSON string) string {
 }
 
 // toolArgSummary extracts the most informative single argument value for display.
+// Returns the full string — truncation is done at the call site using terminal width.
 func toolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
 		if v, ok := args[key].(string); ok && v != "" {
-			if len(v) > 60 {
-				return v[:57] + "..."
-			}
 			return v
 		}
 	}

@@ -10,13 +10,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
+
+// agentToolNameRE matches non-alphanumeric-lowercase characters for tool name sanitisation.
+var agentToolNameRE = regexp.MustCompile(`[^a-z0-9]+`)
 
 const errMemUnavailable = "memory store not available"
 
@@ -32,7 +37,7 @@ func (r toolResult) String() string {
 }
 
 // schemas returns the OpenAI function schemas for all built-in tools.
-func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[string]any {
+func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgents []config.AgentToolEntry) []map[string]any {
 	base := []map[string]any{
 		{
 			"type": "function",
@@ -259,7 +264,44 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session) []map[str
 		base = append(base, currentNeedSchema())
 		base = append(base, getContextStatsSchema())
 	}
+	base = append(base, AgentToolSchemas(toolAgents)...)
 	return base
+}
+
+// sanitiseAgentToolName converts an agent name to a safe OpenAI tool function name.
+// It lowercases the name, replaces non-alphanumeric runs with underscores, and
+// prefixes with "agent_". Example: "my-agent" → "agent_my_agent".
+func sanitiseAgentToolName(name string) string {
+	lower := strings.ToLower(name)
+	safe := agentToolNameRE.ReplaceAllString(lower, "_")
+	safe = strings.Trim(safe, "_")
+	return "agent_" + safe
+}
+
+// AgentToolSchemas produces OpenAI function-call schema entries for the given
+// agent tool entries. Returns an empty (non-nil) slice when entries is empty.
+func AgentToolSchemas(entries []config.AgentToolEntry) []map[string]any {
+	result := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		result = append(result, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        sanitiseAgentToolName(e.Agent),
+				"description": e.Description,
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"request": map[string]any{
+							"type":        "string",
+							"description": "The request to send to the agent.",
+						},
+					},
+					"required": []string{"request"},
+				},
+			},
+		})
+	}
+	return result
 }
 
 func currentNeedSchema() map[string]any {

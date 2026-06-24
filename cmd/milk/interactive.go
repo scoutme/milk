@@ -54,6 +54,8 @@ type initWizardState struct {
 	limitMsgBudget int // message_budget_chars override (0 = not set)
 	limitCtxBudget int // context_budget_chars override (0 = not set)
 	limitsSubStep  int // 0=ask large? 1=tool_iter 2=msg_budget 3=ctx_budget
+	// agent-tools step
+	toolAgentNames []string // agent names the user wants to enable as tools
 }
 
 type initWizardStep int
@@ -70,6 +72,7 @@ const (
 	initStepAWSRegion                        // ask aws_region (bedrock only)
 	initStepLimits                           // ask large context window + limit overrides
 	initStepEscalation                       // ask escalation agent choice
+	initStepAgentTools                       // ask which agents to enable as tools
 	initStepOpenConfig                       // ask whether to open config in editor
 	initStepDone
 )
@@ -117,6 +120,11 @@ const interactiveHelp = `
   /agent add             add a new agent interactively
   /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]
   /agent switch <name> [as primary|escalation]   (prompts if args missing)
+  /agent tool list [<agent>|global]              show tool-agents (default: primary)
+  /agent tool enable <tool> [for <agent>|global]  enable a tool-agent entry
+  /agent tool disable <tool> [for <agent>|global]  disable a tool-agent entry
+  /agent tool add <tool> description=<desc> [for <agent>|global]  add a new tool-agent entry
+  /agent tool remove <tool> [for <agent>|global]  remove a tool-agent entry
   /skip-permissions      show current skip-permissions state
   /skip-permissions on   all agents auto-approve tool uses (no prompts)
   /skip-permissions off  agents prompt before running side-effecting tools
@@ -680,4 +688,321 @@ func loadSession(cwd string, flagNew bool, flagSession string) (*session.Session
 		return session.New(cwd, flagSession)
 	}
 	return session.Resume(cwd, flagSession)
+}
+
+// execAgentTool dispatches /agent tool <verb> [args] subcommands.
+func execAgentTool(sub string, st *interactiveState) string {
+	parts := strings.Fields(sub)
+	if len(parts) == 0 {
+		return execAgentToolList("", st)
+	}
+	verb := parts[0]
+	rest := strings.TrimSpace(strings.TrimPrefix(sub, verb))
+
+	// parse optional "for <agent>|global" suffix
+	scope, toolName := parseAgentToolScope(rest)
+
+	switch verb {
+	case "list":
+		// For list, the "tool name" is actually the scope argument.
+		listScope := toolName
+		if scope != "" {
+			listScope = scope
+		}
+		return execAgentToolList(listScope, st)
+	case "enable":
+		if toolName == "" {
+			return milkTag() + " usage: /agent tool enable <tool-agent> [for <agent>|global]"
+		}
+		return execAgentToolEnable(toolName, scope, st)
+	case "disable":
+		if toolName == "" {
+			return milkTag() + " usage: /agent tool disable <tool-agent> [for <agent>|global]"
+		}
+		return execAgentToolDisable(toolName, scope, st)
+	case "add":
+		if toolName == "" {
+			return milkTag() + " usage: /agent tool add <tool-agent> description=<desc> [for <agent>|global]"
+		}
+		return execAgentToolAdd(toolName, scope, rest, st)
+	case "remove":
+		if toolName == "" {
+			return milkTag() + " usage: /agent tool remove <tool-agent> [for <agent>|global]"
+		}
+		return execAgentToolRemove(toolName, scope, st)
+	default:
+		return milkTag() + " unknown subcommand: /agent tool " + verb + "\n  try: list, enable, disable, add, remove"
+	}
+}
+
+// parseAgentToolScope parses "<tool-name> [for <agent>|global]" and returns (scope, toolName).
+// scope is "" (default: active primary), "global", or an agent name.
+func parseAgentToolScope(s string) (scope, toolName string) {
+	if idx := strings.Index(s, " for "); idx >= 0 {
+		toolName = strings.TrimSpace(s[:idx])
+		scope = strings.TrimSpace(s[idx+5:])
+		return
+	}
+	toolName = strings.TrimSpace(s)
+	return
+}
+
+// execAgentToolList shows effective tool-agents for the given scope.
+// scope == "" → use the active primary agent; scope == "global" → global list only;
+// otherwise → EffectiveToolAgents for the named agent.
+func execAgentToolList(scope string, st *interactiveState) string {
+	var targetName string
+	switch scope {
+	case "", "primary":
+		targetName = st.cfg.ActiveAgent().Name
+	case "global":
+		// Show raw global list.
+		entries := st.cfg.AgentTools
+		if len(entries) == 0 {
+			return milkTag() + " no global tool-agents configured"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s global tool-agents:\n", milkTag())
+		for _, e := range entries {
+			status := "enabled"
+			if !e.IsEnabled() {
+				status = "disabled"
+			}
+			desc := e.Description
+			if len(desc) > 55 {
+				desc = desc[:52] + "..."
+			}
+			fmt.Fprintf(&b, "  %-20s  %-8s  %-8s  %s\n", e.Agent, status, "global", desc)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	default:
+		targetName = scope
+	}
+
+	entries := st.cfg.EffectiveToolAgents(targetName)
+	if len(entries) == 0 {
+		return fmt.Sprintf("%s no tool-agents configured for %q", milkTag(), targetName)
+	}
+
+	// Build lookup sets for scope badge computation.
+	globalNames := make(map[string]bool, len(st.cfg.AgentTools))
+	for _, e := range st.cfg.AgentTools {
+		globalNames[strings.ToLower(e.Agent)] = true
+	}
+	overrideNames := make(map[string]bool)
+	for _, ac := range st.cfg.Agents {
+		if strings.EqualFold(ac.Name, targetName) {
+			for _, te := range ac.Tools {
+				overrideNames[strings.ToLower(te.Agent)] = true
+			}
+			break
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s tool-agents for %q:\n", milkTag(), targetName)
+	for _, e := range entries {
+		status := "enabled"
+		if !e.IsEnabled() {
+			status = "disabled"
+		}
+		key := strings.ToLower(e.Agent)
+		scopeBadge := "global"
+		if overrideNames[key] && globalNames[key] {
+			scopeBadge = "override"
+		} else if overrideNames[key] {
+			scopeBadge = "local"
+		}
+		desc := e.Description
+		if len(desc) > 55 {
+			desc = desc[:52] + "..."
+		}
+		fmt.Fprintf(&b, "  %-20s  %-8s  %-8s  %s\n", e.Agent, status, scopeBadge, desc)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// execAgentToolEnable sets Enabled=true on a matching entry.
+func execAgentToolEnable(toolName, scope string, st *interactiveState) string {
+	t := true
+	if scope == "global" {
+		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+		if idx < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found in global list — use /agent tool add first", milkTag(), toolName)
+		}
+		st.cfg.AgentTools[idx].Enabled = &t
+	} else {
+		agentName := scope
+		if agentName == "" {
+			agentName = st.cfg.ActiveAgent().Name
+		}
+		acIdx := findAgentIdx(st.cfg, agentName)
+		if acIdx < 0 {
+			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
+		}
+		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
+		if idx < 0 {
+			// Check if it exists globally; if so, create a per-agent override.
+			gIdx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+			if gIdx < 0 {
+				return fmt.Sprintf("%s tool-agent %q not found — use /agent tool add first", milkTag(), toolName)
+			}
+			entry := st.cfg.AgentTools[gIdx]
+			entry.Enabled = &t
+			st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
+		} else {
+			st.cfg.Agents[acIdx].Tools[idx].Enabled = &t
+		}
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s enabled %q (config save failed: %v)", milkTag(), toolName, err)
+	}
+	return fmt.Sprintf("%s tool-agent %q enabled", milkTag(), toolName)
+}
+
+// execAgentToolDisable sets Enabled=false on a matching entry.
+func execAgentToolDisable(toolName, scope string, st *interactiveState) string {
+	f := false
+	if scope == "global" {
+		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+		if idx < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found in global list — use /agent tool add first", milkTag(), toolName)
+		}
+		st.cfg.AgentTools[idx].Enabled = &f
+	} else {
+		agentName := scope
+		if agentName == "" {
+			agentName = st.cfg.ActiveAgent().Name
+		}
+		acIdx := findAgentIdx(st.cfg, agentName)
+		if acIdx < 0 {
+			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
+		}
+		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
+		if idx < 0 {
+			// Check if it exists globally; create per-agent override that disables it.
+			gIdx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+			if gIdx < 0 {
+				return fmt.Sprintf("%s tool-agent %q not found — use /agent tool add first", milkTag(), toolName)
+			}
+			entry := st.cfg.AgentTools[gIdx]
+			entry.Enabled = &f
+			st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
+		} else {
+			st.cfg.Agents[acIdx].Tools[idx].Enabled = &f
+		}
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s disabled %q (config save failed: %v)", milkTag(), toolName, err)
+	}
+	return fmt.Sprintf("%s tool-agent %q disabled", milkTag(), toolName)
+}
+
+// execAgentToolAdd adds a new tool-agent entry to the target scope.
+// The rest argument still contains the full "toolName [description=...] [for ...]" text
+// so we can extract the description= field.
+func execAgentToolAdd(toolName, scope, rest string, st *interactiveState) string {
+	// Extract description= from rest.
+	desc := ""
+	if idx := strings.Index(rest, "description="); idx >= 0 {
+		after := rest[idx+len("description="):]
+		// strip any trailing " for ..." scope fragment.
+		if forIdx := strings.Index(after, " for "); forIdx >= 0 {
+			after = after[:forIdx]
+		}
+		desc = strings.TrimSpace(after)
+	}
+	if desc == "" {
+		return milkTag() + " usage: /agent tool add <tool-agent> description=<desc> [for <agent>|global]"
+	}
+
+	entry := config.AgentToolEntry{Agent: toolName, Description: desc}
+
+	if scope == "global" {
+		if findToolEntryIdx(st.cfg.AgentTools, toolName) >= 0 {
+			return fmt.Sprintf("%s tool-agent %q already exists in global list — use enable/disable to change its state", milkTag(), toolName)
+		}
+		st.cfg.AgentTools = append(st.cfg.AgentTools, entry)
+	} else {
+		agentName := scope
+		if agentName == "" {
+			agentName = st.cfg.ActiveAgent().Name
+		}
+		acIdx := findAgentIdx(st.cfg, agentName)
+		if acIdx < 0 {
+			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
+		}
+		if findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName) >= 0 {
+			return fmt.Sprintf("%s tool-agent %q already exists for agent %q", milkTag(), toolName, agentName)
+		}
+		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s added tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
+	}
+	return fmt.Sprintf("%s tool-agent %q added", milkTag(), toolName)
+}
+
+// execAgentToolRemove removes a tool-agent entry from the target scope.
+func execAgentToolRemove(toolName, scope string, st *interactiveState) string {
+	if scope == "global" {
+		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+		if idx < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found in global list", milkTag(), toolName)
+		}
+		st.cfg.AgentTools = append(st.cfg.AgentTools[:idx], st.cfg.AgentTools[idx+1:]...)
+	} else {
+		agentName := scope
+		if agentName == "" {
+			agentName = st.cfg.ActiveAgent().Name
+		}
+		acIdx := findAgentIdx(st.cfg, agentName)
+		if acIdx < 0 {
+			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
+		}
+		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
+		if idx < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found for agent %q", milkTag(), toolName, agentName)
+		}
+		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools[:idx], st.cfg.Agents[acIdx].Tools[idx+1:]...)
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s removed tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
+	}
+	return fmt.Sprintf("%s tool-agent %q removed", milkTag(), toolName)
+}
+
+// findToolEntryIdx returns the index of a tool entry by agent name in a slice,
+// or -1 if not found. Comparison is case-insensitive.
+func findToolEntryIdx(entries []config.AgentToolEntry, agentName string) int {
+	lower := strings.ToLower(agentName)
+	for i, e := range entries {
+		if strings.ToLower(e.Agent) == lower {
+			return i
+		}
+	}
+	return -1
+}
+
+// findAgentIdx returns the index of an agent by name in cfg.Agents, or -1.
+func findAgentIdx(cfg config.Config, agentName string) int {
+	lower := strings.ToLower(agentName)
+	for i, ac := range cfg.Agents {
+		if strings.ToLower(ac.Name) == lower {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitCommaNames splits a comma-separated string into trimmed, non-empty names.
+func splitCommaNames(s string) []string {
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		name := strings.TrimSpace(part)
+		if name != "" {
+			result = append(result, name)
+		}
+	}
+	return result
 }
