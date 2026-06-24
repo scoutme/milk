@@ -769,10 +769,10 @@ func execAgentToolList(scope string, st *interactiveState) string {
 				status = "disabled"
 			}
 			desc := e.Description
-			if len(desc) > 60 {
-				desc = desc[:57] + "..."
+			if len(desc) > 55 {
+				desc = desc[:52] + "..."
 			}
-			fmt.Fprintf(&b, "  %-20s  %-8s  %s\n", e.Agent, status, desc)
+			fmt.Fprintf(&b, "  %-20s  %-8s  %-8s  %s\n", e.Agent, status, "global", desc)
 		}
 		return strings.TrimRight(b.String(), "\n")
 	default:
@@ -783,18 +783,41 @@ func execAgentToolList(scope string, st *interactiveState) string {
 	if len(entries) == 0 {
 		return fmt.Sprintf("%s no tool-agents configured for %q", milkTag(), targetName)
 	}
+
+	// Build lookup sets for scope badge computation.
+	globalNames := make(map[string]bool, len(st.cfg.AgentTools))
+	for _, e := range st.cfg.AgentTools {
+		globalNames[strings.ToLower(e.Agent)] = true
+	}
+	overrideNames := make(map[string]bool)
+	for _, ac := range st.cfg.Agents {
+		if strings.EqualFold(ac.Name, targetName) {
+			for _, te := range ac.Tools {
+				overrideNames[strings.ToLower(te.Agent)] = true
+			}
+			break
+		}
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s tool-agents for %q (effective merged):\n", milkTag(), targetName)
+	fmt.Fprintf(&b, "%s tool-agents for %q:\n", milkTag(), targetName)
 	for _, e := range entries {
 		status := "enabled"
 		if !e.IsEnabled() {
 			status = "disabled"
 		}
-		desc := e.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
+		key := strings.ToLower(e.Agent)
+		scopeBadge := "global"
+		if overrideNames[key] && globalNames[key] {
+			scopeBadge = "override"
+		} else if overrideNames[key] {
+			scopeBadge = "local"
 		}
-		fmt.Fprintf(&b, "  %-20s  %-8s  %s\n", e.Agent, status, desc)
+		desc := e.Description
+		if len(desc) > 55 {
+			desc = desc[:52] + "..."
+		}
+		fmt.Fprintf(&b, "  %-20s  %-8s  %-8s  %s\n", e.Agent, status, scopeBadge, desc)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

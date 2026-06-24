@@ -4781,6 +4781,31 @@ func (m *model) rebuildInlineHints() {
 				return
 			}
 		}
+		// Compound command: e.g. "/agent tool l" → base="/agent", mid="tool", typing="l"
+		if len(words) >= 3 {
+			base := words[len(words)-3]
+			mid := words[len(words)-2]
+			if isSlashCmdToken(base) && !isSlashCmdToken(mid) {
+				if vs := cmdVariants[base]; len(vs) > 0 {
+					lower := strings.ToLower(last)
+					prefix := base + " " + mid + " "
+					var hints []string
+					for _, v := range vs {
+						if !strings.HasPrefix(v.sig+" ", prefix) {
+							continue
+						}
+						sigWords := strings.Fields(v.sig)
+						if len(sigWords) >= 3 && strings.HasPrefix(strings.ToLower(sigWords[2]), lower) {
+							hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+						}
+					}
+					if len(hints) > 0 {
+						m.setHints(m.capHints(hints))
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// Trailing space after a known slash command: show all its subcommand hints.
@@ -4795,6 +4820,26 @@ func (m *model) rebuildInlineHints() {
 					}
 					m.setHints(m.capHints(hints))
 					return
+				}
+			}
+			// Compound trailing space: e.g. "/agent tool " → base="/agent", sub="tool"
+			if len(words) >= 2 {
+				base := words[len(words)-2]
+				sub := words[len(words)-1]
+				if isSlashCmdToken(base) && !isSlashCmdToken(sub) {
+					if vs := cmdVariants[base]; len(vs) > 0 {
+						prefix := base + " " + sub + " "
+						var hints []string
+						for _, v := range vs {
+							if strings.HasPrefix(v.sig+" ", prefix) {
+								hints = append(hints, " "+dim(v.sig)+"  "+dim(v.desc))
+							}
+						}
+						if len(hints) > 0 {
+							m.setHints(m.capHints(hints))
+							return
+						}
+					}
 				}
 			}
 		}
