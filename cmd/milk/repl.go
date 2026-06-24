@@ -1821,6 +1821,11 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
+	// Propagate terminal width to local agent for tool hint truncation.
+	if m.agents.local != nil {
+		m.agents.local.SetTermWidth(msg.Width)
+	}
+
 	vw := m.vpWidth()
 	vpH := m.viewportHeight()
 	if !m.ready {
@@ -3036,7 +3041,22 @@ func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
 
 // initWizardNeedsURL reports whether the provider requires a URL.
 func initWizardNeedsURL(provider string) bool {
-	return strings.ToLower(provider) != "claude-cli"
+	switch strings.ToLower(provider) {
+	case "claude-cli", "aider-cli", "subprocess":
+		return false
+	default:
+		return true
+	}
+}
+
+// initWizardNeedsModel reports whether the provider requires a model name.
+func initWizardNeedsModel(provider string) bool {
+	switch strings.ToLower(provider) {
+	case "claude-cli":
+		return false
+	default:
+		return true
+	}
 }
 
 // initWizardNeedsAuth reports whether the provider requires api_key / token_cmd.
@@ -3069,6 +3089,9 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepProvider:
 		if initWizardNeedsURL(p) {
 			return initStepURL
+		}
+		if initWizardNeedsModel(p) {
+			return initStepModel
 		}
 		return initStepEscalation
 	case initStepURL:
@@ -3156,6 +3179,10 @@ func initWizardPrompt(st *initWizardState) string {
 			hint = " (e.g. meta-llama/llama-3.1-8b-instruct)"
 		} else if st.primary.Provider == "bedrock" {
 			hint = " (model ARN)"
+		} else if st.primary.Provider == "aider-cli" {
+			hint = " (e.g. gpt-4o  or  claude-3-5-sonnet-20241022)"
+		} else if st.primary.Provider == "subprocess" {
+			hint = " (forwarded to subprocess via --model)"
 		}
 		return milkTag() + " model name" + hint + ": "
 	case initStepAuth:
@@ -3285,7 +3312,7 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 		case initStepModel:
-			if answer == "" {
+			if answer == "" && initWizardNeedsModel(st.primary.Provider) {
 				m.appendTranscript(milkTag() + " model name is required\n" + initWizardPrompt(st))
 				return m, nil
 			}
@@ -3942,6 +3969,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	st := m.st
 	rtr := m.rtr
 	agents := m.agents
+	termWidth := m.width
 
 	send := func(msg tea.Msg) { st.program.Send(msg) }
 	st.toolFutures = map[string]chan string{}
@@ -3961,7 +3989,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					return
 				}
 				var hint string
-				summary := cliToolArgSummary(input)
+				summary := truncateToolSummary(name, cliToolArgSummary(input), termWidth)
 				if summary != "" {
 					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
 				} else {
@@ -4542,24 +4570,42 @@ func stripCompletionPlaceholders(s string) string {
 		if !hasSlash {
 			continue
 		}
-		// Rebuild word-by-word: strip placeholders only while in slash-cmd mode.
+		// Rebuild word-by-word: once a slash-command token is seen, drop every
+		// placeholder token (<…> or […]) on the rest of that line. Non-placeholder
+		// tokens are always kept. Stripping mode stays active for the whole line.
 		out := make([]string, 0, len(words))
 		stripping := false
+		inGroup := byte(0) // '<' or '[' when inside a multi-word placeholder group
 		for _, w := range words {
 			if strings.HasPrefix(w, "/") {
 				stripping = true
+				inGroup = 0
 				out = append(out, w)
 				continue
 			}
 			if stripping {
-				// A placeholder is a word that is entirely wrapped in <…> or […].
-				if (strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">")) ||
-					(strings.HasPrefix(w, "[") && strings.HasSuffix(w, "]")) {
-					// Drop this placeholder token.
+				// Continue consuming a multi-word placeholder group.
+				if inGroup != 0 {
+					closer := map[byte]byte{'<': '>', '[': ']'}[inGroup]
+					if strings.HasSuffix(w, string(closer)) {
+						inGroup = 0
+					}
 					continue
 				}
-				// Non-placeholder word — exit stripping mode and keep the word.
-				stripping = false
+				// A placeholder is a word (or group start) entirely wrapped in <…> or […].
+				if (strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">")) ||
+					(strings.HasPrefix(w, "[") && strings.HasSuffix(w, "]")) {
+					continue
+				}
+				// Start of a multi-word placeholder group.
+				if strings.HasPrefix(w, "<") {
+					inGroup = '<'
+					continue
+				}
+				if strings.HasPrefix(w, "[") {
+					inGroup = '['
+					continue
+				}
 			}
 			out = append(out, w)
 		}

@@ -1,7 +1,7 @@
 # 34. Agent-as-Tool: Peer Agents as Callable Tools
 
 Date: 2026-06-24
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -136,9 +136,9 @@ global or per-agent tool entries via `/agent tool` also evicts affected runners.
 
 ### 5. Scope and future paths
 
-**v1 — localRunner only.** Tool-agent calls are supported only when the calling agent is a **localRunner** (OpenAI-compat HTTP). The tool calling infrastructure for this path already exists in `internal/agent/local`.
+**v1 — localRunner (caller) + localRunner or subprocessRunner (target).** Tool-agent calls are supported when the calling agent is a **localRunner** (OpenAI-compat HTTP). The tool calling infrastructure for this path already exists in `internal/agent/local`. Subprocess agents (`aider-cli`, `subprocess`/smolagent) may also act as **targets**: they are stateless per-call, so `RunToolCall` invokes `RunFirst` with empty context strings and no session bookkeeping. The `claude-cli` provider is excluded from v1 targets — it requires session management that is incompatible with stateless single-shot invocation.
 
-**v2 — cliRunner via tag-based stop-and-re-invoke.** The existing `<milk:percept:NONCE>` / `<milk:need:NONCE>` stream-interception infrastructure can be extended to support tool calls for CLI agents (Claude Code subprocess). The protocol:
+**v2 — cliRunner via tag-based stop-and-re-invoke.** The existing `<milk:percept:NONCE>` / `<milk:need:NONCE>` stream-interception infrastructure can be extended to support tool calls where the **calling** agent is a CLI agent (Claude Code subprocess). The protocol:
 
 1. `BuildStaticContext` injects a `ToolCallInstruction(nonce, toolAgents)` block instructing the agent: emit `<milk:tool_call:NONCE>{"agent":"…","request":"…"}</milk:tool_call:NONCE>` and stop the response immediately when it wants to call a tool-agent.
 2. The stream layer intercepts and strips the tag; milk dispatches `RunToolCall` to the target runner and receives the result.
@@ -149,7 +149,7 @@ Constraints: calls are serial (one per re-invoke round-trip); the result travels
 
 **v3 — MCP.** Expose milk's tool-agent runners as a local MCP server. Claude Code natively understands MCP tool definitions; no custom tag protocol is needed. This is the cleanest long-term path for cliRunner but requires a separate MCP server infrastructure piece.
 
-For subprocessRunner (aider, smolagents), v2 tag interception is unlikely to be reliable given those agents' autonomous internal loops. MCP (v3) is the appropriate path.
+For subprocessRunner callers (aider, smolagents), v2 tag interception is unlikely to be reliable given those agents' autonomous internal loops. MCP (v3) is the appropriate path for enabling them as callers.
 
 In v1, when the calling agent is a cliRunner or subprocessRunner, the effective tool-agent list is computed but not injected. This is documented in the config schema.
 
@@ -206,8 +206,9 @@ The autocomplete system gains completions for `/agent tool` subcommands: agent n
 - No protocol change required for existing agents.
 
 **Negative:**
-- v1 scope is limited to localRunner callers. CLI and subprocess agents cannot use tool-agents without future work.
-- v2 (tag-based stop-and-re-invoke for cliRunner) is model-dependent: the CLI agent must reliably honour the "emit tag and stop" instruction. This needs empirical validation before committing; if the model ignores or half-follows the instruction, results will be unpredictable.
+- v1 scope for **callers** is limited to localRunner (OpenAI-compat HTTP). CLI and subprocess agents cannot call tool-agents without future work (v2/v3).
+- v1 scope for **targets** excludes `claude-cli` — it requires resumable sessions which are incompatible with stateless tool invocation.
+- v2 (tag-based stop-and-re-invoke for cliRunner callers) is model-dependent: the CLI agent must reliably honour the "emit tag and stop" instruction. This needs empirical validation before committing; if the model ignores or half-follows the instruction, results will be unpredictable.
 - v2 tool calls are serial; each call adds a full `--resume` round-trip. Latency compounds for multi-call turns.
 - `RunToolCall` introduces a new execution path that bypasses session bookkeeping — care is needed that this never writes to the session or causes state transitions.
 - Tool-agent runners share the same connection pool and concurrency as primary/escalation runners; a slow tool-agent call blocks the primary agent's tool loop turn.

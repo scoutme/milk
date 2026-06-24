@@ -104,11 +104,23 @@ Tool definitions live at two levels: a global `agent_tools` array on `Config` (a
    - Call the agent's single-shot inference path (no tool schemas, no history, no memory injection).
    - Return the text response.
 
-3. Implement stubs on `cliRunner` and `subprocessRunner`:
+3. Implement on `subprocessRunner`:
+   ```go
+   func (r *subprocessRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+       _, res, err := r.agent.RunFirst(ctx, "", "", prompt, out)
+       if err != nil { return "", err }
+       return res.Text, nil
+   }
+   ```
+   Subprocess agents are stateless per-call — `RunFirst` with empty context strings is sufficient.
+
+   Implement a stub on `cliRunner`:
    ```go
    return "", errors.New("tool-agent calls not supported for this provider")
    ```
-   The caller converts errors to `toolResult{Error: ...}` strings.
+   `claude-cli` requires resumable sessions; the tag-intercept path (v2) is the future work.
+
+   `buildToolRunner` in `toolagent.go` routes by provider: `aider-cli` → `aider.New`, `subprocess` → `smolagent.New`, `claude-cli` → error, else → `local.NewFromConfig`.
 
 ---
 
@@ -235,5 +247,7 @@ Phase 2 (schema synthesis)  →  Phase 3 (runner interface)
 - **Global scope name collision**: if both `Config.AgentTools` and `AgentConfig.Tools` define the same `agent` name, the per-agent entry wins — it replaces the global entry in the merged list, not supplements it.
 - **No memory/percept injection in v1**: `RunToolCall` is a direct single-shot call. Document this limitation in the schema.
 - **Tool-agent chaining (unvalidated)**: when an agent is invoked as a tool, it should probably not have other tool-agents injected into its own tool list — no recursive chaining by default. Rationale: prevents unbounded call chains and keeps invocations lightweight and deterministic. Validate this before implementing Phase 3/4; surface the decision explicitly rather than letting it fall through as a side effect.
-- **v2 (cliRunner tag-based)**: a future phase can extend support to cliRunner via a `<milk:tool_call:NONCE>` tag + stop-and-re-invoke loop (mirroring the existing percept/need tag infrastructure). Requires validating that Claude reliably honours the "emit tag and stop" instruction before committing. MCP (v3) is the preferred long-term path for CLI and subprocess agents.
+- **Subprocess targets (v1)**: `aider-cli` and `subprocess` agents are supported as tool targets. They are stateless per-call — `RunFirst` with empty context strings handles each call independently. No session ID is returned or stored.
+- **claude-cli targets (excluded from v1)**: `claude-cli` agents require resumable sessions; a stateless `RunFirst` call discards the session ID, breaking continuity. Excluded until v2 (tag-intercept) or v3 (MCP).
+- **v2 (cliRunner caller tag-based)**: a future phase can extend support to cliRunner **callers** via a `<milk:tool_call:NONCE>` tag + stop-and-re-invoke loop (mirroring the existing percept/need tag infrastructure). Requires validating that Claude reliably honours the "emit tag and stop" instruction before committing. MCP (v3) is the preferred long-term path for CLI and subprocess callers.
 - **Metrics**: `milk.tools.tool_agent_calls` and `milk.tools.tool_agent_errors` counters in Phase 4.

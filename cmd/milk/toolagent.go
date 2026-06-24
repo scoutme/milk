@@ -6,7 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/local"
+	"github.com/scoutme/milk/internal/agent/smolagent"
 	"github.com/scoutme/milk/internal/config"
 )
 
@@ -23,11 +25,29 @@ func findAgentByName(cfg config.Config, name string) (config.AgentConfig, bool) 
 }
 
 // buildToolRunner constructs a TurnRunner for use as a tool-agent call.
-// Only local (OpenAI-compat) agents are supported; subprocess/CLI agents return an error.
+// Local (OpenAI-compat) and subprocess (aider-cli, subprocess) agents are supported.
+// claude-cli is not supported — use MCP (v3) or the tag-intercept path (v2) instead.
 // No session callbacks are wired — RunToolCall passes nil for session everywhere.
 func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config) (TurnRunner, error) {
+	if ac.IsCLI() {
+		return nil, fmt.Errorf("tool-agent %q uses the claude-cli provider; claude-cli tool-agents require the tag-intercept protocol (v2) which is not yet implemented", ac.Name)
+	}
+
+	name := ac.Name
+	if name == "" {
+		name = "tool-agent"
+	}
+
+	// Subprocess agents (aider-cli, subprocess/smolagent) run stateless per-call.
 	if ac.IsExternalProcess() {
-		return nil, fmt.Errorf("tool-agent %q uses an external-process provider (%s); only local HTTP agents are supported as tool agents", ac.Name, ac.Provider)
+		switch {
+		case ac.IsAiderCLI():
+			return newSubprocessRunner(aider.New(ac), name), nil
+		case ac.IsSubprocess():
+			return newSubprocessRunner(smolagent.New(ac), name), nil
+		default:
+			return nil, fmt.Errorf("tool-agent %q uses unsupported subprocess provider %q", ac.Name, ac.Provider)
+		}
 	}
 
 	freshAC := applyFreshAWSCreds(cfg, ac)
@@ -52,10 +72,6 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 		la = la.WithDebugLog(dbg)
 	}
 
-	name := ac.Name
-	if name == "" {
-		name = "tool-agent"
-	}
 	return newLocalRunner(la, name), nil
 }
 

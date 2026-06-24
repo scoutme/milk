@@ -18,14 +18,14 @@ func TestStripCompletionPlaceholders(t *testing.T) {
 		{"/export <path>", "/export"},
 		// No placeholders — unchanged.
 		{"/memory global", "/memory global"},
-		// Nested not supported but shouldn't crash.
-		{"<a <b> c>", "c>"},
-		// Brackets in normal text (not a placeholder) — only strips when matched.
-		{"hello [world]", "hello"},
+		// Nested not supported but shouldn't crash — no slash cmd, left untouched.
+		{"<a <b> c>", "<a <b> c>"},
+		// Brackets in normal text without slash cmd — untouched.
+		{"hello [world]", "hello [world]"},
 		// Empty.
 		{"", ""},
-		// Only placeholders — collapses to empty.
-		{"<param> [opt]", ""},
+		// Only placeholders without slash cmd — untouched.
+		{"<param> [opt]", "<param> [opt]"},
 		// Multiline input must preserve newlines.
 		{"line one\nline two\nline three", "line one\nline two\nline three"},
 		// Multiline with placeholder on one line only.

@@ -969,7 +969,7 @@ var knownProviders = map[string]bool{
 // requiresURL returns true for providers that need an HTTP url.
 func requiresURL(p string) bool {
 	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "claude-cli":
+	case "claude-cli", "aider-cli", "subprocess":
 		return false
 	default:
 		return true
@@ -1012,12 +1012,12 @@ func Validate(cfg Config) []ValidationWarning {
 
 		// HTTP providers must have a url.
 		if requiresURL(a.Provider) && a.URL == "" {
-			warn(a.Name, fmt.Sprintf("url is required for provider %q — run /init or edit config", providerDisplay(a.Provider)))
+			warn(a.Name, fmt.Sprintf("url is required for provider %q — run /config init or edit config", providerDisplay(a.Provider)))
 		}
 
 		// Auth-requiring providers must have api_key or token_cmd.
 		if requiresAuth(a.Provider) && a.APIKey == "" && a.TokenCmd == "" {
-			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /init or edit config", providerDisplay(a.Provider)))
+			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /config init or edit config", providerDisplay(a.Provider)))
 		}
 	}
 
@@ -1031,7 +1031,7 @@ func Validate(cfg Config) []ValidationWarning {
 			}
 		}
 		if !found {
-			warn("", fmt.Sprintf("agent %q not found in agents list — run /init or edit config", cfg.Agent))
+			warn("", fmt.Sprintf("agent %q not found in agents list — run /config init or edit config", cfg.Agent))
 		}
 	}
 
@@ -1045,7 +1045,7 @@ func Validate(cfg Config) []ValidationWarning {
 			}
 		}
 		if !found {
-			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /init or edit config", cfg.EscalationAgent))
+			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /config init or edit config", cfg.EscalationAgent))
 		}
 	}
 

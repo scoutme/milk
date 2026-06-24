@@ -421,8 +421,13 @@ func (r *subprocessRunner) Execute(
 	}, nil
 }
 
-func (r *subprocessRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
-	return "", errors.New("tool-agent calls not supported for this provider")
+func (r *subprocessRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+	// Subprocess agents are stateless per-call; RunFirst with empty context works directly.
+	_, res, err := r.agent.RunFirst(ctx, "", "", prompt, out)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

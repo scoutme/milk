@@ -121,10 +121,10 @@ const interactiveHelp = `
   /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]
   /agent switch <name> [as primary|escalation]   (prompts if args missing)
   /agent tool list [<agent>|global]              show tool-agents (default: primary)
-  /agent tool enable <tool> [for <agent>|global]
-  /agent tool disable <tool> [for <agent>|global]
-  /agent tool add <tool> description=<desc> [for <agent>|global]
-  /agent tool remove <tool> [for <agent>|global]
+  /agent tool enable <tool> [for <agent>|global]  enable a tool-agent entry
+  /agent tool disable <tool> [for <agent>|global]  disable a tool-agent entry
+  /agent tool add <tool> description=<desc> [for <agent>|global]  add a new tool-agent entry
+  /agent tool remove <tool> [for <agent>|global]  remove a tool-agent entry
   /skip-permissions      show current skip-permissions state
   /skip-permissions on   all agents auto-approve tool uses (no prompts)
   /skip-permissions off  agents prompt before running side-effecting tools
