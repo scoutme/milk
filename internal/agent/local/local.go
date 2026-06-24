@@ -103,6 +103,10 @@ func agentRoleForMetrics(escalationName string) string {
 	return "primary"
 }
 
+// ToolAgentDispatcher is called when the agent issues an agent_* tool call.
+// agentName is the unsanitised agent name (e.g. "aider", not "agent_aider").
+type ToolAgentDispatcher func(ctx context.Context, agentName, request string, out io.Writer) (string, error)
+
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
 // or the AWS Bedrock Converse API when useBedrockNative is true.
 type Agent struct {
@@ -137,6 +141,10 @@ type Agent struct {
 	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
 	// including lines that are skipped or fail JSON parsing.
 	debugLog io.Writer
+	// toolAgentEntries is the list of peer agents available as tools for this agent.
+	toolAgentEntries []config.AgentToolEntry
+	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
+	toolAgentDispatcher ToolAgentDispatcher
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -149,6 +157,21 @@ func (a *Agent) AsEscalationTarget(name string) *Agent {
 	copy.skipRepeatCheck = true
 	copy.escalationName = name
 	return &copy
+}
+
+// WithToolAgentEntries returns a shallow copy of the agent configured with
+// the given peer-agent tool entries. These entries are passed to schemas() so
+// the LLM can call peer agents as tools.
+func (a *Agent) WithToolAgentEntries(entries []config.AgentToolEntry) *Agent {
+	copy := *a
+	copy.toolAgentEntries = entries
+	return &copy
+}
+
+// SetToolAgentDispatcher wires the callback that is invoked when the agent
+// issues an agent_* tool call.
+func (a *Agent) SetToolAgentDispatcher(fn ToolAgentDispatcher) {
+	a.toolAgentDispatcher = fn
 }
 
 // WithTagCallbacks returns a shallow copy of the agent configured to intercept
@@ -598,7 +621,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
-	tools := schemas(mem, a.otelDir, sess)
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
 
 	if a.tagNonce != "" {
 		if a.onNeed != nil {
@@ -748,6 +771,28 @@ func capMemToolResult(result string, maxBytes int) string {
 func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
 	for _, tc := range toolCalls {
+		if strings.HasPrefix(tc.Function.Name, "agent_") && a.toolAgentDispatcher != nil {
+			var reqArgs struct {
+				Request string `json:"request"`
+			}
+			json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
+			agentName := tc.Function.Name[len("agent_"):]
+			fmt.Fprintf(out, "\n⚙ calling agent %s…\n", agentName)
+			result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
+			if err != nil {
+				obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
+					attribute.String("agent", agentName),
+				)
+				result = toolResult{Error: err.Error()}.String()
+			} else {
+				result = toolResult{Output: result}.String()
+			}
+			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
+				attribute.String("agent", agentName),
+			)
+			msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
+			continue
+		}
 		printToolLine(out, tc)
 		args := tc.Function.Arguments
 		if len(args) > 120 {

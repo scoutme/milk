@@ -19,6 +19,8 @@ import (
 // It handles all session bookkeeping: context-mode resolution, nonce management,
 // state transitions, turn recording, token accounting, summary rebuild, and
 // self-escalation dispatch when runner signals an EscalationReason.
+// da is optional (may be nil); when non-nil, tool-agent dispatching is wired
+// into local runners so they can call peer agents as tools.
 func runPrimary(
 	ctx context.Context,
 	cfg config.Config,
@@ -28,6 +30,7 @@ func runPrimary(
 	mem *memory.Store,
 	prompt string,
 	out io.Writer,
+	da *dispatchAgents,
 ) error {
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
@@ -65,6 +68,22 @@ func runPrimary(
 		OnNeed:     func(body string) { sess.RecordNeed(body) },
 		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
 		OnEscalate: func(reason string) {}, // captured via TurnResult.EscalationReason
+	}
+
+	// Wire tool-agent dispatcher into local runners when dispatchAgents is available.
+	if da != nil {
+		if lr, ok := runner.(*localRunner); ok {
+			entries := cfg.EffectiveToolAgents(runner.Name())
+			lr.agent = lr.agent.WithToolAgentEntries(entries)
+			capturedDA := da
+			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, dout io.Writer) (string, error) {
+				tr, err := getOrBuildToolRunner(dctx, agentName, cfg, capturedDA)
+				if err != nil {
+					return "", err
+				}
+				return tr.RunToolCall(dctx, cfg, request, dout)
+			})
+		}
 	}
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RolePrimary, ctxMode,

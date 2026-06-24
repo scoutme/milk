@@ -87,6 +87,7 @@ type dispatchAgents struct {
 	subprocessPrimary *subprocess.Agent // non-nil when primary is a subprocess provider
 	localAvail        bool
 	escalationAvail   bool
+	toolRunners       map[string]TurnRunner // lazily built tool-agent runners, keyed by agent name
 }
 
 // --- TUI message types ---
@@ -3987,7 +3988,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		func() tea.Msg {
 			defer cancel()
 			sw := &sendWriter{send: send}
-			err := runTurn(turnCtx, st, rtr, tuiAgents, input, sw, ir0)
+			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
 			return agentDoneMsg{err: err}
 		},
 	)
@@ -5487,7 +5488,7 @@ func replTurnSourceLabel(st *interactiveState) string {
 }
 
 // runTurn routes a prompt to the appropriate agent, writing output to out.
-func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
+func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents *dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
 	localAvail := agents.localAvail
 	escalationAvail := agents.escalationAvail
 
@@ -5540,7 +5541,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out)
+		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents)
 	case router.TargetEscalation:
 		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out)
 	}

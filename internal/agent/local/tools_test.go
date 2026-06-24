@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -321,5 +322,77 @@ func TestGetContextStats_NoSession(t *testing.T) {
 	result, _ := dispatchTool(context.Background(), "get_context_stats", `{}`, nil, nil, "")
 	if !strings.Contains(result, "error") {
 		t.Errorf("expected error with nil session, got %q", result)
+	}
+}
+
+// --- AgentToolSchemas tests ---
+
+func TestAgentToolSchemas_Empty(t *testing.T) {
+	result := AgentToolSchemas(nil)
+	if result == nil {
+		t.Error("expected non-nil empty slice")
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty slice, got %d entries", len(result))
+	}
+}
+
+func TestAgentToolSchemas_SingleEntry(t *testing.T) {
+	entries := []config.AgentToolEntry{
+		{Agent: "my-agent", Description: "A helpful agent"},
+	}
+	result := AgentToolSchemas(entries)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(result))
+	}
+	schema := result[0]
+	if schema["type"] != "function" {
+		t.Errorf("expected type=function, got %v", schema["type"])
+	}
+	fn, ok := schema["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected function map, got %T", schema["function"])
+	}
+	if fn["name"] != "agent_my_agent" {
+		t.Errorf("expected agent_my_agent, got %v", fn["name"])
+	}
+	if fn["description"] != "A helpful agent" {
+		t.Errorf("expected description, got %v", fn["description"])
+	}
+	params, ok := fn["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected parameters map, got %T", fn["parameters"])
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %T", params["properties"])
+	}
+	if _, hasRequest := props["request"]; !hasRequest {
+		t.Error("expected 'request' property in schema")
+	}
+	required, _ := params["required"].([]string)
+	if len(required) != 1 || required[0] != "request" {
+		t.Errorf("expected required=[request], got %v", required)
+	}
+}
+
+func TestSanitiseAgentToolName_Uppercase(t *testing.T) {
+	got := sanitiseAgentToolName("MyAgent")
+	if got != "agent_myagent" {
+		t.Errorf("expected agent_myagent, got %q", got)
+	}
+}
+
+func TestSanitiseAgentToolName_Hyphens(t *testing.T) {
+	got := sanitiseAgentToolName("my-agent")
+	if got != "agent_my_agent" {
+		t.Errorf("expected agent_my_agent, got %q", got)
+	}
+}
+
+func TestSanitiseAgentToolName_Spaces(t *testing.T) {
+	got := sanitiseAgentToolName("my agent")
+	if got != "agent_my_agent" {
+		t.Errorf("expected agent_my_agent, got %q", got)
 	}
 }

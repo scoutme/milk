@@ -460,3 +460,137 @@ func TestAgentReturningFreshStartLocalTurns_Disabled(t *testing.T) {
 		t.Errorf("expected 0 (disabled) for -1 per-agent, got %d", got)
 	}
 }
+
+// --- EffectiveToolAgents tests ---
+
+func TestEffectiveToolAgents_NoToolsConfigured(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{{Name: "local", URL: "http://local", Model: "m"}},
+	}
+	got := cfg.EffectiveToolAgents("local")
+	if len(got) != 0 {
+		t.Errorf("expected empty list, got %v", got)
+	}
+}
+
+func TestEffectiveToolAgents_GlobalOnly(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{Name: "primary", URL: "http://primary", Model: "m"},
+			{Name: "helper", URL: "http://helper", Model: "m2"},
+		},
+		AgentTools: []AgentToolEntry{
+			{Agent: "helper", Description: "A helper agent"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %v", len(got), got)
+	}
+	if got[0].Agent != "helper" || got[0].Description != "A helper agent" {
+		t.Errorf("unexpected entry: %+v", got[0])
+	}
+}
+
+func TestEffectiveToolAgents_PerAgentShadowsGlobal(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{
+				Name:  "primary",
+				URL:   "http://primary",
+				Model: "m",
+				Tools: []AgentToolEntry{
+					{Agent: "helper", Description: "overridden description"},
+				},
+			},
+			{Name: "helper", URL: "http://helper", Model: "m2"},
+		},
+		AgentTools: []AgentToolEntry{
+			{Agent: "helper", Description: "global description"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %v", len(got), got)
+	}
+	if got[0].Description != "overridden description" {
+		t.Errorf("expected per-agent override, got %q", got[0].Description)
+	}
+}
+
+func TestEffectiveToolAgents_PerAgentDisablesGlobal(t *testing.T) {
+	disabled := false
+	cfg := Config{
+		Agents: []AgentConfig{
+			{
+				Name:  "primary",
+				URL:   "http://primary",
+				Model: "m",
+				Tools: []AgentToolEntry{
+					{Agent: "helper", Description: "desc", Enabled: &disabled},
+				},
+			},
+			{Name: "helper", URL: "http://helper", Model: "m2"},
+		},
+		AgentTools: []AgentToolEntry{
+			{Agent: "helper", Description: "global description"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 0 {
+		t.Errorf("expected empty list (disabled), got %v", got)
+	}
+}
+
+func TestEffectiveToolAgents_PerAgentAddsEntry(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{
+				Name:  "primary",
+				URL:   "http://primary",
+				Model: "m",
+				Tools: []AgentToolEntry{
+					{Agent: "extra", Description: "extra agent"},
+				},
+			},
+			{Name: "extra", URL: "http://extra", Model: "m2"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %v", len(got), got)
+	}
+	if got[0].Agent != "extra" {
+		t.Errorf("expected extra, got %q", got[0].Agent)
+	}
+}
+
+func TestEffectiveToolAgents_CycleGuard(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{Name: "primary", URL: "http://primary", Model: "m"},
+		},
+		AgentTools: []AgentToolEntry{
+			{Agent: "primary", Description: "self-call"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 0 {
+		t.Errorf("cycle guard: expected empty list, got %v", got)
+	}
+}
+
+func TestEffectiveToolAgents_UnknownAgentDropped(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{Name: "primary", URL: "http://primary", Model: "m"},
+		},
+		AgentTools: []AgentToolEntry{
+			{Agent: "nonexistent", Description: "ghost agent"},
+		},
+	}
+	got := cfg.EffectiveToolAgents("primary")
+	if len(got) != 0 {
+		t.Errorf("expected unknown agent to be dropped, got %v", got)
+	}
+}

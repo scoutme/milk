@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 
@@ -71,6 +72,9 @@ type TurnRunner interface {
 		cbs TurnCallbacks,
 		out io.Writer,
 	) (TurnResult, error)
+	// RunToolCall executes a single lightweight inference call with no session
+	// bookkeeping. Returns the agent's text response or an error.
+	RunToolCall(ctx context.Context, cfg config.Config, prompt string, out io.Writer) (string, error)
 }
 
 // ── localRunner ──────────────────────────────────────────────────────────────
@@ -182,6 +186,20 @@ func (r *localRunner) Execute(
 		}
 	}
 	return TurnResult{Text: text}, nil
+}
+
+func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+	msgs := []local.Message{{Role: "user", Content: prompt}}
+	updatedMsgs, err := r.agent.Run(ctx, msgs, prompt, out, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	for i := len(updatedMsgs) - 1; i >= 0; i-- {
+		if updatedMsgs[i].Role == "assistant" {
+			return updatedMsgs[i].Content, nil
+		}
+	}
+	return "", nil
 }
 
 // ── cliRunner ─────────────────────────────────────────────────────────────────
@@ -311,6 +329,10 @@ func (r *cliRunner) Execute(
 	}, nil
 }
 
+func (r *cliRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
+	return "", errors.New("tool-agent calls not supported for this provider")
+}
+
 // ── subprocessRunner ─────────────────────────────────────────────────────────
 
 type subprocessRunner struct {
@@ -397,6 +419,10 @@ func (r *subprocessRunner) Execute(
 		CacheCreate:      res.CacheCreationInputTokens,
 		CostUSD:          res.TotalCostUSD,
 	}, nil
+}
+
+func (r *subprocessRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
+	return "", errors.New("tool-agent calls not supported for this provider")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
