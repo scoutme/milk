@@ -94,6 +94,10 @@ runPrimary / runEscalation role-specific session bookkeeping (dispatch.go)
 run() / runTurn()          single-shot or TUI entry point; builds runners, drives router
 ```
 
+### Agent-as-Tool
+
+Any agent in the `agents` list can be exposed as a callable tool to any other agent via the `agent_tools` global list (or per-agent `tools` overrides). When enabled, milk synthesises an OpenAI function-schema for each peer agent and injects it alongside the built-in tools; the primary agent can invoke a peer by name as it would any other tool call. The peer agent receives the caller's prompt and returns a text result that is fed back as a tool result, with no session state shared between peer calls. Configure tool-agents with the `agent_tools` config field or at runtime with `/agent tool`.
+
 ---
 
 ## Router
@@ -316,6 +320,11 @@ The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–6
 | `/agent switch <name> as primary\|escalation` | Switch role to the named backend (prompts if args missing) |
 | `/agent add` | Add a backend via interactive wizard (prompts for each field) |
 | `/agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
+| `/agent tool list [<agent>\|global]` | List tool-agents (effective merged for primary by default) |
+| `/agent tool enable <tool> [for <agent>\|global]` | Enable a tool-agent entry |
+| `/agent tool disable <tool> [for <agent>\|global]` | Disable a tool-agent entry |
+| `/agent tool add <tool> description=<desc> [for <agent>\|global]` | Add a new tool-agent entry |
+| `/agent tool remove <tool> [for <agent>\|global]` | Remove a tool-agent entry |
 
 New backends are appended to `agents` in `~/.milk/config.json` immediately. Use `/agent switch` to assign a role to a newly added backend in the current session.
 
@@ -479,6 +488,34 @@ A built-in `claude-cli` entry named `"claude"` is always available even if not l
 | `dangerously_skip_permissions` | bool | Auto-approve all tool uses without prompting |
 | `allowed_tools` | array of string | Tools pre-approved; passed as `--allowedTools` |
 | `add_dirs` | array of string | Extra directories; passed as `--add-dir` |
+
+#### Common fields (all providers)
+
+| Field | Type | Description |
+|---|---|---|
+| `tools` | array of AgentToolEntry | Per-agent overrides/extensions of the global `agent_tools` list. An entry whose `agent` name matches a global entry replaces it; new names are appended. |
+
+### `agent_tools` field
+
+Global list of peer agents that can be called as tools by any agent. Each entry is an `AgentToolEntry` object:
+
+| Field | Type | Description |
+|---|---|---|
+| `agent` | string | Name of the agent to expose as a tool (must match a name in `agents`) |
+| `description` | string | Description shown to the calling agent as the tool's purpose |
+| `enabled` | bool | Whether the tool is active (default `true` when omitted) |
+
+Per-agent entries in `AgentConfig.tools` shadow or extend this global list (same `agent` name = replace; new name = append). Cycle guard: an agent cannot call itself as a tool. Unknown agent names are silently dropped.
+
+Example:
+```json
+"agent_tools": [
+  { "agent": "haiku-aws", "description": "Fast summarization and classification agent." },
+  { "agent": "claude", "description": "Full-capability Claude Code escalation agent.", "enabled": false }
+]
+```
+
+Use `/agent tool` subcommands to manage tool-agents at runtime.
 
 ### `colorization` field
 

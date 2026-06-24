@@ -2591,6 +2591,10 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 		inline := strings.TrimSpace(arg[len("add"):])
 		return m.startAddAgent(inline), nil
 
+	case arg == "tool", strings.HasPrefix(arg, "tool "):
+		sub := strings.TrimSpace(strings.TrimPrefix(arg, "tool"))
+		m.appendTranscript(execAgentTool(sub, m.st) + "\n")
+
 	default:
 		m.appendTranscript(milkTag() + " usage: /agent [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
 	}
@@ -3101,6 +3105,8 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepLimits:
 		return initStepEscalation
 	case initStepEscalation:
+		return initStepAgentTools
+	case initStepAgentTools:
 		return initStepOpenConfig
 	case initStepOpenConfig:
 		return initStepDone
@@ -3194,6 +3200,8 @@ func initWizardPrompt(st *initWizardState) string {
 		return ""
 	case initStepEscalation:
 		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
+	case initStepAgentTools:
+		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated) or leave blank to skip: "
 	case initStepOpenConfig:
 		return milkTag() + " open config in editor now? [y/N]: "
 	}
@@ -3318,6 +3326,13 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			lower := strings.ToLower(answer)
 			st.escCLI = lower != "n" && lower != "no"
 
+		case initStepAgentTools:
+			// answer is a comma-separated list of agent names to enable as tools.
+			// Blank means skip. We record the choices; they will be applied in commitInitWizard.
+			if strings.TrimSpace(answer) != "" {
+				st.toolAgentNames = splitCommaNames(answer)
+			}
+
 		case initStepLimits:
 			switch st.limitsSubStep {
 			case 0:
@@ -3377,6 +3392,11 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		st.step = initWizardNextStep(st)
+		// Skip the agent-tools step when the config has only one agent
+		// (no peer agents to expose as tools yet).
+		if st.step == initStepAgentTools && len(m.st.cfg.Agents) <= 1 {
+			st.step = initStepOpenConfig
+		}
 		if st.step == initStepOpenConfig {
 			// Write config before asking about opening editor.
 			m = m.commitInitWizard(st)
@@ -3419,6 +3439,16 @@ func (m model) commitInitWizard(st *initWizardState) model {
 		st.primary.Limits = lim
 	}
 	cfg := config.InitConfig(st.primary, escalation)
+	// Add tool-agent entries from wizard step.
+	for _, name := range st.toolAgentNames {
+		if strings.EqualFold(name, st.primary.Name) {
+			continue // skip self-reference
+		}
+		cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
+			Agent:       name,
+			Description: "Specialist agent. Describe its capabilities here.",
+		})
+	}
 	if err := config.Save(cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
