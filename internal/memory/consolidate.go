@@ -1,6 +1,10 @@
 package memory
 
-import "context"
+import (
+	"context"
+
+	"github.com/scoutme/milk/internal/obs"
+)
 
 const (
 	decayPerSession   = 0.10 // −10% per session end; Local/Claude percepts prune after ~5 sessions
@@ -61,6 +65,7 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 	endSpan(decayed, pruned, len(promoted), saveErr)
 	logConsolidation(ctx, s.sessionID, before, decayed, pruned, len(promoted), globalTotal)
 	metricsConsolidation(ctx, decayed, pruned, len(promoted), globalTotal)
+	obs.Debug("consolidation run", "session", s.sessionID, "before", before, "decayed", decayed, "pruned", pruned, "promoted", len(promoted), "global_total", globalTotal)
 
 	return saveErr
 }

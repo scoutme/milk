@@ -41,6 +41,7 @@ var (
 	flagList     bool
 	flagListAll  bool
 	flagDrop     bool
+	flagLogLevel string
 )
 
 // Set via -ldflags at build time.
@@ -80,6 +81,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagList, "list", false, "List sessions for current cwd")
 	rootCmd.Flags().BoolVar(&flagListAll, "all", false, "With --list: show all sessions across all directories")
 	rootCmd.Flags().BoolVar(&flagDrop, "drop", false, "Delete the current session")
+	rootCmd.Flags().StringVar(&flagLogLevel, "log-level", "", "Log level: DEBUG, INFO, WARN, ERROR (overrides config)")
 
 	rootCmd.AddCommand(configCmd)
 }
@@ -104,6 +106,9 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf(errGettingCWD, err)
 	}
 
+	if flagLogLevel != "" {
+		cfg.Otel.LogLevel = flagLogLevel
+	}
 	if prompt == "" {
 		return runREPL(cfg, cwd, flagNew, flagSession)
 	}
@@ -233,7 +238,6 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if od, err := config.OtelDir(); err == nil {
 		la.WithOtelDir(od)
 	}
-	la.WithLogContext(cfg.Otel.LogContext)
 	la.WithOnTokens(func(model, role string, prompt, completion int64) {
 		sess.AddTokens(model, role, prompt, completion)
 	})
@@ -241,11 +245,6 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 		la.WithPermissions(lp, nil)
 	}
 	la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
-	if dbg, err := openLocalDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		la = la.WithDebugLog(dbg)
-	}
 	name := primaryAC.Name
 	if name == "" {
 		name = "primary"
@@ -277,7 +276,6 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			if od, err := config.OtelDir(); err == nil {
 				la.WithOtelDir(od)
 			}
-			la.WithLogContext(cfg.Otel.LogContext)
 			la.WithOnTokens(func(model, role string, prompt, completion int64) {
 				sess.AddTokens(model, role, prompt, completion)
 			})
@@ -298,12 +296,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 	cliAC := cliAgentConfig(cfg)
 	cliAgt := newCLIAgent(cliAC)
 	cliAgt = applyAWSCreds(cfg, cliAgt)
-	cliAgt = cliAgt.WithLogContext(cfg.Otel.LogContext)
-	if dbg, err := openCLIDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		cliAgt = cliAgt.WithDebugLog(dbg)
-	}
+
 	var cs *claudesettings.Store
 	if store, err := claudesettings.Open(cwd); err == nil {
 		cs = store
@@ -414,31 +407,6 @@ func applyAWSCreds(cfg config.Config, agent *claude.Agent) *claude.Agent {
 		agent = agent.WithExtraEnv(creds.Env()...)
 	}
 	return agent
-}
-
-// openCLIDebugLog opens (or creates/appends) the Claude raw NDJSON debug log
-// when cfg.DebugCLILog is true. Returns nil, nil when disabled.
-// The caller is responsible for closing the returned file.
-func openCLIDebugLog(cfg config.Config) (*os.File, error) {
-	if !cfg.DebugCLILog {
-		return nil, nil
-	}
-	path, err := config.CLIDebugLogPath()
-	if err != nil {
-		return nil, err
-	}
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
-}
-
-func openLocalDebugLog(cfg config.Config) (*os.File, error) {
-	if !cfg.DebugLocalLog {
-		return nil, nil
-	}
-	path, err := config.LocalDebugLogPath()
-	if err != nil {
-		return nil, err
-	}
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 }
 
 func memoryDir() (string, error) {

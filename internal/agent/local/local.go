@@ -131,16 +131,12 @@ type Agent struct {
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
-	logContext       bool   // when true, log full request payload at DEBUG level
 	cachedCwd        string // cwd for which cachedCwdContext was built
 	cachedCwdContext string // cached working directory listing system message
 	// onTokens is an optional callback fired after each inference call with real
 	// token counts. Used to persist usage into the session without coupling the
 	// agent to the session package.
 	onTokens func(model, role string, prompt, completion int64)
-	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
-	// including lines that are skipped or fail JSON parsing.
-	debugLog io.Writer
 	// toolAgentEntries is the list of peer agents available as tools for this agent.
 	toolAgentEntries []config.AgentToolEntry
 	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
@@ -421,24 +417,10 @@ func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion int6
 	return a
 }
 
-// WithLogContext enables full request payload logging at DEBUG level.
-func (a *Agent) WithLogContext(v bool) *Agent {
-	a.logContext = v
-	return a
-}
-
 // WithOtelDir sets the otel directory so the agent can offer get_metrics.
 func (a *Agent) WithOtelDir(dir string) *Agent {
 	a.otelDir = dir
 	return a
-}
-
-// WithDebugLog returns a shallow copy of the agent that writes every raw SSE
-// line from the HTTP stream to w, including skipped and unparseable lines.
-func (a *Agent) WithDebugLog(w io.Writer) *Agent {
-	copy := *a
-	copy.debugLog = w
-	return &copy
 }
 
 // systemPromptShared is the role-independent core: tool rules, memory rules,
@@ -966,7 +948,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if err != nil {
 		return "", "", nil, err
 	}
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload(a.inferenceURL(), body)
 	}
 
@@ -1078,16 +1060,15 @@ func (a *Agent) scanSSE(
 	textBuf *strings.Builder,
 	out io.Writer,
 ) ([]toolCall, int64, int64, error) {
-	dbg := a.debugLog
 	var promptTokens, completionTokens int64
 	for scanner.Scan() {
 		line := scanner.Text()
-		if dbg != nil {
-			fmt.Fprintln(dbg, line) //nolint:errcheck
+		if obs.DebugEnabled() {
+			obs.Debug("sse line", "line", line)
 		}
 		if !strings.HasPrefix(line, "data: ") {
-			if dbg != nil {
-				fmt.Fprintf(dbg, "[skip:no-data-prefix] %s\n", line) //nolint:errcheck
+			if obs.DebugEnabled() {
+				obs.Debug("sse skip", "reason", "no-data-prefix", "line", line)
 			}
 			continue
 		}
@@ -1097,9 +1078,7 @@ func (a *Agent) scanSSE(
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			if dbg != nil {
-				fmt.Fprintf(dbg, "[skip:json-error] %v | raw: %s\n", err, data) //nolint:errcheck
-			}
+			obs.Debug("sse skip", "reason", "json-error", "err", err, "raw", data)
 			continue
 		}
 		if chunk.Usage != nil {
@@ -1185,7 +1164,7 @@ Task: ` + prompt
 	if err != nil {
 		return false, err
 	}
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload(a.inferenceURL()+" [classify]", body)
 	}
 

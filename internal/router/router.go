@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -103,7 +102,7 @@ func (r *Router) route(ctx context.Context, sess *session.Session, prompt string
 			escalate, err := r.localAgent.Classify(ctx, prompt)
 			classifyElapsed := time.Since(classifyStart)
 			if err != nil {
-				fmt.Printf("[router] classifier error: %v — defaulting to local\n", err)
+				obs.Warn("router classifier error, defaulting to local", "err", err)
 			} else {
 				obs.RecordDuration(ctx, instrumentationScope, "milk.router.classify_latency_ms", classifyElapsed,
 					attribute.String("model", r.cfg.ActiveAgent().Model),

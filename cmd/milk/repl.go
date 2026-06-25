@@ -527,6 +527,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		if m.cancelTurn != nil {
+			obs.Debug("turn interrupted by user")
 			m.cancelTurn()
 			m.cancelTurn = nil
 			m.interrupted = true
@@ -640,8 +641,10 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 			// this branch catches any late-arriving cancellation that slipped through.
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		case isContextDeadlineExceeded(msg.err):
+			obs.Warn("agent turn timed out")
 			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond within " + agentTimeout.String() + "\n")
 		default:
+			obs.Error("agent turn error", "err", msg.err)
 			m.appendTranscript(milkTag() + " error: " + errText + "\n")
 		}
 	}
@@ -1763,7 +1766,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newAgent.WithOnSigV4Refresh(func(err error) {
 					prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 				})
-				newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 				ist := m.st
 				newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
 					ist.sess.AddTokens(model, role, prompt, completion)
@@ -2825,7 +2827,6 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 		newAgent.WithOnSigV4Refresh(func(err error) {
 			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 		})
-		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 		ist := m.st
 		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
 			ist.sess.AddTokens(model, role, prompt, completion)
@@ -3691,7 +3692,6 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		newAgent.WithOnSigV4Refresh(func(err error) {
 			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
 		})
-		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 		ist := m.st
 		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
 			ist.sess.AddTokens(model, role, prompt, completion)
@@ -3745,7 +3745,6 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 			if od, err := config.OtelDir(); err == nil {
 				newEsc.WithOtelDir(od)
 			}
-			newEsc.WithLogContext(m.st.cfg.Otel.LogContext)
 			ist := m.st
 			newEsc.WithOnTokens(func(model, role string, prompt, completion int64) {
 				ist.sess.AddTokens(model, role, prompt, completion)
@@ -3957,6 +3956,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
+	obs.Debug("dispatch agent turn", "input_chars", len(input))
 	m.busy = true
 	m.spinnerFrame = 0
 	m.currentTurnChars = 0
@@ -5806,13 +5806,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if od, err := config.OtelDir(); err == nil {
 			localAgent.WithOtelDir(od)
 		}
-		localAgent.WithLogContext(cfg.Otel.LogContext)
-		if dbg, err := openLocalDebugLog(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
-		} else if dbg != nil {
-			defer dbg.Close()
-			localAgent = localAgent.WithDebugLog(dbg)
-		}
+
 	}
 
 	// Build the escalation agent: local provider, subprocess (subprocess, aider-cli), or claude-cli (default).
@@ -5833,7 +5827,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if od, err := config.OtelDir(); err == nil {
 				escalationLocalAgent.WithOtelDir(od)
 			}
-			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
 			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
@@ -5845,13 +5838,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	cliAgent := newCLIAgent(cliAgentConfig(cfg))
 	cliAgent = applyAWSCreds(cfg, cliAgent)
-	cliAgent = cliAgent.WithLogContext(cfg.Otel.LogContext)
-	if dbg, err := openCLIDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		defer dbg.Close()
-		cliAgent = cliAgent.WithDebugLog(dbg)
-	}
 
 	ctx := context.Background()
 	// TUI mode continues even when both agents are unavailable so the user can

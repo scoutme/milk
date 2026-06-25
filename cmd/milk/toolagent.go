@@ -56,7 +56,6 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 	if od, err := config.OtelDir(); err == nil {
 		la.WithOtelDir(od)
 	}
-	la.WithLogContext(cfg.Otel.LogContext)
 	// No WithOnTokens: tool-agent calls are stateless — no session to record tokens into.
 
 	if cwd, err := os.Getwd(); err == nil {
@@ -65,12 +64,6 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 		}
 	}
 	la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
-
-	if dbg, err := openLocalDebugLog(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: cannot open tool-agent debug log: %v\n", milkTag(), err)
-	} else if dbg != nil {
-		la = la.WithDebugLog(dbg)
-	}
 
 	return newLocalRunner(la, name), nil
 }

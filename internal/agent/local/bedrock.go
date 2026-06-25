@@ -241,7 +241,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	if err != nil {
 		return "", "", nil, err
 	}
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload(a.converseEndpoint(true), body)
 	}
 
@@ -402,7 +402,7 @@ Task: ` + prompt
 	if err != nil {
 		return false, err
 	}
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload(a.converseEndpoint(false)+" [classify]", body)
 	}
 

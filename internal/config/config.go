@@ -243,13 +243,12 @@ type Config struct {
 	// "full"     — full Markdown render via glamour
 	Colorization string `json:"colorization,omitempty"`
 
-	// DebugCLILog writes every raw NDJSON line from the claude subprocess to
-	// ~/.milk/claude_debug.ndjson.
+	// Deprecated: use otel.log_format + otel.log_level (or --log-level) instead.
+	// Retained for JSON backwards compatibility; has no effect.
 	DebugCLILog bool `json:"debug_claude_code,omitempty"`
 
-	// DebugLocalLog writes every raw SSE line from the local agent's HTTP
-	// stream to ~/.milk/local_debug.log, including lines that are skipped or
-	// fail to parse. Useful for diagnosing dropped tokens or unknown events.
+	// Deprecated: use otel.log_format + otel.log_level (or --log-level) instead.
+	// Retained for JSON backwards compatibility; has no effect.
 	DebugLocalLog bool `json:"debug_local,omitempty"`
 
 	// AWSAuthRefresh enables AWS credential injection for the claude subprocess.
@@ -859,24 +858,6 @@ func (c Config) HasInferenceAgent() bool {
 		}
 	}
 	return false
-}
-
-// CLIDebugLogPath returns the path for the Claude raw NDJSON debug log.
-func CLIDebugLogPath() (string, error) {
-	d, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(d, "claude_debug.ndjson"), nil
-}
-
-// LocalDebugLogPath returns the path for the local agent raw SSE debug log.
-func LocalDebugLogPath() (string, error) {
-	d, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(d, "local_debug.log"), nil
 }
 
 func Dir() (string, error) {

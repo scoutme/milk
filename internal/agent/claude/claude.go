@@ -25,7 +25,6 @@ type Agent struct {
 	allowedTools      []string                     // tools pre-approved via --allowedTools
 	addDirs           []string                     // extra directories granted via --add-dir
 	permissionHandler PermissionHandler            // nil → denyAllHandler
-	debugLog          io.Writer                    // when non-nil, every raw NDJSON line is written here
 	onToolUse         func(string)                 // called on content_block_start tool_use events
 	onToolUseReady    func(string, map[string]any) // called on content_block_stop with full input
 	onThinking        func(string)                 // called on thinking_delta tokens
@@ -35,7 +34,6 @@ type Agent struct {
 	onNeed            func(string)                 // called for each <milk:need:NONCE> tag; arg: new current-need text
 	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
-	logContext        bool                         // when true, log system context and prompt at DEBUG level
 }
 
 func New(bin string) *Agent {
@@ -59,22 +57,6 @@ func NewWithOpts(bin string, skipPermissions bool, allowedTools, addDirs []strin
 func (a *Agent) WithPermissionHandler(h PermissionHandler) *Agent {
 	c := *a
 	c.permissionHandler = h
-	return &c
-}
-
-// WithLogContext enables logging of the system context and prompt passed to the
-// claude subprocess at DEBUG level via obs.LogPayload.
-func (a *Agent) WithLogContext(v bool) *Agent {
-	c := *a
-	c.logContext = v
-	return &c
-}
-
-// WithDebugLog returns a copy of the agent that writes every raw NDJSON line
-// from the claude subprocess to w.
-func (a *Agent) WithDebugLog(w io.Writer) *Agent {
-	c := *a
-	c.debugLog = w
 	return &c
 }
 
@@ -175,7 +157,7 @@ func (a *Agent) Ping() error {
 // survives changes to the dynamic part. Either may be empty.
 // Returns the session ID emitted by the subprocess and a ParseResult.
 func (a *Agent) RunFirst(ctx context.Context, staticContext, dynamicContext, prompt string, out io.Writer) (string, ParseResult, error) {
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload("claude-cli [first] static-context", []byte(staticContext))
 		obs.LogPayload("claude-cli [first] dynamic-context", []byte(dynamicContext))
 		obs.LogPayload("claude-cli [first] prompt", []byte(prompt))
@@ -200,7 +182,7 @@ func (a *Agent) RunFirst(ctx context.Context, staticContext, dynamicContext, pro
 // the turn-specific summary and is re-sent whenever it changes. Sending them as
 // separate files lets the static prefix remain cached even when the dynamic part changes.
 func (a *Agent) RunResume(ctx context.Context, claudeSessionID, staticContext, dynamicContext, prompt string, out io.Writer) (ParseResult, error) {
-	if a.logContext {
+	if obs.DebugEnabled() {
 		obs.LogPayload("claude-cli [resume] static-context", []byte(staticContext))
 		obs.LogPayload("claude-cli [resume] dynamic-context", []byte(dynamicContext))
 		obs.LogPayload("claude-cli [resume] prompt", []byte(prompt))
@@ -344,7 +326,16 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 
+	obs.Debug("claude-cli start", "bin", a.bin, "mode", func() string {
+		for _, arg := range args {
+			if arg == "--resume" {
+				return "resume"
+			}
+		}
+		return "first"
+	}())
 	if err := cmd.Start(); err != nil {
+		obs.Error("claude-cli start failed", "err", err)
 		return ParseResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 
@@ -358,7 +349,6 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		AgentNames:     a.agentNames,
 		OnNeed:         a.onNeed,
 		NeedNonce:      a.needNonce,
-		DebugLog:       a.debugLog,
 	})
 
 	// Close stdin after stream ends so Claude can exit cleanly.
