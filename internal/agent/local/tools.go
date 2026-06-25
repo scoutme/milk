@@ -226,13 +226,15 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 			"type": "function",
 			"function": map[string]any{
 				"name":        "get_session_context",
-				"description": "Return shared session history for both agents. Filter with last_n, pattern, or agent.",
+				"description": "Return shared session history for both agents. Recent turns are returned verbatim; older turns are shown as compact one-liners with turn indices (e.g. [3]). Use turn_from/turn_to to fetch specific older turns verbatim (max 5 turns per request). Filter with last_n, pattern, or agent.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"last_n":  map[string]any{"type": "integer", "description": "Last N turns only."},
-						"pattern": map[string]any{"type": "string", "description": "Substring filter."},
-						"agent":   map[string]any{"type": "string", "enum": []string{"primary", "escalation"}, "description": "Filter by agent role."},
+						"last_n":    map[string]any{"type": "integer", "description": "Last N turns only. Ignored when turn_from is set."},
+						"pattern":   map[string]any{"type": "string", "description": "Substring filter."},
+						"agent":     map[string]any{"type": "string", "enum": []string{"primary", "escalation"}, "description": "Filter by agent role."},
+						"turn_from": map[string]any{"type": "integer", "description": "1-based start index from a previous compact older history listing. Returns turns verbatim (max 5)."},
+						"turn_to":   map[string]any{"type": "integer", "description": "1-based end index (inclusive). Defaults to turn_from when omitted."},
 					},
 					"required": []string{},
 				},
@@ -470,21 +472,113 @@ func dispatchCurrentNeed(sess *session.Session, argsJSON string) string {
 	return toolResult{Output: "current need updated"}.String()
 }
 
-// runGetSessionContext formats session history with optional filters:
-// last_n, pattern (substring), agent ("primary"|"escalation").
+// runGetSessionContext formats session history with optional filters.
+// Normal mode: recent contextRecentTurns are verbatim; older turns are compact
+// one-liners with 1-based indices. If the older portion is ≤ contextOlderThreshold
+// it is also returned verbatim (no indices needed for tiny histories).
+// Range mode (turn_from set): returns a specific slice of at most
+// contextRangeMaxTurns turns fully verbatim, bypassing the split logic.
+const (
+	contextRecentTurns    = 10 // tail returned verbatim in normal mode
+	contextOlderThreshold = 5  // older portion: verbatim when ≤ this, else compact
+	contextSummaryChars   = 80 // max content chars per line in compact summary
+	contextRangeMaxTurns  = 5  // max turns fetchable via turn_from/turn_to
+)
+
 func runGetSessionContext(sess *session.Session, args map[string]any) string {
 	if sess == nil || len(sess.History) == 0 {
 		return toolResult{Output: "(no session history yet)"}.String()
 	}
+
+	// Range mode: turn_from/turn_to fetch a specific verbatim slice.
+	if from := intArg(args, "turn_from"); from > 0 {
+		all := applySessionFilters(sess.History, args)
+		to := intArg(args, "turn_to")
+		if to < from {
+			to = from
+		}
+		if to-from+1 > contextRangeMaxTurns {
+			to = from + contextRangeMaxTurns - 1
+		}
+		// clamp to valid indices (1-based)
+		if from > len(all) {
+			return toolResult{Output: "(turn index out of range)"}.String()
+		}
+		if to > len(all) {
+			to = len(all)
+		}
+		slice := all[from-1 : to]
+		var b strings.Builder
+		fmt.Fprintf(&b, "[turns %d–%d, verbatim]\n", from, to)
+		for _, t := range slice {
+			appendTurn(&b, t)
+		}
+		return toolResult{Output: b.String()}.String()
+	}
+
 	turns := applySessionFilters(sess.History, args)
 	if len(turns) == 0 {
 		return toolResult{Output: "(no matching turns)"}.String()
 	}
+
+	split := len(turns) - contextRecentTurns
+	if split < 0 {
+		split = 0
+	}
+	older, recent := turns[:split], turns[split:]
+
 	var b strings.Builder
-	for _, t := range turns {
+	if len(older) > 0 {
+		if len(older) <= contextOlderThreshold {
+			for i, t := range older {
+				appendTurnCompact(&b, t, i+1)
+			}
+		} else {
+			fmt.Fprintf(&b, "[older history — %d turns, compact; use turn_from/turn_to to fetch verbatim]\n", len(older))
+			for i, t := range older {
+				appendTurnCompact(&b, t, i+1)
+			}
+			b.WriteString("[end older history]\n")
+		}
+	}
+	for _, t := range recent {
 		appendTurn(&b, t)
 	}
 	return toolResult{Output: b.String()}.String()
+}
+
+func appendTurnCompact(b *strings.Builder, t session.Turn, idx int) {
+	prefix := fmt.Sprintf("[%d] ", idx)
+	var role, content string
+	switch t.Role {
+	case session.RoleUser:
+		role = "User"
+		content = t.Content
+	case session.RoleAssistant:
+		if len(t.ToolCalls) > 0 {
+			names := make([]string, 0, len(t.ToolCalls))
+			for _, tc := range t.ToolCalls {
+				names = append(names, tc.Name)
+			}
+			fmt.Fprintf(b, "%s%s: [tool calls: %s]\n", prefix, t.Agent, strings.Join(names, ", "))
+			return
+		}
+		role = string(t.Agent)
+		content = t.Content
+	case session.RoleToolResult:
+		content = t.Content
+		if len(content) > contextSummaryChars {
+			content = content[:contextSummaryChars] + "…"
+		}
+		fmt.Fprintf(b, "%s[tool result] %s\n", prefix, content)
+		return
+	default:
+		return
+	}
+	if len(content) > contextSummaryChars {
+		content = content[:contextSummaryChars] + "…"
+	}
+	fmt.Fprintf(b, "%s%s: %s\n", prefix, role, content)
 }
 
 func applySessionFilters(turns []session.Turn, args map[string]any) []session.Turn {

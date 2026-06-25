@@ -215,6 +215,80 @@ func TestGetSessionContext_NoMatch(t *testing.T) {
 	}
 }
 
+// makeSess builds a session with n user+assistant turn pairs.
+func makeSess(n int) *session.Session {
+	sess := &session.Session{}
+	for i := 1; i <= n; i++ {
+		sess.AddTurn(session.Turn{Role: session.RoleUser, Content: strings.Repeat("u", i)})
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: strings.Repeat("a", i)})
+	}
+	return sess
+}
+
+func TestGetSessionContext_CompactOlderHasIndices(t *testing.T) {
+	// 8 pairs = 16 turns; split = 16-10 = 6 older turns → compact with indices
+	sess := makeSess(8)
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{}`, sess, nil, "")
+	if !strings.Contains(result, "[1]") {
+		t.Errorf("expected compact index [1] in output, got %q", result)
+	}
+	if !strings.Contains(result, "older history") {
+		t.Errorf("expected older history header, got %q", result)
+	}
+}
+
+func TestGetSessionContext_SmallOlderVerbatimNoHeader(t *testing.T) {
+	// 6 pairs = 12 turns; split = 12-10 = 2 older turns → ≤5, verbatim, no header
+	sess := makeSess(6)
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{}`, sess, nil, "")
+	if strings.Contains(result, "older history") {
+		t.Errorf("small older portion should be verbatim without header, got %q", result)
+	}
+}
+
+func TestGetSessionContext_RangeVerbatim(t *testing.T) {
+	// 8 pairs → 16 turns; request turns 2-3 verbatim
+	sess := makeSess(8)
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"turn_from":2,"turn_to":3}`, sess, nil, "")
+	if !strings.Contains(result, "turns 2") {
+		t.Errorf("expected verbatim range header, got %q", result)
+	}
+	// turn 2 is the first assistant turn: content "a" (i=1 in makeSess)
+	if !strings.Contains(result, "primary: a") {
+		t.Errorf("expected verbatim content of turn 2, got %q", result)
+	}
+}
+
+func TestGetSessionContext_RangeClampedToMax(t *testing.T) {
+	// request 10 turns — should be clamped to contextRangeMaxTurns (5)
+	sess := makeSess(10)
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"turn_from":1,"turn_to":10}`, sess, nil, "")
+	if !strings.Contains(result, "turns 1") {
+		t.Errorf("expected range header, got %q", result)
+	}
+	// turn 6 (content "aaaaaa") must not appear
+	if strings.Contains(result, "aaaaaa") {
+		t.Errorf("range should be clamped to %d turns, but turn 6 appears: %q", contextRangeMaxTurns, result)
+	}
+}
+
+func TestGetSessionContext_RangeOutOfBounds(t *testing.T) {
+	sess := makeSess(2) // 4 turns
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"turn_from":99}`, sess, nil, "")
+	if !strings.Contains(result, "out of range") {
+		t.Errorf("expected out-of-range message, got %q", result)
+	}
+}
+
+func TestGetSessionContext_RangeDefaultsToFromWhenToOmitted(t *testing.T) {
+	sess := makeSess(8)
+	result, _ := dispatchTool(context.Background(), "get_session_context", `{"turn_from":2}`, sess, nil, "")
+	// header should say "turns 2–2"
+	if !strings.Contains(result, "2") {
+		t.Errorf("expected single-turn range, got %q", result)
+	}
+}
+
 func TestUnknownTool(t *testing.T) {
 	result, escalate := dispatchTool(context.Background(), "nonexistent", `{}`, nil, nil, "")
 	if escalate {

@@ -116,6 +116,11 @@ type quitPendingClearMsg struct{}
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
 
+// hintDebounceMsg fires after the debounce delay to trigger a (potentially
+// expensive) hint rebuild. The gen field must match model.hintDebounceGen —
+// stale firings from a superseded keystroke are silently dropped.
+type hintDebounceMsg struct{ gen int }
+
 // toolUseMsg carries the name of a tool Claude just started calling.
 type toolUseMsg struct{ name string }
 
@@ -428,6 +433,11 @@ type model struct {
 	colorizeVPWidth   int    // vpWidth when cache was built
 	colorizeForce     bool   // if true, bypass cache on next render
 	colorizeLinesSeen int    // new lines since last full re-colorize
+
+	// hintDebounceGen is incremented on every keystroke that triggers a hint
+	// rebuild. hintDebounceMsg carries the gen value at dispatch time; any
+	// message whose gen no longer matches is a stale firing and is dropped.
+	hintDebounceGen int
 
 	// credRefreshInit, if non-nil, is returned by Init() to start background
 	// credential refresh only after the bubbletea event loop is running.
@@ -1782,6 +1792,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quitPending = false
 		return m, nil
 
+	case hintDebounceMsg:
+		if msg.gen == m.hintDebounceGen {
+			m.rebuildInlineHints()
+			m.syncLayout()
+		}
+		return m, nil
+
 	case memoryRefreshMsg:
 		if m.panelMemory {
 			return m, memoryPollTick()
@@ -2065,9 +2082,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.undoPush(true)
 	cmd = m.updateTA(msg)
-	m.rebuildInlineHints()
 	m.syncLayout()
-	return m, cmd
+	return m, tea.Batch(cmd, m.scheduleHintRebuild())
 }
 
 // handleShiftArrow manages keyboard selection in the input textarea.
@@ -4707,12 +4723,13 @@ func (m *model) rebuildInlineHints() {
 			limit = 1
 		}
 		// Direct children first, then deeper results up to limit.
-		// When there is no fragment at all (bare "@" or "@ dir/") skip the
-		// recursive walk — there is nothing to filter on and it would fill
-		// the hint list with deep paths before any useful entry appears.
-		direct := expandPath(pathToken, m.st.cwd)
+		// Skip the recursive walk when:
+		//   - fragment is empty (bare "@" or "@dir/") — nothing to filter on
+		//   - fragment is a single character — too broad, walk scans the whole tree
+		// Both avoid freezing the TUI on every backspace keystroke.
+		direct := expandPath(pathToken, m.st.cwd, limit)
 		var matches []string
-		if fragment == "" {
+		if fragment == "" || len([]rune(fragment)) < 2 {
 			matches = direct
 		} else {
 			seen := make(map[string]bool, len(direct))
@@ -4846,6 +4863,19 @@ func (m *model) rebuildInlineHints() {
 	}
 
 	m.setHints(nil)
+}
+
+const hintDebounceDelay = 120 * time.Millisecond
+
+// scheduleHintRebuild increments the debounce generation counter and returns a
+// tea.Cmd that fires after hintDebounceDelay. Only the most-recent firing
+// (matching hintDebounceGen) triggers an actual rebuild; superseded ones drop.
+func (m *model) scheduleHintRebuild() tea.Cmd {
+	m.hintDebounceGen++
+	gen := m.hintDebounceGen
+	return tea.Tick(hintDebounceDelay, func(time.Time) tea.Msg {
+		return hintDebounceMsg{gen: gen}
+	})
 }
 
 // setHints replaces the hint list and resets the highlight. Both tabHints and
@@ -5035,7 +5065,8 @@ func buildTabMatches(input, cwd string) ([]string, int, string) {
 	last := words[len(words)-1]
 	if strings.HasPrefix(last, "@") {
 		pathPrefix := last[1:]
-		matches := expandPath(pathPrefix, cwd)
+		const tabCompletionLimit = 50
+		matches := expandPath(pathPrefix, cwd, tabCompletionLimit)
 		atMatches := make([]string, len(matches))
 		for j, m := range matches {
 			atMatches[j] = "@" + m
@@ -5080,7 +5111,8 @@ func buildTabMatches(input, cwd string) ([]string, int, string) {
 	return matches, 0, ""
 }
 
-func expandPath(prefix, cwd string) []string {
+// expandPath resolves @-path completions. limit<=0 means no limit.
+func expandPath(prefix, cwd string, limit int) []string {
 	// Empty prefix: list cwd contents directly with no name filter.
 	if prefix == "" {
 		entries, err := os.ReadDir(cwd)
@@ -5089,6 +5121,9 @@ func expandPath(prefix, cwd string) []string {
 		}
 		var out []string
 		for _, e := range entries {
+			if limit > 0 && len(out) >= limit {
+				break
+			}
 			rel := e.Name()
 			if e.IsDir() {
 				rel += "/"
@@ -5107,12 +5142,22 @@ func expandPath(prefix, cwd string) []string {
 		dir = base
 		namePrefix = ""
 	}
+	// Guard: skip read if dir doesn't exist or is filesystem root (would be very slow)
+	if dir == "/" || dir == "" {
+		return nil
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 	var matches []string
 	for _, e := range entries {
+		if limit > 0 && len(matches) >= limit {
+			break
+		}
 		if namePrefix == "" || strings.Contains(strings.ToLower(e.Name()), strings.ToLower(namePrefix)) {
 			rel := filepath.Join(dir, e.Name())
 			if !strings.HasPrefix(prefix, "/") {
@@ -5131,7 +5176,16 @@ func expandPath(prefix, cwd string) []string {
 // prefix is not absolute) whose base name contains fragment.
 // Stops early once limit entries are collected.
 func walkMatches(root, fragment, cwd string, absolute bool, limit int) []string {
+	// Never walk the filesystem root — it blocks the UI goroutine for seconds.
+	if root == "/" || root == "" {
+		return nil
+	}
 	var results []string
+	visited := 0
+	maxVisit := limit * 20 // cap total visits regardless of match count
+	if maxVisit < 200 {
+		maxVisit = 200
+	}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -5142,7 +5196,8 @@ func walkMatches(root, fragment, cwd string, absolute bool, limit int) []string 
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
-		if len(results) >= limit {
+		visited++
+		if len(results) >= limit || visited > maxVisit {
 			return filepath.SkipAll
 		}
 		rel := path
