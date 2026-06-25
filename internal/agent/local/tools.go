@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
@@ -556,13 +558,47 @@ func appendAssistantTurn(b *strings.Builder, t session.Turn) {
 	}
 }
 
+// runCmdInGroup runs cmd in its own process group so that context cancellation
+// (Ctrl+C) sends SIGINT to the whole group — including any child processes
+// spawned by the command — before falling back to SIGKILL.
+func runCmdInGroup(ctx context.Context, cmd *exec.Cmd) error {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// Send SIGINT to the process group (negative pgid = group).
+		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		if err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGINT)
+		}
+		// Give the group a short window to clean up before SIGKILL.
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			if err == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = cmd.Process.Kill()
+			}
+			<-done
+		}
+		return ctx.Err()
+	}
+}
+
 func runBash(ctx context.Context, args map[string]any) (string, bool) {
 	command, _ := args["command"].(string)
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := exec.Command("sh", "-c", command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := runCmdInGroup(ctx, cmd)
 	code := 0
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
@@ -596,7 +632,7 @@ func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	path = expandTilde(path)
 	pattern, _ := args["pattern"].(string)
-	cmd := exec.CommandContext(ctx, "find", path,
+	cmd := exec.Command("find", path,
 		"-not", "-path", "*/.git/*",
 		"-not", "-path", "*/.claude/*",
 		"-name", pattern,
@@ -604,7 +640,7 @@ func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := runCmdInGroup(ctx, cmd)
 	code := 0
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
@@ -636,11 +672,11 @@ func runGrep(ctx context.Context, args map[string]any) (string, bool) {
 	}
 	gargs = append(gargs, pattern, path)
 
-	cmd := exec.CommandContext(ctx, "grep", gargs...)
+	cmd := exec.Command("grep", gargs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := runCmdInGroup(ctx, cmd)
 	code := 0
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
