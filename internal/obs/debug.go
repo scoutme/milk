@@ -87,3 +87,23 @@ func DebugCtx(ctx context.Context, msg string, args ...any) {
 		milkLogger.DebugContext(ctx, msg, args...)
 	}
 }
+
+// Warn emits a warn-level message to the milk log (no-op when disabled).
+func Warn(msg string, args ...any) {
+	if milkLogger != nil {
+		milkLogger.Warn(msg, args...)
+	}
+}
+
+// Error emits an error-level message to the milk log (no-op when disabled).
+func Error(msg string, args ...any) {
+	if milkLogger != nil {
+		milkLogger.Error(msg, args...)
+	}
+}
+
+// DebugEnabled reports whether the logger is active and configured at DEBUG level.
+// Use this to avoid building expensive log arguments when debug is off.
+func DebugEnabled() bool {
+	return milkLogger != nil && milkLogger.Enabled(context.Background(), slog.LevelDebug)
+}

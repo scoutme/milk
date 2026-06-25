@@ -3,6 +3,7 @@ package escalation
 import (
 	"strings"
 
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -47,7 +48,9 @@ func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injec
 	b.WriteString(NeedInstruction(nonce))
 	b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
 	b.WriteString(formatPercepts(percepts))
-	return b.String()
+	result := b.String()
+	obs.Debug("escalation static context built", "mode", mode, "chars", len(result), "percepts", len(percepts))
+	return result
 }
 
 // BuildPrimaryStaticContext is like BuildStaticContext but prepends the escalation
@@ -115,7 +118,9 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 		sess.LastLocalSummaryInjected = sess.LastLocalSummary
 	}
 
-	return b.String()
+	result := b.String()
+	obs.Debug("escalation dynamic context built", "mode", mode, "chars", len(result))
+	return result
 }
 
 // BuildPrimaryDynamicContext assembles the turn-specific context for a subprocess

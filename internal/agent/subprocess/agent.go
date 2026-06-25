@@ -28,13 +28,6 @@ func NewAgent(b ArgBuilder, p StreamParser) *Agent {
 // Ping checks whether the underlying binary is available.
 func (a *Agent) Ping() error { return a.runner.Ping() }
 
-// WithDebugLog returns a copy of the agent that writes every raw stdout line to w.
-func (a *Agent) WithDebugLog(w io.Writer) *Agent {
-	c := *a
-	c.runner = a.runner.WithDebugLog(w)
-	return &c
-}
-
 // WithExtraEnv returns a copy of the agent with extra KEY=VALUE env pairs.
 func (a *Agent) WithExtraEnv(pairs ...string) *Agent {
 	c := *a

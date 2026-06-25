@@ -46,6 +46,7 @@ func runPrimary(
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+	obs.Info("primary turn start", "agent", agentName, "ctx_mode", ctxMode)
 	logStateTransition(sess, session.StateLocal, "run "+agentName+" primary")
 	sess.ForceState(session.StateLocal)
 
@@ -92,6 +93,7 @@ func runPrimary(
 		prompt, cbs, aw)
 	aw.Done()
 	if err != nil {
+		obs.Error("primary turn failed", "agent", agentName, "err", err)
 		return err
 	}
 
@@ -199,6 +201,7 @@ func runEscalation(
 	}
 
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	obs.Info("escalation turn start", "agent", agentName, "ctx_mode", ctxMode)
 	logStateTransition(sess, session.StateEscalation, "run "+agentName+" escalation")
 	sess.ForceState(session.StateEscalation)
 
@@ -226,6 +229,7 @@ func runEscalation(
 		prompt, cbs, aw)
 	aw.Done()
 	if err != nil {
+		obs.Error("escalation turn failed", "agent", agentName, "err", err)
 		return err
 	}
 

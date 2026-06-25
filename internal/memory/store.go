@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // storeFile is the JSON structure persisted to disk.
@@ -97,6 +99,7 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 
 	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
 		dupErr := &DuplicateError{Existing: *dup, Similarity: jaccardSimilarity(tokenize(content), tokenize(dup.Content))}
+		obs.Debug("percept duplicate skipped", "existing_id", dup.ID, "similarity", dupErr.Similarity)
 		return dup.ID, dupErr
 	}
 
@@ -126,6 +129,7 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 
 	logPercept(ctx, p, s.sessionID)
 	metricsRecord(ctx, producer, scopeLabel)
+	obs.Debug("percept recorded", "id", p.ID, "scope", scopeLabel, "producer", string(producer))
 	return p.ID, saveErr
 }
 
@@ -157,6 +161,7 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 
 	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
 		dupErr := &DuplicateError{Existing: *dup, Similarity: jaccardSimilarity(tokenize(content), tokenize(dup.Content))}
+		obs.Debug("percept duplicate skipped", "existing_id", dup.ID, "similarity", dupErr.Similarity)
 		return dup.ID, dupErr
 	}
 

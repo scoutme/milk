@@ -13,14 +13,15 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // Runner executes a subprocess agent binary and streams its output.
 type Runner struct {
 	builder  ArgBuilder
 	parser   StreamParser
-	extraEnv []string  // KEY=VALUE pairs injected into subprocess env
-	debugLog io.Writer // when non-nil, every raw stdout line is written here
+	extraEnv []string // KEY=VALUE pairs injected into subprocess env
 }
 
 // New creates a Runner for the given ArgBuilder and StreamParser.
@@ -32,13 +33,6 @@ func New(b ArgBuilder, p StreamParser) *Runner {
 func (r *Runner) WithExtraEnv(pairs ...string) *Runner {
 	c := *r
 	c.extraEnv = append(append([]string{}, r.extraEnv...), pairs...)
-	return &c
-}
-
-// WithDebugLog returns a copy of the Runner that writes every raw stdout line to w.
-func (r *Runner) WithDebugLog(w io.Writer) *Runner {
-	c := *r
-	c.debugLog = w
 	return &c
 }
 
@@ -86,10 +80,6 @@ func buildArgs(base, sessionArgs []string, prompt string) []string {
 
 // runPipe starts the subprocess, feeds its stdout to the parser, and returns.
 func (r *Runner) runPipe(ctx context.Context, args []string, opts ParseOpts, out io.Writer) (ParseResult, error) {
-	if r.debugLog != nil {
-		opts.DebugLog = r.debugLog
-	}
-
 	cmd := newCmd(ctx, r.builder.Bin(), args, r.builder.EnvStrip(), r.extraEnv)
 
 	devNull, err := os.Open(os.DevNull)
@@ -106,7 +96,9 @@ func (r *Runner) runPipe(ctx context.Context, args []string, opts ParseOpts, out
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 
+	obs.Debug("subprocess start", "bin", r.builder.Bin())
 	if err := cmd.Start(); err != nil {
+		obs.Error("subprocess start failed", "bin", r.builder.Bin(), "err", err)
 		return ParseResult{}, fmt.Errorf("starting %s: %w", r.builder.Bin(), err)
 	}
 
@@ -115,6 +107,7 @@ func (r *Runner) runPipe(ctx context.Context, args []string, opts ParseOpts, out
 	if err := cmd.Wait(); err != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
+			obs.Error("subprocess exit error", "bin", r.builder.Bin(), "stderr", stderr)
 			return res, fmt.Errorf("%s exited with error: %s", r.builder.Bin(), stderr)
 		}
 		if parseErr != nil {

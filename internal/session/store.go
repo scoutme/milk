@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 )
 
 type IndexEntry struct {
@@ -160,8 +161,10 @@ func Save(s *Session) error {
 	}
 	path := filepath.Join(dir, s.ID+".json")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
+		obs.Error("session save failed", "id", s.ID, "err", err)
 		return err
 	}
+	obs.Debug("session saved", "id", s.ID)
 
 	idx, err := loadIndex()
 	if err != nil {
@@ -192,6 +195,7 @@ func Load(id string) (*Session, error) {
 		s.CurrentNeed = ""
 		s.CurrentNeedSetAt = 0
 	}
+	obs.Debug("session loaded", "id", s.ID)
 	return &s, nil
 }
 
