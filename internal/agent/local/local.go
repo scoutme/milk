@@ -19,7 +19,6 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/diff"
-	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
@@ -223,13 +222,7 @@ func (a *Agent) SystemOverheadChars(sess *session.Session) int {
 			n += len(a.cachedCwdContext)
 		}
 	}
-	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
-		primaryName, escalationName := "", ""
-		if len(a.agentNames) >= 2 {
-			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
-		}
-		n += len(escalation.NeedInstruction(a.tagNonce)) + len(escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName))
-	}
+	// No tag instruction overhead for local HTTP agents — they use injected tools.
 	return n
 }
 
@@ -619,16 +612,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 		msgs = append(msgs, Message{Role: "system", Content: a.cachedCwdContext})
 	}
-	if a.tagNonce != "" && a.shouldInjectMemoryInstruction(sess) {
-		primaryName, escalationName := "", ""
-		if len(a.agentNames) >= 2 {
-			primaryName, escalationName = a.agentNames[0], a.agentNames[1]
-		}
-		msgs = append(msgs, Message{Role: "system", Content: escalation.NeedInstruction(a.tagNonce) + escalation.MemoryInstruction(a.tagNonce, primaryName, escalationName)})
-		if sess != nil {
-			sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount() + 1
-		}
-	}
+	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
+	// current_need are injected as tools. Tag-based instruction injection is only for
+	// external-process agents (CLI, subprocess) that cannot receive injected tools.
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
 

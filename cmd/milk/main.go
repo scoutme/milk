@@ -658,33 +658,6 @@ func shouldInjectMemoryInstructions(cfg config.Config, sess *session.Session, re
 	return false
 }
 
-// shouldInjectPrimaryMemoryInstructions mirrors shouldInjectMemoryInstructions
-// for the subprocess primary path, using LocalTurnCount and LocalMemoryInstructionInjectedAt.
-func shouldInjectPrimaryMemoryInstructions(cfg config.Config, sess *session.Session, resuming bool) bool {
-	if !resuming {
-		return true
-	}
-	ac := cfg.ActiveAgent()
-	turnThreshold := cfg.AgentMemoryReinjectionTurnThreshold(ac, true)
-	byteThreshold := cfg.AgentMemoryReinjectionByteThreshold(ac, true)
-	if turnThreshold == 0 && byteThreshold == 0 {
-		return false
-	}
-	injectedAt := sess.LocalMemoryInstructionInjectedAt
-	if injectedAt > 0 {
-		injectedAt-- // convert from 1-based to 0-based turn count
-	}
-	turnsSince := sess.LocalTurnCount() - injectedAt
-	if turnThreshold > 0 && turnsSince >= turnThreshold {
-		return true
-	}
-	bytesSince := sess.LocalOutputBytesSince(injectedAt)
-	if byteThreshold > 0 && bytesSince >= byteThreshold {
-		return true
-	}
-	return false
-}
-
 // handlePermissionDenials checks the result for permission issues and retries if the user approves.
 func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string, primaryName, escalationName string) claude.ParseResult {
 	if len(res.PermissionDenials) > 0 {

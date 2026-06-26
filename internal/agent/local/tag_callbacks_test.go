@@ -171,30 +171,38 @@ func TestWithTagCallbacks_WrongNonceNotRecorded(t *testing.T) {
 	}
 }
 
-// TestWithTagCallbacks_NeedInstructionInjected verifies that when tagNonce is set,
-// the NeedInstruction system message is included in the messages sent to the model.
-func TestWithTagCallbacks_NeedInstructionInjected(t *testing.T) {
+// TestWithTagCallbacks_NoTagInstructionForLocalAgent verifies that local HTTP agents
+// never receive tag instructions regardless of role — they use injected tool calls
+// (record_memory, current_need) instead. Tags are only for external-process agents
+// (CLI, subprocess) where milk cannot inject tools.
+func TestWithTagCallbacks_NoTagInstructionForLocalAgent(t *testing.T) {
 	const nonce = "test05"
 	var captured chatRequest
 	srv := sseServerCapture(t, "ok", &captured)
 	defer srv.Close()
 
-	agent := New(srv.URL, "test-model")
-	agent = agent.WithTagCallbacks(nonce, "primary", "escalation", func(string) {}, nil)
-
-	sess := &session.Session{}
-	var out strings.Builder
-	if _, err := agent.Run(context.Background(), nil, "hello", &out, sess, nil); err != nil {
-		t.Fatalf("Run error: %v", err)
-	}
-
 	needle := "<milk:need:" + nonce + ">"
-	for _, msg := range captured.Messages {
-		if strings.Contains(msg.Content, needle) {
-			return // found
-		}
+
+	for _, name := range []string{"primary-role", "escalation-role"} {
+		t.Run(name, func(t *testing.T) {
+			a := New(srv.URL, "test-model")
+			if name == "escalation-role" {
+				a = a.AsEscalationTarget("escalation")
+			}
+			a = a.WithTagCallbacks(nonce, "primary", "escalation", func(string) {}, nil)
+			sess := &session.Session{}
+			var out strings.Builder
+			if _, err := a.Run(context.Background(), nil, "hello", &out, sess, nil); err != nil {
+				t.Fatalf("Run error: %v", err)
+			}
+			for _, msg := range captured.Messages {
+				if strings.Contains(msg.Content, needle) {
+					t.Errorf("local agent must not receive tag instructions; found %q in message: %q", needle, msg.Content)
+					return
+				}
+			}
+		})
 	}
-	t.Errorf("NeedInstruction not found in messages sent to model; looking for %q in %d messages", needle, len(captured.Messages))
 }
 
 // TestWithoutTagCallbacks_TagNotStripped verifies that without WithTagCallbacks,

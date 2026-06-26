@@ -57,13 +57,6 @@ func runPrimary(
 	primaryName := ac.Name
 	escalationName := cfg.EscalationAgentConfig().Name
 
-	resuming := false // primary has no waiting state
-
-	injectInstructions := shouldInjectPrimaryMemoryInstructions(cfg, sess, resuming)
-	if injectInstructions {
-		sess.LocalMemoryInstructionInjectedAt = sess.LocalTurnCount() + 1
-	}
-
 	cbs := TurnCallbacks{
 		OnNeed:     func(body string) { sess.RecordNeed(body) },
 		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
@@ -88,7 +81,7 @@ func runPrimary(
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RolePrimary, ctxMode,
 		sess.PrimarySessionID, nonce,
-		perceptsForEscalation(cfg, mem, prompt), injectInstructions,
+		perceptsForEscalation(cfg, mem, prompt), true,
 		prompt, cbs, aw)
 	aw.Done()
 	if err != nil {
