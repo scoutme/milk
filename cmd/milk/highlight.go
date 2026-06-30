@@ -660,7 +660,7 @@ func renderTableBlock(rawLines []string) []string {
 			continue
 		}
 		for c, cell := range cells {
-			w := len([]rune(cell)) // visual width (rune count)
+			w := len([]rune(ansi.Strip(styleInlineSpans(cell))))
 			if c >= len(colWidths) {
 				colWidths = append(colWidths, w)
 			} else if w > colWidths[c] {
@@ -710,8 +710,7 @@ func renderTableBlock(rawLines []string) []string {
 				}
 				styled := styleInlineSpans(cell)
 				sb.WriteString(styled)
-				// Pad to column width using rune count of the unstyled cell.
-				pad := w - len([]rune(cell))
+				pad := w - len([]rune(ansi.Strip(styled)))
 				if pad > 0 {
 					sb.WriteString(strings.Repeat(" ", pad))
 				}
