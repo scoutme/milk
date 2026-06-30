@@ -31,11 +31,16 @@ func runPrimary(
 	prompt string,
 	out io.Writer,
 	da *dispatchAgents,
+	prefixOut ...io.Writer,
 ) error {
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
 
-	fmt.Fprint(out, bold(green(agentName+":"))+" ")
+	pw := out
+	if len(prefixOut) > 0 && prefixOut[0] != nil {
+		pw = prefixOut[0]
+	}
+	fmt.Fprint(pw, bold(green(agentName+":"))+" ")
 	aw := newActivityWriter(out)
 
 	var ctxMode escalation.ContextMode
@@ -143,11 +148,16 @@ func runEscalation(
 	mem *memory.Store,
 	prompt string,
 	out io.Writer,
+	prefixOut ...io.Writer,
 ) error {
 	escAC := cfg.EscalationAgentConfig()
 	agentName := runner.Name()
 
-	fmt.Fprint(out, bold(blue(agentName+":"))+" ")
+	pw := out
+	if len(prefixOut) > 0 && prefixOut[0] != nil {
+		pw = prefixOut[0]
+	}
+	fmt.Fprint(pw, bold(blue(agentName+":"))+" ")
 	aw := newActivityWriter(out)
 
 	forceFresh := sess.ForceFreshEscalation

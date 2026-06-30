@@ -95,6 +95,10 @@ type dispatchAgents struct {
 // chunkMsg carries a chunk of streamed agent output.
 type chunkMsg struct{ text string }
 
+// prefixChunkMsg carries the agent-name prefix printed before streaming begins.
+// It is appended to the transcript but excluded from the live token estimate.
+type prefixChunkMsg struct{ text string }
+
 // thinkChunkMsg carries a chunk of streamed thinking/reasoning output, kept
 // separate from regular content so it can be shown or hidden independently.
 type thinkChunkMsg struct{ text string }
@@ -213,6 +217,19 @@ type sendWriter struct {
 func (w *sendWriter) Write(p []byte) (int, error) {
 	if len(p) > 0 {
 		w.send(chunkMsg{text: string(p)})
+	}
+	return len(p), nil
+}
+
+// prefixWriter is an io.Writer that forwards writes as prefixChunkMsg,
+// excluded from the live output-token estimate.
+type prefixWriter struct {
+	send func(msg tea.Msg)
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		w.send(prefixChunkMsg{text: string(p)})
 	}
 	return len(p), nil
 }
@@ -1719,6 +1736,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolUseMsg:
 		m.activeToolUse = msg.name
+		return m, nil
+
+	case prefixChunkMsg:
+		m.appendTranscript(msg.text)
 		return m, nil
 
 	case chunkMsg:
@@ -5709,6 +5730,12 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	sourceLabel := replTurnSourceLabel(st)
 	turnStart := time.Now()
 	var turnErr error
+	var pw io.Writer
+	if sw, ok := out.(*sendWriter); ok {
+		pw = &prefixWriter{send: sw.send}
+	} else {
+		pw = out
+	}
 	switch target {
 	case router.TargetLocal:
 		if mem := st.mem; mem != nil {
@@ -5717,9 +5744,9 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents)
+		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents, pw)
 	case router.TargetEscalation:
-		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out)
+		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out, pw)
 	}
 	targetLabel := string(target)
 	obs.Inc(turnCtx, milkScope, "milk.turns.total",
