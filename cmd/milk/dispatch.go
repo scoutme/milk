@@ -267,16 +267,20 @@ func buildPerceptCallback(
 			switch consumerHint {
 			case primaryName:
 				consumer = memory.ConsumerLocal
-			default:
+			case escalationName:
 				consumer = memory.ConsumerEscalation
+			default:
+				consumer = memory.ConsumerAll
 			}
 			_, _ = mem.Record(ctx, body, memory.ProducerEscalation, consumer, memory.Roles{}, false)
 		} else {
 			switch consumerHint {
 			case escalationName:
 				consumer = memory.ConsumerEscalation
-			default:
+			case primaryName:
 				consumer = memory.ConsumerLocal
+			default:
+				consumer = memory.ConsumerAll
 			}
 			_, _ = mem.Record(ctx, body, memory.ProducerLocal, consumer, memory.Roles{}, false)
 		}

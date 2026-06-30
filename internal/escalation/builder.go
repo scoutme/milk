@@ -235,5 +235,8 @@ func MemoryInstruction(nonce, primaryName, escalationName string) string {
 		"  " + openTag + "one fact" + closeTag + "\n" +
 		"One fact per tag. Skip transient state or current-task details. " +
 		"Tags are intercepted by milk, never shown. " +
-		"Prefix @" + primaryName + ": or @" + escalationName + ": to target a specific agent.\n"
+		"Omit the prefix to share with both agents (default). " +
+		"Prefix @" + primaryName + ": or @" + escalationName + ": only when the fact is relevant to just that agent.\n" +
+		"Emit when you learn: who the user is or their role; a key preference or working style; " +
+		"a project decision or constraint not derivable from the code; an external resource or tool they use.\n"
 }

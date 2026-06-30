@@ -33,7 +33,8 @@ remained:
 `agent.Run`. The same `TagWriter` / `PerceptWriter` stream-interception pattern used for the Claude
 agent is applied: `<milk:need:NONCE>` tags update `Session.CurrentNeed`; `<milk:percept:NONCE>` tags
 are recorded with `ProducerLocal`. Consumer routing follows the same switch on `consumerHint`:
-escalation-targeted percepts → `ConsumerEscalation`; everything else → `ConsumerLocal`.
+primary-targeted percepts → `ConsumerLocal`; escalation-targeted percepts → `ConsumerEscalation`;
+unknown/no hint → `ConsumerAll` (shared between both agents).
 
 **Dynamic consumer hint names.** `MemoryInstruction(nonce, primaryName, escalationName string)` now
 embeds the actual configured agent names in the instruction text. The `@local: ` / `@claude: `
