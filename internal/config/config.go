@@ -920,6 +920,9 @@ func HistoryPath(cwd string) (string, error) {
 }
 
 func Load() (Config, error) {
+	if p := os.Getenv("MILK_CONFIG"); p != "" {
+		return LoadFrom(p)
+	}
 	cfg := defaults()
 
 	dir, err := Dir()
@@ -939,6 +942,19 @@ func Load() (Config, error) {
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	return cfg, nil
+}
+
+// LoadFrom loads a config from the given explicit path, merging over defaults.
+func LoadFrom(path string) (Config, error) {
+	cfg := defaults()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("loading config from %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	return cfg, nil
 }

@@ -958,7 +958,7 @@ func expandPath(prefix, cwd string, limit int) []string {
 	// (e.g. "@repl.go"), walk the repo from cwd and collect any entry whose
 	// base name starts with namePrefix (e.g. "cmd/milk/repl.go").
 	if len(matches) == 0 && namePrefix != "" && !strings.ContainsRune(prefix, '/') && !filepath.IsAbs(prefix) {
-		const maxVisited = 200
+		const maxVisited = 2000
 		visited := 0
 		_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
@@ -967,7 +967,7 @@ func expandPath(prefix, cwd string, limit int) []string {
 			if path == cwd {
 				return nil
 			}
-			if d.IsDir() && d.Name() == ".git" {
+			if d.IsDir() && (d.Name() == ".git" || d.Name() == ".claude") {
 				return filepath.SkipDir
 			}
 			visited++
@@ -1011,7 +1011,7 @@ func walkMatches(root, fragment, cwd string, absolute bool, limit int) []string 
 		if path == root {
 			return nil
 		}
-		if d.IsDir() && d.Name() == ".git" {
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".claude") {
 			return filepath.SkipDir
 		}
 		visited++

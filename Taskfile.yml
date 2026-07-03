@@ -61,6 +61,13 @@ tasks:
       - chmod +x {{.SCRIPTS_DEST}}/milk-smolagent
       - echo "installed milk-smolagent to {{.SCRIPTS_DEST}}"
 
+  demo:
+    desc: Record the TUI demo gif (requires vhs)
+    cmds:
+      - vhs demo/demo.tape
+    deps:
+      - build
+
   ci:
     desc: fmt + vet + test + build
     cmds:

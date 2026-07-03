@@ -4,33 +4,54 @@
 
 Switch models, not context.
 
-Start cheap. Go deep when you need it. Switch mid-workflow — the full conversation goes with you.
+milk is a terminal AI assistant that routes each prompt between a fast primary agent and a deep escalation agent — keeping the full conversation in sync across both. Start cheap. Go deep when you need it. Switch mid-workflow.
 
-## How it works
+## What it does
 
-Each prompt is routed through a decision chain:
+- **Automatic routing** — each prompt is classified and sent to the right agent without you changing tools
+- **Context handoff** — when escalation fires, the primary conversation is reformatted as context; the escalation agent orients itself without a separate setup step
+- **Persistent memory** — a Percept store survives across sessions; key facts are reinforced, decay, and promote to long-term memory over time (NREM consolidation)
+- **Built-in tools** — the primary agent has bash, file read/write/edit, grep, find, HTTP GET, session access, and memory tools without any extra configuration
+- **Streaming TUI** — bubbletea terminal UI with a scrollable transcript, live memory panel, status bar, and input history
+- **Aider and smolagents** — plug in aider-chat or smolagents as either the primary or escalation agent
 
-1. Explicit flags (`--escalate`, `--primary`) override everything
-2. Session state — if the escalation agent asked a follow-up question, the next turn goes directly back to it
-3. Rules layer — hard thresholds (token length, keywords) then a weighted signal scorer
-4. Primary model classifier — the primary model decides `local` or `escalate` when the scorer is inconclusive
-5. Default: local
+## Backends
 
-When the primary model cannot handle a task, it calls `escalate(reason)` and milk reformats the primary conversation history as context for the escalation agent, which orients itself without a separate reformulation step.
+Both the primary and escalation roles support any of these backends — there is no backend tied exclusively to one role:
+
+| Provider value | Backend |
+| --- | --- |
+| `"claude-cli"` | **Claude Code CLI** — runs `claude` as a subprocess; full tool access, session continuity, permission management |
+| omit / `""` / `"local"` | Any OpenAI-compatible server (llama.cpp, Ollama, LM Studio, Azure OpenAI, …) |
+| `"bedrock"` | AWS Bedrock — native Converse API, SigV4 signing, credential auto-refresh |
+| `"aider-cli"` | aider — milk calls the `aider` binary directly, no adapter needed |
+| `"subprocess"` | Generic NDJSON subprocess (milk-smolagent adapter, bundled automatically) |
+| anything else | Bearer-token HTTP (OpenRouter, Groq, Together.ai, GitHub Models, …) |
+
+> If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
+
+## How routing works
+
+Each prompt passes through a decision chain:
+
+1. **Explicit flags** — `--escalate` or `--primary` override everything
+2. **Session state** — if the escalation agent asked a follow-up, the next turn goes directly back to it
+3. **Rules layer** — hard thresholds (token length, keywords) then a weighted signal scorer
+4. **Primary model classifier** — the primary model decides `local` or `escalate` when the scorer is inconclusive
+5. **Default** — local
+
+When the primary model cannot handle a task, it calls `escalate(reason)` and milk reformats the conversation history as context for the escalation agent.
+
+Once escalation fires, **auto-sticky** keeps subsequent turns on the escalation agent (shown as `<agent> (sticky)` in the status bar) — avoiding the "cold-start" penalty on each turn. Use `/primary` to return to the primary agent.
 
 ## Prerequisites
 
-| Dependency | Purpose | Required |
-| --- | --- | --- |
-| Primary agent (inference server or cloud) | primary LLM inference | no (degrades to escalation-agent-only) |
-| Escalation agent (any `agents` entry) | deep reasoning / rich tooling | no (degrades to local-only) |
-| Go 1.21+ | build from source only | no (pre-built binaries available) |
+- Go 1.21+ (build from source only; pre-built binaries available)
+- At least one configured agent backend (primary and/or escalation — each is optional; milk degrades gracefully if either is absent)
+- `aider-chat` pip package — only if using the `aider-cli` provider
+- `smolagents[litellm]` pip package — only if using the `subprocess`/smolagent provider
 
-Both the primary and escalation agents support the same set of backends: [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), AWS Bedrock, OpenRouter, Together.ai, Groq, any OpenAI-compatible server (`provider: ""` or `"local"`), the [Claude Code CLI](https://claude.ai/code) (`provider: "claude-cli"`), [aider](https://aider.chat) (`provider: "aider-cli"`), and generic subprocess agents (`provider: "subprocess"`). Either role can use any backend; there is no backend tied exclusively to primary or escalation.
-
-If no agent is configured, milk starts in setup mode. Use `/agent add` to configure a backend interactively.
-
-For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific setup (Bedrock, OpenRouter, Groq, Copilot, Azure, etc.) see [docs/providers.md](docs/providers.md).
+For a reference local setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific configuration see [docs/providers.md](docs/providers.md).
 
 ## Installation
 
@@ -40,49 +61,31 @@ For a reference setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs
 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 ```
 
-Downloads a pre-built binary for your OS/arch and installs it to `~/.local/bin/milk`. No Go required.
-
-To install a specific version:
+Installs to `~/.local/bin/milk`. To install a specific version:
 
 ```sh
 MILK_VERSION=v0.2.0 curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
 ```
 
-### Windows (native)
+### Windows (PowerShell)
 
 ```powershell
 irm https://raw.githubusercontent.com/scoutme/milk/main/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\milk\bin\milk.exe` and adds it to your user PATH.
+Installs to `%LOCALAPPDATA%\milk\bin\milk.exe`. Native Windows support is partial — WSL2 is the recommended path. See [docs/setup.md](docs/setup.md#windows-and-wsl2).
 
 ### From source
-
-Requires Go 1.21+ and Git.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh
-```
-
-Or with `go install`:
 
 ```sh
 go install github.com/scoutme/milk/cmd/milk@latest
 ```
 
-### Windows
+Or with the install script (requires Go 1.21+ and Git):
 
-Native Windows is not yet fully supported. The recommended path is **WSL2** (Windows Subsystem for Linux), which gives you a full Linux environment where milk runs without modification.
-
-1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and a Linux distribution (Ubuntu 22.04 or 24.04 recommended)
-2. Inside a WSL2 terminal, follow the Linux installation steps above
-
-**Known limitations on native Windows (without WSL2):**
-- `go build ./...` compiles, but the `bash` local-agent tool hard-codes `sh -c` and will fail
-- `install.sh` requires a POSIX shell; there is no `.ps1` equivalent yet
-- `scripts/llama-serve.sh` has no PowerShell equivalent
-
-See [docs/setup.md](docs/setup.md#windows-and-wsl2) for the full Windows/WSL2 setup walkthrough.
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh
+```
 
 ## Usage
 
@@ -92,80 +95,9 @@ See [docs/setup.md](docs/setup.md#windows-and-wsl2) for the full Windows/WSL2 se
 milk
 ```
 
-Starts an interactive session. The status bar shows the current routing state, active agent, and availability.
+![milk TUI](docs/images/milk-tui-compressed.gif)
 
-**Slash commands:**
-
-| Command | Description |
-| --- | --- |
-| `/escalate` | Pin all subsequent turns to escalation agent (until `/primary`) |
-| `/escalate <msg>` | Force this single turn to escalation agent, then resume routing |
-| `/primary` | Pin all subsequent turns to primary agent (until `/escalate`) |
-| `/primary <msg>` | Force this single turn to primary agent, then resume routing |
-| `/learn <fact>` | Store a persistent memory (`Core=true`, W=1.0, global scope) |
-| `/memory` | List all Percepts (global + session), sorted by confidence weight |
-| `/memory global` | List only global Percepts |
-| `/memory session` | List only session-scoped Percepts |
-| `/memory <pattern>` | List Percepts whose content matches a substring |
-| `/memory show <pat\|#id>` | Show full details of matching Percepts |
-| `/panel memory` | Toggle the memory panel (right-side Percept viewer) |
-| `/forget <pat>` | Delete a Percept by description or `#id` (confirms before deleting) |
-| `/export` | Print the current session transcript |
-| `/export json` | Print the current session as raw JSON |
-| `/export <path>` | Write the session transcript to a file |
-| `/usage` | Token usage report (cumulative, this session, since start) |
-| `/metrics` | Show the most recent values of all observability metrics |
-| `/otel` | Show OTel signal file sizes and record counts |
-| `/otel trim` | Archive current OTel files and start fresh |
-| `/otel off` / `/otel on` | Disable / re-enable OTel for this session |
-| `/setup telegram` | Configure Telegram remote oversight interactively |
-| `/setup telegram on\|off` | Enable / disable Telegram (credentials preserved) |
-| `/history` | Show current history mode and entry counts |
-| `/history global` | Switch input navigation to global history (all sessions) |
-| `/history session` | Switch input navigation to session history (default) |
-| `/skip-permissions` | Show current `dangerously_skip_permissions` state |
-| `/skip-permissions on\|off` | Enable / disable permission skip for this session (all agents) |
-| `/agent` | Show active primary and escalation agents |
-| `/agent list` | List all configured agents (`[P]` = primary, `[E]` = escalation) |
-| `/agent switch <name> [as primary\|escalation]` | Switch agent role (prompts if args missing) |
-| `/agent add` | Add a new agent backend interactively |
-| `/colorize` | Show current transcript colorization mode |
-| `/colorize off\|fenced\|balanced\|full` | Switch colorization mode live (`balanced` = default; `full` = experimental glamour) |
-| `/think on\|off` | Show or hide reasoning/thinking tokens in transcript |
-| `/need <goal>` | Set the current session goal (shown in memory panel; injected into escalation context) |
-| `/config` | Print effective config JSON in transcript |
-| `/config init` | Run the interactive setup wizard |
-| `/config open` | Open `~/.milk/config.json` in the configured editor |
-| `/open <path>` | Open any file in the configured editor (`@path` notation supported) |
-| `/new` | Start a fresh session |
-| `/drop` | Delete current session and start fresh |
-| `/list` | List sessions for the current directory |
-| `/help` | Show categorised command reference |
-| `/exit` | Quit |
-
-**Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory (e.g. `@src/main.go`). Tab cycles forward through matches entry by entry — within a command's variants first, then to the next command. Shift+Tab cycles backward. The hint panel below the transcript shows all matches with the active entry highlighted. Completion works on the token under the cursor, not just at end of line.
-
-**Keyboard shortcuts:**
-
-| Key | Action |
-| --- | --- |
-| `Ctrl+C` | Cancel running turn (if busy); clear input or exit (on empty) |
-| `Ctrl+D` | Exit (on empty input) |
-| `Ctrl+T` | Toggle thinking/reasoning token visibility |
-| `Ctrl+R` / `Ctrl+S` | Reverse / forward incremental history search |
-| `Up` / `Down` | Navigate input history (at first/last line); move cursor otherwise |
-| `Ctrl+Up` / `Ctrl+Down` | Navigate input history (always) |
-| `Shift+Left/Right/Up/Down` | Extend keyboard selection by character |
-| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Extend keyboard selection by word |
-| `Tab` / `Shift+Tab` | Cycle tab completion forward / backward |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo in input area |
-| `Ctrl+N` / `Shift+Alt+Enter` / `Alt+Enter` | Insert newline (multi-line input) |
-| `PgUp` / `Ctrl+U` | Scroll transcript up |
-| `PgDn` / `Ctrl+F` | Scroll transcript down |
-
-All navigation, editing, history search, and undo/redo work while an agent turn is in progress. Only `Enter` (submit) is blocked until the turn completes.
-
-**Input history** is persisted per session (`~/.milk/sessions/<id>.history`) and globally (`~/.milk/input_history`). Navigation defaults to session history; use `/history global` to switch.
+The TUI shows a scrollable transcript, a live memory panel on the right, a status bar with the active agent and routing state, and a multi-line input area at the bottom. All navigation, history search, and undo/redo work while a turn is in progress.
 
 ### Single-prompt mode
 
@@ -179,7 +111,7 @@ milk [flags] <prompt>
 | --- | --- |
 | `--escalate` | Force this turn to the escalation agent |
 | `--primary` | Force this turn to the primary agent |
-| `--new` | Start a fresh session for the current directory |
+| `--new` | Start a fresh session |
 | `--session <name>` | Resume or create a named session |
 | `--list` | List sessions for the current directory |
 | `--list --all` | List all sessions across all directories |
@@ -188,16 +120,13 @@ milk [flags] <prompt>
 ### Examples
 
 ```sh
-# Interactive session
-milk
-
-# Simple shell automation — routed to primary (local) model
+# Simple query — routed to primary (local) model
 milk "list all Go files modified in the last week"
 
-# Force escalation agent for architecture decisions
+# Force escalation for a complex task
 milk --escalate "design a caching layer for this service"
 
-# Named session for a specific feature
+# Named session for a feature branch
 milk --session auth-refactor "what does the current middleware do?"
 
 # Continue after escalation agent asks a follow-up
@@ -205,18 +134,16 @@ milk "yes, use Redis"
 
 # Force back to primary agent
 milk --primary "grep for TODO comments"
-
-# Inspect all active sessions
-milk --list --all
 ```
 
-### Configuration
+## Configuration
 
-milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
+milk reads `~/.milk/config.json` on startup. Run `/config init` in the TUI for an interactive wizard, or `/config open` to edit the file directly.
 
 ```json
 {
   "agent": "my-local",
+  "escalation_agent": "claude",
   "agents": [
     {
       "name": "my-local",
@@ -242,80 +169,111 @@ milk reads `~/.milk/config.json` on startup, falling back to defaults if absent.
       "provider": "claude-cli"
     }
   ],
-  "escalation_agent": "claude",
   "default_route": "local",
-  "otel": {
-    "enabled": true,
-    "traces": true,
-    "metrics": true,
-    "warn_mb": 50,
-    "max_mb": 200,
-    "metrics_flush_minutes": 5
-  },
   "rules": {
     "escalate_above_tokens": 2000,
     "local_below_tokens": 30,
     "escalate_keywords": ["architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"],
     "escalate_threshold": 6,
-    "local_threshold": -4,
-    "local_verb_weight": -3,
-    "escalate_verb_weight": 4,
-    "path_ref_weight": -2,
-    "code_block_weight": -2,
-    "open_question_weight": 3,
-    "classifier_fallback": "local"
+    "local_threshold": -4
   }
 }
 ```
 
-`agent` names the active primary backend. `escalation_agent` names which backend handles escalated turns — any entry in `agents`, not necessarily the Claude CLI. Use `/agent switch <name> as primary|escalation` to change roles at runtime.
+`agent` names the active primary backend. `escalation_agent` names the escalation backend — any entry in `agents`. Use `/agent switch <name> as primary|escalation` to change roles at runtime.
 
-Supported `provider` values:
+Full configuration reference, all provider options, and auth setup: [docs/providers.md](docs/providers.md).
 
-| Value | Backend |
+## Slash commands
+
+| Command | Description |
 | --- | --- |
-| omit or `""` / `"local"` | OpenAI-compatible HTTP server, no auth |
-| `"bedrock"` | AWS Bedrock, SigV4 signing, native Converse API |
-| `"claude-cli"` | Claude Code CLI subprocess |
-| `"aider-cli"` | aider CLI — requires `pip install aider-chat` |
-| `"subprocess"` | generic subprocess agent (smolagents and similar) — requires extra install, see below |
-| anything else | Bearer-token HTTP (OpenRouter, Groq, Together.ai, GitHub Models, …) |
+| `/escalate` | Pin all subsequent turns to escalation agent (until `/primary`) |
+| `/escalate <msg>` | Force this single turn to escalation agent, then resume routing |
+| `/primary` | Pin all subsequent turns to primary agent (until `/escalate`) |
+| `/primary <msg>` | Force this single turn to primary agent, then resume routing |
+| `/agent` | Show active primary and escalation agents |
+| `/agent list` | List all configured agents |
+| `/agent switch <name> [as primary\|escalation]` | Switch agent role |
+| `/agent add` | Add a new agent backend interactively |
+| `/learn <fact>` | Store a persistent memory |
+| `/memory [pattern]` | List Percepts (global + session) |
+| `/memory show <pat\|#id>` | Show full details of a Percept |
+| `/forget <pat>` | Delete a Percept |
+| `/panel memory` | Toggle the memory panel |
+| `/export` | Print session transcript (colorized if terminal) |
+| `/export json` | Print session as raw JSON |
+| `/export <path>` | Write transcript to a file |
+| `/need <goal>` | Set the current session goal |
+| `/think on\|off` | Show or hide reasoning/thinking tokens |
+| `/colorize off\|fenced\|balanced\|full` | Switch transcript colorization mode |
+| `/skip-permissions on\|off` | Enable / disable tool permission prompts |
+| `/usage` | Token usage report |
+| `/metrics` | Latest observability metric values |
+| `/otel` | OTel signal file sizes and record counts |
+| `/otel trim` | Archive current OTel files and start fresh |
+| `/history global\|session` | Switch input navigation history |
+| `/config` | Print effective config JSON |
+| `/config init` | Run interactive setup wizard |
+| `/config open` | Open config file in `$EDITOR` |
+| `/open <path>` | Open any file in the configured editor |
+| `/setup telegram` | Configure Telegram remote oversight |
+| `/new` | Start a fresh session |
+| `/drop` | Delete current session and start fresh |
+| `/list` | List sessions for the current directory |
+| `/help` | Show categorised command reference |
+| `/exit` | Quit |
 
-For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}` under `headers`.
+**Tab completion:** `/` completes slash commands; `@` completes file paths from the current directory. Tab cycles forward through matches; Shift+Tab cycles backward. The hint panel shows all matches with the active entry highlighted.
 
-#### Providers requiring extra setup
+## Keyboard shortcuts
 
-**aider** (`provider: "aider-cli"`): milk calls the `aider` binary directly — no adapter script needed.
-```sh
-pip install aider-chat
-```
+| Key | Action |
+| --- | --- |
+| `Ctrl+C` | Cancel running turn (if busy); clear input or exit (on empty) |
+| `Ctrl+D` | Exit (on empty input) |
+| `Ctrl+T` | Toggle thinking/reasoning token visibility |
+| `Ctrl+R` / `Ctrl+S` | Reverse / forward incremental history search |
+| `Up` / `Down` | Navigate input history (at first/last line); move cursor otherwise |
+| `Ctrl+Up` / `Ctrl+Down` | Navigate input history (always) |
+| `Shift+Left/Right/Up/Down` | Extend selection by character |
+| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Extend selection by word |
+| `Tab` / `Shift+Tab` | Cycle tab completion forward / backward |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo in input area |
+| `Ctrl+N` / `Shift+Alt+Enter` / `Alt+Enter` | Insert newline |
+| `PgUp` / `Ctrl+U` | Scroll transcript up |
+| `PgDn` / `Ctrl+F` | Scroll transcript down |
 
-**smolagents** (`provider: "subprocess"`): smolagents has no CLI — milk bundles the adapter script and extracts it automatically to `~/.milk/scripts/milk-smolagent` on first use.
-```sh
-pip install smolagents[litellm]
-```
+## Memory
 
-Full configuration options, model drivers, and verification steps: [docs/providers.md](docs/providers.md).
+milk maintains a persistent Percept store at `~/.milk/memory/`. Percepts are atomic natural-language assertions with a confidence weight. At session end, NREM consolidation runs: weights decay, low-weight Percepts are pruned, and high-weight ones are promoted to the global store. The memory panel (`/panel memory`) shows SESSION / GLOBAL / GLOBAL(core) sections in real time.
 
-**`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
+## Primary agent tools
 
-**`milk config init`** (or `/config init` in the REPL) — interactive setup wizard. Guides you through:
-- Agent name, provider, URL, model, authentication
-- Context window size — if the agent has a large context window, sets `max_tool_iterations`, `message_budget_chars`, and `context_budget_chars` with sensible defaults (100 / 3,000,000 / 200,000)
-- Escalation agent configuration
-- Option to open the config file in `$EDITOR` at the end
+The primary agent has access to these built-in tools (no extra configuration needed):
 
-**`milk config open`** (or `/config open` in the REPL) — open `~/.milk/config.json` in the configured editor. The editor is selected from the `config_editors` list in config (default: `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`). Override by setting `config_editors` to an ordered list of commands, e.g. `["code --wait", "$EDITOR", "nano"]`.
+| Tool | Description |
+| --- | --- |
+| `bash` | Run a shell command |
+| `grep` | Search file contents by pattern |
+| `find_files` | Find files by name or glob |
+| `read_file` | Read a file with optional offset and limit |
+| `write_file` | Write content to a file |
+| `edit_file` | Exact-string replacement within a file |
+| `list_dir` | List directory contents |
+| `http_get` | Fetch a URL |
+| `get_session_context` | Read shared session history |
+| `record_memory` | Store a Percept |
+| `get_memory` | Retrieve Percepts by keyword |
+| `list_memory` | List all Percepts |
+| `export_session` | Export the session transcript |
+| `get_metrics` | Show observability metrics |
+| `search_signals` | Search OTel signal files |
+| `escalate` | Hand off to the escalation agent |
 
-### Session storage
+Side-effecting tools (`bash`, `write_file`, `edit_file`, `http_get`) require user approval on first use per project. Grants persist to `~/.milk/permissions/<project-hash>.json`. Use `/skip-permissions on` to bypass prompts.
 
-Sessions persist under `~/.milk/sessions/`. By default, `milk` resumes the most recent session for the current directory. Multiple named sessions can coexist in the same directory.
-
-### Memory
-
-milk maintains a persistent Percept store at `~/.milk/memory/`. Percepts are atomic natural-language assertions with a confidence weight that decays each session and rises when reinforced. At session end, NREM consolidation runs: decay → prune → promote high-weight Percepts to the global store.
-
-### Observability
+## Observability
 
 OTel signal files are written to `~/.milk/otel/`:
 
@@ -323,34 +281,9 @@ OTel signal files are written to `~/.milk/otel/`:
 | --- | --- |
 | `logs.jsonl` | Structured event logs (Percept records, consolidation runs, recalls) |
 | `traces.jsonl` | Span traces per memory operation |
-| `metrics.jsonl` | Counters and gauges (Percept counts, decay/prune/promote totals, file sizes) |
+| `metrics.jsonl` | Counters and gauges |
 
-Use `/otel` to inspect sizes and `/otel trim` to archive and reset. Use `/metrics` to see the latest metric values inline.
-
-## Primary agent tools
-
-The primary agent has access to these built-in tools:
-
-| Tool | Description |
-| --- | --- |
-| `bash` | Run a shell command, returns stdout/stderr/exit code |
-| `grep` | Search file contents by pattern |
-| `find_files` | Find files by name pattern or glob |
-| `read_file` | Read a file with optional offset and line limit |
-| `write_file` | Write content to a file (creates parent directories) |
-| `edit_file` | Exact-string replacement within a file |
-| `list_dir` | List directory contents with type and size |
-| `http_get` | Fetch a URL, returns body as text |
-| `get_session_context` | Read the shared session history (filterable by agent, pattern, recency) |
-| `record_memory` | Store a Percept in the memory store |
-| `get_memory` | Retrieve Percepts matching a keyword query |
-| `list_memory` | List all Percepts with optional scope/producer/pattern filters |
-| `export_session` | Export the current session transcript as text or JSON |
-| `get_metrics` | Show the latest observability metric values |
-| `search_signals` | Search OTel signal files (logs/traces/metrics) for a pattern |
-| `escalate` | Hand off the current task to the escalation agent with a reason |
-
-Side-effecting tools (`bash`, `write_file`, `edit_file`, `http_get`) require user approval on first use per project. Grants persist to `~/.milk/permissions/<project-hash>.json`. Use `/skip-permissions on` to bypass all prompts.
+Use `/otel` to inspect sizes, `/otel trim` to archive and reset, and `/metrics` to see current values inline.
 
 ## Graceful degradation
 
@@ -359,25 +292,23 @@ Side-effecting tools (`bash`, `write_file`, `edit_file`, `http_get`) require use
 | available | available | normal routing |
 | unavailable | available | warns once, routes all turns to escalation agent |
 | available | unavailable | warns once, stays primary-only |
-| not configured | not configured | setup mode — splash shows `/agent add` guidance |
+| not configured | not configured | setup mode — `/agent add` guidance shown |
 
 ## Debugging
 
 Two opt-in flags in `~/.milk/config.json` capture raw protocol streams to disk:
 
-| Config key | Log file | Content | Use for |
-| --- | --- | --- | --- |
-| `"debug_claude_code": true` | `~/.milk/claude_debug.ndjson` | Every raw NDJSON line from the Claude CLI subprocess | Claude CLI protocol issues, unexpected event types, streaming gaps |
-| `"debug_local": true` | `~/.milk/local_debug.log` | Every raw SSE line from the local agent HTTP stream (including skipped/unparsed lines) | Dropped tokens, unknown SSE events, parser mismatches |
-
-Both flags default to `false`. The file extensions reflect content format: `.ndjson` is valid Newline-Delimited JSON (pipe through `jq -c`); `.log` is mixed SSE framing text with `data:` / `event:` prefixes and blank separators.
+| Config key | Log file | Content |
+| --- | --- | --- |
+| `"debug_claude_code": true` | `~/.milk/claude_debug.ndjson` | Raw NDJSON from the Claude CLI subprocess |
+| `"debug_local": true` | `~/.milk/local_debug.log` | Raw SSE lines from the local agent HTTP stream |
 
 ## Documentation
 
 - [docs/setup.md](docs/setup.md) — full setup guide and local testing procedure
+- [docs/providers.md](docs/providers.md) — all provider configuration guides
 - [docs/spec.md](docs/spec.md) — full architecture and design spec
-- [docs/providers.md](docs/providers.md) — provider configuration guides
-- [docs/memory-design.md](docs/memory-design.md) — memory system design and phases
+- [docs/memory-design.md](docs/memory-design.md) — memory system design
 - [docs/observability-design.md](docs/observability-design.md) — OTel observability strategy
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch and commit conventions
