@@ -1631,6 +1631,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if tuiPrimaryAC.IsExternalProcess() && !tuiPrimaryAC.IsCLI() {
 		switch {
 		case tuiPrimaryAC.IsSubprocess():
+			if tuiPrimaryAC.Bin == "" {
+				if scriptPath, scriptErr := ensureSmolagentScript(); scriptErr != nil {
+					return fmt.Errorf("building subprocess primary agent: %w", scriptErr)
+				} else {
+					tuiPrimaryAC.Bin = scriptPath
+				}
+			}
 			tuiSubprocessPrimaryAgent = smolagent.New(tuiPrimaryAC)
 		case tuiPrimaryAC.IsAiderCLI():
 			tuiSubprocessPrimaryAgent = aider.New(tuiPrimaryAC)
@@ -1659,6 +1666,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	var tuiSubprocessAgent *subprocess.Agent
 	switch {
 	case tuiEscAC.IsSubprocess():
+		if tuiEscAC.Bin == "" {
+			if scriptPath, scriptErr := ensureSmolagentScript(); scriptErr != nil {
+				return fmt.Errorf("building subprocess escalation agent: %w", scriptErr)
+			} else {
+				tuiEscAC.Bin = scriptPath
+			}
+		}
 		tuiSubprocessAgent = smolagent.New(tuiEscAC)
 	case tuiEscAC.IsAiderCLI():
 		tuiSubprocessAgent = aider.New(tuiEscAC)

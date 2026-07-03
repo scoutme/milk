@@ -105,7 +105,7 @@ For cross-region inference profiles, use the profile ARN as the model:
 }
 ```
 
-### Step 4 — Verify
+### Step 3 — Verify
 
 ```sh
 milk --new --primary "say hi in one word"
@@ -350,7 +350,7 @@ Expected: aider's response streamed into the TUI, with file-edit hints shown for
 
 ## smolagents (HuggingFace)
 
-**Provider**: `subprocess` — runs `milk-smolagent` as a subprocess. The adapter script (in `scripts/`) wraps HuggingFace smolagents and translates its stream events to milk's NDJSON protocol.
+**Provider**: `subprocess` — runs `milk-smolagent` as a subprocess. The adapter script wraps HuggingFace smolagents and translates its stream events to milk's NDJSON protocol. The script is bundled inside the milk binary and auto-deployed to `~/.milk/scripts/milk-smolagent` on first use — no manual installation required.
 
 ### Step 1 — Install smolagents
 
@@ -366,17 +366,7 @@ The `litellm` extra is needed for `LiteLLMModel` (default driver for OpenAI-comp
 | `HfApiModel` (HuggingFace Inference API) | `pip install smolagents` |
 | `TransformersModel` (local model weights) | `pip install smolagents[transformers]` |
 
-### Step 2 — Install milk-smolagent
-
-The adapter ships with milk. Put it on your PATH:
-
-```sh
-cp scripts/milk-smolagent ~/.local/bin/milk-smolagent
-chmod +x ~/.local/bin/milk-smolagent
-milk-smolagent --help
-```
-
-### Step 3 — Add the backend entry
+### Step 2 — Add the backend entry
 
 ```json
 {
@@ -402,7 +392,7 @@ Set this as the escalation agent in the root config:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `provider` | string | required | Must be `"subprocess"` |
-| `bin` | string | `"milk-smolagent"` | Path to the adapter script |
+| `bin` | string | auto-deployed | Path to the adapter script; defaults to the bundled copy at `~/.milk/scripts/milk-smolagent` |
 | `model_type` | string | `"LiteLLMModel"` | smolagents model driver: `LiteLLMModel`, `HfApiModel`, `TransformersModel` |
 | `model` | string | required | Model identifier passed to `--model-id` |
 | `url` | string | — | API base URL (`--api-base`); for LiteLLMModel pointing at a local server |

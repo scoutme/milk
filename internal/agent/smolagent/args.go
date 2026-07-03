@@ -108,6 +108,8 @@ func (b *argBuilder) Ping() error {
 }
 
 // New constructs a subprocess.Agent backed by milk-smolagent.
+// The caller is responsible for setting ac.Bin before calling New;
+// cmd/milk/scripts.go auto-deploys the embedded script when ac.Bin is empty.
 func New(ac config.AgentConfig) *subprocess.Agent {
 	return subprocess.NewAgent(newArgBuilder(ac), &Parser{})
 }

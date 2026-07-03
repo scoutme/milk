@@ -290,15 +290,9 @@ For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}`
 pip install aider-chat
 ```
 
-**smolagents** (`provider: "subprocess"`): smolagents has no CLI, so an adapter script is required.
+**smolagents** (`provider: "subprocess"`): smolagents has no CLI — milk bundles the adapter script and extracts it automatically to `~/.milk/scripts/milk-smolagent` on first use.
 ```sh
 pip install smolagents[litellm]
-cp scripts/milk-smolagent ~/.local/bin/milk-smolagent && chmod +x ~/.local/bin/milk-smolagent
-```
-
-Or install the smolagents adapter via Taskfile if you built from source:
-```sh
-task install-scripts
 ```
 
 Full configuration options, model drivers, and verification steps: [docs/providers.md](docs/providers.md).

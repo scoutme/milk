@@ -218,6 +218,13 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 		var sp *subprocess.Agent
 		switch {
 		case primaryAC.IsSubprocess():
+			if primaryAC.Bin == "" {
+				if scriptPath, scriptErr := ensureSmolagentScript(); scriptErr != nil {
+					fmt.Fprintf(os.Stderr, "%s warning: could not deploy milk-smolagent: %v\n", milkTag(), scriptErr)
+				} else {
+					primaryAC.Bin = scriptPath
+				}
+			}
 			sp = smolagent.New(primaryAC)
 		case primaryAC.IsAiderCLI():
 			sp = aider.New(primaryAC)
@@ -261,6 +268,13 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 		var sp *subprocess.Agent
 		switch {
 		case escAC.IsSubprocess():
+			if escAC.Bin == "" {
+				if scriptPath, scriptErr := ensureSmolagentScript(); scriptErr != nil {
+					fmt.Fprintf(os.Stderr, "%s warning: could not deploy milk-smolagent: %v\n", milkTag(), scriptErr)
+				} else {
+					escAC.Bin = scriptPath
+				}
+			}
 			sp = smolagent.New(escAC)
 		case escAC.IsAiderCLI():
 			sp = aider.New(escAC)

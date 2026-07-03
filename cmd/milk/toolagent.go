@@ -44,6 +44,13 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 		case ac.IsAiderCLI():
 			return newSubprocessRunner(aider.New(ac), name), nil
 		case ac.IsSubprocess():
+			if ac.Bin == "" {
+				if scriptPath, scriptErr := ensureSmolagentScript(); scriptErr != nil {
+					return nil, fmt.Errorf("building subprocess tool agent %q: %w", ac.Name, scriptErr)
+				} else {
+					ac.Bin = scriptPath
+				}
+			}
 			return newSubprocessRunner(smolagent.New(ac), name), nil
 		default:
 			return nil, fmt.Errorf("tool-agent %q uses unsupported subprocess provider %q", ac.Name, ac.Provider)
