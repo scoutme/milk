@@ -448,10 +448,19 @@ func applyInlineMarkdown(text string) string {
 		// affect the carry-over decision. Only a true ansiReset from the
 		// source text closes the outer context.
 		activeANSI = trailingOpenANSI(originalLine)
-		// If the original line had no ANSI at all, check whether styleLine
-		// opened a new context (e.g. a dim heading). Use the final styled line
-		// (after the localContext guard) so a properly closed diff line never
-		// propagates its color to the next line.
+		// If the original line had no ANSI of its own but we entered this line
+		// with a carry-over context (e.g. a dim thinking block), preserve that
+		// context — inline span resets within the line do not end the block.
+		// But if the source line contains an explicit reset, the dim block ended
+		// here and the carry-over must not bleed into the next line.
+		if activeANSI == "" && lineContext != "" && !localContext {
+			if !strings.Contains(originalLine, ansiReset) {
+				activeANSI = lineContext
+			}
+		}
+		// If there was no carry-over at all, check whether styleLine opened a
+		// new context (e.g. a dim heading). Use the final styled line (after the
+		// localContext guard) so a properly closed diff line never propagates.
 		if activeANSI == "" {
 			activeANSI = trailingOpenANSI(lines[i])
 		}

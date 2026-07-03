@@ -953,6 +953,40 @@ func expandPath(prefix, cwd string, limit int) []string {
 			matches = append(matches, rel)
 		}
 	}
+	// Second pass: bare-filename recursive search.
+	// When the flat scan found nothing and the prefix contains no path separator
+	// (e.g. "@repl.go"), walk the repo from cwd and collect any entry whose
+	// base name starts with namePrefix (e.g. "cmd/milk/repl.go").
+	if len(matches) == 0 && namePrefix != "" && !strings.ContainsRune(prefix, '/') && !filepath.IsAbs(prefix) {
+		const maxVisited = 200
+		visited := 0
+		_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if path == cwd {
+				return nil
+			}
+			if d.IsDir() && d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			visited++
+			if visited > maxVisited || (limit > 0 && len(matches) >= limit) {
+				return filepath.SkipAll
+			}
+			if strings.HasPrefix(strings.ToLower(d.Name()), strings.ToLower(namePrefix)) {
+				rel, err := filepath.Rel(cwd, path)
+				if err != nil {
+					return nil
+				}
+				if d.IsDir() {
+					rel += "/"
+				}
+				matches = append(matches, rel)
+			}
+			return nil
+		})
+	}
 	return matches
 }
 

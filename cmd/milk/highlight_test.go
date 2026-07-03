@@ -206,6 +206,25 @@ func TestApplyInlineMarkdown_DimPreservedThroughInlineCode(t *testing.T) {
 	if !strings.Contains(got, "fmt.Println") {
 		t.Errorf("inline code content lost: %q", got)
 	}
+	// Text AFTER the closing backtick on line 0 must also be dimmed.
+	// The word "here" follows the inline code span; it must not lose dim styling.
+	line0 := lines[0]
+	hereIdx := strings.Index(line0, "here")
+	if hereIdx == -1 {
+		t.Fatalf("word 'here' not found in line 0: %q", line0)
+	}
+	// There must be a dim escape somewhere before "here" after the last reset.
+	beforeHere := line0[:hereIdx]
+	lastReset := strings.LastIndex(beforeHere, ansiReset)
+	var afterLastReset string
+	if lastReset == -1 {
+		afterLastReset = beforeHere
+	} else {
+		afterLastReset = beforeHere[lastReset+len(ansiReset):]
+	}
+	if !strings.Contains(afterLastReset, ansiDim) {
+		t.Errorf("word 'here' (after closing backtick) is not dim-wrapped on line 0: %q", line0)
+	}
 }
 
 func TestApplyInlineMarkdown_DimPreservedNoInlineSpans(t *testing.T) {

@@ -772,7 +772,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			}
 			json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
 			agentName := tc.Function.Name[len("agent_"):]
-			fmt.Fprintf(out, "\n⚙ calling agent %s…\n", agentName)
+			fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
 			result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
 			if err != nil {
 				obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
