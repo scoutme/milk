@@ -480,7 +480,11 @@ func execExport(sub string, st *interactiveState) string {
 		}
 		content = string(data)
 	default:
-		content = session.ExportText(st.sess)
+		if outputPath != "" {
+			content = session.ExportText(st.sess) // plain — no ANSI in files
+		} else {
+			content = session.ExportTextColorized(st.sess) // colorized for terminal
+		}
 	}
 
 	if outputPath != "" {

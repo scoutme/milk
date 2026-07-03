@@ -329,7 +329,7 @@ Set as the escalation agent:
 | `model` | string | — | Model identifier passed to `--model` (e.g. `claude-opus-4-5`, `openai/qwen...`) |
 | `url` | string | — | OpenAI-compatible API base URL (`--openai-api-base`); for local servers |
 | `api_key` | string | — | API key passed as `OPENAI_API_KEY` in the subprocess environment |
-| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to aider (e.g. `["--auto-commits"]`) |
+| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to aider (e.g. `["--auto-commits"]`). Appended after sane defaults (`--map-tokens 2048`, `--max-chat-history-tokens 4096`, `--map-refresh files`, `--no-show-model-warnings`) — any flag in `extra_args` overrides a sane default since aider uses last-value-wins parsing. |
 
 ### Step 3 — Verify
 

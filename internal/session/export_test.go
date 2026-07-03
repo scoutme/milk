@@ -79,6 +79,26 @@ func TestExportText_ToolResultTruncated(t *testing.T) {
 	}
 }
 
+func TestExportText_NoANSI(t *testing.T) {
+	s := testSession()
+	out := ExportText(s)
+	if strings.Contains(out, "\033[") {
+		t.Error("ExportText should not contain ANSI escape codes")
+	}
+}
+
+func TestExportTextColorized_ContainsANSI(t *testing.T) {
+	s := testSession()
+	out := ExportTextColorized(s)
+	if !strings.Contains(out, "\033[") {
+		t.Error("ExportTextColorized should contain ANSI escape codes")
+	}
+	// Body content must still be present.
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "world") {
+		t.Error("ExportTextColorized should include turn content")
+	}
+}
+
 func TestExportJSON_ValidJSON(t *testing.T) {
 	s := testSession()
 	data, err := ExportJSON(s)

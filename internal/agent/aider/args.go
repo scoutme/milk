@@ -56,7 +56,17 @@ func newArgBuilder(ac config.AgentConfig) *argBuilder {
 
 func (b *argBuilder) Bin() string { return b.bin }
 
+// saneDefaults are aider flags applied before extra_args so they can be
+// overridden by the user's extra_args config.
+var saneDefaults = []string{
+	"--map-tokens", "2048",
+	"--max-chat-history-tokens", "4096",
+	"--map-refresh", "files",
+	"--no-show-model-warnings",
+}
+
 // BaseArgs returns the aider flags that are constant across turns.
+// Sane defaults are applied first; extra_args from config override them.
 func (b *argBuilder) BaseArgs() []string {
 	args := []string{"--yes-always", "--no-pretty", "--no-auto-commits", "--edit-format", "diff"}
 	if b.model != "" {
@@ -68,6 +78,8 @@ func (b *argBuilder) BaseArgs() []string {
 	if !inGitRepo() {
 		args = append(args, "--no-git")
 	}
+	// Sane defaults — applied before extra_args so user config can override.
+	args = append(args, saneDefaults...)
 	for _, extra := range b.extraArgs {
 		args = append(args, strings.Fields(extra)...)
 	}

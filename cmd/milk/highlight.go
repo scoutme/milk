@@ -459,9 +459,11 @@ func applyInlineMarkdown(text string) string {
 			}
 		}
 		// If there was no carry-over at all, check whether styleLine opened a
-		// new context (e.g. a dim heading). Use the final styled line (after the
-		// localContext guard) so a properly closed diff line never propagates.
-		if activeANSI == "" {
+		// new context (e.g. a dim heading). Only consult the styled line when no
+		// context injection ran (lineContext == ""), because injectANSIAfterResets
+		// leaves a trailing context code after the last reset that would otherwise
+		// falsely propagate dim into the line after a closing tool-hint block.
+		if activeANSI == "" && lineContext == "" {
 			activeANSI = trailingOpenANSI(lines[i])
 		}
 		i++
