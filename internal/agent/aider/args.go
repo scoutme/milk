@@ -23,7 +23,15 @@ func resolveAPIKey(ac config.AgentConfig) string {
 	return ac.APIKey
 }
 
-// argBuilder implements subprocess.ArgBuilder for the milk-aider CLI.
+// inGitRepo returns true when the current working directory is inside a git repo.
+func inGitRepo() bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+// argBuilder implements subprocess.ArgBuilder for the aider CLI.
 type argBuilder struct {
 	bin       string
 	model     string
@@ -35,7 +43,7 @@ type argBuilder struct {
 func newArgBuilder(ac config.AgentConfig) *argBuilder {
 	bin := ac.Bin
 	if bin == "" {
-		bin = "milk-aider"
+		bin = "aider"
 	}
 	return &argBuilder{
 		bin:       bin,
@@ -48,17 +56,17 @@ func newArgBuilder(ac config.AgentConfig) *argBuilder {
 
 func (b *argBuilder) Bin() string { return b.bin }
 
-// BaseArgs returns model/backend flags that are constant across turns.
+// BaseArgs returns the aider flags that are constant across turns.
 func (b *argBuilder) BaseArgs() []string {
-	var args []string
+	args := []string{"--yes-always", "--no-pretty", "--no-auto-commits", "--edit-format", "diff"}
 	if b.model != "" {
 		args = append(args, "--model", b.model)
 	}
 	if b.apiBase != "" {
-		args = append(args, "--api-base", b.apiBase)
+		args = append(args, "--openai-api-base", b.apiBase)
 	}
-	if b.apiKey != "" {
-		args = append(args, "--api-key", b.apiKey)
+	if !inGitRepo() {
+		args = append(args, "--no-git")
 	}
 	for _, extra := range b.extraArgs {
 		args = append(args, strings.Fields(extra)...)
@@ -66,34 +74,44 @@ func (b *argBuilder) BaseArgs() []string {
 	return args
 }
 
-// FirstArgs returns per-turn args for a new session.
-func (b *argBuilder) FirstArgs(sessionID string, contextFiles []string) []string {
-	args := []string{"--session-id", sessionID}
+// FirstArgs returns per-turn args for a new session: context files + prompt.
+func (b *argBuilder) FirstArgs(sessionID, prompt string, contextFiles []string) []string {
+	var args []string
 	for _, f := range contextFiles {
-		args = append(args, "--append-system-prompt-file", f)
+		args = append(args, "--read", f)
 	}
+	args = append(args, "--message", prompt)
 	return args
 }
 
-// ResumeArgs returns per-turn args to continue an existing session.
-// milk-aider is stateless (reset each turn); resume re-injects context files.
-func (b *argBuilder) ResumeArgs(sessionID string, contextFiles []string) []string {
-	return b.FirstArgs(sessionID, contextFiles)
+// ResumeArgs is identical to FirstArgs — aider is stateless per-turn.
+func (b *argBuilder) ResumeArgs(sessionID, prompt string, contextFiles []string) []string {
+	return b.FirstArgs(sessionID, prompt, contextFiles)
 }
 
-// EnvStrip returns env var prefixes to remove from the subprocess environment.
-func (b *argBuilder) EnvStrip() []string { return nil }
+// EnvStrip removes conflicting API key vars; the correct key is injected via WithExtraEnv.
+func (b *argBuilder) EnvStrip() []string {
+	return []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+}
 
-// Ping checks whether the milk-aider binary is available.
+// Ping checks whether the aider binary is available.
 func (b *argBuilder) Ping() error {
-	cmd := exec.Command(b.bin, "--help")
+	cmd := exec.Command(b.bin, "--version")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%q not available: %w", b.bin, err)
 	}
 	return nil
 }
 
-// New constructs a subprocess.Agent backed by milk-aider.
+// New constructs a subprocess.Agent backed by the aider CLI directly.
 func New(ac config.AgentConfig) *subprocess.Agent {
-	return subprocess.NewAgent(newArgBuilder(ac), &Parser{})
+	b := newArgBuilder(ac)
+	agent := subprocess.NewAgent(b, &Parser{})
+	// Inject OPENAI_API_KEY so aider can authenticate.
+	if key := b.apiKey; key != "" {
+		agent = agent.WithExtraEnv("OPENAI_API_KEY=" + key)
+	}
+	return agent
 }

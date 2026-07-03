@@ -61,8 +61,7 @@ type initWizardState struct {
 type initWizardStep int
 
 const (
-	initStepGreet      initWizardStep = iota // display greeting, advance immediately
-	initStepName                             // ask agent name
+	initStepName initWizardStep = iota // ask agent name
 	initStepProvider                         // ask provider (menu 1–6)
 	initStepURL                              // ask URL (providers that need it)
 	initStepChatPath                         // ask chat_path (bearer only, skip if standard)

@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/x/ansi"
+	rw "github.com/mattn/go-runewidth"
 )
 
 // highlightStyle is the chroma theme used for code blocks.
@@ -660,7 +661,7 @@ func renderTableBlock(rawLines []string) []string {
 			continue
 		}
 		for c, cell := range cells {
-			w := len([]rune(ansi.Strip(styleInlineSpans(cell))))
+			w := rw.StringWidth(ansi.Strip(styleInlineSpans(cell)))
 			if c >= len(colWidths) {
 				colWidths = append(colWidths, w)
 			} else if w > colWidths[c] {
@@ -710,7 +711,7 @@ func renderTableBlock(rawLines []string) []string {
 				}
 				styled := styleInlineSpans(cell)
 				sb.WriteString(styled)
-				pad := w - len([]rune(ansi.Strip(styled)))
+				pad := w - rw.StringWidth(ansi.Strip(styled))
 				if pad > 0 {
 					sb.WriteString(strings.Repeat(" ", pad))
 				}

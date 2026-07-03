@@ -51,6 +51,16 @@ tasks:
     cmds:
       - go vet ./...
 
+  install-scripts:
+    desc: Install subprocess adapter scripts (milk-smolagent) to ~/.local/bin
+    vars:
+      SCRIPTS_DEST: ~/.local/bin
+    cmds:
+      - mkdir -p {{.SCRIPTS_DEST}}
+      - cp scripts/milk-smolagent {{.SCRIPTS_DEST}}/milk-smolagent
+      - chmod +x {{.SCRIPTS_DEST}}/milk-smolagent
+      - echo "installed milk-smolagent to {{.SCRIPTS_DEST}}"
+
   ci:
     desc: fmt + vet + test + build
     cmds:

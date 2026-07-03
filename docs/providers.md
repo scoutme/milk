@@ -280,7 +280,7 @@ The command is run with `sh -c`, so environment variables and shell syntax work.
 
 ## aider
 
-**Provider**: `aider-cli` — runs `milk-aider` as a subprocess. The adapter script (in `scripts/`) invokes aider in non-interactive message mode and streams its output back as milk NDJSON events.
+**Provider**: `aider-cli` — invokes the `aider` binary directly. No adapter script required.
 
 ### Step 1 — Install aider
 
@@ -289,17 +289,7 @@ pip install aider-chat
 aider --version
 ```
 
-### Step 2 — Install milk-aider
-
-The adapter ships with milk. Put it on your PATH:
-
-```sh
-cp scripts/milk-aider ~/.local/bin/milk-aider
-chmod +x ~/.local/bin/milk-aider
-milk-aider --help
-```
-
-### Step 3 — Add the backend entry
+### Step 2 — Add the backend entry
 
 Pointing aider at a local llama.cpp server:
 
@@ -313,13 +303,14 @@ Pointing aider at a local llama.cpp server:
 }
 ```
 
-Or using a cloud provider (aider uses your shell's `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` when `api_key` is omitted):
+Or using a cloud provider:
 
 ```json
 {
   "name": "aider",
   "provider": "aider-cli",
-  "model": "claude-opus-4-5"
+  "model": "claude-opus-4-5",
+  "api_key": "sk-ant-..."
 }
 ```
 
@@ -334,13 +325,13 @@ Set as the escalation agent:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `provider` | string | required | Must be `"aider-cli"` |
-| `bin` | string | `"milk-aider"` | Path to the adapter script |
+| `bin` | string | `"aider"` | Path to the aider binary |
 | `model` | string | — | Model identifier passed to `--model` (e.g. `claude-opus-4-5`, `openai/qwen...`) |
 | `url` | string | — | OpenAI-compatible API base URL (`--openai-api-base`); for local servers |
-| `api_key` | string | — | API key (`--openai-api-key`); omit to use shell env vars |
-| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to milk-aider (e.g. `["--auto-commits", "--files", "src/**/*.go"]`) |
+| `api_key` | string | — | API key passed as `OPENAI_API_KEY` in the subprocess environment |
+| `extra_args` | array | — | Raw CLI arguments forwarded verbatim to aider (e.g. `["--auto-commits"]`) |
 
-### Step 4 — Verify
+### Step 3 — Verify
 
 ```sh
 milk --new --escalate "list the Go files in this directory"
@@ -350,9 +341,10 @@ Expected: aider's response streamed into the TUI, with file-edit hints shown for
 
 ### Notes
 
-- aider is invoked with `--yes-always --no-pretty --no-git` to run non-interactively. Git integration is off by default; pass `"--auto-commits"` in `extra_args` to re-enable it.
-- Context files (milk's static + dynamic system prompt) are passed to aider via `--read`. Aider reads them as reference material but does not modify them.
-- Token counts are not available from aider's stdout; the `result` event will report zero tokens. Cost tracking via `/usage` will show zeros for this provider.
+- aider is invoked with `--yes-always --no-pretty --edit-format diff` to run non-interactively.
+- `--no-git` is added automatically when the current directory is not inside a git repository.
+- Context files (milk's static + dynamic system prompt) are passed via `--read`. Aider treats them as reference material.
+- Token counts are not reported by aider; cost tracking via `/usage` will show zeros for this provider.
 
 ---
 

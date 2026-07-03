@@ -152,6 +152,97 @@ func ParseMilkNDJSON(r io.Reader, out io.Writer, opts ParseOpts, handler EventHa
 	return res, nil
 }
 
+// PlainTextParser implements StreamParser for binaries that emit plain text on
+// stdout (i.e. no NDJSON envelope). Each line is forwarded as-is after applying
+// the optional skip predicate. Tag interception (percept/need/escalate) is still
+// performed via the display writer chain from ParseOpts.
+type PlainTextParser struct {
+	// SkipLine, when non-nil, returns true for lines that should be suppressed.
+	SkipLine func(line string) bool
+	// EventHook, when non-nil, is called for each non-skipped line before writing.
+	// It may write additional output to out (e.g. formatted edit annotations).
+	EventHook func(line string, out io.Writer, textBuf *strings.Builder)
+}
+
+func (p *PlainTextParser) Parse(r io.Reader, out io.Writer, opts ParseOpts) (ParseResult, error) {
+	var res ParseResult
+	var textBuf strings.Builder
+
+	displayOut := out
+	var escalateWriter *tags.TagWriter
+	var needWriter *tags.TagWriter
+	var perceptWriter *tags.PerceptWriter
+	if opts.OnEscalate != nil {
+		escalateWriter = &tags.TagWriter{
+			W: displayOut, OpenPrefix: tags.EscalateOpenPrefix,
+			OnTag:       func(body string) { opts.OnEscalate(strings.TrimSpace(body)) },
+			RecordNonce: opts.EscalateNonce,
+		}
+		displayOut = escalateWriter
+	}
+	if opts.OnNeed != nil {
+		needWriter = &tags.TagWriter{
+			W: displayOut, OpenPrefix: tags.NeedOpenPrefix,
+			OnTag:       func(body string) { opts.OnNeed(strings.TrimSpace(body)) },
+			RecordNonce: opts.NeedNonce,
+		}
+		displayOut = needWriter
+	}
+	if opts.OnPercept != nil {
+		perceptWriter = &tags.PerceptWriter{
+			W: displayOut, OnPercept: opts.OnPercept,
+			RecordNonce: opts.PerceptNonce, AgentNames: opts.AgentNames,
+		}
+		displayOut = perceptWriter
+	}
+
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if opts.DebugLog != nil {
+			fmt.Fprintln(opts.DebugLog, line) //nolint:errcheck
+		}
+		if p.SkipLine != nil && p.SkipLine(line) {
+			continue
+		}
+		if p.EventHook != nil {
+			p.EventHook(line, displayOut, &textBuf)
+		} else {
+			fmt.Fprintln(displayOut, line) //nolint:errcheck
+			textBuf.WriteString(line)
+			textBuf.WriteByte('\n')
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return res, err
+	}
+
+	if perceptWriter != nil {
+		perceptWriter.Flush() //nolint:errcheck
+	}
+	if needWriter != nil {
+		needWriter.Flush() //nolint:errcheck
+	}
+	if escalateWriter != nil {
+		escalateWriter.Flush() //nolint:errcheck
+	}
+
+	text := strings.TrimSpace(textBuf.String())
+	if opts.OnPercept != nil {
+		text = tags.StripPerceptTags(text)
+	}
+	if opts.OnNeed != nil {
+		text = tags.StripTagsByPrefix(text, tags.NeedOpenPrefix)
+	}
+	if opts.OnEscalate != nil {
+		text = tags.StripTagsByPrefix(text, tags.EscalateOpenPrefix)
+	}
+	res.Text = text
+	res.EndsWithQ = endsWithQ(text)
+	return res, nil
+}
+
 // endsWithQ returns true if the last non-whitespace character of text is '?'.
 func endsWithQ(text string) bool {
 	last := strings.TrimRight(text, " \t\n\r")

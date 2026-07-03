@@ -56,8 +56,8 @@ func (r *Runner) RunFirst(ctx context.Context, staticContext, dynamicContext, pr
 	contextFiles, cleanup := writeContextFiles(staticContext, dynamicContext)
 	defer cleanup()
 
-	sessionArgs := r.builder.FirstArgs(sessionID, contextFiles)
-	args := buildArgs(r.builder.BaseArgs(), sessionArgs, prompt)
+	sessionArgs := r.builder.FirstArgs(sessionID, prompt, contextFiles)
+	args := append(r.builder.BaseArgs(), sessionArgs...)
 	res, err := r.runPipe(ctx, args, opts, out)
 	if res.SessionID != "" {
 		sessionID = res.SessionID
@@ -70,18 +70,9 @@ func (r *Runner) RunResume(ctx context.Context, sessionID, staticContext, dynami
 	contextFiles, cleanup := writeContextFiles(staticContext, dynamicContext)
 	defer cleanup()
 
-	sessionArgs := r.builder.ResumeArgs(sessionID, contextFiles)
-	args := buildArgs(r.builder.BaseArgs(), sessionArgs, prompt)
+	sessionArgs := r.builder.ResumeArgs(sessionID, prompt, contextFiles)
+	args := append(r.builder.BaseArgs(), sessionArgs...)
 	return r.runPipe(ctx, args, opts, out)
-}
-
-// buildArgs assembles [baseArgs..., sessionArgs..., "--", prompt].
-func buildArgs(base, sessionArgs []string, prompt string) []string {
-	args := make([]string, 0, len(base)+len(sessionArgs)+2)
-	args = append(args, base...)
-	args = append(args, sessionArgs...)
-	args = append(args, "--", prompt)
-	return args
 }
 
 // runPipe starts the subprocess, feeds its stdout to the parser, and returns.

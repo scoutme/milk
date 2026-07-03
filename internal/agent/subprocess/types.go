@@ -11,11 +11,12 @@ type ArgBuilder interface {
 	// For claude: ["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
 	// For smolagent: ["--model-type", "OpenAIModel", ...]
 	BaseArgs() []string
-	// FirstArgs returns session-specific args for a new session.
-	// contextFiles is the list of temp file paths for --append-system-prompt-file.
-	FirstArgs(sessionID string, contextFiles []string) []string
-	// ResumeArgs returns session-specific args to resume an existing session.
-	ResumeArgs(sessionID string, contextFiles []string) []string
+	// FirstArgs returns the complete per-turn args for a new session, including
+	// prompt injection. contextFiles holds temp file paths for context injection.
+	// The prompt must be appended in whatever form the binary expects.
+	FirstArgs(sessionID, prompt string, contextFiles []string) []string
+	// ResumeArgs returns the complete per-turn args to continue an existing session.
+	ResumeArgs(sessionID, prompt string, contextFiles []string) []string
 	// EnvStrip returns environment variable name prefixes to remove from the
 	// subprocess environment before launching.
 	EnvStrip() []string

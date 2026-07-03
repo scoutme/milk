@@ -277,11 +277,31 @@ Supported `provider` values:
 | omit or `""` / `"local"` | OpenAI-compatible HTTP server, no auth |
 | `"bedrock"` | AWS Bedrock, SigV4 signing, native Converse API |
 | `"claude-cli"` | Claude Code CLI subprocess |
-| `"aider-cli"` | aider subprocess |
-| `"subprocess"` | generic subprocess agent (smolagents and similar) |
+| `"aider-cli"` | aider CLI — requires `pip install aider-chat` |
+| `"subprocess"` | generic subprocess agent (smolagents and similar) — requires extra install, see below |
 | anything else | Bearer-token HTTP (OpenRouter, Groq, Together.ai, GitHub Models, …) |
 
 For Azure OpenAI, use `provider: ""` (or omit it) and add `{"api-key": "<key>"}` under `headers`.
+
+#### Providers requiring extra setup
+
+**aider** (`provider: "aider-cli"`): milk calls the `aider` binary directly — no adapter script needed.
+```sh
+pip install aider-chat
+```
+
+**smolagents** (`provider: "subprocess"`): smolagents has no CLI, so an adapter script is required.
+```sh
+pip install smolagents[litellm]
+cp scripts/milk-smolagent ~/.local/bin/milk-smolagent && chmod +x ~/.local/bin/milk-smolagent
+```
+
+Or install the smolagents adapter via Taskfile if you built from source:
+```sh
+task install-scripts
+```
+
+Full configuration options, model drivers, and verification steps: [docs/providers.md](docs/providers.md).
 
 **`milk config`** — print the effective configuration (merged defaults + `~/.milk/config.json`).
 

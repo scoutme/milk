@@ -79,20 +79,19 @@ func (b *argBuilder) BaseArgs() []string {
 	return args
 }
 
-// FirstArgs returns per-turn args for a new session: session ID + context files.
-func (b *argBuilder) FirstArgs(sessionID string, contextFiles []string) []string {
+// FirstArgs returns per-turn args for a new session: session ID + context files + prompt.
+func (b *argBuilder) FirstArgs(sessionID, prompt string, contextFiles []string) []string {
 	args := []string{"--session-id", sessionID}
 	for _, f := range contextFiles {
 		args = append(args, "--append-system-prompt-file", f)
 	}
+	args = append(args, "--", prompt)
 	return args
 }
 
-// ResumeArgs returns per-turn args to continue an existing session.
-// milk-smolagent is stateless (reset=True each turn), so resume is identical
-// to first: history is re-injected via context files on every turn.
-func (b *argBuilder) ResumeArgs(sessionID string, contextFiles []string) []string {
-	return b.FirstArgs(sessionID, contextFiles)
+// ResumeArgs is identical to FirstArgs — milk-smolagent is stateless per-turn.
+func (b *argBuilder) ResumeArgs(sessionID, prompt string, contextFiles []string) []string {
+	return b.FirstArgs(sessionID, prompt, contextFiles)
 }
 
 // EnvStrip returns env var prefixes to remove from the subprocess environment.
