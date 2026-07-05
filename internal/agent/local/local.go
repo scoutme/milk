@@ -735,6 +735,14 @@ func isMemoryReadTool(name string) bool {
 	return name == "get_memory" || name == "list_memory"
 }
 
+// isSessionContextTool returns true for tools whose results can be very large
+// (full session history) and must be capped before being stored in history.
+func isSessionContextTool(name string) bool {
+	return name == "get_session_context" || name == "search_signals" || name == "export_session"
+}
+
+const sessionContextResultMaxBytes = 8000 // ~2000 tokens, enough for recent context summary
+
 // capMemToolResult truncates the output field of a toolResult JSON string so
 // that the total content size stays within maxBytes. A truncation notice is
 // appended so the model knows not all results were returned.
@@ -858,6 +866,9 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 				result = memory.DispatchListMemoryFiltered(ctx, mem, tc.Function.Arguments, userPrompt)
 			}
 			result = capMemToolResult(result, a.memCfg.ResultMaxBytes)
+		}
+		if isSessionContextTool(tc.Function.Name) {
+			result = capMemToolResult(result, sessionContextResultMaxBytes)
 		}
 		msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 	}
