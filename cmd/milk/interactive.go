@@ -12,6 +12,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
@@ -37,9 +38,10 @@ const cmdThink = "/think"
 const cmdSetup = "/setup"
 const cmdConfig = "/config"
 const cmdOpen = "/open"
+const cmdMCP = "/mcp"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -158,6 +160,17 @@ const interactiveHelp = `
   /otel on               enable OTel for this session
   /otel off              disable OTel for this session
   /otel trim             archive current OTel files and start fresh
+
+── MCP Servers ───────────────────────────────────────────────────────────
+  /mcp                   list configured MCP servers and their status
+  /mcp list [<agent>]    list MCP servers for an agent (default: primary)
+  /mcp add name=… url=… [transport=…] [auth=…] [api_key=…] [timeout=…]
+  /mcp remove <name>     remove an MCP server by name
+  /mcp enable <name>     enable a disabled MCP server
+  /mcp disable <name>    disable an MCP server (keeps config)
+  /mcp tools [<name>]    list tools exported by connected MCP server(s)
+  /mcp assign <server> for <agent>   add server to agent's mcp_servers list
+  /mcp unassign <server> for <agent>  remove server from agent's list
 
 ── Setup ─────────────────────────────────────────────────────────────────
   /config                print the current config (~/.milk/config.json)
@@ -290,6 +303,7 @@ var busySafeCommands = map[string]bool{
 	cmdMetrics:  true,
 	cmdExport:   true,
 	cmdPaste:    true,
+	cmdMCP:      true,
 }
 
 // handleSlashCommand processes a slash command with optional surrounding prompt text.
@@ -367,6 +381,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// Handled in repl.go (needs model state and config path). No-op here.
 	case cmdOpen:
 		// Handled in repl.go (needs tea.ExecProcess). No-op here.
+	case cmdMCP:
+		output = execMCP(prompt, st)
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
@@ -996,6 +1012,338 @@ func findAgentIdx(cfg config.Config, agentName string) int {
 		}
 	}
 	return -1
+}
+
+// execMCP dispatches /mcp <verb> [args] subcommands.
+func execMCP(sub string, st *interactiveState) string {
+	parts := strings.Fields(sub)
+	if len(parts) == 0 {
+		return execMCPList("", st)
+	}
+	verb := parts[0]
+	rest := strings.TrimSpace(strings.TrimPrefix(sub, verb))
+
+	switch verb {
+	case "list":
+		return execMCPList(rest, st)
+	case "add":
+		return execMCPAdd(rest, st)
+	case "remove":
+		if rest == "" {
+			return milkTag() + " usage: /mcp remove <name>"
+		}
+		return execMCPRemove(rest, st)
+	case "enable":
+		if rest == "" {
+			return milkTag() + " usage: /mcp enable <name>"
+		}
+		return execMCPSetEnabled(rest, true, st)
+	case "disable":
+		if rest == "" {
+			return milkTag() + " usage: /mcp disable <name>"
+		}
+		return execMCPSetEnabled(rest, false, st)
+	case "tools":
+		return execMCPTools(rest, st)
+	case "assign":
+		return execMCPAssign(rest, true, st)
+	case "unassign":
+		return execMCPAssign(rest, false, st)
+	default:
+		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign"
+	}
+}
+
+// execMCPList shows the configured MCP servers, optionally filtered to those
+// visible by a given agent. When agentFilter is empty, shows all servers.
+func execMCPList(agentFilter string, st *interactiveState) string {
+	agentFilter = strings.TrimSpace(agentFilter)
+	servers := st.cfg.MCPServers
+	if len(servers) == 0 {
+		return milkTag() + " no MCP servers configured — use /mcp add name=… url=… to add one"
+	}
+
+	// Build a lookup of which agents use which servers.
+	agentForServer := map[string][]string{}
+	for _, ac := range st.cfg.Agents {
+		for _, sname := range ac.MCPServers {
+			agentForServer[strings.ToLower(sname)] = append(agentForServer[strings.ToLower(sname)], ac.Name)
+		}
+	}
+
+	var b strings.Builder
+	if agentFilter != "" {
+		effective := st.cfg.EffectiveMCPServers(agentFilter)
+		if len(effective) == 0 {
+			return fmt.Sprintf("%s no MCP servers configured for agent %q", milkTag(), agentFilter)
+		}
+		fmt.Fprintf(&b, "%s MCP servers for %q:\n", milkTag(), agentFilter)
+		for _, s := range effective {
+			writeMCPServerLine(&b, s, agentForServer)
+		}
+	} else {
+		fmt.Fprintf(&b, "%s MCP servers (%d):\n", milkTag(), len(servers))
+		for _, s := range servers {
+			writeMCPServerLine(&b, s, agentForServer)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForServer map[string][]string) {
+	status := green("enabled")
+	if !s.IsEnabled() {
+		status = dim("disabled")
+	}
+	auth := s.Auth
+	if auth == "" {
+		auth = "none"
+	}
+	agents := agentForServer[strings.ToLower(s.Name)]
+	agentBadge := ""
+	if len(agents) > 0 {
+		agentBadge = "  [" + strings.Join(agents, ", ") + "]"
+	}
+	fmt.Fprintf(b, "  %-20s  %-10s  %-8s  %s%s\n", bold(s.Name), status, auth, s.URL, agentBadge)
+}
+
+// execMCPAdd adds a new MCP server entry from key=value args.
+func execMCPAdd(rest string, st *interactiveState) string {
+	fields := parseKVArgs(rest)
+	name := fields["name"]
+	url := fields["url"]
+	if name == "" || url == "" {
+		return milkTag() + " usage: /mcp add name=<name> url=<url> [transport=http|sse] [auth=bearer|token_cmd] [api_key=…] [timeout=30s]"
+	}
+	for _, s := range st.cfg.MCPServers {
+		if strings.EqualFold(s.Name, name) {
+			return fmt.Sprintf("%s MCP server %q already exists — use /mcp enable/disable or /mcp remove first", milkTag(), name)
+		}
+	}
+	entry := config.MCPServerConfig{
+		Name:      name,
+		URL:       url,
+		Transport: fields["transport"],
+		Auth:      fields["auth"],
+		APIKey:    fields["api_key"],
+		TokenCmd:  fields["token_cmd"],
+		Timeout:   fields["timeout"],
+	}
+	st.cfg.MCPServers = append(st.cfg.MCPServers, entry)
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s added MCP server %q (config save failed: %v)", milkTag(), name, err)
+	}
+	return fmt.Sprintf("%s MCP server %q added — use /mcp assign %s for <agent> to expose it", milkTag(), name, name)
+}
+
+// execMCPRemove removes an MCP server by name, also cleaning up all agent references.
+func execMCPRemove(name string, st *interactiveState) string {
+	idx := findMCPServerIdx(st.cfg.MCPServers, name)
+	if idx < 0 {
+		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
+	}
+	st.cfg.MCPServers = append(st.cfg.MCPServers[:idx], st.cfg.MCPServers[idx+1:]...)
+	// Remove references from all agents.
+	lower := strings.ToLower(name)
+	for i, ac := range st.cfg.Agents {
+		var kept []string
+		for _, sname := range ac.MCPServers {
+			if strings.ToLower(sname) != lower {
+				kept = append(kept, sname)
+			}
+		}
+		st.cfg.Agents[i].MCPServers = kept
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s removed MCP server %q (config save failed: %v)", milkTag(), name, err)
+	}
+	return fmt.Sprintf("%s MCP server %q removed", milkTag(), name)
+}
+
+// execMCPSetEnabled enables or disables an MCP server.
+func execMCPSetEnabled(name string, enabled bool, st *interactiveState) string {
+	idx := findMCPServerIdx(st.cfg.MCPServers, name)
+	if idx < 0 {
+		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
+	}
+	st.cfg.MCPServers[idx].Enabled = &enabled
+	verb := "enabled"
+	if !enabled {
+		verb = "disabled"
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s %s MCP server %q (config save failed: %v)", milkTag(), verb, name, err)
+	}
+	return fmt.Sprintf("%s MCP server %q %s", milkTag(), name, verb)
+}
+
+// execMCPTools connects to the named server (or all servers for the primary agent)
+// and lists their available tools.
+func execMCPTools(serverName string, st *interactiveState) string {
+	serverName = strings.TrimSpace(serverName)
+	var servers []config.MCPServerConfig
+	if serverName != "" {
+		idx := findMCPServerIdx(st.cfg.MCPServers, serverName)
+		if idx < 0 {
+			return fmt.Sprintf("%s MCP server %q not found", milkTag(), serverName)
+		}
+		if !st.cfg.MCPServers[idx].IsEnabled() {
+			return fmt.Sprintf("%s MCP server %q is disabled", milkTag(), serverName)
+		}
+		servers = []config.MCPServerConfig{st.cfg.MCPServers[idx]}
+	} else {
+		servers = st.cfg.EffectiveMCPServers(st.cfg.ActiveAgent().Name)
+		if len(servers) == 0 {
+			return milkTag() + " no MCP servers configured for primary agent — specify a server name or use /mcp list"
+		}
+	}
+
+	var b strings.Builder
+	ctx := context.Background()
+	for _, s := range servers {
+		fmt.Fprintf(&b, "%s %s tools:\n", milkTag(), bold(s.Name))
+		c := mcpClientForConfig(s)
+		if err := c.Connect(ctx); err != nil {
+			fmt.Fprintf(&b, "  error: %v\n", err)
+			continue
+		}
+		defer c.Close(ctx)
+		tools := c.Tools()
+		if len(tools) == 0 {
+			fmt.Fprintf(&b, "  (no tools)\n")
+			continue
+		}
+		for _, t := range tools {
+			desc := t.Description
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
+			}
+			fmt.Fprintf(&b, "  %-30s  %s\n", t.Name, desc)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// execMCPAssign adds or removes an MCP server reference from an agent's mcp_servers list.
+// rest is "<server-name> for <agent-name>".
+func execMCPAssign(rest string, assign bool, st *interactiveState) string {
+	verb := "assign"
+	if !assign {
+		verb = "unassign"
+	}
+	serverName, agentName, ok := parseMCPAssignArgs(rest)
+	if !ok {
+		return fmt.Sprintf("%s usage: /mcp %s <server> for <agent>", milkTag(), verb)
+	}
+	if findMCPServerIdx(st.cfg.MCPServers, serverName) < 0 {
+		return fmt.Sprintf("%s MCP server %q not found — add it first with /mcp add", milkTag(), serverName)
+	}
+	acIdx := findAgentIdx(st.cfg, agentName)
+	if acIdx < 0 {
+		return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
+	}
+	lower := strings.ToLower(serverName)
+	existing := st.cfg.Agents[acIdx].MCPServers
+	if assign {
+		for _, sn := range existing {
+			if strings.ToLower(sn) == lower {
+				return fmt.Sprintf("%s MCP server %q already assigned to agent %q", milkTag(), serverName, agentName)
+			}
+		}
+		st.cfg.Agents[acIdx].MCPServers = append(existing, serverName)
+	} else {
+		var kept []string
+		found := false
+		for _, sn := range existing {
+			if strings.ToLower(sn) == lower {
+				found = true
+			} else {
+				kept = append(kept, sn)
+			}
+		}
+		if !found {
+			return fmt.Sprintf("%s MCP server %q not assigned to agent %q", milkTag(), serverName, agentName)
+		}
+		st.cfg.Agents[acIdx].MCPServers = kept
+	}
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s %sed %q for agent %q (config save failed: %v)", milkTag(), verb, serverName, agentName, err)
+	}
+	if assign {
+		return fmt.Sprintf("%s MCP server %q assigned to agent %q — restart milk to connect", milkTag(), serverName, agentName)
+	}
+	return fmt.Sprintf("%s MCP server %q unassigned from agent %q — restart milk to disconnect", milkTag(), serverName, agentName)
+}
+
+// parseMCPAssignArgs parses "<server> for <agent>" from the rest string.
+func parseMCPAssignArgs(rest string) (serverName, agentName string, ok bool) {
+	idx := strings.Index(rest, " for ")
+	if idx < 0 {
+		return "", "", false
+	}
+	serverName = strings.TrimSpace(rest[:idx])
+	agentName = strings.TrimSpace(rest[idx+5:])
+	return serverName, agentName, serverName != "" && agentName != ""
+}
+
+// mcpClientForConfig builds an mcp.Client from an MCPServerConfig.
+func mcpClientForConfig(s config.MCPServerConfig) *mcp.Client {
+	return mcp.New(s)
+}
+
+// findMCPServerIdx returns the index of an MCP server by name, or -1.
+func findMCPServerIdx(servers []config.MCPServerConfig, name string) int {
+	lower := strings.ToLower(name)
+	for i, s := range servers {
+		if strings.ToLower(s.Name) == lower {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseKVArgs parses "key=value key2=value2 …" into a map. Values may be
+// quoted with double quotes. Unrecognised tokens (no "=") are skipped.
+func parseKVArgs(s string) map[string]string {
+	result := map[string]string{}
+	for len(s) > 0 {
+		s = strings.TrimLeft(s, " \t")
+		if s == "" {
+			break
+		}
+		eq := strings.IndexByte(s, '=')
+		if eq < 0 {
+			break
+		}
+		key := strings.TrimSpace(s[:eq])
+		s = s[eq+1:]
+		var val string
+		if len(s) > 0 && s[0] == '"' {
+			// Quoted value: scan to closing quote.
+			end := strings.IndexByte(s[1:], '"')
+			if end < 0 {
+				val = s[1:]
+				s = ""
+			} else {
+				val = s[1 : end+1]
+				s = s[end+2:]
+			}
+		} else {
+			// Unquoted: read until next whitespace.
+			sp := strings.IndexAny(s, " \t")
+			if sp < 0 {
+				val = s
+				s = ""
+			} else {
+				val = s[:sp]
+				s = s[sp:]
+			}
+		}
+		if key != "" {
+			result[key] = val
+		}
+	}
+	return result
 }
 
 // splitCommaNames splits a comma-separated string into trimmed, non-empty names.

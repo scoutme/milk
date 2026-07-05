@@ -21,6 +21,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
@@ -257,6 +258,7 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if name == "" {
 		name = "primary"
 	}
+	la = attachMCPToolSet(context.Background(), cfg, primaryAC.Name, la)
 	return newLocalRunner(la, name), la, nil
 }
 
@@ -303,6 +305,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			if name == "" {
 				name = "escalation"
 			}
+			la = attachMCPToolSet(context.Background(), cfg, escAC.Name, la)
 			return newLocalRunner(la, name), nil
 		}
 		fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
@@ -347,6 +350,30 @@ func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 		bin = "claude"
 	}
 	return claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, ac.AllowedTools, ac.AddDirs)
+}
+
+// attachMCPToolSet builds an mcp.ToolSet from the MCP servers configured for
+// agentName, connects all clients concurrently, and wires it into la via
+// WithMCPToolSet. Errors during connect are logged as warnings — partial
+// connectivity is preferred over a hard startup failure. When no MCP servers
+// are configured for the agent, la is returned unchanged.
+func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) *local.Agent {
+	servers := cfg.EffectiveMCPServers(agentName)
+	if len(servers) == 0 {
+		return la
+	}
+	clients := make([]*mcp.Client, 0, len(servers))
+	for _, s := range servers {
+		clients = append(clients, mcp.New(s))
+	}
+	ts := mcp.NewToolSet(clients)
+	if err := ts.ConnectAll(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
+	}
+	if ts.Len() > 0 {
+		la = la.WithMCPToolSet(ts)
+	}
+	return la
 }
 
 // activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd

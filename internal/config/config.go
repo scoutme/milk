@@ -124,6 +124,10 @@ type AgentConfig struct {
 	// AuthorizedImports lists Python packages the CodeAgent may import.
 	AuthorizedImports []string `json:"authorized_imports,omitempty"`
 
+	// MCPServers is the list of MCP server names (from Config.MCPServers) that
+	// this agent is allowed to use as tools. When empty, no MCP tools are exposed.
+	MCPServers []string `json:"mcp_servers,omitempty"`
+
 	// ExtraArgs holds raw CLI arguments appended verbatim to the subprocess command.
 	// Used by aider-cli, subprocess, and any future external-process provider to pass provider-specific
 	// flags without requiring dedicated config fields.
@@ -217,11 +221,62 @@ func defaultCLIAgent() AgentConfig {
 	}
 }
 
+// MCPServerConfig holds connection settings for one MCP server.
+// MCP servers expose callable tools to agents; they are not agents themselves
+// and are never used for routing, escalation, or conversation turns.
+type MCPServerConfig struct {
+	// Name is the unique identifier referenced from AgentConfig.MCPServers.
+	Name string `json:"name"`
+
+	// URL is the MCP endpoint (e.g. "http://localhost:3000/mcp").
+	// For Streamable HTTP transport (2025-03-26) this is a single POST+GET endpoint.
+	URL string `json:"url"`
+
+	// Transport selects the wire protocol. "http" (default) uses Streamable HTTP
+	// with SSE fallback for older servers. "stdio" is reserved for future use.
+	Transport string `json:"transport,omitempty"`
+
+	// Auth selects the authentication method.
+	// "" or "none" — no auth (local servers)
+	// "bearer"     — static Bearer token via APIKey
+	// "token_cmd"  — dynamic token from TokenCmd stdout
+	Auth string `json:"auth,omitempty"`
+
+	// APIKey is the static Bearer token. Used when Auth == "bearer".
+	APIKey string `json:"api_key,omitempty"`
+
+	// TokenCmd is a shell command whose stdout is the Bearer token.
+	// Takes precedence over APIKey when Auth == "token_cmd".
+	TokenCmd string `json:"token_cmd,omitempty"`
+
+	// Timeout is the per-request timeout (e.g. "30s"). Default: 30s.
+	Timeout string `json:"timeout,omitempty"`
+
+	// Enabled controls whether this server is active. Default: true.
+	// Set to false to temporarily disable without removing the entry.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// TLSSkipVerify disables TLS certificate verification for dev/self-signed certs.
+	TLSSkipVerify bool `json:"tls_skip_verify,omitempty"`
+}
+
+// IsEnabled reports whether this MCP server entry is enabled.
+// Returns true when Enabled is nil (default on) or explicitly true.
+func (m MCPServerConfig) IsEnabled() bool {
+	return m.Enabled == nil || *m.Enabled
+}
+
 type Config struct {
 	// Agent is the name of the active primary backend from Agents.
 	// If empty, the first non-claude-cli entry is used.
 	Agent  string        `json:"agent,omitempty"`
 	Agents []AgentConfig `json:"agents,omitempty"`
+
+	// MCPServers is the list of MCP tool-server endpoints available to agents.
+	// Each agent opts in to specific servers by listing their names in
+	// AgentConfig.MCPServers. Servers listed here but not referenced by any
+	// agent are loaded but never connected.
+	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
 
 	// EscalationAgent selects which backend handles escalated turns.
 	// Defaults to "claude" (the built-in claude-cli entry).
@@ -743,6 +798,39 @@ func (c Config) StickyEscalationEnabled() bool {
 	return *c.StickyEscalation
 }
 
+// EffectiveMCPServers returns the enabled MCPServerConfig entries for the named
+// agent. It resolves the agent's MCPServers name list against the top-level
+// MCPServers array, skipping unknown names and disabled entries.
+func (c Config) EffectiveMCPServers(agentName string) []MCPServerConfig {
+	// Find the agent's MCP server name list.
+	var refs []string
+	for _, ac := range c.effectiveAgents() {
+		if strings.EqualFold(ac.Name, agentName) {
+			refs = ac.MCPServers
+			break
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+
+	// Build a fast lookup of top-level MCP server configs.
+	byName := make(map[string]MCPServerConfig, len(c.MCPServers))
+	for _, ms := range c.MCPServers {
+		byName[strings.ToLower(ms.Name)] = ms
+	}
+
+	result := make([]MCPServerConfig, 0, len(refs))
+	for _, ref := range refs {
+		ms, ok := byName[strings.ToLower(ref)]
+		if !ok || !ms.IsEnabled() {
+			continue
+		}
+		result = append(result, ms)
+	}
+	return result
+}
+
 // EffectiveToolAgents returns the merged list of peer-agent tool entries for the
 // named caller agent. It starts with the global AgentTools list, applies
 // per-agent overrides from the caller's Tools field (replacing global entries by
@@ -1034,6 +1122,41 @@ func Validate(cfg Config) []ValidationWarning {
 		// Auth-requiring providers must have api_key or token_cmd.
 		if requiresAuth(a.Provider) && a.APIKey == "" && a.TokenCmd == "" {
 			warn(a.Name, fmt.Sprintf("provider %q requires api_key or token_cmd — run /config init or edit config", providerDisplay(a.Provider)))
+		}
+	}
+
+	// Validate MCP server entries.
+	mcpNames := make(map[string]bool, len(cfg.MCPServers))
+	for _, ms := range cfg.MCPServers {
+		if ms.Name == "" {
+			warn("", "mcp_servers entry missing name")
+			continue
+		}
+		if mcpNames[ms.Name] {
+			warn("", fmt.Sprintf("mcp_servers: duplicate name %q", ms.Name))
+		}
+		mcpNames[ms.Name] = true
+		if ms.URL == "" {
+			warn("", fmt.Sprintf("mcp_servers %q: url is required", ms.Name))
+		}
+		switch strings.ToLower(ms.Auth) {
+		case "", "none", "bearer", "token_cmd":
+		default:
+			warn("", fmt.Sprintf("mcp_servers %q: unknown auth %q (valid: none, bearer, token_cmd)", ms.Name, ms.Auth))
+		}
+		switch strings.ToLower(ms.Transport) {
+		case "", "http":
+		default:
+			warn("", fmt.Sprintf("mcp_servers %q: unknown transport %q (valid: http)", ms.Name, ms.Transport))
+		}
+	}
+
+	// Validate per-agent MCP server references.
+	for _, a := range effective {
+		for _, ref := range a.MCPServers {
+			if !mcpNames[ref] {
+				warn(a.Name, fmt.Sprintf("mcp_servers reference %q not found in top-level mcp_servers list", ref))
+			}
 		}
 	}
 
