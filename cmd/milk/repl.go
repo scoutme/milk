@@ -1106,8 +1106,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if len(m.tabMatches) > 0 {
-			// Tab cycling is active: accept the already-inserted completion and
-			// clear cycling state without submitting.
+			// Tab cycling is active: accept the already-inserted completion.
+			// If the inserted sig has a parameter placeholder, position the cursor
+			// there and clear the placeholder so the user can type the value directly.
+			current := m.ta.Value()
 			m.tabMatches = nil
 			m.tabIdx = -1
 			m.tabCmdIdx = 0
@@ -1119,11 +1121,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tabHints = nil
 			m.tabHintsBase = nil
 			m.hintIdx = -1
+			if cleared, pos := clearFirstPlaceholder(current); pos >= 0 {
+				m.ta.SetValue(cleared)
+				m.ta.SetCursor(pos)
+				m.rebuildInlineHints()
+			}
 			m.syncLayout()
 			return m, nil
 		}
 		if m.hintIdx >= 0 {
 			if m.commitHintSelection() {
+				// Same: position cursor at first placeholder if present.
+				if cleared, pos := clearFirstPlaceholder(m.ta.Value()); pos >= 0 {
+					m.ta.SetValue(cleared)
+					m.ta.SetCursor(pos)
+					m.rebuildInlineHints()
+				}
 				m.syncLayout()
 				return m, nil
 			}

@@ -729,6 +729,48 @@ func (m *model) commitHintSelection() bool {
 	return true
 }
 
+// clearFirstPlaceholder finds the first <param> or [opt] token that follows a
+// slash-command word in s, strips it and everything after it on that line, and
+// returns (result, runeOffset) where runeOffset is the cursor position to set.
+// Returns ("", -1) when no placeholder is found so callers can skip SetValue.
+func clearFirstPlaceholder(s string) (string, int) {
+	lines := strings.Split(s, "\n")
+	for li, line := range lines {
+		foundCmd := false
+		i := 0
+		for i < len(line) {
+			// skip whitespace
+			j := i
+			for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+				j++
+			}
+			if j >= len(line) {
+				break
+			}
+			// find token end
+			k := j
+			for k < len(line) && line[k] != ' ' && line[k] != '\t' {
+				k++
+			}
+			token := line[j:k]
+			if strings.HasPrefix(token, "/") {
+				foundCmd = true
+			} else if foundCmd && (strings.HasPrefix(token, "<") || strings.HasPrefix(token, "[")) {
+				// Truncate this line just before the placeholder, keep a trailing space.
+				prefix := strings.TrimRight(line[:j], " \t") + " "
+				lines[li] = prefix
+				runesBefore := 0
+				for _, l := range lines[:li] {
+					runesBefore += len([]rune(l)) + 1 // +1 for '\n'
+				}
+				return strings.Join(lines, "\n"), runesBefore + len([]rune(prefix))
+			}
+			i = k
+		}
+	}
+	return "", -1
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
