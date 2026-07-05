@@ -1,3 +1,43 @@
+# milk — active plan
+
+## MCP + ORAS/OCI integration (session 2026-07-05)
+
+### ✅ Task 1 — MCP config schema
+`internal/config/config.go`: `MCPServerConfig`, `MCPServers` top-level array, per-agent `MCPServers` opt-in list, validation, `EffectiveMCPServers` resolver.
+
+### ✅ Task 2 — MCP runtime client + tool loop integration
+- `internal/mcp/mcp.go`: minimal MCP 2025-03-26 client (Streamable HTTP, JSON-RPC 2.0, initialize, tools/list pagination, tools/call, SSE, bearer/token_cmd auth)
+- `internal/mcp/toolset.go`: `ToolSet` aggregates multiple clients, routes by `mcp_<name>_` prefix
+- `internal/agent/local/local.go`: `mcpToolSet` interface (avoids import cycle), `WithMCPToolSet`, MCP schemas appended, MCP dispatch before built-ins
+- `cmd/milk/main.go`: `attachMCPToolSet` wires ToolSet into primary and escalation runners at startup
+
+### ✅ Task 3 — MCP TUI commands
+`cmd/milk/interactive.go`: `/mcp list|add|remove|enable|disable|tools|assign|unassign`
+
+### ⬜ Task 4 — ORAS/OCI: registry client + artifact pull
+- New `internal/oci/` package
+- Config: `OCIRegistryConfig` struct, `OCIRegistries []OCIRegistryConfig` in `Config`
+- OCI Distribution Spec v1 pull: manifest → layers → blobs
+- Vendor media types: `application/vnd.posteitaliane.agent.<type>.v1+json`
+- Artifact types from schemas: `prompt`, `tool`, `personality`, `skill`, `bundle`, `project`
+- Local disk cache: `~/.milk/oci/<registry>/<repo>/<digest>/`
+- Auth: anonymous, bearer (token_cmd or api_key), basic
+
+### ⬜ Task 5 — ORAS/OCI: artifact injection into agent context
+- Pulled `prompt` artifacts → prepended system message
+- Pulled `tool` artifacts with `interface.type == "mcp"` → synthesise an MCPServerConfig and add to runtime ToolSet
+- Pulled `personality` artifacts → appended behavioral instructions
+- Wire into `buildPrimaryRunner` / `buildEscalationRunner` (after MCP tool set)
+
+### ⬜ Task 6 — ORAS/OCI: TUI commands
+`/oci pull|list|inspect|clear` in `cmd/milk/interactive.go`
+
+### 🔖 Tracked issues
+- [#73](https://github.com/scoutme/milk/issues/73) — Persistent task/plan tracking in milk memory
+- Task #7 (session) — Migrate MCP client to official `github.com/modelcontextprotocol/go-sdk`
+
+---
+
 # milk — closed issue archive
 
 > **Deprecated as a backlog.** Open items are now tracked as GitHub Issues.

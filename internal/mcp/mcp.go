@@ -91,17 +91,17 @@ func (e *jsonrpcError) Error() string {
 // Client is a connected MCP client for a single server.
 // Call Connect before using; call Close when done.
 type Client struct {
-	cfg       config.MCPServerConfig
-	endpoint  string
-	sessionID string
+	cfg        config.MCPServerConfig
+	endpoint   string
+	sessionID  string
 	httpClient *http.Client
-	idSeq     atomic.Int64
-	mu        sync.Mutex
-	tools     []Tool
-	ready     bool
+	idSeq      atomic.Int64
+	mu         sync.Mutex
+	tools      []Tool
+	ready      bool
 
 	// tokenOnce caches a dynamic Bearer token resolved from TokenCmd.
-	tokenOnce  sync.Once
+	tokenOnce   sync.Once
 	cachedToken string
 }
 
