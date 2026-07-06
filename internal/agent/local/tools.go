@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
@@ -47,7 +49,8 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"command": map[string]any{"type": "string", "description": "Shell command to execute"},
+						"command":         map[string]any{"type": "string", "description": "Shell command to execute"},
+						"timeout_seconds": map[string]any{"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
 					},
 					"required": []string{"command"},
 				},
@@ -650,26 +653,65 @@ func appendAssistantTurn(b *strings.Builder, t session.Turn) {
 	}
 }
 
+const (
+	bashDefaultTimeout = 120 * time.Second
+	bashMaxTimeout     = 600 * time.Second
+)
+
 func runBash(ctx context.Context, args map[string]any) (string, bool) {
 	command, _ := args["command"].(string)
+
+	timeout := bashDefaultTimeout
+	if v, ok := args["timeout_seconds"]; ok {
+		if n, ok := v.(float64); ok && n > 0 {
+			d := time.Duration(n) * time.Second
+			if d > bashMaxTimeout {
+				d = bashMaxTimeout
+			}
+			timeout = d
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Run in its own process group so we can kill the whole tree on timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
-			code = exit.ExitCode()
-		} else {
-			return toolResult{Error: err.Error()}.String(), false
-		}
+
+	if err := cmd.Start(); err != nil {
+		return toolResult{Error: err.Error()}.String(), false
 	}
-	return toolResult{
-		Output:   stdout.String(),
-		Error:    stderr.String(),
-		ExitCode: code,
-	}.String(), false
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		code := 0
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				code = exit.ExitCode()
+			} else {
+				return toolResult{Error: err.Error()}.String(), false
+			}
+		}
+		return toolResult{
+			Output:   stdout.String(),
+			Error:    stderr.String(),
+			ExitCode: code,
+		}.String(), false
+	case <-ctx.Done():
+		// Kill the entire process group to reap any child processes.
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done
+		return toolResult{Error: fmt.Sprintf("bash: command timed out after %s", timeout)}.String(), false
+	}
 }
 
 // expandTilde replaces a leading "~" with the user's home directory.
