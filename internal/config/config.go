@@ -413,6 +413,22 @@ type Config struct {
 	// ["$EDITOR", "$VISUAL", "nano", "vim", "vi"]
 	// Example: ["code --wait", "$EDITOR", "nano"]
 	ConfigEditors []string `json:"config_editors,omitempty"`
+
+	// UpdateCheck controls whether milk checks GitHub for new releases on startup.
+	// Default: true. Set to false to disable entirely.
+	UpdateCheck *bool `json:"update_check,omitempty"`
+
+	// UpdateChannel selects which releases are considered: "stable" skips pre-releases,
+	// "pre" includes them. Default: "pre" (all current releases are pre-releases).
+	UpdateChannel string `json:"update_channel,omitempty"`
+
+	// UpdateLastCheck is the RFC3339 timestamp of the last successful update check.
+	// Used to throttle checks to at most once every 24 hours.
+	UpdateLastCheck string `json:"update_last_check,omitempty"`
+
+	// UpdateSkippedVersion holds a release tag (e.g. "v0.0.12") the user chose to skip.
+	// The update badge is suppressed for this version until a newer one arrives.
+	UpdateSkippedVersion string `json:"update_skipped_version,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.
@@ -1215,6 +1231,28 @@ func InitConfig(primary AgentConfig, escalation *AgentConfig) Config {
 		cfg.EscalationAgent = escalation.Name
 	}
 	return cfg
+}
+
+// ShouldCheckUpdate returns true when the update check is enabled and at least
+// 24 hours have passed since the last check.
+func (c Config) ShouldCheckUpdate() bool {
+	if c.UpdateCheck != nil && !*c.UpdateCheck {
+		return false
+	}
+	if c.UpdateLastCheck == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, c.UpdateLastCheck)
+	if err != nil {
+		return true
+	}
+	return time.Since(last) >= 24*time.Hour
+}
+
+// UpdateCheckIncludePrerelease returns true when the update channel includes
+// pre-release versions (default: true, since all current releases are pre-releases).
+func (c Config) UpdateCheckIncludePrerelease() bool {
+	return c.UpdateChannel != "stable"
 }
 
 func Save(cfg Config) error {

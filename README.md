@@ -218,6 +218,7 @@ Full configuration reference, all provider options, and auth setup: [docs/provid
 | `/config open` | Open config file in `$EDITOR` |
 | `/open <path>` | Open any file in the configured editor |
 | `/setup telegram` | Configure Telegram remote oversight |
+| `/update` | Check for new milk releases, show current vs latest version, prompt to download |
 | `/new` | Start a fresh session |
 | `/drop` | Delete current session and start fresh |
 | `/list` | List sessions for the current directory |

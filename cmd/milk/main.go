@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/scoutme/milk/internal/updater"
 
 	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/claude"
@@ -84,6 +87,7 @@ func init() {
 
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(otelCmd)
+	rootCmd.AddCommand(updateCmd)
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -1586,6 +1590,86 @@ func init() {
 		},
 	})
 	otelCmd.AddCommand(debugCmd)
+}
+
+// updateCmd is the `milk update` subcommand — check and apply updates non-interactively.
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Check for and install milk updates",
+}
+
+func init() {
+	updateCmd.AddCommand(&cobra.Command{
+		Use:   "check",
+		Short: "Check whether a newer release is available",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			fmt.Printf("current version: %s\n", version)
+			fmt.Println("checking for updates…")
+			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			if err != nil {
+				return fmt.Errorf("update check: %w", err)
+			}
+			if rel == nil {
+				fmt.Println("already up to date")
+				return nil
+			}
+			fmt.Printf("update available: %s  %s\n", rel.Tag, rel.HTMLURL)
+			fmt.Println("run `milk update install` to apply")
+			return nil
+		},
+	})
+	updateCmd.AddCommand(&cobra.Command{
+		Use:   "install",
+		Short: "Download and install the latest release",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			fmt.Printf("current version: %s\n", version)
+			fmt.Println("checking for updates…")
+			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			if err != nil {
+				return fmt.Errorf("update check: %w", err)
+			}
+			if rel == nil {
+				fmt.Println("already up to date")
+				return nil
+			}
+			fmt.Printf("update available: %s\n", rel.Tag)
+
+			dest, err := updater.CurrentBinaryPath()
+			if err != nil {
+				return fmt.Errorf("resolving binary path: %w", err)
+			}
+			fmt.Printf("installing to %s…\n", dest)
+			err = updater.Apply(ctx, rel, dest, func(done, total int64) {
+				if total > 0 {
+					fmt.Printf("\r  %d%% (%d / %d bytes)", 100*done/total, done, total)
+				}
+			})
+			fmt.Println()
+			if err != nil {
+				if errors.Is(err, updater.ErrWindowsManual) {
+					fmt.Printf("Windows: replace %s manually with the downloaded binary\n", dest)
+					return nil
+				}
+				return fmt.Errorf("install: %w", err)
+			}
+			fmt.Printf("installed %s — restart milk to use the new version\n", rel.Tag)
+			return nil
+		},
+	})
 }
 
 // runOtelDebug enables or disables the full debug logging bundle.
