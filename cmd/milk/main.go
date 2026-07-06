@@ -1564,7 +1564,7 @@ func init() {
 		Use:   "enable",
 		Short: "Enable debug logging (log_context, debug_claude_code, debug_local, log_level=DEBUG)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := runOtelDebug(true, ""); err != nil {
+			if err := runOtelDebug(true); err != nil {
 				return err
 			}
 			cliPath, _ := config.CLIDebugLogPath()
@@ -1578,9 +1578,7 @@ func init() {
 		Use:   "disable",
 		Short: "Disable debug logging (restores log_level to pre-debug value; default INFO)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Read current config to preserve the pre-debug log level.
-			cur, _ := config.Load()
-			if err := runOtelDebug(false, cur.Otel.LogLevel); err != nil {
+			if err := runOtelDebug(false); err != nil {
 				return err
 			}
 			fmt.Println("debug logging disabled")
@@ -1591,24 +1589,27 @@ func init() {
 }
 
 // runOtelDebug enables or disables the full debug logging bundle.
-// prevLevel is only used when enable=false: if the current persisted level is
-// "DEBUG" (case-insensitive) it is restored to prevLevel (falling back to "INFO"
-// when prevLevel is also "DEBUG" or empty), preserving any user-configured level.
-func runOtelDebug(enable bool, prevLevel string) error {
+// On enable: saves the current log_level to pre_debug_log_level, then sets DEBUG.
+// On disable: restores log_level from pre_debug_log_level (falling back to INFO).
+func runOtelDebug(enable bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 	cfg.Otel.LogContext = enable
 	if enable {
-		cfg.Otel.LogLevel = "DEBUG"
-	} else if strings.EqualFold(cfg.Otel.LogLevel, "DEBUG") {
-		// Restore to the caller's pre-debug level; fall back to INFO.
-		if prevLevel != "" && !strings.EqualFold(prevLevel, "DEBUG") {
-			cfg.Otel.LogLevel = prevLevel
-		} else {
-			cfg.Otel.LogLevel = "INFO"
+		// Snapshot the current level so disable can restore it.
+		if !strings.EqualFold(cfg.Otel.LogLevel, "DEBUG") {
+			cfg.Otel.PreDebugLogLevel = cfg.Otel.LogLevel
 		}
+		cfg.Otel.LogLevel = "DEBUG"
+	} else {
+		prev := cfg.Otel.PreDebugLogLevel
+		if prev == "" || strings.EqualFold(prev, "DEBUG") {
+			prev = "INFO"
+		}
+		cfg.Otel.LogLevel = prev
+		cfg.Otel.PreDebugLogLevel = ""
 	}
 	cfg.DebugCLILog = enable
 	cfg.DebugLocalLog = enable

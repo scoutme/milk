@@ -473,7 +473,7 @@ func execOtel(sub string, st *interactiveState) string {
 		st.cfg.Otel.Enabled = true
 		return milkTag() + " OTel re-enabled for this session"
 	case "debug enable":
-		if err := runOtelDebug(true, ""); err != nil {
+		if err := runOtelDebug(true); err != nil {
 			return fmt.Sprintf("%s error: %v", milkTag(), err)
 		}
 		st.cfg.Otel.LogContext = true
@@ -487,13 +487,11 @@ func execOtel(sub string, st *interactiveState) string {
 			"  local SSE     → " + localPath + "\n" +
 			"  payloads      → " + otelDir + "/logs.jsonl"
 	case "debug disable":
-		if err := runOtelDebug(false, st.cfg.Otel.LogLevel); err != nil {
+		if err := runOtelDebug(false); err != nil {
 			return fmt.Sprintf("%s error: %v", milkTag(), err)
 		}
 		st.cfg.Otel.LogContext = false
-		if strings.EqualFold(st.cfg.Otel.LogLevel, "DEBUG") {
-			st.cfg.Otel.LogLevel = "INFO"
-		}
+		st.cfg.Otel.LogLevel = "INFO" // in-memory reset; disk already restored by runOtelDebug
 		st.cfg.DebugCLILog = false
 		st.cfg.DebugLocalLog = false
 		return milkTag() + " debug logging disabled"

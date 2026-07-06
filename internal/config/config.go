@@ -50,6 +50,7 @@ type OtelConfig struct {
 	WarnMB              int    `json:"warn_mb"`               // warn when any otel file exceeds this (0 = off)
 	MaxMB               int    `json:"max_mb"`                // hard cap, disable otel when exceeded (0 = off)
 	MetricsFlushMinutes int    `json:"metrics_flush_minutes"` // periodic flush interval (0 = session-end only)
+	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"` // saved by debug enable; restored by debug disable
 }
 
 // AgentConfig holds configuration for a single agent backend.
