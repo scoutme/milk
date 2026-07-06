@@ -39,9 +39,10 @@ const cmdSetup = "/setup"
 const cmdConfig = "/config"
 const cmdOpen = "/open"
 const cmdMCP = "/mcp"
+const cmdUpdate = "/update"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -385,6 +386,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// Handled in repl.go (needs tea.ExecProcess). No-op here.
 	case cmdMCP:
 		output = execMCP(prompt, st)
+	case cmdUpdate:
+		// Handled in repl.go (needs model state for install dispatch). No-op here.
 	default:
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}

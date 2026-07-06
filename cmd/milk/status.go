@@ -64,7 +64,17 @@ func (m *model) headerBar() string {
 func (m *model) statusBar() string {
 	tokenStr := m.statusTokens()
 	left := fmt.Sprintf(" %s  %s%s", dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
-	right := dim(m.statusCwd() + " ")
+	right := ""
+	if m.updateInstalling {
+		pct := ""
+		if m.updateTotal > 0 {
+			pct = fmt.Sprintf(" %d%%", 100*m.updateProgress/m.updateTotal)
+		}
+		right += yellow("⬆ updating" + pct + " ")
+	} else if m.pendingUpdate != nil {
+		right += yellow("⬆ " + m.pendingUpdate.Tag + " available — /update install ")
+	}
+	right += dim(m.statusCwd() + " ")
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
 	} else if m.credStatus != "" {

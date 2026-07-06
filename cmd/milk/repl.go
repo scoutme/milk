@@ -30,6 +30,7 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/updater"
 )
 
 const agentTimeout = 10 * time.Minute
@@ -107,6 +108,15 @@ type remoteInputMsg struct{ text string }
 
 type configReloadMsg struct{}
 type errMsg struct{ err error }
+
+// updateAvailableMsg is sent when the background update check finds a newer release.
+type updateAvailableMsg struct{ release *updater.Release }
+
+// updateProgressMsg carries download progress during /update install.
+type updateProgressMsg struct{ done, total int64 }
+
+// updateDoneMsg signals a completed self-update attempt.
+type updateDoneMsg struct{ err error }
 
 // openFileMsg is sent by the agent goroutine (or /open command) to request that
 // the TUI open a file in the editor. The goroutine blocks on respCh until the
@@ -387,6 +397,14 @@ type model struct {
 	// credRefreshInit, if non-nil, is returned by Init() to start background
 	// credential refresh only after the bubbletea event loop is running.
 	credRefreshInit tea.Cmd
+
+	// pendingUpdate is non-nil when an update is available but not yet installed.
+	pendingUpdate *updater.Release
+	// updateInstalling is true while /update install is downloading+applying.
+	updateInstalling bool
+	// updateProgress tracks download bytes for the progress indicator.
+	updateProgress int64
+	updateTotal    int64
 
 	// injected dependencies
 	ctx    context.Context
@@ -845,6 +863,18 @@ func (m model) Init() tea.Cmd {
 	if m.credRefreshInit != nil {
 		cmds = append(cmds, m.credRefreshInit)
 	}
+	if m.st.cfg.ShouldCheckUpdate() {
+		cfg := m.st.cfg
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			if err != nil || rel == nil {
+				return nil
+			}
+			return updateAvailableMsg{release: rel}
+		})
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -1013,6 +1043,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openFileMsg:
 		return m.handleOpenFileMsg(msg)
+
+	case updateAvailableMsg:
+		m.pendingUpdate = msg.release
+		// Record last-check time so we don't spam on every startup.
+		cfg := m.st.cfg
+		cfg.UpdateLastCheck = time.Now().UTC().Format(time.RFC3339)
+		_ = config.Save(cfg)
+		m.st.cfg = cfg
+		return m, nil
+
+	case updateProgressMsg:
+		m.updateProgress = msg.done
+		m.updateTotal = msg.total
+		return m, nil
+
+	case updateDoneMsg:
+		m.updateInstalling = false
+		m.updateProgress = 0
+		m.updateTotal = 0
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s update failed: %v\n", milkTag(), msg.err))
+		} else {
+			m.pendingUpdate = nil
+			m.appendTranscript(milkTag() + " update applied — restart milk to use the new version\n")
+		}
+		return m, nil
 
 	case errMsg:
 		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), msg.err))

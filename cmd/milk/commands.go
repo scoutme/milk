@@ -15,6 +15,7 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/updater"
 )
 
 func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
@@ -44,6 +45,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	}
 	if cmd == cmdOpen {
 		return m.handleOpenCmd(rest)
+	}
+	if cmd == cmdUpdate {
+		return m.handleUpdateCmd(strings.TrimSpace(rest))
 	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
@@ -596,6 +600,76 @@ func (m model) handleOpenFileMsg(msg openFileMsg) (tea.Model, tea.Cmd) {
 		}
 		return nil
 	})
+}
+
+// handleUpdateCmd handles /update [check|install|skip].
+func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
+	switch sub {
+	case "check", "":
+		if m.pendingUpdate != nil {
+			m.appendTranscript(fmt.Sprintf("%s update available: %s — use /update install\n", milkTag(), m.pendingUpdate.Tag))
+			return m, nil
+		}
+		m.appendTranscript(milkTag() + " checking for updates…\n")
+		cfg := m.st.cfg
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			if err != nil {
+				return errMsg{err: fmt.Errorf("update check: %w", err)}
+			}
+			if rel == nil {
+				return errMsg{err: fmt.Errorf("already up to date (%s)", version)}
+			}
+			return updateAvailableMsg{release: rel}
+		}
+
+	case "install":
+		if m.updateInstalling {
+			m.appendTranscript(milkTag() + " update already in progress\n")
+			return m, nil
+		}
+		if m.pendingUpdate == nil {
+			m.appendTranscript(milkTag() + " no update available — run /update check first\n")
+			return m, nil
+		}
+		rel := m.pendingUpdate
+		m.updateInstalling = true
+		m.updateProgress = 0
+		m.updateTotal = 0
+		m.appendTranscript(fmt.Sprintf("%s installing %s…\n", milkTag(), rel.Tag))
+		send := func(msg tea.Msg) { m.st.program.Send(msg) }
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			dest, err := updater.CurrentBinaryPath()
+			if err != nil {
+				return updateDoneMsg{err: err}
+			}
+			err = updater.Apply(ctx, rel, dest, func(done, total int64) {
+				send(updateProgressMsg{done: done, total: total})
+			})
+			return updateDoneMsg{err: err}
+		}
+
+	case "skip":
+		if m.pendingUpdate == nil {
+			m.appendTranscript(milkTag() + " no pending update\n")
+			return m, nil
+		}
+		cfg := m.st.cfg
+		cfg.UpdateSkippedVersion = m.pendingUpdate.Tag
+		_ = config.Save(cfg)
+		m.st.cfg = cfg
+		m.pendingUpdate = nil
+		m.appendTranscript(milkTag() + " update skipped\n")
+		return m, nil
+
+	default:
+		m.appendTranscript(milkTag() + " usage: /update [check|install|skip]\n")
+		return m, nil
+	}
 }
 
 // isHexPrefix returns true when s looks like a percept ID prefix (4-64 hex chars).
