@@ -47,9 +47,9 @@ type OtelConfig struct {
 	LogContext          bool   `json:"log_context"` // when true, log the full serialised request payload on each inference call
 	Traces              bool   `json:"traces"`
 	Metrics             bool   `json:"metrics"`
-	WarnMB              int    `json:"warn_mb"`               // warn when any otel file exceeds this (0 = off)
-	MaxMB               int    `json:"max_mb"`                // hard cap, disable otel when exceeded (0 = off)
-	MetricsFlushMinutes int    `json:"metrics_flush_minutes"` // periodic flush interval (0 = session-end only)
+	WarnMB              int    `json:"warn_mb"`                       // warn when any otel file exceeds this (0 = off)
+	MaxMB               int    `json:"max_mb"`                        // hard cap, disable otel when exceeded (0 = off)
+	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`         // periodic flush interval (0 = session-end only)
 	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"` // saved by debug enable; restored by debug disable
 }
 
