@@ -83,6 +83,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagDrop, "drop", false, "Delete the current session")
 
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(otelCmd)
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -233,7 +234,12 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 		if sp == nil {
 			return nil, nil, fmt.Errorf("unsupported subprocess provider: %s", primaryAC.Provider)
 		}
-		return newSubprocessRunner(sp, primaryAC.Name), nil, nil
+		sp = sp.WithLogContext(cfg.Otel.LogContext)
+		r := newSubprocessRunner(sp, primaryAC.Name)
+		if servers, ts := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
+			r = r.withMCPToolSet(servers, ts)
+		}
+		return r, nil, nil
 	}
 
 	ac := applyFreshAWSCreds(cfg, primaryAC)
@@ -248,7 +254,7 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if lp, err := local.OpenPermStore(cwd); err == nil {
 		la.WithPermissions(lp, nil)
 	}
-	la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 	if dbg, err := openLocalDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
@@ -282,7 +288,12 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			sp = aider.New(escAC)
 		}
 		if sp != nil {
-			return newSubprocessRunner(sp, escAC.Name), nil
+			sp = sp.WithLogContext(cfg.Otel.LogContext)
+			r := newSubprocessRunner(sp, escAC.Name)
+			if servers, ts := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
+				r = r.withMCPToolSet(servers, ts)
+			}
+			return r, nil
 		}
 	}
 
@@ -297,7 +308,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			la.WithOnTokens(func(model, role string, prompt, completion int64) {
 				sess.AddTokens(model, role, prompt, completion)
 			})
-			la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				la.WithPermissions(lp, nil)
 			}
@@ -329,7 +340,11 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 	if name == "" {
 		name = "claude"
 	}
-	return newCLIRunner(cliAgt, name, permContext{cs: cs}, func() inputReader { return newStdinInputReader() }), nil
+	r := newCLIRunner(cliAgt, name, permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
+	if servers := cfg.EffectiveMCPServers(cliAC.Name); len(servers) > 0 {
+		r = r.withMCPServers(servers)
+	}
+	return r, nil
 }
 
 // cliAgentConfig returns the AgentConfig for the claude-cli backend —
@@ -367,13 +382,38 @@ func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, 
 		clients = append(clients, mcp.New(s))
 	}
 	ts := mcp.NewToolSet(clients)
-	if err := ts.ConnectAll(ctx); err != nil {
+	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer connectCancel()
+	if err := ts.ConnectAll(connectCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
+		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
 	}
-	if ts.Len() > 0 {
-		la = la.WithMCPToolSet(ts)
-	}
+	// Always wire the ToolSet even if no clients connected at startup.
+	// Lazy reconnect inside Schemas() / Dispatch() will retry on first use.
+	la = la.WithMCPToolSet(ts)
 	return la
+}
+
+// buildMCPToolSet builds a connected mcp.ToolSet for agentName using the servers
+// from cfg, or returns (nil, nil) when no servers are configured. Errors are
+// logged as warnings; partial connectivity is acceptable — lazy reconnect retries on use.
+func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet) {
+	servers := cfg.EffectiveMCPServers(agentName)
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	clients := make([]*mcp.Client, 0, len(servers))
+	for _, s := range servers {
+		clients = append(clients, mcp.New(s))
+	}
+	ts := mcp.NewToolSet(clients)
+	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer connectCancel()
+	if err := ts.ConnectAll(connectCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
+		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
+	}
+	return servers, ts
 }
 
 // activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd
@@ -657,6 +697,11 @@ func escalationLocalHistoryFresh(sess *session.Session, prompt string) []local.M
 // settings.json and wires them into the agent so grants survive across turns.
 // In single-shot mode it also installs the interactive permission handler.
 func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
+	// Always trust the working directory so Claude's directory-trust check never
+	// fires as a silent "Stream closed" error before the permission handler is active.
+	if pc.cwd != "" {
+		agent = agent.WithExtraDir(pc.cwd)
+	}
 	if pc.cs == nil {
 		return agent
 	}
@@ -710,6 +755,7 @@ func handlePermissionDenials(ctx context.Context, sess *session.Session, agent *
 // permContext bundles the mutable permission state threaded through a CLI escalation turn.
 type permContext struct {
 	cs          *claudesettings.Store
+	cwd         string                 // working directory; always passed as --add-dir so trust checks don't silently fail
 	toolFutures map[string]chan string // tool name → buffered channel pre-filled by OnToolUse
 	// contextHash, when non-nil, holds the hash of the last --append-system-prompt-file
 	// sent to the escalation agent. runCLIEscalationAgent skips re-sending the file when
@@ -1500,4 +1546,74 @@ func runConfigOpen() error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
+}
+
+// ── otel command ──────────────────────────────────────────────────────────────
+
+var otelCmd = &cobra.Command{
+	Use:   "otel",
+	Short: "Manage observability settings",
+}
+
+func init() {
+	debugCmd := &cobra.Command{
+		Use:   "debug",
+		Short: "Enable or disable full debug logging",
+	}
+	debugCmd.AddCommand(&cobra.Command{
+		Use:   "enable",
+		Short: "Enable debug logging (log_context, debug_claude_code, debug_local, log_level=DEBUG)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := runOtelDebug(true, ""); err != nil {
+				return err
+			}
+			cliPath, _ := config.CLIDebugLogPath()
+			localPath, _ := config.LocalDebugLogPath()
+			otelDir, _ := config.OtelDir()
+			fmt.Printf("debug logging enabled\n  claude NDJSON → %s\n  local SSE     → %s\n  payloads      → %s/logs.jsonl\n", cliPath, localPath, otelDir)
+			return nil
+		},
+	})
+	debugCmd.AddCommand(&cobra.Command{
+		Use:   "disable",
+		Short: "Disable debug logging (restores log_level to pre-debug value; default INFO)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Read current config to preserve the pre-debug log level.
+			cur, _ := config.Load()
+			if err := runOtelDebug(false, cur.Otel.LogLevel); err != nil {
+				return err
+			}
+			fmt.Println("debug logging disabled")
+			return nil
+		},
+	})
+	otelCmd.AddCommand(debugCmd)
+}
+
+// runOtelDebug enables or disables the full debug logging bundle.
+// prevLevel is only used when enable=false: if the current persisted level is
+// "DEBUG" (case-insensitive) it is restored to prevLevel (falling back to "INFO"
+// when prevLevel is also "DEBUG" or empty), preserving any user-configured level.
+func runOtelDebug(enable bool, prevLevel string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	cfg.Otel.LogContext = enable
+	if enable {
+		cfg.Otel.LogLevel = "DEBUG"
+	} else if strings.EqualFold(cfg.Otel.LogLevel, "DEBUG") {
+		// Restore to the caller's pre-debug level; fall back to INFO.
+		if prevLevel != "" && !strings.EqualFold(prevLevel, "DEBUG") {
+			cfg.Otel.LogLevel = prevLevel
+		} else {
+			cfg.Otel.LogLevel = "INFO"
+		}
+	}
+	cfg.DebugCLILog = enable
+	cfg.DebugLocalLog = enable
+	if err := config.Save(cfg); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	return nil
 }

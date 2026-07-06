@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/obs"
 )
 
@@ -36,6 +38,7 @@ type Agent struct {
 	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
 	logContext        bool                         // when true, log system context and prompt at DEBUG level
+	mcpServers        []config.MCPServerConfig     // MCP servers to expose via --mcp-config
 }
 
 func New(bin string) *Agent {
@@ -145,6 +148,14 @@ func (a *Agent) WithExtraAllowedTool(tool string) *Agent {
 	return &c
 }
 
+// WithMCPServers returns a copy of the agent that will write a temp --mcp-config
+// file at run time exposing the given HTTP MCP servers to the Claude CLI subprocess.
+func (a *Agent) WithMCPServers(servers []config.MCPServerConfig) *Agent {
+	c := *a
+	c.mcpServers = servers
+	return &c
+}
+
 // WithExtraEnv returns a copy of the agent with the given KEY=VALUE pairs appended
 // to the subprocess environment. These override any inherited values for the same key.
 func (a *Agent) WithExtraEnv(pairs ...string) *Agent {
@@ -251,6 +262,47 @@ func writeTempContext(content string) (string, error) {
 	return f.Name(), nil
 }
 
+// readFileOrEmpty returns the contents of path, or an empty slice on error.
+func readFileOrEmpty(path string) []byte {
+	b, _ := os.ReadFile(path)
+	return b
+}
+
+// writeMCPConfigFile serialises servers into a temp JSON file in the format
+// Claude CLI expects for --mcp-config: {"mcpServers":{"name":{"type":"http","url":"...","headers":{...}}}}.
+// The caller must invoke the returned cleanup func when the subprocess exits.
+func writeMCPConfigFile(servers []config.MCPServerConfig) (string, func(), error) {
+	type httpEntry struct {
+		Type    string            `json:"type"`
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers,omitempty"`
+	}
+	entries := make(map[string]httpEntry, len(servers))
+	for _, s := range servers {
+		entry := httpEntry{Type: "http", URL: s.URL}
+		if strings.ToLower(s.Auth) == "bearer" && s.APIKey != "" {
+			entry.Headers = map[string]string{"Authorization": "Bearer " + s.APIKey}
+		}
+		entries[s.Name] = entry
+	}
+	payload := map[string]any{"mcpServers": entries}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("marshal mcp config: %w", err)
+	}
+	f, err := os.CreateTemp("", "milk-mcp-*.json")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create mcp config file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name()) //nolint:errcheck
+		return "", func() {}, fmt.Errorf("write mcp config file: %w", err)
+	}
+	f.Close()
+	return f.Name(), func() { os.Remove(f.Name()) }, nil //nolint:errcheck
+}
+
 // run builds the full arg list and delegates to runPipe.
 func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseResult, error) {
 	var prefix []string
@@ -264,6 +316,17 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 	}
 	for _, dir := range a.addDirs {
 		prefix = append(prefix, "--add-dir", dir)
+	}
+	if len(a.mcpServers) > 0 {
+		if mcpFile, mcpCleanup, err := writeMCPConfigFile(a.mcpServers); err == nil {
+			defer mcpCleanup()
+			prefix = append(prefix, "--mcp-config", mcpFile)
+			if a.logContext {
+				obs.LogPayload("claude-cli mcp-config", readFileOrEmpty(mcpFile))
+			}
+		} else {
+			obs.Info("claude.mcp_config.write_failed", "error", err.Error())
+		}
 	}
 	args = append(prefix, args...)
 	pipeArgs := append([]string{"--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages"}, args...)

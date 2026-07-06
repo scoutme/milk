@@ -35,6 +35,13 @@ func (a *Agent) WithDebugLog(w io.Writer) *Agent {
 	return &c
 }
 
+// WithLogContext enables logging of static/dynamic context and prompt at DEBUG level.
+func (a *Agent) WithLogContext(v bool) *Agent {
+	c := *a
+	c.runner = a.runner.WithLogContext(v)
+	return &c
+}
+
 // WithExtraEnv returns a copy of the agent with extra KEY=VALUE env pairs.
 func (a *Agent) WithExtraEnv(pairs ...string) *Agent {
 	c := *a

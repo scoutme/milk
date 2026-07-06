@@ -13,6 +13,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
+	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -205,14 +206,23 @@ func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt s
 // ── cliRunner ─────────────────────────────────────────────────────────────────
 
 type cliRunner struct {
-	agent    *claude.Agent
-	name     string
-	pc       permContext
-	newInput func() inputReader // produces an inputReader for permission prompts
+	agent      *claude.Agent
+	name       string
+	pc         permContext
+	newInput   func() inputReader // produces an inputReader for permission prompts
+	mcpServers []config.MCPServerConfig
 }
 
 func newCLIRunner(agent *claude.Agent, name string, pc permContext, newInput func() inputReader) *cliRunner {
 	return &cliRunner{agent: agent, name: name, pc: pc, newInput: newInput}
+}
+
+// withMCPServers returns a copy of the cliRunner that passes the given MCP servers
+// to the Claude CLI subprocess via --mcp-config.
+func (r *cliRunner) withMCPServers(servers []config.MCPServerConfig) *cliRunner {
+	c := *r
+	c.mcpServers = servers
+	return &c
 }
 
 func (r *cliRunner) Name() string { return r.name }
@@ -244,6 +254,9 @@ func (r *cliRunner) Execute(
 	}
 	if cbs.OnNeed != nil {
 		agent = agent.WithOnNeed(cbs.OnNeed, nonce)
+	}
+	if len(r.mcpServers) > 0 {
+		agent = agent.WithMCPServers(r.mcpServers)
 	}
 
 	staticCtx := escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
@@ -336,12 +349,24 @@ func (r *cliRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ 
 // ── subprocessRunner ─────────────────────────────────────────────────────────
 
 type subprocessRunner struct {
-	agent *subprocess.Agent
-	name  string
+	agent      *subprocess.Agent
+	name       string
+	mcpServers []config.MCPServerConfig
+	mcpToolSet *mcp.ToolSet
 }
 
 func newSubprocessRunner(agent *subprocess.Agent, name string) *subprocessRunner {
 	return &subprocessRunner{agent: agent, name: name}
+}
+
+// withMCPToolSet returns a copy of the subprocessRunner with an attached ToolSet.
+// The tool schemas are injected as a context block so the subprocess model knows
+// what MCP tools are available (option 3 — context injection).
+func (r *subprocessRunner) withMCPToolSet(servers []config.MCPServerConfig, ts *mcp.ToolSet) *subprocessRunner {
+	c := *r
+	c.mcpServers = servers
+	c.mcpToolSet = ts
+	return &c
 }
 
 func (r *subprocessRunner) Name() string { return r.name }
@@ -389,6 +414,14 @@ func (r *subprocessRunner) Execute(
 	dynamicCtx := escalation.BuildPrimaryDynamicContext(sess, ctxMode)
 	if role == RoleEscalation {
 		dynamicCtx = escalation.BuildDynamicContext(sess, ctxMode)
+	}
+	if r.mcpToolSet != nil {
+		mcpBlock := escalation.BuildMCPContextBlock(r.mcpServers, r.mcpToolSet.Schemas(ctx))
+		if staticCtx != "" {
+			staticCtx += mcpBlock
+		} else {
+			dynamicCtx += mcpBlock
+		}
 	}
 
 	var (

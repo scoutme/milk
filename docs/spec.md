@@ -368,6 +368,18 @@ The goal is shown in the memory panel and injected into escalation context so th
 
 The editor used by `/config open` is selected from the `config_editors` list (see Configuration). The same commands are available on the CLI as `milk config`, `milk config init`, `milk config open`.
 
+**`milk otel`** manages observability settings from the CLI (no TUI required):
+
+| Command | Action |
+|---|---|
+| `milk otel debug enable` | Enable full debug logging: `otel.log_context=true`, `otel.log_level=DEBUG`, `debug_claude_code=true`, `debug_local=true` |
+| `milk otel debug disable` | Disable debug logging: restores `otel.log_context=false`, `otel.log_level=INFO`, `debug_claude_code=false`, `debug_local=false` |
+
+`milk otel debug enable` prints the paths where each debug stream is written:
+- Claude subprocess NDJSON → `~/.milk/claude_debug.ndjson`
+- Local agent SSE → `~/.milk/local_debug.log`
+- Request payloads (log_context) → `~/.milk/otel/logs.jsonl`
+
 **/open** opens any file in the configured editor:
 
 ```
@@ -554,6 +566,18 @@ When `true`, every raw NDJSON line emitted by the Claude CLI subprocess is appen
 ### `debug_local` field
 
 When `true`, every raw SSE line received from the local agent's HTTP stream is appended to `~/.milk/local_debug.log` — including lines that are skipped, blank separator lines, and lines that fail to parse. The `.log` extension reflects the content: SSE frames include `data:` and `event:` prefixes, blank separators, and other protocol framing that is not pure JSON. Useful for diagnosing dropped tokens, unknown event types, or SSE parser mismatches. Default: `false`.
+
+### `otel.log_context` field
+
+When `true`, the full content of every request payload is logged via `obs.LogPayload` at DEBUG level to `~/.milk/otel/logs.jsonl`. This covers:
+
+- **claude-cli agent**: static context file, dynamic context file, prompt, and MCP config JSON (the `--mcp-config` temp file passed to the subprocess)
+- **local/Bedrock agent**: full serialised inference request body sent to the HTTP endpoint, plus classifier request bodies
+- **subprocess agents (aider, smolagents)**: static context, dynamic context, and prompt passed as temp files
+
+Requires `otel.log_level: "DEBUG"` to appear in the log output. Default: `false`.
+
+Use `milk otel debug enable` to turn on the full debug bundle in one command.
 
 **Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
 

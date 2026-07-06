@@ -1029,7 +1029,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 			m.agents.subprocessAgent = nil
 			m.agents.escalationAvail = true
 			m.agents.escalation = newCLIRunner(m.agents.cliAgent, name,
-				permContext{cs: m.st.cs}, func() inputReader { return newStdinInputReader() })
+				permContext{cs: m.st.cs, cwd: m.st.cwd}, func() inputReader { return newStdinInputReader() })
 		} else if escAC.URL != "" {
 			newEsc := local.NewFromConfig(escAC).AsEscalationTarget(escAC.Name)
 			if od, err := config.OtelDir(); err == nil {

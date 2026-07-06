@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 )
 
 const protocolVersion = "2025-03-26"
@@ -91,14 +92,16 @@ func (e *jsonrpcError) Error() string {
 // Client is a connected MCP client for a single server.
 // Call Connect before using; call Close when done.
 type Client struct {
-	cfg        config.MCPServerConfig
-	endpoint   string
-	sessionID  string
-	httpClient *http.Client
-	idSeq      atomic.Int64
-	mu         sync.Mutex
-	tools      []Tool
-	ready      bool
+	cfg            config.MCPServerConfig
+	endpoint       string
+	sessionID      string
+	httpClient     *http.Client
+	idSeq          atomic.Int64
+	mu             sync.Mutex
+	tools          []Tool
+	ready          bool
+	dead           bool          // set after a lazy-reconnect attempt fails; prevents per-turn retry storms
+	connectTimeout time.Duration // hint for startup callers; see ConnectTimeout()
 
 	// tokenOnce caches a dynamic Bearer token resolved from TokenCmd.
 	tokenOnce   sync.Once
@@ -113,6 +116,12 @@ func New(cfg config.MCPServerConfig) *Client {
 			timeout = d
 		}
 	}
+	connectTimeout := 5 * time.Second
+	if cfg.ConnectTimeout != "" {
+		if d, err := time.ParseDuration(cfg.ConnectTimeout); err == nil && d > 0 {
+			connectTimeout = d
+		}
+	}
 	transport := http.DefaultTransport
 	if cfg.TLSSkipVerify {
 		transport = insecureTLSTransport()
@@ -124,6 +133,7 @@ func New(cfg config.MCPServerConfig) *Client {
 			Timeout:   timeout,
 			Transport: transport,
 		},
+		connectTimeout: connectTimeout,
 	}
 }
 
@@ -131,12 +141,17 @@ func New(cfg config.MCPServerConfig) *Client {
 // tool list. It is safe to call from multiple goroutines; only the first call
 // takes effect. Returns an error if the server is unreachable or rejects the
 // initialize request.
-func (c *Client) Connect(ctx context.Context) error {
+func (c *Client) Connect(ctx context.Context) (retErr error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ready {
 		return nil
 	}
+	defer func() {
+		if retErr != nil {
+			obs.Info("mcp.connect.failed", "server", c.cfg.Name, "error", retErr.Error())
+		}
+	}()
 
 	// Resolve dynamic token upfront so it's available for all requests.
 	if strings.ToLower(c.cfg.Auth) == "token_cmd" && c.cfg.TokenCmd != "" {
@@ -180,6 +195,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	c.tools = tools
 	c.ready = true
+	obs.Info("mcp.connect", "server", c.cfg.Name, "tools", len(c.tools))
 	return nil
 }
 
@@ -192,7 +208,17 @@ func (c *Client) Tools() []Tool {
 }
 
 // RefreshTools re-issues tools/list and updates the cached list.
+// If the client did not connect successfully at startup, it performs a lazy
+// reconnect using ctx before refreshing.
 func (c *Client) RefreshTools(ctx context.Context) error {
+	c.mu.Lock()
+	ready := c.ready
+	c.mu.Unlock()
+	if !ready {
+		if err := c.Connect(ctx); err != nil {
+			return err
+		}
+	}
 	tools, err := c.listTools(ctx)
 	if err != nil {
 		return err
@@ -204,7 +230,28 @@ func (c *Client) RefreshTools(ctx context.Context) error {
 }
 
 // Call invokes a tool by name with the given arguments JSON and returns the result.
+// If the client did not connect successfully at startup (e.g. server was unreachable),
+// it performs a single lazy reconnect (bounded by connectTimeout) before proceeding;
+// on failure the client is marked dead and subsequent calls return immediately.
 func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResult, error) {
+	c.mu.Lock()
+	ready, dead := c.ready, c.dead
+	c.mu.Unlock()
+	if dead {
+		return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: "MCP server " + c.cfg.Name + " is unavailable"}}}, nil
+	}
+	if !ready {
+		obs.Info("mcp.call.reconnect", "server", c.cfg.Name, "tool", toolName)
+		reconnCtx, cancel := context.WithTimeout(ctx, c.connectTimeout)
+		defer cancel()
+		if err := c.Connect(reconnCtx); err != nil {
+			c.mu.Lock()
+			c.dead = true
+			c.mu.Unlock()
+			return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: err.Error()}}}, nil
+		}
+	}
+
 	var args map[string]any
 	if argsJSON != "" {
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
@@ -217,6 +264,7 @@ func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResul
 		"arguments": args,
 	})
 	if err != nil {
+		obs.Info("mcp.call.failed", "server", c.cfg.Name, "tool", toolName, "error", err.Error())
 		return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: err.Error()}}}, nil
 	}
 
@@ -224,6 +272,7 @@ func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResul
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return CallResult{}, fmt.Errorf("mcp %q tools/call: unexpected response: %w", c.cfg.Name, err)
 	}
+	obs.Info("mcp.call", "server", c.cfg.Name, "tool", toolName, "is_error", result.IsError)
 	return result, nil
 }
 
@@ -277,7 +326,7 @@ func (c *Client) roundtrip(ctx context.Context, method string, params any) (json
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	if c.sessionID != "" {
 		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
@@ -301,12 +350,14 @@ func (c *Client) roundtrip(ctx context.Context, method string, params any) (json
 		}
 	}
 
-	ct := resp.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/event-stream") {
-		return c.readSSEResult(resp.Body, id)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
 	}
-	// application/json — read directly.
-	return c.readJSONResult(resp.Body, id)
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		raw = extractSSEData(raw)
+	}
+	return c.readJSONResult(bytes.NewReader(raw), id)
 }
 
 // notify sends a JSON-RPC notification (no ID, no response expected).
@@ -325,7 +376,7 @@ func (c *Client) notify(ctx context.Context, method string, params any) error {
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	if c.sessionID != "" {
 		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
@@ -417,7 +468,31 @@ func (c *Client) resolveToken() error {
 // Schemas converts the client's tool list into OpenAI function-call schema
 // entries that can be appended to the local agent's tools array.
 // Each tool name is prefixed with "mcp_<serverName>_" to avoid collisions.
-func (c *Client) Schemas() []map[string]any {
+// If the client did not connect successfully at startup (e.g. connect timeout),
+// it performs a single lazy reconnect (bounded by connectTimeout) before returning;
+// on failure the client is marked dead and nil is returned for all future calls.
+func (c *Client) Schemas(ctx context.Context) []map[string]any {
+	c.mu.Lock()
+	ready, dead := c.ready, c.dead
+	c.mu.Unlock()
+	if dead {
+		return nil
+	}
+	if !ready {
+		reconnCtx, cancel := context.WithTimeout(ctx, c.connectTimeout)
+		defer cancel()
+		if err := c.Connect(reconnCtx); err != nil {
+			obs.Info("mcp.reconnect.failed", "server", c.cfg.Name, "error", err.Error())
+			c.mu.Lock()
+			c.dead = true
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Lock()
+		obs.Info("mcp.reconnect", "server", c.cfg.Name, "tools", len(c.tools))
+		c.mu.Unlock()
+	}
+
 	c.mu.Lock()
 	tools := c.tools
 	c.mu.Unlock()
@@ -458,6 +533,11 @@ func (c *Client) OriginalToolName(name string) (string, bool) {
 // ServerName returns the config name of this server.
 func (c *Client) ServerName() string { return c.cfg.Name }
 
+// ConnectTimeout returns the configured connect-handshake timeout.
+// Startup callers (e.g. attachMCPToolSet) use this to derive a per-client
+// context deadline rather than applying a single global timeout.
+func (c *Client) ConnectTimeout() time.Duration { return c.connectTimeout }
+
 // Close terminates the session. For HTTP transport this sends a DELETE to the
 // MCP endpoint with the session ID header; failure is silently ignored.
 func (c *Client) Close(ctx context.Context) {
@@ -471,6 +551,7 @@ func (c *Client) Close(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Session-Id", sid)
 	c.applyAuth(req)
 	resp, err := c.httpClient.Do(req)
@@ -478,6 +559,19 @@ func (c *Client) Close(ctx context.Context) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// extractSSEData scans a raw SSE body and returns the payload of the first
+// "data:" line. If no such line is found the original bytes are returned so
+// the caller can still attempt to unmarshal a plain JSON response.
+func extractSSEData(body []byte) []byte {
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			return bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		}
+	}
+	return body // fallback: return as-is
 }
 
 // mcpToolPrefix returns the OpenAI-safe prefix for a given MCP server name.

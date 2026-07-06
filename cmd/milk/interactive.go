@@ -160,6 +160,8 @@ const interactiveHelp = `
   /otel on               enable OTel for this session
   /otel off              disable OTel for this session
   /otel trim             archive current OTel files and start fresh
+  /otel debug enable     enable full debug logging (log_context, debug_*, log_level=DEBUG)
+  /otel debug disable    disable debug logging (restores defaults)
 
 ── MCP Servers ───────────────────────────────────────────────────────────
   /mcp                   list configured MCP servers and their status
@@ -470,6 +472,31 @@ func execOtel(sub string, st *interactiveState) string {
 	case "on":
 		st.cfg.Otel.Enabled = true
 		return milkTag() + " OTel re-enabled for this session"
+	case "debug enable":
+		if err := runOtelDebug(true, ""); err != nil {
+			return fmt.Sprintf("%s error: %v", milkTag(), err)
+		}
+		st.cfg.Otel.LogContext = true
+		st.cfg.Otel.LogLevel = "DEBUG"
+		st.cfg.DebugCLILog = true
+		st.cfg.DebugLocalLog = true
+		cliPath, _ := config.CLIDebugLogPath()
+		localPath, _ := config.LocalDebugLogPath()
+		return milkTag() + " debug logging enabled\n" +
+			"  claude NDJSON → " + cliPath + "\n" +
+			"  local SSE     → " + localPath + "\n" +
+			"  payloads      → " + otelDir + "/logs.jsonl"
+	case "debug disable":
+		if err := runOtelDebug(false, st.cfg.Otel.LogLevel); err != nil {
+			return fmt.Sprintf("%s error: %v", milkTag(), err)
+		}
+		st.cfg.Otel.LogContext = false
+		if strings.EqualFold(st.cfg.Otel.LogLevel, "DEBUG") {
+			st.cfg.Otel.LogLevel = "INFO"
+		}
+		st.cfg.DebugCLILog = false
+		st.cfg.DebugLocalLog = false
+		return milkTag() + " debug logging disabled"
 	default:
 		return milkTag() + " " + obs.FormatStats(otelDir)
 	}

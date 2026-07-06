@@ -45,7 +45,7 @@ func TestLiveUKBConnect(t *testing.T) {
 		t.Logf("  - %s: %s", tool.Name, desc)
 	}
 
-	schemas := c.Schemas()
+	schemas := c.Schemas(ctx)
 	if len(schemas) == 0 {
 		t.Fatal("expected at least one schema entry")
 	}
@@ -81,7 +81,7 @@ func TestLiveUKBToolSet(t *testing.T) {
 	}
 	defer ts.Close(context.Background())
 
-	schemas := ts.Schemas()
+	schemas := ts.Schemas(ctx)
 	t.Logf("ToolSet exposed %d tool schemas", len(schemas))
 	if len(schemas) == 0 {
 		t.Fatal("expected schemas from toolset")

@@ -252,6 +252,10 @@ type MCPServerConfig struct {
 	// Timeout is the per-request timeout (e.g. "30s"). Default: 30s.
 	Timeout string `json:"timeout,omitempty"`
 
+	// ConnectTimeout is the timeout for the initial MCP handshake (e.g. "5s"). Default: 5s.
+	// If the server is unreachable at startup, the client will retry lazily on the first tool call.
+	ConnectTimeout string `json:"connect_timeout,omitempty"`
+
 	// Enabled controls whether this server is active. Default: true.
 	// Set to false to temporarily disable without removing the entry.
 	Enabled *bool `json:"enabled,omitempty"`

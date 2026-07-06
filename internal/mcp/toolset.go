@@ -40,10 +40,11 @@ func (ts *ToolSet) ConnectAll(ctx context.Context) error {
 
 // Schemas returns OpenAI function-call schema entries for all tools across all
 // connected clients. Tool names are prefixed to avoid cross-server collisions.
-func (ts *ToolSet) Schemas() []map[string]any {
+// Clients that were not ready at startup perform a lazy reconnect via ctx.
+func (ts *ToolSet) Schemas(ctx context.Context) []map[string]any {
 	var result []map[string]any
 	for _, c := range ts.clients {
-		result = append(result, c.Schemas()...)
+		result = append(result, c.Schemas(ctx)...)
 	}
 	return result
 }

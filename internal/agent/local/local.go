@@ -155,7 +155,7 @@ type Agent struct {
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
 // interface to avoid an import cycle between internal/agent/local and internal/mcp.
 type mcpToolSet interface {
-	Schemas() []map[string]any
+	Schemas(ctx context.Context) []map[string]any
 	Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool)
 }
 
@@ -638,7 +638,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
 	if a.mcpToolSet != nil {
-		tools = append(tools, a.mcpToolSet.Schemas()...)
+		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
 	}
 
 	if a.tagNonce != "" {
