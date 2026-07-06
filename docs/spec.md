@@ -301,7 +301,7 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/config`, `/open`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/config`, `/open`, `/update`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
@@ -388,6 +388,14 @@ The editor used by `/config open` is selected from the `config_editors` list (se
 ```
 
 The same editor resolution as `/config open` is used. The agent can also open files via the `open_file` tool when asked to do so.
+
+**/update** checks for new milk releases on GitHub, compares the running version against the latest published release, and prompts the user to download and install:
+
+```
+/update
+```
+
+If a newer release is available, milk shows the current and latest versions and asks for confirmation before downloading the appropriate binary for the current platform. If already up to date, a confirmation message is shown and no download occurs.
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
@@ -528,6 +536,53 @@ Example:
 ```
 
 Use `/agent tool` subcommands to manage tool-agents at runtime.
+
+### `mcp_servers` field
+
+Global list of MCP (Model Context Protocol) servers that agents can connect to. Each entry is an `MCPServerConfig` object:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Unique identifier referenced from `AgentConfig.mcp_servers` |
+| `url` | string | MCP endpoint (e.g. `"http://localhost:3000/mcp"`). For Streamable HTTP transport this is a single POST+GET endpoint |
+| `transport` | string | Wire protocol: `"http"` (default) uses Streamable HTTP with SSE fallback for older servers; `"stdio"` reserved for future use |
+| `enabled` | bool | Whether the server is active (default `true` when omitted) |
+
+Reference servers from an agent entry via `"mcp_servers": ["my-mcp"]` in the `agents` list.
+
+#### `mcp_connect_timeout_secs`
+
+Per-server startup connect timeout in seconds. Default: `5`.
+
+```json
+"mcp_connect_timeout_secs": 10
+```
+
+If a server does not respond within the timeout at startup, milk logs a warning and continues. The server's tools are still registered; the client reconnects lazily on the first tool call that targets the server.
+
+#### Lazy reconnect
+
+When a startup connection times out or fails, milk defers the live connection rather than aborting the session. On the first tool call targeting the server, milk retries the connection automatically. If reconnect succeeds the call proceeds normally; if it fails the tool returns an error result to the agent. Each lazy reconnect attempt is recorded as an `mcp.lazy_reconnect` span in `~/.milk/otel/traces.jsonl`.
+
+#### `--mcp-config` generation (`claude-cli` and `aider-cli` agents)
+
+For `claude-cli` and `aider-cli` agents, milk translates the applicable `mcp_servers` entries into a JSON config file and passes it via the `--mcp-config` flag. milk acts as an MCP proxy: each server entry is re-exported as a stdio-transport entry pointing back to milk's internal MCP proxy process, so Claude Code and aider see MCP tools natively without requiring direct network access to the upstream server.
+
+#### Context injection (`subprocess` agents)
+
+For `subprocess` agents (smolagents and compatible adapters), MCP tool schemas are serialised and injected into the agent's context files alongside the built-in tool descriptions. The subprocess agent sees MCP tools as additional callable functions in its context.
+
+#### OTel observability
+
+The MCP client emits spans and counters to `~/.milk/otel/`:
+
+| Signal | Type | Description |
+|---|---|---|
+| `mcp.connect` | span | One span per server per connect attempt; `status` attribute is `ok` or `error` |
+| `mcp.tool_call` | span | One span per tool invocation; includes `server`, `tool`, and `status` attributes |
+| `mcp.lazy_reconnect` | span | Emitted when a deferred reconnect is triggered on first tool call |
+| `mcp.connect_failures` | counter | Incremented on each failed connect or lazy reconnect failure |
+| `mcp.tool_calls` | counter | Total tool calls dispatched through the MCP client |
 
 ### `colorization` field
 
