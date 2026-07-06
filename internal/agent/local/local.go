@@ -144,9 +144,19 @@ type Agent struct {
 	toolAgentEntries []config.AgentToolEntry
 	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
 	toolAgentDispatcher ToolAgentDispatcher
+	// mcpToolSet holds connected MCP servers whose tools are exposed to this agent.
+	// Nil when no MCP servers are configured for this agent.
+	mcpToolSet mcpToolSet
 	// termWidth is the current terminal width used to truncate tool hint lines.
 	// 0 means no truncation.
 	termWidth int
+}
+
+// mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
+// interface to avoid an import cycle between internal/agent/local and internal/mcp.
+type mcpToolSet interface {
+	Schemas(ctx context.Context) []map[string]any
+	Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool)
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -167,6 +177,16 @@ func (a *Agent) AsEscalationTarget(name string) *Agent {
 func (a *Agent) WithToolAgentEntries(entries []config.AgentToolEntry) *Agent {
 	copy := *a
 	copy.toolAgentEntries = entries
+	return &copy
+}
+
+// WithMCPToolSet returns a shallow copy of the agent configured with the given
+// MCP tool set. The tool set's Schemas() are appended to the agent's tool list
+// and its Dispatch() is called for any mcp_* tool name before falling through
+// to built-in tools.
+func (a *Agent) WithMCPToolSet(ts mcpToolSet) *Agent {
+	copy := *a
+	copy.mcpToolSet = ts
 	return &copy
 }
 
@@ -617,6 +637,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
+	if a.mcpToolSet != nil {
+		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
+	}
 
 	if a.tagNonce != "" {
 		if a.onNeed != nil {
@@ -840,6 +863,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			}
 			continue
 		}
+		// MCP tools (mcp_<server>_<tool> prefix) are dispatched before built-ins.
+		if a.mcpToolSet != nil {
+			if mcpResult, ok := a.mcpToolSet.Dispatch(ctx, tc.Function.Name, tc.Function.Arguments); ok {
+				obs.Inc(ctx, inferenceScope, "milk.tools.calls",
+					attribute.String("name", tc.Function.Name),
+					attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+				)
+				msgs = append(msgs, Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID})
+				continue
+			}
+		}
+
 		toolStart := time.Now()
 		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
 		toolElapsed := time.Since(toolStart)

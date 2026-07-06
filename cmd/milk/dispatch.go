@@ -305,12 +305,14 @@ func buildFallbackCLIRunner(cfg config.Config) *cliRunner {
 	agent := newCLIAgent(ac)
 	agent = applyAWSCreds(cfg, agent)
 	var cs *claudesettings.Store
-	if cwd, err := os.Getwd(); err == nil {
+	var cwd string
+	if d, err := os.Getwd(); err == nil {
+		cwd = d
 		cs, _ = claudesettings.Open(cwd)
 	}
 	name := ac.Name
 	if name == "" {
 		name = "claude"
 	}
-	return newCLIRunner(agent, name, permContext{cs: cs}, func() inputReader { return newStdinInputReader() })
+	return newCLIRunner(agent, name, permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
 }

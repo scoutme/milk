@@ -13,14 +13,16 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // Runner executes a subprocess agent binary and streams its output.
 type Runner struct {
-	builder  ArgBuilder
-	parser   StreamParser
-	extraEnv []string  // KEY=VALUE pairs injected into subprocess env
-	debugLog io.Writer // when non-nil, every raw stdout line is written here
+	builder    ArgBuilder
+	parser     StreamParser
+	extraEnv   []string  // KEY=VALUE pairs injected into subprocess env
+	debugLog   io.Writer // when non-nil, every raw stdout line is written here
+	logContext bool      // when true, log static/dynamic context and prompt via obs.LogPayload
 }
 
 // New creates a Runner for the given ArgBuilder and StreamParser.
@@ -42,6 +44,13 @@ func (r *Runner) WithDebugLog(w io.Writer) *Runner {
 	return &c
 }
 
+// WithLogContext enables logging of static/dynamic context and prompt at DEBUG level.
+func (r *Runner) WithLogContext(v bool) *Runner {
+	c := *r
+	c.logContext = v
+	return &c
+}
+
 // Ping delegates to the ArgBuilder's Ping method.
 func (r *Runner) Ping() error {
 	return r.builder.Ping()
@@ -52,6 +61,11 @@ func (r *Runner) Ping() error {
 // to the ArgBuilder as context file paths. Returns the session ID used (emitted
 // by the subprocess when it can, otherwise the generated UUID).
 func (r *Runner) RunFirst(ctx context.Context, staticContext, dynamicContext, prompt string, opts ParseOpts, out io.Writer) (string, ParseResult, error) {
+	if r.logContext {
+		obs.LogPayload(r.builder.Bin()+" [first] static-context", []byte(staticContext))
+		obs.LogPayload(r.builder.Bin()+" [first] dynamic-context", []byte(dynamicContext))
+		obs.LogPayload(r.builder.Bin()+" [first] prompt", []byte(prompt))
+	}
 	sessionID := uuid.New().String()
 	contextFiles, cleanup := writeContextFiles(staticContext, dynamicContext)
 	defer cleanup()
@@ -67,6 +81,11 @@ func (r *Runner) RunFirst(ctx context.Context, staticContext, dynamicContext, pr
 
 // RunResume continues an existing session identified by sessionID.
 func (r *Runner) RunResume(ctx context.Context, sessionID, staticContext, dynamicContext, prompt string, opts ParseOpts, out io.Writer) (ParseResult, error) {
+	if r.logContext {
+		obs.LogPayload(r.builder.Bin()+" [resume] static-context", []byte(staticContext))
+		obs.LogPayload(r.builder.Bin()+" [resume] dynamic-context", []byte(dynamicContext))
+		obs.LogPayload(r.builder.Bin()+" [resume] prompt", []byte(prompt))
+	}
 	contextFiles, cleanup := writeContextFiles(staticContext, dynamicContext)
 	defer cleanup()
 

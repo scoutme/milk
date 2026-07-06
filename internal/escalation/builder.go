@@ -1,8 +1,10 @@
 package escalation
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -245,4 +247,34 @@ func MemoryInstruction(nonce, primaryName, escalationName string) string {
 		"for project- or session-scoped facts — those writes bypass milk's memory pipeline and are never " +
 		"visible in the milk memory panel or injected into future sessions. " +
 		"Reserve file-based memory only for facts that must persist across all sessions regardless of host.\n"
+}
+
+// BuildMCPContextBlock returns a context block that describes the MCP tools
+// available to a subprocess agent that cannot connect to MCP servers directly.
+// The block lists each server name, its URL, and its tools with descriptions
+// and parameter schemas so the model understands what is available.
+// Returns "" when servers is empty or no server has tools.
+func BuildMCPContextBlock(servers []config.MCPServerConfig, toolSchemas []map[string]any) string {
+	if len(toolSchemas) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[MCP tools available via milk]\n")
+	b.WriteString("The following tools are provided by MCP servers connected to milk. ")
+	b.WriteString("You cannot call them directly — describe the tool call you want and milk will execute it for you.\n\n")
+	for _, s := range servers {
+		b.WriteString(fmt.Sprintf("Server: %s (%s)\n", s.Name, s.URL))
+	}
+	b.WriteString("\nAvailable tools:\n")
+	for _, schema := range toolSchemas {
+		fn, _ := schema["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		desc, _ := fn["description"].(string)
+		b.WriteString(fmt.Sprintf("  %s — %s\n", name, desc))
+	}
+	b.WriteString("\n")
+	return b.String()
 }

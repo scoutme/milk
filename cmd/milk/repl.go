@@ -979,6 +979,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
 					ist.sess.AddTokens(model, role, prompt, completion)
 				})
+				newAgent = attachMCPToolSet(m.ctx, m.st.cfg, activeLocalAgentConfig(m.st.cfg).Name, newAgent)
 				m.agents.local = newAgent
 				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 				m.agents.primary = newLocalRunner(newAgent, activeLocalAgentConfig(m.st.cfg).Name)
@@ -1436,9 +1437,13 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		// Only rebuild escalation runner as cliRunner when cliAgent IS the escalation target.
 		if agents.escalationLocal == nil && agents.subprocessAgent == nil {
 			escName := agents.escalation.Name()
-			tuiAgents.escalation = newCLIRunner(tuiCliAgent, escName,
-				permContext{cs: st.cs, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash},
+			cr := newCLIRunner(tuiCliAgent, escName,
+				permContext{cs: st.cs, cwd: st.cwd, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash},
 				func() inputReader { return ir0 })
+			if servers := st.cfg.EffectiveMCPServers(escName); len(servers) > 0 {
+				cr = cr.withMCPServers(servers)
+			}
+			tuiAgents.escalation = cr
 		}
 	}
 
@@ -1655,6 +1660,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		case tuiPrimaryAC.IsAiderCLI():
 			tuiSubprocessPrimaryAgent = aider.New(tuiPrimaryAC)
 		}
+		if tuiSubprocessPrimaryAgent != nil {
+			tuiSubprocessPrimaryAgent = tuiSubprocessPrimaryAgent.WithLogContext(cfg.Otel.LogContext)
+		}
 	} else {
 		// Build the local agent without blocking on credential refresh. If
 		// aws_auth_refresh is enabled, the agent starts with no/stale credentials
@@ -1671,6 +1679,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			defer dbg.Close()
 			localAgent = localAgent.WithDebugLog(dbg)
 		}
+		localAgent = attachMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name, localAgent)
 	}
 
 	// Build the escalation agent: local provider, subprocess (subprocess, aider-cli), or claude-cli (default).
@@ -1691,6 +1700,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tuiSubprocessAgent = aider.New(tuiEscAC)
 	default:
 	}
+	if tuiSubprocessAgent != nil {
+		tuiSubprocessAgent = tuiSubprocessAgent.WithLogContext(cfg.Otel.LogContext)
+	}
 	if !tuiEscAC.IsExternalProcess() {
 		escAC := applyFreshAWSCreds(cfg, tuiEscAC)
 		if escAC.URL != "" {
@@ -1699,7 +1711,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 				escalationLocalAgent.WithOtelDir(od)
 			}
 			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
-			escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			escalationLocalAgent = escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
 			}
@@ -1790,14 +1802,24 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	var primaryRunner TurnRunner
 	switch {
 	case tuiSubprocessPrimaryAgent != nil:
-		primaryRunner = newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
+		r := newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
+		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+			r = r.withMCPToolSet(servers, ts)
+			defer ts.Close(context.Background())
+		}
+		primaryRunner = r
 	case localAgent != nil:
 		primaryRunner = newLocalRunner(localAgent, tuiPrimaryAC.Name)
 	}
 	var escalationRunner TurnRunner
 	switch {
 	case tuiSubprocessAgent != nil:
-		escalationRunner = newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
+		r := newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
+		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+			r = r.withMCPToolSet(servers, ts)
+			defer ts.Close(context.Background())
+		}
+		escalationRunner = r
 	case escalationLocalAgent != nil:
 		escalationRunner = newLocalRunner(escalationLocalAgent, tuiEscAC.Name)
 	default:
@@ -1806,8 +1828,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if escName == "" {
 			escName = "claude"
 		}
-		escalationRunner = newCLIRunner(cliAgent, escName,
-			permContext{cs: cs}, func() inputReader { return newStdinInputReader() })
+		cr := newCLIRunner(cliAgent, escName,
+			permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
+		if servers := cfg.EffectiveMCPServers(cliAC.Name); len(servers) > 0 {
+			cr = cr.withMCPServers(servers)
+		}
+		escalationRunner = cr
 	}
 
 	agents := dispatchAgents{

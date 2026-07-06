@@ -58,14 +58,35 @@ func colorizeTranscriptWrapped(text string, mode ColorizeMode) string {
 }
 
 // splitTurns splits text on "\n\n" boundaries that are NOT inside a fenced code
-// block. This prevents splitting a code block whose body contains blank lines,
-// while still isolating turns from each other for independent colorization.
+// block and NOT inside an open ANSI escape sequence. This prevents splitting a
+// code block whose body contains blank lines, and prevents splitting a dim-wrapped
+// thinking block mid-paragraph (which would cause the second paragraph to be
+// colorized without the dim carry-over context).
 func splitTurns(text string) []string {
 	var segments []string
 	inFence := false
+	openANSI := "" // last unclosed ANSI code seen so far
 	start := 0
 	i := 0
 	for i < len(text) {
+		// Track open ANSI sequences so we know when we're inside a dim block.
+		if text[i] == 0x1B && i+1 < len(text) && text[i+1] == '[' {
+			j := i + 2
+			for j < len(text) && text[j] != 'm' {
+				j++
+			}
+			if j < len(text) {
+				code := text[i : j+1]
+				if code == ansiReset {
+					openANSI = ""
+				} else {
+					openANSI = code
+				}
+				i = j + 1
+				continue
+			}
+		}
+
 		if !inFence && i+3 <= len(text) && text[i:i+3] == "```" && (i == 0 || text[i-1] == '\n') {
 			inFence = true
 			i += 3
@@ -83,7 +104,7 @@ func splitTurns(text string) []string {
 				continue
 			}
 		}
-		if !inFence && i+2 <= len(text) && text[i:i+2] == "\n\n" {
+		if !inFence && openANSI == "" && i+2 <= len(text) && text[i:i+2] == "\n\n" {
 			segments = append(segments, text[start:i+2])
 			i += 2
 			start = i
@@ -416,22 +437,30 @@ func applyInlineMarkdown(text string) string {
 			// No separator — fall through and style each line normally.
 		}
 
-		line := originalLine
-		if activeANSI != "" {
-			line = activeANSI + line
-		}
-		styled := styleLine(line)
-
 		// Determine the effective ANSI context for this line: either the
 		// carried-over context from the previous line, or the line's own
 		// leading escape (e.g. a diff line that opens with its own color).
 		// This ensures ansiReset injected by inline spans (e.g. backtick
 		// matches) is followed by a re-injection of the active color.
+		// Also used to suppress inline span styling inside dim-wrapped thinking
+		// blocks: \033[1m (bold) overrides \033[2m (dim) in terminals, so
+		// **bold** inside thinking text would render bright instead of dim.
 		lineContext := activeANSI
 		localContext := false // true when lineContext came from leadingANSI, not carry-over
 		if lineContext == "" {
 			lineContext = leadingANSI(originalLine)
 			localContext = lineContext != ""
+		}
+
+		line := originalLine
+		if activeANSI != "" {
+			line = activeANSI + line
+		}
+		var styled string
+		if lineContext == ansiDim {
+			styled = line
+		} else {
+			styled = styleLine(line)
 		}
 		if lineContext != "" {
 			styled = injectANSIAfterResets(styled, lineContext)
