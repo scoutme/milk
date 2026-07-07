@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -203,6 +204,27 @@ func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt s
 	return "", nil
 }
 
+// switchWriter is an io.Writer whose target can be swapped atomically mid-stream.
+// It is used to redirect Claude's output into a side buffer when AskUserQuestion
+// is announced, so the question text can be suppressed if milk handles it itself.
+type switchWriter struct {
+	mu     sync.Mutex
+	target io.Writer
+}
+
+func (w *switchWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	t := w.target
+	w.mu.Unlock()
+	return t.Write(p)
+}
+
+func (w *switchWriter) redirectTo(t io.Writer) {
+	w.mu.Lock()
+	w.target = t
+	w.mu.Unlock()
+}
+
 // ── cliRunner ─────────────────────────────────────────────────────────────────
 
 type cliRunner struct {
@@ -273,34 +295,45 @@ func (r *cliRunner) Execute(
 		}
 	}
 
-	// Buffer the first run's streaming output so we can discard it when
-	// AskUserQuestion is in the denials — the question text and Claude's
-	// "stream closed" fallback should not appear in the transcript. We only
-	// flush the buffer to the real out when there are no AskUserQuestion denials.
-	firstBuf := &bytes.Buffer{}
+	// Stream live to the TUI; redirect into askBuf only if AskUserQuestion is
+	// announced mid-stream — that text must be suppressed so milk's own selection
+	// prompt is the only UI shown to the user.
+	var askBuf bytes.Buffer
+	sw := &switchWriter{target: out}
+	prevOnToolUse := agent.OnToolUseCallback()
+	agent = agent.WithOnToolUse(func(name string) {
+		if name == "AskUserQuestion" {
+			sw.redirectTo(&askBuf)
+		}
+		if prevOnToolUse != nil {
+			prevOnToolUse(name)
+		}
+	})
+
 	var (
 		res    claude.ParseResult
 		runErr error
 	)
 	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
-		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, firstBuf)
+		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, sw)
 		if runErr != nil && claude.IsInvalidSession(runErr) {
 			// Stale session ID — Claude's store no longer has this session (evicted,
-			// CLI upgrade, machine restart, etc.). Discard the buffer, notify the
+			// CLI upgrade, machine restart, etc.). Restore live output, notify the
 			// user inline, and fall back to a fresh RunFirst with full context.
-			firstBuf.Reset()
+			askBuf.Reset()
+			sw.redirectTo(out)
 			fmt.Fprintf(out, "\n\033[2m[Claude session refreshed — previous session no longer available]\033[0m\n\n")
 			staticCtx = escalation.BuildStaticContext(nonce, percepts, escalation.ContextModeFirst, injectInstructions, primaryName, escalationName)
 			dynamicCtx = escalation.BuildDynamicContext(sess, escalation.ContextModeFirst)
 			var newID string
-			newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, firstBuf)
+			newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, sw)
 			if runErr == nil {
 				sessionID = newID
 			}
 		}
 	} else {
 		var newID string
-		newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, firstBuf)
+		newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, sw)
 		if runErr == nil {
 			sessionID = newID
 		}
@@ -316,8 +349,10 @@ func (r *cliRunner) Execute(
 			break
 		}
 	}
-	if !hasAskDenial {
-		io.Copy(out, firstBuf) //nolint:errcheck
+	// If AskUserQuestion was not actually denied, flush whatever landed in askBuf
+	// (normally empty; non-empty only if the tool was announced but not denied).
+	if !hasAskDenial && askBuf.Len() > 0 {
+		io.Copy(out, &askBuf) //nolint:errcheck
 	}
 
 	// Permission-denial retry (Claude CLI only). handlePermissionDenials reads

@@ -87,6 +87,11 @@ type AgentConfig struct {
 	// ChatPath overrides the inference endpoint path (default "/v1/chat/completions").
 	ChatPath string `json:"chat_path,omitempty"`
 
+	// APIFormat selects the wire protocol format for HTTP agents.
+	// "" or "chat_completions" — OpenAI Chat Completions API (default)
+	// "responses"             — OpenAI Responses API (/v1/responses)
+	APIFormat string `json:"api_format,omitempty"`
+
 	// TLSSkipVerify disables TLS certificate verification. Use only for dev/self-signed certs.
 	TLSSkipVerify bool `json:"tls_skip_verify,omitempty"`
 	// TLSCACert is a path to a PEM-encoded CA cert for private/self-signed endpoints.

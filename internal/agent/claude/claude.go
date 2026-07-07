@@ -89,6 +89,9 @@ func (a *Agent) WithOnToolUse(fn func(string)) *Agent {
 	return &c
 }
 
+// OnToolUseCallback returns the current onToolUse callback, or nil if not set.
+func (a *Agent) OnToolUseCallback() func(string) { return a.onToolUse }
+
 // WithOnToolUseReady returns a copy of the agent that calls fn when a tool
 // call block is complete (content_block_stop) and the full input is available.
 func (a *Agent) WithOnToolUseReady(fn func(string, map[string]any)) *Agent {

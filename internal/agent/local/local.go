@@ -115,6 +115,7 @@ type Agent struct {
 	otelDir          string
 	skipHealthCheck  bool   // true for remote providers that have no /health endpoint (e.g. Bedrock)
 	useBedrockNative bool   // true when provider = "bedrock"; uses Converse API instead of /v1/chat/completions
+	useResponsesAPI  bool   // true when api_format = "responses"; uses OpenAI Responses API instead of Chat Completions
 	skipRepeatCheck  bool   // true when acting as the escalation target: the repeated-prompt check must not fire
 	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
@@ -375,12 +376,19 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		transport = &headerTransport{inner: transport, headers: headers}
 	}
 
+	useResponses := strings.ToLower(strings.TrimSpace(ac.APIFormat)) == "responses"
+	chatPath := ac.ChatPath
+	if useResponses && chatPath == "" {
+		chatPath = "/v1/responses"
+	}
 	return &Agent{
-		baseURL:  strings.TrimRight(ac.URL, "/"),
-		model:    ac.Model,
-		chatPath: ac.ChatPath,
-		tokenCmd: tct,
-		client:   &http.Client{Transport: transport},
+		baseURL:         strings.TrimRight(ac.URL, "/"),
+		model:           ac.Model,
+		chatPath:        chatPath,
+		tokenCmd:        tct,
+		useResponsesAPI: useResponses,
+		skipHealthCheck: useResponses, // remote API providers typically have no /health
+		client:          &http.Client{Transport: transport},
 	}
 }
 
@@ -982,6 +990,9 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if a.useBedrockNative {
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
+	if a.useResponsesAPI {
+		return a.responsesStreamCompletion(ctx, msgs, tools, out)
+	}
 	req := chatRequest{
 		Model:    a.model,
 		Messages: msgs,
@@ -1197,6 +1208,9 @@ func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
 func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
 	if a.useBedrockNative {
 		return a.bedrockClassify(ctx, prompt)
+	}
+	if a.useResponsesAPI {
+		return a.responsesClassify(ctx, prompt)
 	}
 	classifyPrompt := `Respond with exactly one word: "primary" or "escalate".
 Use "escalate" only when the task clearly requires complex multi-file refactoring, architectural design decisions, or deep reasoning beyond coding assistance.
