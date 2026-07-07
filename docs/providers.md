@@ -31,6 +31,30 @@ A built-in entry named `"claude"` with `provider: "claude-cli"` is always availa
 
 ---
 
+## OpenAI Responses API
+
+milk supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`) as an alternative wire format for HTTP agents. Enable it with `"api_format": "responses"` on any local or Bearer-auth agent entry.
+
+```json
+{
+  "name": "local-responses",
+  "url": "http://localhost:8080",
+  "model": "qwen2.5-coder",
+  "api_format": "responses"
+}
+```
+
+When `api_format` is `"responses"`:
+- The inference endpoint defaults to `/v1/responses` (override with `chat_path` if needed).
+- `skip_health_check` is automatically set — the `/health` probe is skipped.
+- Message history is translated: `tool` role → `function_call_output` items; assistant `tool_calls` → `function_call` items.
+- Tool schemas are flattened from the Chat Completions nested `"function"` wrapper to the flat Responses API format.
+- Streaming uses SSE event types (`response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`).
+
+The default for HTTP agents is `"chat_completions"` (or `""`), which uses `/v1/chat/completions`.
+
+---
+
 ## Local llama.cpp / Ollama / LM Studio
 
 **Auth**: none — plain HTTP.
@@ -427,6 +451,7 @@ Expected: streamed response with step/observation progress visible in the TUI.
 | `token_cmd` | string | — | Shell command to fetch a dynamic Bearer token |
 | `headers` | object | — | Extra HTTP headers (key→value) injected on every request |
 | `chat_path` | string | `/v1/chat/completions` | Override the inference endpoint path |
+| `api_format` | string | `""` | Wire protocol: `""` / `"chat_completions"` = OpenAI Chat Completions (default), `"responses"` = OpenAI Responses API |
 | `tls_skip_verify` | bool | false | Disable TLS cert verification (dev/self-signed only) |
 | `tls_ca_cert` | string | — | Path to PEM CA cert for private/self-signed endpoints |
 | `aws_region` | string | `AWS_REGION` env | AWS region (Bedrock only) |
