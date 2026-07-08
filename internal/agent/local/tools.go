@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
@@ -676,8 +675,7 @@ func runBash(ctx context.Context, args map[string]any) (string, bool) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	// Run in its own process group so we can kill the whole tree on timeout.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -705,10 +703,7 @@ func runBash(ctx context.Context, args map[string]any) (string, bool) {
 			ExitCode: code,
 		}.String(), false
 	case <-ctx.Done():
-		// Kill the entire process group to reap any child processes.
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		killProcGroup(cmd)
 		<-done
 		return toolResult{Error: fmt.Sprintf("bash: command timed out after %s", timeout)}.String(), false
 	}
