@@ -1,6 +1,7 @@
 package router
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/scoutme/milk/internal/config"
@@ -137,6 +138,58 @@ func TestScoreSignals_OpenQuestion(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected open-question signal")
+	}
+}
+
+func TestScoreSignals_OpenQuestion_Italian(t *testing.T) {
+	cfg := testCfg()
+	cfg.Rules.OpenQuestionPrefixes = []string{"cosa", "come", "perché", "puoi"}
+	cases := []string{
+		"Cosa fa questa funzione?",
+		"Come posso migliorare questo?",
+		"Perché fallisce il test?",
+		"Puoi spiegare questo errore?",
+	}
+	for _, prompt := range cases {
+		lower := strings.ToLower(prompt)
+		result := scoreSignals(prompt, lower, cfg)
+		found := false
+		for _, s := range result.Signals {
+			if s.Name == "open-question" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected open-question signal for Italian prompt %q", prompt)
+		}
+	}
+}
+
+func TestMatchesOpenQuestion_WordBoundary(t *testing.T) {
+	prefixes := []string{"what", "where", "does"}
+	// should NOT match mid-word
+	noMatch := []string{"whatever you say", "wherever possible", "doesn't matter"}
+	for _, p := range noMatch {
+		if matchesOpenQuestion(p, prefixes) {
+			t.Errorf("matchesOpenQuestion(%q) should be false (mid-word prefix)", p)
+		}
+	}
+	// should match at word boundary
+	match := []string{"what is this?", "where does it go", "does it work"}
+	for _, p := range match {
+		if !matchesOpenQuestion(p, prefixes) {
+			t.Errorf("matchesOpenQuestion(%q) should be true", p)
+		}
+	}
+}
+
+func TestMatchesOpenQuestion_FallbackToDefault(t *testing.T) {
+	// nil prefixes → falls back to DefaultOpenQuestionPrefixes
+	if !matchesOpenQuestion("What should I do?", nil) {
+		t.Error("expected match with nil prefixes (fallback)")
+	}
+	if !matchesOpenQuestion("Come funziona?", nil) {
+		t.Error("expected Italian match with nil prefixes (fallback)")
 	}
 }
 

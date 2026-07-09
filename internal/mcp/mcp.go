@@ -89,6 +89,10 @@ func (e *jsonrpcError) Error() string {
 	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
 }
 
+// reconnectBackoff is the delay between automatic lazy-reconnect attempts for
+// clients that have not yet connected or whose last reconnect failed.
+const reconnectBackoff = 30 * time.Second
+
 // Client is a connected MCP client for a single server.
 // Call Connect before using; call Close when done.
 type Client struct {
@@ -100,7 +104,7 @@ type Client struct {
 	mu             sync.Mutex
 	tools          []Tool
 	ready          bool
-	dead           bool          // set after a lazy-reconnect attempt fails; prevents per-turn retry storms
+	deadUntil      time.Time     // when non-zero, lazy reconnect is suppressed until this time
 	connectTimeout time.Duration // hint for startup callers; see ConnectTimeout()
 
 	// tokenOnce caches a dynamic Bearer token resolved from TokenCmd.
@@ -231,13 +235,14 @@ func (c *Client) RefreshTools(ctx context.Context) error {
 
 // Call invokes a tool by name with the given arguments JSON and returns the result.
 // If the client did not connect successfully at startup (e.g. server was unreachable),
-// it performs a single lazy reconnect (bounded by connectTimeout) before proceeding;
-// on failure the client is marked dead and subsequent calls return immediately.
+// it performs a lazy reconnect before proceeding; on failure the client is backed off
+// for reconnectBackoff before the next attempt.
 func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResult, error) {
 	c.mu.Lock()
-	ready, dead := c.ready, c.dead
+	ready := c.ready
+	backedOff := !c.deadUntil.IsZero() && time.Now().Before(c.deadUntil)
 	c.mu.Unlock()
-	if dead {
+	if backedOff {
 		return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: "MCP server " + c.cfg.Name + " is unavailable"}}}, nil
 	}
 	if !ready {
@@ -246,7 +251,7 @@ func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResul
 		defer cancel()
 		if err := c.Connect(reconnCtx); err != nil {
 			c.mu.Lock()
-			c.dead = true
+			c.deadUntil = time.Now().Add(reconnectBackoff)
 			c.mu.Unlock()
 			return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: err.Error()}}}, nil
 		}
@@ -469,13 +474,14 @@ func (c *Client) resolveToken() error {
 // entries that can be appended to the local agent's tools array.
 // Each tool name is prefixed with "mcp_<serverName>_" to avoid collisions.
 // If the client did not connect successfully at startup (e.g. connect timeout),
-// it performs a single lazy reconnect (bounded by connectTimeout) before returning;
-// on failure the client is marked dead and nil is returned for all future calls.
+// it performs a lazy reconnect before returning; on failure the client is backed
+// off for reconnectBackoff before the next attempt.
 func (c *Client) Schemas(ctx context.Context) []map[string]any {
 	c.mu.Lock()
-	ready, dead := c.ready, c.dead
+	ready := c.ready
+	backedOff := !c.deadUntil.IsZero() && time.Now().Before(c.deadUntil)
 	c.mu.Unlock()
-	if dead {
+	if backedOff {
 		return nil
 	}
 	if !ready {
@@ -484,7 +490,7 @@ func (c *Client) Schemas(ctx context.Context) []map[string]any {
 		if err := c.Connect(reconnCtx); err != nil {
 			obs.Info("mcp.reconnect.failed", "server", c.cfg.Name, "error", err.Error())
 			c.mu.Lock()
-			c.dead = true
+			c.deadUntil = time.Now().Add(reconnectBackoff)
 			c.mu.Unlock()
 			return nil
 		}
@@ -537,6 +543,58 @@ func (c *Client) ServerName() string { return c.cfg.Name }
 // Startup callers (e.g. attachMCPToolSet) use this to derive a per-client
 // context deadline rather than applying a single global timeout.
 func (c *Client) ConnectTimeout() time.Duration { return c.connectTimeout }
+
+// ConnectionStatus is the runtime state of an MCP client.
+type ConnectionStatus int
+
+const (
+	StatusDisconnected ConnectionStatus = iota // never successfully connected
+	StatusConnected                            // connected and ready
+	StatusDead                                 // connection was lost and lazy-reconnect failed
+)
+
+func (s ConnectionStatus) String() string {
+	switch s {
+	case StatusConnected:
+		return "connected"
+	case StatusDead:
+		return "dead"
+	default:
+		return "disconnected"
+	}
+}
+
+// Status returns the current runtime connection state of this client.
+func (c *Client) Status() ConnectionStatus {
+	c.mu.Lock()
+	ready := c.ready
+	backedOff := !c.deadUntil.IsZero() && time.Now().Before(c.deadUntil)
+	c.mu.Unlock()
+	switch {
+	case ready:
+		return StatusConnected
+	case backedOff:
+		return StatusDead
+	default:
+		return StatusDisconnected
+	}
+}
+
+// DeadUntil returns the time until which lazy reconnect is suppressed, or the
+// zero value when the client is not in backoff (either connected or never tried).
+func (c *Client) DeadUntil() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deadUntil
+}
+
+// Reset clears the backoff so the next Schemas() or Call() will attempt a
+// lazy reconnect immediately. Has no effect when the client is already connected.
+func (c *Client) Reset() {
+	c.mu.Lock()
+	c.deadUntil = time.Time{}
+	c.mu.Unlock()
+}
 
 // Close terminates the session. For HTTP transport this sends a DELETE to the
 // MCP endpoint with the session ID header; failure is silently ignored.

@@ -109,7 +109,7 @@ Decision order per turn:
 3. **Rules layer** — layered scorer:
    - Hard rules: token length above `escalate_above_tokens` → escalation; keyword match → escalation
    - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
-   - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open questions each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`
+   - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open-question prefixes each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`; all lists are configurable (see `rules` field)
 4. **Primary model classification** — when scorer is inconclusive, ask the primary model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
 5. **Default** — attempt primary; escalate if primary returns `escalate(reason)`
 
@@ -454,7 +454,7 @@ If a newer release is available, milk shows the current and latest versions and 
   "rules": {
     "escalate_above_tokens": 2000,
     "local_below_tokens": 30,
-    "escalate_keywords": ["architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize"],
+    "escalate_keywords": ["refactor entire", "context brick", "memory panel", "panel memory"],
     "escalate_threshold": 6,
     "local_threshold": -4,
     "local_verb_weight": -3,
@@ -463,8 +463,25 @@ If a newer release is available, milk shows the current and latest versions and 
     "code_block_weight": -2,
     "open_question_weight": 3,
     "classifier_fallback": "local",
-    "local_verbs": ["grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls", "check", "print", "count", "search"],
-    "escalate_verbs": ["architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"]
+    "local_verbs": [
+      "grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls",
+      "check", "print", "count", "search", "add", "create", "write", "implement",
+      "rename", "delete", "move",
+      "aggiungi", "crea", "scrivi", "implementa", "rinomina", "elimina", "sposta",
+      "cerca", "mostra", "controlla", "esegui", "leggi"
+    ],
+    "escalate_verbs": [
+      "architect", "design", "refactor", "explain why", "compare", "evaluate",
+      "plan", "propose", "summarize", "review", "analyze", "describe",
+      "progetta", "refactorizza", "spiega perché", "confronta", "valuta",
+      "pianifica", "proponi", "riassumi", "revisiona", "analizza", "descrivi"
+    ],
+    "open_question_prefixes": [
+      "what", "why", "how", "when", "where", "who", "which",
+      "could you", "can you", "would you", "should", "is it", "are there", "do you", "does",
+      "cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
+      "potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai"
+    ]
   }
 }
 ```
@@ -474,6 +491,91 @@ If a newer release is available, milk shows the current and latest versions and 
 `escalation_agent` selects which `agents` entry handles escalated turns. Defaults to `"claude"` (the built-in `claude-cli` entry). Set to the name of any `agents` entry — including another inference-server backend — to route escalated turns there instead. Change at runtime with `/agent switch <name> as escalation`.
 
 A built-in `claude-cli` entry named `"claude"` is always available even if not listed explicitly in `agents`. When absent from the file, it is injected in-memory with `bin: "claude"`. 
+
+### `rules` field
+
+Controls the layered routing scorer. All fields have built-in defaults; only the fields you want to override need to be present.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `escalate_above_tokens` | int | 2000 | Prompt exceeding this approximate token count is unconditionally escalated |
+| `local_below_tokens` | int | 30 | Prompt at or below this approximate token count is unconditionally kept local |
+| `escalate_keywords` | array of string | see below | Substring matches that unconditionally escalate (hard, conclusive). Keep this list short and specific — use `escalate_verbs` for soft signals |
+| `escalate_threshold` | int | 6 | Soft score ≥ this → conclusive escalation |
+| `local_threshold` | int | -4 | Soft score ≤ this → conclusive local |
+| `local_verb_weight` | int | -3 | Score delta per `local_verbs` match (negative = towards local) |
+| `escalate_verb_weight` | int | 4 | Score delta per `escalate_verbs` match (positive = towards escalation) |
+| `path_ref_weight` | int | -2 | Score delta when the prompt contains a path that resolves on disk |
+| `code_block_weight` | int | -2 | Score delta when the prompt contains a fenced code block |
+| `open_question_weight` | int | 3 | Score delta when the prompt starts with an open-question prefix |
+| `classifier_fallback` | string | `"local"` | What to do when the scorer is inconclusive: `"local"` calls the primary model as a classifier; `"escalation"` escalates directly |
+| `local_verbs` | array of string | see below | Words/phrases (substring match) that contribute `local_verb_weight` to the score. One match per prompt (first hit wins) |
+| `escalate_verbs` | array of string | see below | Words/phrases (substring match) that contribute `escalate_verb_weight` to the score. One match per prompt (first hit wins) |
+| `open_question_prefixes` | array of string | see below | Words/phrases (case-insensitive prefix match with word-boundary check) that trigger the open-question soft signal |
+
+#### Keyword design guidelines
+
+**`escalate_keywords` (hard, conclusive)** — only add multi-word or highly specific phrases that unambiguously signal a complex conceptual task, such that routing to local would always be wrong. Single common words (e.g. `design`, `analyze`) are too broad: *"the design looks off"* or *"analyze this traceback"* are local tasks. When in doubt, put the term in `escalate_verbs` instead.
+
+**`escalate_verbs` and `local_verbs` (soft signals)** — these contribute a signed score rather than making a binding decision. One match per prompt is counted (first hit wins), so the lists' relative weights and the `escalate_threshold` / `local_threshold` values control how much weight a single verb match carries. Adding more terms to these lists makes routing more decisive; raising the thresholds makes it more conservative.
+
+**`open_question_prefixes`** — prefix-matched (word boundary required) against the start of the trimmed prompt. A match adds `open_question_weight` to the soft score. This is typically combined with an `escalate_verbs` hit to cross the `escalate_threshold`.
+
+#### Adding language or domain-specific terms
+
+The built-in lists cover English and Italian. To extend coverage for other languages or domain-specific vocabulary, add terms directly to the arrays in your `~/.milk/config.json`. The lists are fully replaced by whatever you provide — there is no merge with the built-in defaults; copy the full default set and extend it.
+
+Example — adding French question starters and domain verbs:
+
+```json
+"open_question_prefixes": [
+  "what", "why", "how", "when", "where", "who", "which",
+  "could you", "can you", "would you", "should", "is it", "are there", "do you", "does",
+  "cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
+  "potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai",
+  "quoi", "pourquoi", "comment", "quand", "où", "qui", "quel", "quelle",
+  "pourriez-vous", "pouvez-vous", "devriez-vous", "est-ce possible"
+],
+"escalate_verbs": [
+  "architect", "design", "refactor", "explain why", "compare", "evaluate",
+  "plan", "propose", "summarize", "review", "analyze", "describe",
+  "progetta", "refactorizza", "spiega perché", "confronta", "valuta",
+  "pianifica", "proponi", "riassumi", "revisiona", "analizza", "descrivi",
+  "concevoir", "évaluer", "planifier", "proposer", "résumer", "analyser"
+]
+```
+
+#### Default keyword lists
+
+`escalate_keywords` (conclusive hard triggers):
+```
+"refactor entire", "context brick", "memory panel", "panel memory"
+```
+
+`escalate_verbs` (soft, +4 each):
+```
+English: architect, design, refactor, explain why, compare, evaluate,
+         plan, propose, summarize, review, analyze, describe
+Italian: progetta, refactorizza, spiega perché, confronta, valuta,
+         pianifica, proponi, riassumi, revisiona, analizza, descrivi
+```
+
+`local_verbs` (soft, −3 each):
+```
+English: grep, find, list, run, read, fix, debug, show, cat, ls,
+         check, print, count, search, add, create, write, implement,
+         rename, delete, move
+Italian: aggiungi, crea, scrivi, implementa, rinomina, elimina, sposta,
+         cerca, mostra, controlla, esegui, leggi
+```
+
+`open_question_prefixes`:
+```
+English: what, why, how, when, where, who, which,
+         could you, can you, would you, should, is it, are there, do you, does
+Italian: cosa, come, perché, quando, dove, chi, quale, quali,
+         potresti, puoi, dovresti, è possibile, ci sono, sai
+```
 
 ### `agents` entry fields
 

@@ -2,7 +2,9 @@ package aider
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/scoutme/milk/internal/agent/subprocess"
@@ -86,11 +88,38 @@ func (b *argBuilder) BaseArgs() []string {
 	return args
 }
 
+// filePathRe matches bare file paths in text: tokens that contain a slash and
+// optionally end with a line number suffix (e.g. "cmd/milk/repl.go:42").
+var filePathRe = regexp.MustCompile(`\b([\w./-]+/[\w./-]+)\b`)
+
+// extractFilePaths returns unique existing file paths found in text.
+func extractFilePaths(text string) []string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, m := range filePathRe.FindAllString(text, -1) {
+		// Strip trailing line-number suffix.
+		p, _, _ := strings.Cut(m, ":")
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		if _, err := os.Stat(p); err == nil {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
 // FirstArgs returns per-turn args for a new session: context files + prompt.
+// File paths found in the prompt are added as --file (editable) args so aider
+// can edit them without prompting the user to /add them manually.
 func (b *argBuilder) FirstArgs(sessionID, prompt string, contextFiles []string) []string {
 	var args []string
 	for _, f := range contextFiles {
 		args = append(args, "--read", f)
+	}
+	for _, f := range extractFilePaths(prompt) {
+		args = append(args, "--file", f)
 	}
 	args = append(args, "--message", prompt)
 	return args

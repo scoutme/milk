@@ -26,6 +26,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
@@ -57,6 +58,9 @@ type dispatchAgents struct {
 	localAvail        bool
 	escalationAvail   bool
 	toolRunners       map[string]TurnRunner // lazily built tool-agent runners, keyed by agent name
+	// mcpToolSets holds the live MCP ToolSet for each agent that has MCP servers
+	// configured, keyed by agent name. Used by /mcp list and /mcp reconnect.
+	mcpToolSets map[string]*mcp.ToolSet
 }
 
 // --- TUI message types ---
@@ -309,6 +313,9 @@ type model struct {
 
 	// pending /agent add wizard
 	pendingAdd *addAgentState
+
+	// pending /mcp add wizard
+	pendingMCPAdd *addMCPState
 
 	// pending /agent switch wizard
 	pendingSwitch *switchAgentState
@@ -894,6 +901,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingAdd != nil {
 			return m.handleAddAgentKey(msg)
+		}
+		if m.pendingMCPAdd != nil {
+			return m.handleAddMCPKey(msg)
 		}
 		if m.pendingSwitch != nil {
 			return m.handleSwitchAgentKey(msg)
@@ -1735,7 +1745,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			defer dbg.Close()
 			localAgent = localAgent.WithDebugLog(dbg)
 		}
-		localAgent = attachMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name, localAgent)
 	}
 
 	// Build the escalation agent: local provider, subprocess (subprocess, aider-cli), or claude-cli (default).
@@ -1855,16 +1864,23 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	// Build TurnRunner instances for dispatch.
+	mcpToolSets := map[string]*mcp.ToolSet{}
 	var primaryRunner TurnRunner
 	switch {
 	case tuiSubprocessPrimaryAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
+			mcpToolSets[tuiPrimaryAC.Name] = ts
 			defer ts.Close(context.Background())
 		}
 		primaryRunner = r
 	case localAgent != nil:
+		if _, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+			localAgent = localAgent.WithMCPToolSet(ts)
+			mcpToolSets[tuiPrimaryAC.Name] = ts
+			defer ts.Close(context.Background())
+		}
 		primaryRunner = newLocalRunner(localAgent, tuiPrimaryAC.Name)
 	}
 	var escalationRunner TurnRunner
@@ -1873,10 +1889,16 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		r := newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
+			mcpToolSets[tuiEscAC.Name] = ts
 			defer ts.Close(context.Background())
 		}
 		escalationRunner = r
 	case escalationLocalAgent != nil:
+		if _, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+			escalationLocalAgent = escalationLocalAgent.WithMCPToolSet(ts)
+			mcpToolSets[tuiEscAC.Name] = ts
+			defer ts.Close(context.Background())
+		}
 		escalationRunner = newLocalRunner(escalationLocalAgent, tuiEscAC.Name)
 	default:
 		cliAC := cliAgentConfig(cfg)
@@ -1902,6 +1924,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		subprocessPrimary: tuiSubprocessPrimaryAgent,
 		localAvail:        localAvail,
 		escalationAvail:   escalationAvail,
+		mcpToolSets:       mcpToolSets,
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)

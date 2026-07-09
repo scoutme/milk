@@ -84,6 +84,36 @@ func (ts *ToolSet) Len() int { return len(ts.clients) }
 // Clients returns the underlying client slice (for status display / /mcp list).
 func (ts *ToolSet) Clients() []*Client { return ts.clients }
 
+// ServerStatus returns the runtime ConnectionStatus of the named server, or
+// StatusDisconnected when no client with that name exists in this set.
+func (ts *ToolSet) ServerStatus(serverName string) ConnectionStatus {
+	for _, c := range ts.clients {
+		if strings.EqualFold(c.cfg.Name, serverName) {
+			return c.Status()
+		}
+	}
+	return StatusDisconnected
+}
+
+// ResetServer clears the dead flag on the named client so the next tool use
+// will attempt a lazy reconnect. Returns false when the server is not found.
+func (ts *ToolSet) ResetServer(serverName string) bool {
+	for _, c := range ts.clients {
+		if strings.EqualFold(c.cfg.Name, serverName) {
+			c.Reset()
+			return true
+		}
+	}
+	return false
+}
+
+// ResetAll clears the dead flag on every client in the set.
+func (ts *ToolSet) ResetAll() {
+	for _, c := range ts.clients {
+		c.Reset()
+	}
+}
+
 // jsonQuote returns a JSON-encoded string literal for s.
 func jsonQuote(s string) string {
 	b, _ := jsonMarshalString(s)

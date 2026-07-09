@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -167,11 +168,13 @@ const interactiveHelp = `
 ── MCP Servers ───────────────────────────────────────────────────────────
   /mcp                   list configured MCP servers and their status
   /mcp list [<agent>]    list MCP servers for an agent (default: primary)
+  /mcp add                add a new MCP server interactively
   /mcp add name=… url=… [transport=…] [auth=…] [api_key=…] [timeout=…]
   /mcp remove <name>     remove an MCP server by name
   /mcp enable <name>     enable a disabled MCP server
   /mcp disable <name>    disable an MCP server (keeps config)
   /mcp tools [<name>]    list tools exported by connected MCP server(s)
+  /mcp reconnect [<name>]  reset dead server(s) so they retry on next use
   /mcp assign <server> for <agent>   add server to agent's mcp_servers list
   /mcp unassign <server> for <agent>  remove server from agent's list
 
@@ -385,7 +388,7 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdOpen:
 		// Handled in repl.go (needs tea.ExecProcess). No-op here.
 	case cmdMCP:
-		output = execMCP(prompt, st)
+		// Handled in commands.go (handleMCPCmd) where model state is available for wizards.
 	case cmdUpdate:
 		// Handled in repl.go (needs model state for install dispatch). No-op here.
 	default:
@@ -1043,17 +1046,18 @@ func findAgentIdx(cfg config.Config, agentName string) int {
 }
 
 // execMCP dispatches /mcp <verb> [args] subcommands.
-func execMCP(sub string, st *interactiveState) string {
+// toolSets is the live runtime map of agent-name → *mcp.ToolSet; may be nil.
+func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet) string {
 	parts := strings.Fields(sub)
 	if len(parts) == 0 {
-		return execMCPList("", st)
+		return execMCPList("", st, toolSets)
 	}
 	verb := parts[0]
 	rest := strings.TrimSpace(strings.TrimPrefix(sub, verb))
 
 	switch verb {
 	case "list":
-		return execMCPList(rest, st)
+		return execMCPList(rest, st, toolSets)
 	case "add":
 		return execMCPAdd(rest, st)
 	case "remove":
@@ -1077,14 +1081,17 @@ func execMCP(sub string, st *interactiveState) string {
 		return execMCPAssign(rest, true, st)
 	case "unassign":
 		return execMCPAssign(rest, false, st)
+	case "reconnect":
+		return execMCPReconnect(rest, st, toolSets)
 	default:
-		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign"
+		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign, reconnect"
 	}
 }
 
 // execMCPList shows the configured MCP servers, optionally filtered to those
 // visible by a given agent. When agentFilter is empty, shows all servers.
-func execMCPList(agentFilter string, st *interactiveState) string {
+// toolSets is the live runtime map of agent-name → *mcp.ToolSet; may be nil.
+func execMCPList(agentFilter string, st *interactiveState, toolSets map[string]*mcp.ToolSet) string {
 	agentFilter = strings.TrimSpace(agentFilter)
 	servers := st.cfg.MCPServers
 	if len(servers) == 0 {
@@ -1107,21 +1114,70 @@ func execMCPList(agentFilter string, st *interactiveState) string {
 		}
 		fmt.Fprintf(&b, "%s MCP servers for %q:\n", milkTag(), agentFilter)
 		for _, s := range effective {
-			writeMCPServerLine(&b, s, agentForServer)
+			writeMCPServerLine(&b, s, agentForServer, toolSets)
 		}
 	} else {
 		fmt.Fprintf(&b, "%s MCP servers (%d):\n", milkTag(), len(servers))
 		for _, s := range servers {
-			writeMCPServerLine(&b, s, agentForServer)
+			writeMCPServerLine(&b, s, agentForServer, toolSets)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForServer map[string][]string) {
-	status := green("enabled")
+// runtimeMCPStatus returns the runtime ConnectionStatus for serverName by
+// checking all toolsets. Returns StatusDisconnected when toolSets is nil or
+// the server is not in any active toolset.
+func runtimeMCPStatus(serverName string, toolSets map[string]*mcp.ToolSet) mcp.ConnectionStatus {
+	for _, ts := range toolSets {
+		if s := ts.ServerStatus(serverName); s != mcp.StatusDisconnected {
+			return s
+		}
+	}
+	return mcp.StatusDisconnected
+}
+
+// runtimeMCPRetryIn returns how long until the named server's backoff expires,
+// or 0 when the server is not backed off.
+func runtimeMCPRetryIn(serverName string, toolSets map[string]*mcp.ToolSet) time.Duration {
+	for _, ts := range toolSets {
+		for _, c := range ts.Clients() {
+			if strings.EqualFold(c.ServerName(), serverName) {
+				until := c.DeadUntil()
+				if until.IsZero() {
+					return 0
+				}
+				remaining := time.Until(until)
+				if remaining < 0 {
+					return 0
+				}
+				return remaining
+			}
+		}
+	}
+	return 0
+}
+
+func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForServer map[string][]string, toolSets map[string]*mcp.ToolSet) {
+	var connStatus string
+	if toolSets != nil {
+		switch runtimeMCPStatus(s.Name, toolSets) {
+		case mcp.StatusConnected:
+			connStatus = "  " + green("●")
+		case mcp.StatusDead:
+			retryIn := runtimeMCPRetryIn(s.Name, toolSets)
+			if retryIn > 0 {
+				connStatus = "  " + red(fmt.Sprintf("✖ retry in %ds", int(retryIn.Seconds())))
+			} else {
+				connStatus = "  " + red("✖ backed off")
+			}
+		default:
+			connStatus = "  " + dim("○")
+		}
+	}
+	cfgStatus := ""
 	if !s.IsEnabled() {
-		status = dim("disabled")
+		cfgStatus = "  " + dim("disabled")
 	}
 	auth := s.Auth
 	if auth == "" {
@@ -1132,7 +1188,43 @@ func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForSe
 	if len(agents) > 0 {
 		agentBadge = "  [" + strings.Join(agents, ", ") + "]"
 	}
-	fmt.Fprintf(b, "  %-20s  %-10s  %-8s  %s%s\n", bold(s.Name), status, auth, s.URL, agentBadge)
+	fmt.Fprintf(b, "  %-20s  %-8s  %s%s%s%s\n", bold(s.Name), auth, s.URL, agentBadge, connStatus, cfgStatus)
+}
+
+// execMCPReconnect resets the dead flag on named server(s) so they will
+// attempt a lazy reconnect on next use. With no argument, resets all dead servers.
+func execMCPReconnect(name string, _ *interactiveState, toolSets map[string]*mcp.ToolSet) string {
+	if len(toolSets) == 0 {
+		return milkTag() + " no live MCP connections to reconnect (start milk with an agent that has mcp_servers configured)"
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		// Reset all dead clients across all toolsets.
+		count := 0
+		for _, ts := range toolSets {
+			for _, c := range ts.Clients() {
+				if c.Status() == mcp.StatusDead {
+					c.Reset()
+					count++
+				}
+			}
+		}
+		if count == 0 {
+			return milkTag() + " no dead MCP servers to reconnect"
+		}
+		return fmt.Sprintf("%s reset %d dead MCP server(s) — they will reconnect on next use", milkTag(), count)
+	}
+	// Reset a specific server by name.
+	found := false
+	for _, ts := range toolSets {
+		if ts.ResetServer(name) {
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Sprintf("%s MCP server %q not found in any active toolset", milkTag(), name)
+	}
+	return fmt.Sprintf("%s MCP server %q reset — will reconnect on next use", milkTag(), name)
 }
 
 // execMCPAdd adds a new MCP server entry from key=value args.

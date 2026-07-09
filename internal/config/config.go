@@ -37,6 +37,24 @@ type Rules struct {
 	// Keyword lists (overridable)
 	LocalVerbs    []string `json:"local_verbs"`
 	EscalateVerbs []string `json:"escalate_verbs"`
+
+	// OpenQuestionPrefixes is the list of prompt-opening words/phrases that
+	// trigger the open-question soft signal (score += open_question_weight).
+	// Matching is case-insensitive and anchored to the start of the trimmed prompt.
+	// Add language-specific or domain-specific prefixes here to extend coverage.
+	OpenQuestionPrefixes []string `json:"open_question_prefixes"`
+}
+
+// DefaultOpenQuestionPrefixes is the built-in fallback used when
+// Rules.OpenQuestionPrefixes is empty (e.g. configs written before this field existed).
+var DefaultOpenQuestionPrefixes = []string{
+	// English
+	"what", "why", "how", "when", "where", "who", "which",
+	"could you", "can you", "would you", "should", "is it",
+	"are there", "do you", "does",
+	// Italian
+	"cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
+	"potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai",
 }
 
 // OtelConfig controls OpenTelemetry signal collection and file management.
@@ -480,7 +498,7 @@ func defaults() Config {
 		},
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
-			EscalateKeywords:    []string{"architect", "refactor entire", "design", "explain why", "analyze", "describe", "summarize", "context brick", "memory panel", "panel memory"},
+			EscalateKeywords:    []string{"refactor entire", "context brick", "memory panel", "panel memory"},
 			LocalBelowTokens:    30,
 
 			EscalateThreshold: 6,
@@ -494,8 +512,32 @@ func defaults() Config {
 
 			ClassifierFallback: "local",
 
-			LocalVerbs:    []string{"grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls", "check", "print", "count", "search"},
-			EscalateVerbs: []string{"architect", "design", "refactor entire", "explain why", "compare", "evaluate", "plan", "propose", "summarize", "review"},
+			LocalVerbs: []string{
+				// English
+				"grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls",
+				"check", "print", "count", "search", "add", "create", "write", "implement",
+				"rename", "delete", "move",
+				// Italian
+				"aggiungi", "crea", "scrivi", "implementa", "rinomina", "elimina", "sposta",
+				"cerca", "mostra", "controlla", "esegui", "leggi",
+			},
+			EscalateVerbs: []string{
+				// English
+				"architect", "design", "refactor", "explain why", "compare", "evaluate",
+				"plan", "propose", "summarize", "review", "analyze", "describe",
+				// Italian
+				"progetta", "refactorizza", "spiega perché", "confronta", "valuta",
+				"pianifica", "proponi", "riassumi", "revisiona", "analizza", "descrivi",
+			},
+			OpenQuestionPrefixes: []string{
+				// English
+				"what", "why", "how", "when", "where", "who", "which",
+				"could you", "can you", "would you", "should", "is it",
+				"are there", "do you", "does",
+				// Italian
+				"cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
+				"potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai",
+			},
 		},
 	}
 }

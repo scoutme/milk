@@ -13,7 +13,6 @@ import (
 )
 
 var reCodeFence = regexp.MustCompile("```")
-var reOpenQuestion = regexp.MustCompile(`(?i)^(what|why|how|when|where|who|which|could you|can you|would you|should|is it|are there|do you|does)`)
 
 // Signal represents a single detected routing cue.
 type Signal struct {
@@ -118,7 +117,7 @@ func scoreSignals(prompt, lower string, cfg config.Config) signalResult {
 	}
 
 	// Open question start → conceptual, escalate
-	if reOpenQuestion.MatchString(strings.TrimSpace(prompt)) {
+	if matchesOpenQuestion(strings.TrimSpace(prompt), r.OpenQuestionPrefixes) {
 		add(Signal{Name: "open-question", Score: r.OpenQuestionWeight})
 	}
 
@@ -146,6 +145,28 @@ func pathRefScore(prompt string, weight int) (int, string) {
 		}
 	}
 	return 0, ""
+}
+
+// matchesOpenQuestion reports whether the (already trimmed) prompt starts with
+// any of the configured open-question prefixes. Matching is case-insensitive.
+// Falls back to the built-in English set when prefixes is nil or empty.
+func matchesOpenQuestion(prompt string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		prefixes = config.DefaultOpenQuestionPrefixes
+	}
+	lower := strings.ToLower(prompt)
+	for _, p := range prefixes {
+		pl := strings.ToLower(p)
+		if strings.HasPrefix(lower, pl) {
+			// Require a word boundary after single-word prefixes to avoid
+			// false matches (e.g. "where" matching "wherever").
+			rest := lower[len(pl):]
+			if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == ',' || rest[0] == '?' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func looksLikePath(s string) bool {

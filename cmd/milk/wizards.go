@@ -270,6 +270,184 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	return m
 }
 
+// --- Add-MCP-server wizard ---
+
+type addMCPStep int
+
+const (
+	mcpStepName addMCPStep = iota
+	mcpStepURL
+	mcpStepAuth     // "none", "bearer", "token_cmd" — enter to skip (defaults to none)
+	mcpStepAPIKey   // only when auth == "bearer"
+	mcpStepTokenCmd // only when auth == "token_cmd"
+	mcpStepDone
+)
+
+type addMCPState struct {
+	sc   config.MCPServerConfig
+	step addMCPStep
+}
+
+// startAddMCP handles `/mcp add [key=val ...]`.
+// Missing required fields (name, url) are prompted interactively.
+func (m model) startAddMCP(inline string) model {
+	sc := parseMCPInlineArgs(inline)
+	if sc.Name != "" && sc.URL != "" {
+		return m.commitAddMCP(sc)
+	}
+	st := &addMCPState{sc: sc}
+	st.step = mcpFirstMissingStep(sc)
+	m.pendingMCPAdd = st
+	m.appendTranscript(mcpAddPrompt(st.step) + " ")
+	m.ta.Reset()
+	return m
+}
+
+// parseMCPInlineArgs parses "key=val key2=val2 ..." into an MCPServerConfig.
+func parseMCPInlineArgs(s string) config.MCPServerConfig {
+	var sc config.MCPServerConfig
+	for _, tok := range strings.Fields(s) {
+		k, v, ok := strings.Cut(tok, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "name":
+			sc.Name = v
+		case "url":
+			sc.URL = v
+		case "auth":
+			sc.Auth = v
+		case "api_key":
+			sc.APIKey = v
+		case "token_cmd":
+			sc.TokenCmd = v
+		case "transport":
+			sc.Transport = v
+		case "timeout":
+			sc.Timeout = v
+		case "connect_timeout":
+			sc.ConnectTimeout = v
+		}
+	}
+	return sc
+}
+
+// mcpFirstMissingStep returns the first wizard step still needing input.
+func mcpFirstMissingStep(sc config.MCPServerConfig) addMCPStep {
+	if sc.Name == "" {
+		return mcpStepName
+	}
+	if sc.URL == "" {
+		return mcpStepURL
+	}
+	if sc.Auth == "" {
+		return mcpStepAuth
+	}
+	auth := strings.ToLower(sc.Auth)
+	if auth == "bearer" && sc.APIKey == "" {
+		return mcpStepAPIKey
+	}
+	if auth == "token_cmd" && sc.TokenCmd == "" {
+		return mcpStepTokenCmd
+	}
+	return mcpStepDone
+}
+
+// mcpAddPrompt returns the prompt string for a wizard step.
+func mcpAddPrompt(step addMCPStep) string {
+	switch step {
+	case mcpStepName:
+		return milkTag() + " name:"
+	case mcpStepURL:
+		return milkTag() + " url:"
+	case mcpStepAuth:
+		return milkTag() + " auth [none/bearer/token_cmd, enter to skip]:"
+	case mcpStepAPIKey:
+		return milkTag() + " api_key:"
+	case mcpStepTokenCmd:
+		return milkTag() + " token_cmd:"
+	default:
+		return ""
+	}
+}
+
+// handleAddMCPKey handles keypresses during the /mcp add wizard.
+func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pendingMCPAdd = nil
+		m.appendTranscript("\n" + milkTag() + " cancelled\n")
+		return m, nil
+	case "enter":
+		answer := strings.TrimSpace(m.ta.Value())
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript(answer + "\n")
+
+		st := m.pendingMCPAdd
+		switch st.step {
+		case mcpStepName:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " name is required\n" + mcpAddPrompt(mcpStepName) + " ")
+				return m, nil
+			}
+			st.sc.Name = answer
+		case mcpStepURL:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " url is required\n" + mcpAddPrompt(mcpStepURL) + " ")
+				return m, nil
+			}
+			st.sc.URL = answer
+		case mcpStepAuth:
+			if answer == "" {
+				answer = "none"
+			}
+			st.sc.Auth = answer
+		case mcpStepAPIKey:
+			st.sc.APIKey = answer
+		case mcpStepTokenCmd:
+			st.sc.TokenCmd = answer
+		}
+
+		st.step = mcpFirstMissingStep(st.sc)
+		if st.step == mcpStepDone {
+			m.pendingMCPAdd = nil
+			m = m.commitAddMCP(st.sc)
+		} else {
+			m.appendTranscript(mcpAddPrompt(st.step) + " ")
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
+
+// commitAddMCP appends the new MCP server to config, saves, and confirms.
+func (m model) commitAddMCP(sc config.MCPServerConfig) model {
+	for _, existing := range m.st.cfg.MCPServers {
+		if strings.EqualFold(existing.Name, sc.Name) {
+			m.appendTranscript(fmt.Sprintf("%s MCP server %q already exists — use /mcp enable/disable or /mcp remove first\n",
+				milkTag(), sc.Name))
+			return m
+		}
+	}
+	// Normalise auth="none" → empty (canonical form).
+	if strings.ToLower(sc.Auth) == "none" {
+		sc.Auth = ""
+	}
+	m.st.cfg.MCPServers = append(m.st.cfg.MCPServers, sc)
+	if err := config.Save(m.st.cfg); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+		return m
+	}
+	m.appendTranscript(fmt.Sprintf("%s MCP server %q added — use /mcp assign %s for <agent> to expose it\n",
+		milkTag(), sc.Name, sc.Name))
+	return m
+}
+
 // isCopilotURL returns true when the URL looks like a GitHub Copilot API endpoint.
 func isCopilotURL(u string) bool {
 	lower := strings.ToLower(u)

@@ -49,6 +49,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdUpdate {
 		return m.handleUpdateCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdMCP {
+		return m.handleMCPCmd(strings.TrimSpace(rest))
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
@@ -401,6 +404,26 @@ func (m model) handleForgetCmd(pat string) model {
 	m.appendTranscript(milkTag() + " enter position (1-" + fmt.Sprintf("%d", len(candidates)) + "), #id, or empty to cancel: ")
 	m.pendingForget = &forgetState{candidates: candidates}
 	return m
+}
+
+// handleMCPCmd handles `/mcp [list|add [key=val ...]|remove|enable|disable|tools|assign|unassign|reconnect]`.
+// /mcp add with missing required fields launches an interactive wizard; all other
+// subcommands are stateless and delegate directly to the exec* helpers.
+func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
+	parts := strings.Fields(arg)
+	if len(parts) == 0 {
+		m.appendTranscript(execMCP("", m.st, m.agents.mcpToolSets) + "\n")
+		return m, nil
+	}
+	verb := parts[0]
+	rest := strings.TrimSpace(strings.TrimPrefix(arg, verb))
+
+	if verb == "add" {
+		return m.startAddMCP(rest), nil
+	}
+
+	m.appendTranscript(execMCP(arg, m.st, m.agents.mcpToolSets) + "\n")
+	return m, nil
 }
 
 // handleAgentCmd handles `/agent [list|switch <name>|add [key=val ...]]`.
