@@ -18,6 +18,7 @@ const (
 	msgTypeResult         msgType = "result"
 	msgTypeControlRequest msgType = "control_request"
 	msgTypeStreamEvent    msgType = "stream_event"
+	msgTypeUser           msgType = "user"
 )
 
 type contentBlock struct {
@@ -50,6 +51,7 @@ type streamEventDelta struct {
 
 type streamContentBlock struct {
 	Type string `json:"type"`
+	ID   string `json:"id"`   // non-empty for tool_use blocks (e.g. "toolu_bdrk_...")
 	Name string `json:"name"` // non-empty for tool_use blocks
 }
 
@@ -107,11 +109,12 @@ type PermissionDenialRecord struct {
 
 // ParseResult holds the parsed output of a claude subprocess run.
 type ParseResult struct {
-	SessionID         string
-	Text              string
-	EndsWithQ         bool // true if the final text ends with a question mark
-	IsError           bool
-	PermissionDenials []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
+	SessionID           string
+	Text                string
+	EndsWithQ           bool // true if the final text ends with a question mark
+	IsError             bool
+	PermissionDenials   []PermissionDenialRecord // tools silently blocked (post-hoc, from result event)
+	StreamClosedDenials []StreamClosedRecord     // tools that hit the pre-flight "Stream closed" trust check
 	// Token usage from the result event (may be zero if not reported).
 	InputTokens              int64
 	OutputTokens             int64
@@ -220,7 +223,13 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 	if opts.OnPercept != nil {
 		out = &perceptWriter{w: out, onPercept: opts.OnPercept, recordNonce: opts.PerceptNonce, agentNames: opts.AgentNames}
 	}
-	cb := eventCallbacks{onPermission: onPermission, onToolUse: opts.OnToolUse, onToolUseReady: opts.OnToolUseReady, onThinking: opts.OnThinking}
+	cb := eventCallbacks{
+		onPermission:   onPermission,
+		onToolUse:      opts.OnToolUse,
+		onToolUseReady: opts.OnToolUseReady,
+		onThinking:     opts.OnThinking,
+		toolRegistry:   map[string]StreamClosedRecord{},
+	}
 
 	var res ParseResult
 	var textBuf strings.Builder
@@ -265,6 +274,9 @@ type eventCallbacks struct {
 	onToolUse      func(string)
 	onToolUseReady func(string, map[string]any)
 	onThinking     func(string)
+	// toolRegistry accumulates tool_use id→{name,input} during streaming so that
+	// type:"user" tool_result lines with "Stream closed" can be correlated.
+	toolRegistry map[string]StreamClosedRecord
 }
 
 // applyEvent updates res and textBuf based on a single stream event.
@@ -280,6 +292,8 @@ func applyEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev st
 		applyResult(res, ev)
 	case msgTypeControlRequest:
 		cb.onPermission(ControlRequest{RequestID: ev.RequestID, Body: ev.Request}, stdinW)
+	case msgTypeUser:
+		applyUserMessage(res, raw, cb)
 	}
 }
 
@@ -302,6 +316,70 @@ func applyResult(res *ParseResult, ev streamEvent) {
 		res.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
 	}
 	res.TotalCostUSD = ev.TotalCostUSD
+}
+
+// userMessageContent is the minimal structure we need to detect stream-closed tool results.
+type userMessageContent struct {
+	Type      string `json:"type"` // "tool_result"
+	ToolUseID string `json:"tool_use_id"`
+	Content   any    `json:"content"` // string or []contentBlock
+	IsError   bool   `json:"is_error"`
+}
+
+type userMessageEvent struct {
+	Message struct {
+		Content []userMessageContent `json:"content"`
+	} `json:"message"`
+}
+
+const streamClosedMarker = "Stream closed"
+
+// applyUserMessage detects tool_result blocks with "Stream closed" content
+// (Claude's pre-flight directory-trust failure) and records them into ParseResult.
+func applyUserMessage(res *ParseResult, raw []byte, cb eventCallbacks) {
+	if cb.toolRegistry == nil {
+		return
+	}
+	var ume userMessageEvent
+	if err := json.Unmarshal(raw, &ume); err != nil {
+		return
+	}
+	for _, block := range ume.Message.Content {
+		if block.Type != "tool_result" {
+			continue
+		}
+		if !isStreamClosedContent(block.Content) {
+			continue
+		}
+		rec, ok := cb.toolRegistry[block.ToolUseID]
+		if !ok {
+			// Unknown tool_use_id — record with just the ID so callers can still surface it.
+			rec = StreamClosedRecord{ToolUseID: block.ToolUseID}
+		}
+		res.StreamClosedDenials = append(res.StreamClosedDenials, rec)
+	}
+}
+
+// isStreamClosedContent returns true if content represents the "Stream closed"
+// error string, regardless of whether it is a plain string or a text content block.
+func isStreamClosedContent(content any) bool {
+	switch v := content.(type) {
+	case string:
+		return strings.Contains(v, streamClosedMarker)
+	case []any:
+		for _, item := range v {
+			m, _ := item.(map[string]any)
+			if m == nil {
+				continue
+			}
+			if m["type"] == "text" {
+				if s, _ := m["text"].(string); strings.Contains(s, streamClosedMarker) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func applyAssistant(res *ParseResult, textBuf *strings.Builder, out io.Writer, ev streamEvent) {
@@ -330,23 +408,33 @@ func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer,
 			if cb.onToolUse != nil {
 				cb.onToolUse(wrapper.Event.ContentBlock.Name)
 			}
-			if cb.onToolUseReady != nil {
-				toolBlock.name = wrapper.Event.ContentBlock.Name
-				toolBlock.buf.Reset()
-			}
+			toolBlock.id = wrapper.Event.ContentBlock.ID
+			toolBlock.name = wrapper.Event.ContentBlock.Name
+			toolBlock.buf.Reset()
 		}
 	case "content_block_delta":
-		if cb.onToolUseReady != nil && wrapper.Event.Delta.Type == "input_json_delta" {
+		if toolBlock.name != "" && wrapper.Event.Delta.Type == "input_json_delta" {
 			toolBlock.buf.WriteString(wrapper.Event.Delta.PartialJSON)
 		}
 		applyDelta(res, textBuf, out, wrapper.Event.Delta, cb.onThinking)
 	case "content_block_stop":
-		if cb.onToolUseReady != nil && toolBlock.name != "" {
+		if toolBlock.name != "" {
 			var input map[string]any
 			if s := toolBlock.buf.String(); s != "" {
 				json.Unmarshal([]byte(s), &input) //nolint:errcheck
 			}
-			cb.onToolUseReady(toolBlock.name, input)
+			if cb.onToolUseReady != nil {
+				cb.onToolUseReady(toolBlock.name, input)
+			}
+			// Register in the per-turn registry so type:"user" stream-closed results can correlate.
+			if cb.toolRegistry != nil && toolBlock.id != "" {
+				cb.toolRegistry[toolBlock.id] = StreamClosedRecord{
+					ToolUseID: toolBlock.id,
+					Name:      toolBlock.name,
+					Input:     input,
+				}
+			}
+			toolBlock.id = ""
 			toolBlock.name = ""
 			toolBlock.buf.Reset()
 		}
@@ -355,8 +443,18 @@ func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer,
 
 // toolBlockState tracks the current tool_use content block being streamed.
 type toolBlockState struct {
+	id   string
 	name string
 	buf  strings.Builder
+}
+
+// StreamClosedRecord is a tool_use that returned "Stream closed" in its tool_result.
+// This happens when Claude's pre-flight directory-trust check fires before the
+// permission-prompt-tool stdio handler becomes active.
+type StreamClosedRecord struct {
+	ToolUseID string
+	Name      string
+	Input     map[string]any
 }
 
 func applyDelta(res *ParseResult, textBuf *strings.Builder, out io.Writer, delta streamEventDelta, onThinking func(string)) {

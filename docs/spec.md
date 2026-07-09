@@ -213,6 +213,16 @@ The prompt shows the tool name, key arguments, and — for `workingDir` blocks �
 
 Pre-approved tools and directories can be listed in `allowed_tools` and `add_dirs` fields on the `claude-cli` entry; they are passed as `--allowedTools` / `--add-dir` flags and never trigger a prompt.
 
+#### Pre-flight "Stream closed" failures
+
+A second class of permission failure sits *before* the `--permission-prompt-tool stdio` handler: Claude Code's directory-trust pre-flight check. When this fires, the tool returns `"Stream closed"` as its result — no `control_request` event is emitted, no prompt reaches the user, and the turn ends silently with partial output.
+
+milk handles this with two layers:
+
+1. **Baseline tool pre-approval**: `Bash`, `Read`, `Write`, and `Edit` are always merged into the `--allowedTools` flag on every `claude-cli` invocation (in addition to any user-configured `allowed_tools`). `/tmp` is always added to the trusted directory list alongside `cwd`. This eliminates the failure for the majority of fresh-workspace first turns with no user interaction.
+
+2. **Post-turn detection and retry**: milk's stream parser tracks `type:"user"` NDJSON messages. A `tool_result` block whose content is `"Stream closed"` is correlated back to the tool name via a per-turn `toolRegistry` (built from `content_block_start` `id` fields during streaming), and recorded in `ParseResult.StreamClosedDenials`. After the turn, `handleStreamClosedDenials` presents each failed tool to the user, offers a tool grant and a directory grant, persists grants to `~/.claude/settings.json`, and retries the turn via `--resume`. See ADR-0035.
+
 ### Context handoff (escalation)
 
 When promoting from the primary agent to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt-file` (for Claude CLI, split into static+dynamic files — see ADR-0004) or as the first system message (for inference-server escalation). Format:

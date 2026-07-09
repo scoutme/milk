@@ -33,3 +33,4 @@
 * [31. Local Agent Percept Writing, Dynamic Consumer Hints, and CurrentNeed Early-Exit Fallback](0031-local-percept-writing-and-dynamic-consumer-hints.md)
 * [32. Returning Fresh-Start on Stale Context](0032-returning-fresh-start-on-stale-context.md)
 * [33. Unified TurnRunner Interface for Agent Dispatch](0033-unified-turn-runner-interface.md)
+* [35. Stream-closed Pre-flight Denial Detection and Retry](0035-stream-closed-pre-flight-denial-handling.md)

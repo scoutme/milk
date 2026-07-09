@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -362,13 +363,25 @@ func cliAgentConfig(cfg config.Config) config.AgentConfig {
 	return config.AgentConfig{Name: "claude", Provider: "claude-cli", Bin: "claude"}
 }
 
+// cliBaselineTools are pre-approved on every claude-cli invocation regardless of
+// config so a fresh workspace never hits Claude Code's silent pre-flight block
+// before the interactive permission handler is active.
+var cliBaselineTools = []string{"Bash", "Read", "Write", "Edit"}
+
 // newCLIAgent constructs a claude.Agent from the claude-cli AgentConfig.
 func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 	bin := ac.Bin
 	if bin == "" {
 		bin = "claude"
 	}
-	return claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, ac.AllowedTools, ac.AddDirs)
+	// Merge baseline into user-configured tools without duplicates.
+	tools := append([]string{}, cliBaselineTools...)
+	for _, t := range ac.AllowedTools {
+		if !slices.Contains(tools, t) {
+			tools = append(tools, t)
+		}
+	}
+	return claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, tools, ac.AddDirs)
 }
 
 // attachMCPToolSet builds an mcp.ToolSet from the MCP servers configured for
@@ -701,11 +714,13 @@ func escalationLocalHistoryFresh(sess *session.Session, prompt string) []local.M
 // settings.json and wires them into the agent so grants survive across turns.
 // In single-shot mode it also installs the interactive permission handler.
 func applyPersistedGrants(agent *claude.Agent, pc permContext) *claude.Agent {
-	// Always trust the working directory so Claude's directory-trust check never
-	// fires as a silent "Stream closed" error before the permission handler is active.
+	// Always trust the working directory and /tmp so Claude's directory-trust check
+	// never fires as a silent "Stream closed" error before the permission handler is active.
+	// /tmp is a universal scratch space — pre-flight blocks on it are always spurious.
 	if pc.cwd != "" {
 		agent = agent.WithExtraDir(pc.cwd)
 	}
+	agent = agent.WithExtraDir("/tmp")
 	if pc.cs == nil {
 		return agent
 	}
@@ -804,6 +819,68 @@ func handleStructuredDenials(ctx context.Context, sess *session.Session, agent *
 	}
 	fmt.Fprint(out, cliLabelStyled(retryAgent)+" ")
 	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce, primaryName, escalationName), "", "Please continue with the approved permissions.", out)
+	if err != nil {
+		return res
+	}
+	return retried
+}
+
+// handleStreamClosedDenials handles the pre-flight "Stream closed" class of failures:
+// Claude's directory-trust check fires before --permission-prompt-tool stdio is active,
+// so no control_request event is ever emitted. Instead we detect the error in the
+// type:"user" tool_result NDJSON line and offer an interactive prompt here, post-turn.
+func handleStreamClosedDenials(ctx context.Context, sess *session.Session, agent *claude.Agent, res claude.ParseResult, input inputReader, out io.Writer, pc permContext, nonce string, primaryName, escalationName string) claude.ParseResult {
+	if len(res.StreamClosedDenials) == 0 {
+		return res
+	}
+	fmt.Fprintf(out, "\n%s escalation agent hit a directory-trust error on:\n", milkTag())
+	retryAgent := agent
+	changed := false
+	for _, d := range res.StreamClosedDenials {
+		label := d.Name
+		if label == "" {
+			label = d.ToolUseID
+		}
+		fmt.Fprintf(out, "  • %s", bold(label))
+		suggested := suggestDir(d.Input)
+		if cmd, ok := d.Input["command"].(string); ok {
+			fmt.Fprintf(out, " → %s", dim(cmd))
+		} else if path, ok := d.Input["file_path"].(string); ok {
+			fmt.Fprintf(out, " → %s", dim(path))
+		}
+		fmt.Fprintln(out)
+		// Offer tool grant.
+		yn := drainFuture(pc.toolFutures, d.Name)
+		if yn == "" {
+			yn, _ = input.readLine(fmt.Sprintf("    allow tool %s? [Y/n] ", bold(d.Name)))
+			if yn == "" {
+				yn = "y"
+			}
+		} else {
+			fmt.Fprintf(out, "    allow tool %s? [Y/n] %s\n", bold(d.Name), yn)
+		}
+		if strings.EqualFold(yn, "y") {
+			retryAgent = retryAgent.WithExtraAllowedTool(d.Name)
+			if pc.cs != nil {
+				pc.cs.AllowTool(d.Name) //nolint:errcheck
+			}
+			changed = true
+		}
+		// Offer directory grant.
+		dir := askDir(input, suggested)
+		if dir != "" {
+			retryAgent = retryAgent.WithExtraDir(dir)
+			if pc.cs != nil {
+				pc.cs.AllowDirectory(dir) //nolint:errcheck
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return res
+	}
+	fmt.Fprint(out, cliLabelStyled(retryAgent)+" ")
+	retried, err := retryAgent.RunResume(ctx, sess.EscalationSessionID, escalation.MemoryInstruction(nonce, primaryName, escalationName), "", "Continue — if the previous tool invocations that errored with permission issues haven't been retried with alternatives, please retry them now with the newly granted permissions.", out)
 	if err != nil {
 		return res
 	}

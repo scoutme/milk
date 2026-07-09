@@ -669,3 +669,148 @@ func TestStream_PermissionDenialsInResult(t *testing.T) {
 		t.Errorf("want Write denial, got %v", res.PermissionDenials)
 	}
 }
+
+// --- StreamClosedDenials (pre-flight directory-trust "Stream closed") tests ---
+
+// toolUseEvents returns the stream_event lines needed to register a tool_use block
+// in the per-turn registry (content_block_start + content_block_stop; no input delta needed).
+func toolUseEvents(id, name string) []string {
+	return []string{
+		wrapStreamEvent(`{"type":"content_block_start","content_block":{"type":"tool_use","id":"` + id + `","name":"` + name + `"}}`),
+		wrapStreamEvent(`{"type":"content_block_stop"}`),
+	}
+}
+
+func TestStream_StreamClosedDenials_StringContent(t *testing.T) {
+	// tool_result content is a plain string "Stream closed"
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_01", "Bash")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"Stream closed","is_error":true}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 1 {
+		t.Fatalf("want 1 StreamClosedDenial, got %d: %v", len(res.StreamClosedDenials), res.StreamClosedDenials)
+	}
+	d := res.StreamClosedDenials[0]
+	if d.ToolUseID != "toolu_01" {
+		t.Errorf("ToolUseID: want toolu_01, got %q", d.ToolUseID)
+	}
+	if d.Name != "Bash" {
+		t.Errorf("Name: want Bash, got %q", d.Name)
+	}
+}
+
+func TestStream_StreamClosedDenials_BlockContent(t *testing.T) {
+	// tool_result content is an array of content blocks — the other common encoding
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_02", "Read")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_02","content":[{"type":"text","text":"Stream closed"}],"is_error":true}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 1 {
+		t.Fatalf("want 1 StreamClosedDenial, got %d: %v", len(res.StreamClosedDenials), res.StreamClosedDenials)
+	}
+	if res.StreamClosedDenials[0].Name != "Read" {
+		t.Errorf("Name: want Read, got %q", res.StreamClosedDenials[0].Name)
+	}
+}
+
+func TestStream_StreamClosedDenials_UnknownToolUseID(t *testing.T) {
+	// tool_use_id has no matching entry in the registry (no prior content_block_start) —
+	// still recorded with just the ID so callers can surface it.
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_unknown","content":"Stream closed","is_error":true}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 1 {
+		t.Fatalf("want 1 StreamClosedDenial, got %d", len(res.StreamClosedDenials))
+	}
+	d := res.StreamClosedDenials[0]
+	if d.ToolUseID != "toolu_unknown" {
+		t.Errorf("ToolUseID: want toolu_unknown, got %q", d.ToolUseID)
+	}
+	if d.Name != "" {
+		t.Errorf("Name: want empty for unknown id, got %q", d.Name)
+	}
+}
+
+func TestStream_StreamClosedDenials_NonMatchingContentIgnored(t *testing.T) {
+	// tool_result whose content does not contain "Stream closed" must not be captured.
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_03", "Bash")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_03","content":"ok","is_error":false}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 0 {
+		t.Errorf("want no StreamClosedDenials for non-matching content, got %v", res.StreamClosedDenials)
+	}
+}
+
+func TestStream_StreamClosedDenials_MultipleBlocks(t *testing.T) {
+	// Two tools both hit "Stream closed" — both must be captured with correct names.
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_a", "Write")...)
+	lines = append(lines, toolUseEvents("toolu_b", "Edit")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[`+
+			`{"type":"tool_result","tool_use_id":"toolu_a","content":"Stream closed","is_error":true},`+
+			`{"type":"tool_result","tool_use_id":"toolu_b","content":"Stream closed","is_error":true}`+
+			`]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 2 {
+		t.Fatalf("want 2 StreamClosedDenials, got %d: %v", len(res.StreamClosedDenials), res.StreamClosedDenials)
+	}
+	names := map[string]bool{res.StreamClosedDenials[0].Name: true, res.StreamClosedDenials[1].Name: true}
+	if !names["Write"] || !names["Edit"] {
+		t.Errorf("want Write+Edit, got %v", res.StreamClosedDenials)
+	}
+}
+
+func TestStream_ToolRegistryPopulatedWithoutOnToolUseReadyCallback(t *testing.T) {
+	// Registry must be populated even when OnToolUseReady is nil, so that
+	// type:"user" Stream-closed correlation works unconditionally.
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_04", "Bash")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_04","content":"Stream closed","is_error":true}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 1 || res.StreamClosedDenials[0].Name != "Bash" {
+		t.Errorf("want Bash denial even without OnToolUseReady, got %v", res.StreamClosedDenials)
+	}
+}

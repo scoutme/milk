@@ -362,6 +362,12 @@ func (r *cliRunner) Execute(
 		orig := sess.EscalationSessionID
 		sess.EscalationSessionID = sessionID
 		res = handlePermissionDenials(ctx, sess, agent, res, r.newInput(), out, r.pc, nonce, primaryName, escalationName)
+		// Handle pre-flight "Stream closed" denials (directory-trust check fires before
+		// the permission-prompt-tool stdio handler). These are separate from structured
+		// PermissionDenials and need their own grant + retry flow.
+		if len(res.StreamClosedDenials) > 0 {
+			res = handleStreamClosedDenials(ctx, sess, agent, res, r.newInput(), out, r.pc, nonce, primaryName, escalationName)
+		}
 		sess.EscalationSessionID = orig
 	}
 
