@@ -921,8 +921,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case remoteInputMsg:
 		if !m.busy && msg.text != "" {
-			m.appendTranscript(dim("[telegram]") + " " + colorizeTokens(msg.text) + "\n")
-			return m.dispatchAgent(msg.text)
+			return m.submitInput(msg.text, dim("[telegram]")+" ")
 		}
 		return m, nil
 
@@ -1426,12 +1425,16 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
+	return m.submitInput(input, promptLabel(m.st))
+}
+
+// submitInput handles a finalised user input string from any source (keyboard,
+// Telegram, etc.). label is the transcript echo prefix.
+func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
 
-	// Append echo to transcript
-	label := promptLabel(m.st)
 	m.appendTranscript(label + colorizeTokens(input) + "\n")
 
 	// Append to both histories (deduped)
@@ -1523,11 +1526,17 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		send(openFileMsg{path: path, respCh: respCh})
 		return <-respCh
 	}
+	localOnToolUse := func(name, summary string) {
+		if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+			st.notifier.NotifyToolUse(context.Background(), name, summary)
+		}
+	}
 	if agents.local != nil {
 		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
-			WithOnOpenFile(localOpenFile)
+			WithOnOpenFile(localOpenFile).
+			WithOnToolUse(localOnToolUse)
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
@@ -1535,7 +1544,8 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		tuiEscLocal := agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
-			WithOnOpenFile(localOpenFile)
+			WithOnOpenFile(localOpenFile).
+			WithOnToolUse(localOnToolUse)
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
@@ -1634,6 +1644,11 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	} else {
 		pw = out
 	}
+	// onResponse is called by the dispatch layer with the agent's final text,
+	// giving us the exact text from this turn without re-scanning history.
+	var lastResponseText string
+	onResponse := func(text string) { lastResponseText = text }
+
 	switch target {
 	case router.TargetLocal:
 		if mem := st.mem; mem != nil {
@@ -1642,9 +1657,9 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents, pw)
+		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents, onResponse, pw)
 	case router.TargetEscalation:
-		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out, pw)
+		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out, onResponse, pw)
 	}
 	targetLabel := string(target)
 	obs.Inc(turnCtx, milkScope, "milk.turns.total",
@@ -1662,14 +1677,8 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	}
 	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
 	if turnErr == nil {
-		// Find the last assistant turn added by this agent and forward its text.
-		hist := st.sess.History
-		for i := len(hist) - 1; i >= 0; i-- {
-			t := hist[i]
-			if t.Role == session.RoleAssistant && t.Content != "" {
-				st.notifier.NotifyResponse(turnCtx, agentName, t.Content)
-				break
-			}
+		if lastResponseText != "" {
+			st.notifier.NotifyResponse(turnCtx, agentName, lastResponseText)
 		}
 		// Auto-sticky: if the router decided to escalate (not user-pinned) and the
 		// turn succeeded, keep subsequent turns on the escalation agent.

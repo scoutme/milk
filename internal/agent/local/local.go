@@ -145,6 +145,9 @@ type Agent struct {
 	toolAgentEntries []config.AgentToolEntry
 	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
 	toolAgentDispatcher ToolAgentDispatcher
+	// onToolUse is called just before each tool is dispatched, with the tool name
+	// and a short human-readable summary of its key argument.
+	onToolUse func(name, summary string)
 	// mcpToolSet holds connected MCP servers whose tools are exposed to this agent.
 	// Nil when no MCP servers are configured for this agent.
 	mcpToolSet mcpToolSet
@@ -440,6 +443,15 @@ func (a *Agent) WithOnOpenFile(fn func(path string) error) *Agent {
 func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion int64)) *Agent {
 	a.onTokens = fn
 	return a
+}
+
+// WithOnToolUse returns a shallow copy of the agent that calls fn just before
+// each tool is dispatched. name is the tool name; summary is the short
+// human-readable argument summary produced by toolArgSummary.
+func (a *Agent) WithOnToolUse(fn func(name, summary string)) *Agent {
+	copy := *a
+	copy.onToolUse = fn
+	return &copy
 }
 
 // WithLogContext enables full request payload logging at DEBUG level.
@@ -828,6 +840,11 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			continue
 		}
 		printToolLine(out, tc, a.termWidth)
+		if a.onToolUse != nil {
+			var argMap map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
+			a.onToolUse(tc.Function.Name, toolArgSummary(argMap))
+		}
 		args := tc.Function.Arguments
 		if len(args) > 120 {
 			args = args[:120] + "…"

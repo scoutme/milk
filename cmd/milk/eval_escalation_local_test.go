@@ -290,7 +290,7 @@ func TestEval_EscalationLocal(t *testing.T) {
 		newSess.History = append([]session.Turn(nil), orig.History...)
 		newAgent := local.NewFromConfig(cfg.EscalationAgentConfig()).AsEscalationTarget("esc")
 		var newOut strings.Builder
-		if err := runEscalation(context.Background(), cfg, &newSess, newLocalRunner(newAgent, "esc"), "", nil, prompt, &newOut); err != nil {
+		if err := runEscalation(context.Background(), cfg, &newSess, newLocalRunner(newAgent, "esc"), "", nil, prompt, &newOut, nil); err != nil {
 			t.Errorf("scenario %q: runEscalation: %v", name, err)
 		}
 		newChars := srv.lastChars()

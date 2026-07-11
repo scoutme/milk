@@ -61,6 +61,7 @@ type TurnCallbacks struct {
 	OnNeed     func(body string)
 	OnPercept  func(body, consumerHint string)
 	OnEscalate func(reason string) // nil for escalation runners (they never self-escalate)
+	OnResponse func(text string)   // called with the agent's final text after a successful turn
 }
 
 // TurnRunner abstracts provider-specific inference for one agent turn.

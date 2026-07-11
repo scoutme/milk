@@ -31,6 +31,7 @@ func runPrimary(
 	prompt string,
 	out io.Writer,
 	da *dispatchAgents,
+	onResponse func(string),
 	prefixOut ...io.Writer,
 ) error {
 	ac := cfg.ActiveAgent()
@@ -66,6 +67,7 @@ func runPrimary(
 		OnNeed:     func(body string) { sess.RecordNeed(body) },
 		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
 		OnEscalate: func(reason string) {}, // captured via TurnResult.EscalationReason
+		OnResponse: onResponse,
 	}
 
 	// Wire tool-agent dispatcher into local runners when dispatchAgents is available.
@@ -111,6 +113,9 @@ func runPrimary(
 		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: res.Text})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
+	if res.Text != "" && cbs.OnResponse != nil {
+		cbs.OnResponse(res.Text)
+	}
 
 	if res.EscalationReason != "" {
 		fmt.Fprintf(out, "\n%s %s requested escalation: %s\n", milkTag(), agentName, res.EscalationReason)
@@ -123,11 +128,11 @@ func runPrimary(
 		session.Save(sess) //nolint:errcheck
 
 		if escalationRunner != nil {
-			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out)
+			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, onResponse)
 		}
 		// Fallback: build CLI escalation runner on-demand.
 		cliEsc := buildFallbackCLIRunner(cfg)
-		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out)
+		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, onResponse)
 	}
 
 	logStateTransition(sess, session.StateRouting, agentName+" primary done")
@@ -148,6 +153,7 @@ func runEscalation(
 	mem *memory.Store,
 	prompt string,
 	out io.Writer,
+	onResponse func(string),
 	prefixOut ...io.Writer,
 ) error {
 	escAC := cfg.EscalationAgentConfig()
@@ -219,8 +225,9 @@ func runEscalation(
 	}
 
 	cbs := TurnCallbacks{
-		OnNeed:    func(body string) { sess.RecordNeed(body) },
-		OnPercept: buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
+		OnNeed:     func(body string) { sess.RecordNeed(body) },
+		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
+		OnResponse: onResponse,
 	}
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RoleEscalation, ctxMode,
@@ -248,6 +255,9 @@ func runEscalation(
 
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
 	sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
+	if res.Text != "" && cbs.OnResponse != nil {
+		cbs.OnResponse(res.Text)
+	}
 
 	if res.EndsWithQ {
 		logStateTransition(sess, session.StateEscalationWaiting, agentName+" escalation ended with question")
