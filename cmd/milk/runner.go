@@ -19,6 +19,21 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+// permissionManagementInstruction is appended to the claude-cli static context
+// when ExperimentalPermissionManagement is enabled. It instructs Claude to
+// terminate gracefully on "Stream closed" pre-flight denials so milk can grant
+// the permission and respawn the turn, rather than attempting workarounds.
+const permissionManagementInstruction = `
+
+## Permission management (milk-managed)
+If a tool call returns an error with content that includes "Stream closed", it
+means milk has not yet granted the required permission for that tool or directory.
+Do NOT retry the tool, attempt workarounds, or continue the task.
+Instead, output exactly one short message such as:
+  "Pausing — milk needs to grant permission for [tool name] before I can continue."
+then end your turn immediately with no further output or tool calls.
+Milk will automatically prompt the user for the permission and resume your task.`
+
 // AgentRole distinguishes primary from escalation so runners can apply
 // role-specific behaviour (e.g. history scoping, context builder choice).
 type AgentRole int
@@ -282,6 +297,9 @@ func (r *cliRunner) Execute(
 	}
 
 	staticCtx := escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
+	if cfg.ExperimentalPermissionManagement {
+		staticCtx += permissionManagementInstruction
+	}
 	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
 
 	// Suppress duplicate dynamic context on resume turns (cache preservation).

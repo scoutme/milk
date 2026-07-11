@@ -461,6 +461,14 @@ type Config struct {
 	// UpdateSkippedVersion holds a release tag (e.g. "v0.0.12") the user chose to skip.
 	// The update badge is suppressed for this version until a newer one arrives.
 	UpdateSkippedVersion string `json:"update_skipped_version,omitempty"`
+
+	// ExperimentalPermissionManagement injects a system-prompt instruction into
+	// claude-cli turns that tells Claude to stop and announce when a tool call
+	// is denied with a "Stream closed" pre-flight error, rather than attempting
+	// workarounds. Milk then grants the permission and respawns the turn via its
+	// normal handleStreamClosedDenials path.
+	// Default: false (opt-in, experimental).
+	ExperimentalPermissionManagement bool `json:"experimental_permission_management,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.
