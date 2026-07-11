@@ -110,35 +110,46 @@ type Client struct {
 	// tokenOnce caches a dynamic Bearer token resolved from TokenCmd.
 	tokenOnce   sync.Once
 	cachedToken string
+
+	// stdio transport fields — non-nil only when Transport == "stdio".
+	proc       *exec.Cmd
+	procStdin  io.WriteCloser
+	procStdout *bufio.Reader
+	stdioMu    sync.Mutex // serialises JSON-RPC over the single stdio channel
 }
 
 // New builds a Client from an MCPServerConfig but does not connect yet.
 func New(cfg config.MCPServerConfig) *Client {
-	timeout := 30 * time.Second
-	if cfg.Timeout != "" {
-		if d, err := time.ParseDuration(cfg.Timeout); err == nil && d > 0 {
-			timeout = d
-		}
-	}
 	connectTimeout := 5 * time.Second
 	if cfg.ConnectTimeout != "" {
 		if d, err := time.ParseDuration(cfg.ConnectTimeout); err == nil && d > 0 {
 			connectTimeout = d
 		}
 	}
-	transport := http.DefaultTransport
-	if cfg.TLSSkipVerify {
-		transport = insecureTLSTransport()
-	}
-	return &Client{
-		cfg:      cfg,
-		endpoint: cfg.URL,
-		httpClient: &http.Client{
-			Timeout:   timeout,
-			Transport: transport,
-		},
+
+	c := &Client{
+		cfg:            cfg,
+		endpoint:       cfg.URL,
 		connectTimeout: connectTimeout,
 	}
+
+	if !c.isStdio() {
+		timeout := 30 * time.Second
+		if cfg.Timeout != "" {
+			if d, err := time.ParseDuration(cfg.Timeout); err == nil && d > 0 {
+				timeout = d
+			}
+		}
+		transport := http.DefaultTransport
+		if cfg.TLSSkipVerify {
+			transport = insecureTLSTransport()
+		}
+		c.httpClient = &http.Client{
+			Timeout:   timeout,
+			Transport: transport,
+		}
+	}
+	return c
 }
 
 // Connect performs the MCP initialization handshake and fetches the initial
@@ -156,6 +167,10 @@ func (c *Client) Connect(ctx context.Context) (retErr error) {
 			obs.Info("mcp.connect.failed", "server", c.cfg.Name, "error", retErr.Error())
 		}
 	}()
+
+	if c.isStdio() {
+		return c.connectStdio(ctx)
+	}
 
 	// Resolve dynamic token upfront so it's available for all requests.
 	if strings.ToLower(c.cfg.Auth) == "token_cmd" && c.cfg.TokenCmd != "" {
@@ -201,6 +216,132 @@ func (c *Client) Connect(ctx context.Context) (retErr error) {
 	c.ready = true
 	obs.Info("mcp.connect", "server", c.cfg.Name, "tools", len(c.tools))
 	return nil
+}
+
+// connectStdio starts the subprocess and performs the MCP handshake over stdio.
+// Must be called with c.mu held.
+// The subprocess is started with context.Background() so it outlives the
+// connect-timeout context; ctx is used only for the handshake round-trips.
+func (c *Client) connectStdio(ctx context.Context) error {
+	cmd := exec.CommandContext(context.Background(), c.cfg.Command, c.cfg.Args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("mcp %q: stdin pipe: %w", c.cfg.Name, err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("mcp %q: stdout pipe: %w", c.cfg.Name, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("mcp %q: start: %w", c.cfg.Name, err)
+	}
+	c.proc = cmd
+	c.procStdin = stdin
+	c.procStdout = bufio.NewReader(stdout)
+
+	// Phase 1: initialize
+	if _, err := c.roundtripStdio(ctx, "initialize", map[string]any{
+		"protocolVersion": protocolVersion,
+		"capabilities": map[string]any{
+			"roots":    map[string]any{},
+			"sampling": map[string]any{},
+		},
+		"clientInfo": map[string]any{
+			"name":    "milk",
+			"version": "0.1.0",
+		},
+	}); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("mcp %q: initialize failed: %w", c.cfg.Name, err)
+	}
+
+	// Phase 2: initialized notification
+	if err := c.notifyStdio("notifications/initialized", nil); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("mcp %q: initialized notification failed: %w", c.cfg.Name, err)
+	}
+
+	// Phase 3: list tools
+	tools, err := c.listTools(ctx)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("mcp %q: tools/list failed: %w", c.cfg.Name, err)
+	}
+	c.tools = tools
+	c.ready = true
+	obs.Info("mcp.connect", "server", c.cfg.Name, "transport", "stdio", "tools", len(c.tools))
+	return nil
+}
+
+// roundtripStdio sends a JSON-RPC request over stdin and reads the response from stdout.
+// It does not hold c.mu — callers that need serialisation must hold c.stdioMu.
+func (c *Client) roundtripStdio(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	id := c.idSeq.Add(1)
+	req := jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Method:  method,
+		Params:  params,
+	}
+	line, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	line = append(line, '\n')
+
+	c.stdioMu.Lock()
+	defer c.stdioMu.Unlock()
+
+	if _, err := c.procStdin.Write(line); err != nil {
+		return nil, fmt.Errorf("write to stdin: %w", err)
+	}
+
+	// Read lines until we see the response matching our id (skip server notifications).
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		raw, err := c.procStdout.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read from stdout: %w", err)
+		}
+		var rpc jsonrpcResponse
+		if err := json.Unmarshal(raw, &rpc); err != nil {
+			continue // skip malformed lines
+		}
+		if rpc.ID == nil || *rpc.ID != id {
+			continue // server notification or response to another request
+		}
+		if rpc.Error != nil {
+			return nil, rpc.Error
+		}
+		return rpc.Result, nil
+	}
+}
+
+// notifyStdio sends a JSON-RPC notification (no id, no response) over stdin.
+func (c *Client) notifyStdio(method string, params any) error {
+	notif := jsonrpcRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+	}
+	line, err := json.Marshal(notif)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+	c.stdioMu.Lock()
+	defer c.stdioMu.Unlock()
+	_, err = c.procStdin.Write(line)
+	return err
+}
+
+// isStdio reports whether this client uses the stdio subprocess transport.
+func (c *Client) isStdio() bool {
+	return strings.ToLower(c.cfg.Transport) == "stdio"
 }
 
 // Tools returns the cached list of tools discovered during Connect.
@@ -311,9 +452,13 @@ func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
 }
 
 // roundtrip sends a JSON-RPC request and returns the result bytes.
+// Dispatches to roundtripStdio for stdio transport.
 // It attaches the session ID header when one has been established and updates
 // the session ID from the response header on the initialize call.
 func (c *Client) roundtrip(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if c.isStdio() {
+		return c.roundtripStdio(ctx, method, params)
+	}
 	id := c.idSeq.Add(1)
 	req := jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -366,7 +511,11 @@ func (c *Client) roundtrip(ctx context.Context, method string, params any) (json
 }
 
 // notify sends a JSON-RPC notification (no ID, no response expected).
+// Dispatches to notifyStdio for stdio transport.
 func (c *Client) notify(ctx context.Context, method string, params any) error {
+	if c.isStdio() {
+		return c.notifyStdio(method, params)
+	}
 	req := jsonrpcRequest{
 		JSONRPC: "2.0",
 		Method:  method,
@@ -596,9 +745,24 @@ func (c *Client) Reset() {
 	c.mu.Unlock()
 }
 
-// Close terminates the session. For HTTP transport this sends a DELETE to the
-// MCP endpoint with the session ID header; failure is silently ignored.
+// Close terminates the session. For stdio transport this kills the subprocess;
+// for HTTP transport this sends a DELETE to the MCP endpoint with the session
+// ID header. Failures are silently ignored.
 func (c *Client) Close(ctx context.Context) {
+	if c.isStdio() {
+		c.mu.Lock()
+		proc := c.proc
+		stdin := c.procStdin
+		c.mu.Unlock()
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+		if proc != nil && proc.Process != nil {
+			_ = proc.Process.Kill()
+		}
+		return
+	}
+
 	c.mu.Lock()
 	sid := c.sessionID
 	c.mu.Unlock()

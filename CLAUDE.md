@@ -114,5 +114,5 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 
 - Planning mode (offline)
 - Demotion from escalation back to primary mid-session
-- MCP server integration for local tools
+- MCP stdio transport for local subprocess tools ✓ (done — `transport: "stdio"`, `command`, `args` fields in `MCPServerConfig`)
 - TUI: app-managed drag selection (currently terminal-native; selection highlight sticks to screen coords during scroll — Claude Code works around this with non-native selection)

@@ -656,8 +656,10 @@ Global list of MCP (Model Context Protocol) servers that agents can connect to. 
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Unique identifier referenced from `AgentConfig.mcp_servers` |
-| `url` | string | MCP endpoint (e.g. `"http://localhost:3000/mcp"`). For Streamable HTTP transport this is a single POST+GET endpoint |
-| `transport` | string | Wire protocol: `"http"` (default) uses Streamable HTTP with SSE fallback for older servers; `"stdio"` reserved for future use |
+| `url` | string | MCP endpoint. Required for `http` transport (e.g. `"http://localhost:3000/mcp"`). For Streamable HTTP transport this is a single POST+GET endpoint |
+| `transport` | string | Wire protocol: `"http"` (default) uses Streamable HTTP with SSE fallback; `"stdio"` launches a subprocess and communicates over its stdin/stdout |
+| `command` | string | Executable path. Required when `transport` is `"stdio"` |
+| `args` | string[] | Command-line arguments for the stdio subprocess |
 | `enabled` | bool | Whether the server is active (default `true` when omitted) |
 
 Reference servers from an agent entry via `"mcp_servers": ["my-mcp"]` in the `agents` list.
@@ -777,5 +779,5 @@ milk relays tokens to stdout as they arrive.
 - Planning mode (offline, no LLM execution)
 - Demotion from escalation back to primary mid-session
 - Web UI / TUI
-- MCP server integration for local tools
+- MCP stdio transport for local tools ✓ (done)
 - Multi-user / daemon mode

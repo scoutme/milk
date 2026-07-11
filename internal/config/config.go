@@ -254,10 +254,11 @@ type MCPServerConfig struct {
 
 	// URL is the MCP endpoint (e.g. "http://localhost:3000/mcp").
 	// For Streamable HTTP transport (2025-03-26) this is a single POST+GET endpoint.
-	URL string `json:"url"`
+	URL string `json:"url,omitempty"`
 
 	// Transport selects the wire protocol. "http" (default) uses Streamable HTTP
-	// with SSE fallback for older servers. "stdio" is reserved for future use.
+	// with SSE fallback for older servers. "stdio" launches the server as a
+	// subprocess and communicates over its stdin/stdout (newline-delimited JSON-RPC).
 	Transport string `json:"transport,omitempty"`
 
 	// Auth selects the authentication method.
@@ -286,6 +287,14 @@ type MCPServerConfig struct {
 
 	// TLSSkipVerify disables TLS certificate verification for dev/self-signed certs.
 	TLSSkipVerify bool `json:"tls_skip_verify,omitempty"`
+
+	// Command is the executable path for stdio transport servers.
+	// Only used when Transport == "stdio".
+	Command string `json:"command,omitempty"`
+
+	// Args are the command-line arguments passed to Command.
+	// Only used when Transport == "stdio".
+	Args []string `json:"args,omitempty"`
 }
 
 // IsEnabled reports whether this MCP server entry is enabled.
@@ -1204,8 +1213,12 @@ func Validate(cfg Config) []ValidationWarning {
 			warn("", fmt.Sprintf("mcp_servers: duplicate name %q", ms.Name))
 		}
 		mcpNames[ms.Name] = true
-		if ms.URL == "" {
+		isStdio := strings.ToLower(ms.Transport) == "stdio"
+		if ms.URL == "" && !isStdio {
 			warn("", fmt.Sprintf("mcp_servers %q: url is required", ms.Name))
+		}
+		if isStdio && ms.Command == "" {
+			warn("", fmt.Sprintf("mcp_servers %q: command is required for stdio transport", ms.Name))
 		}
 		switch strings.ToLower(ms.Auth) {
 		case "", "none", "bearer", "token_cmd":
@@ -1213,9 +1226,9 @@ func Validate(cfg Config) []ValidationWarning {
 			warn("", fmt.Sprintf("mcp_servers %q: unknown auth %q (valid: none, bearer, token_cmd)", ms.Name, ms.Auth))
 		}
 		switch strings.ToLower(ms.Transport) {
-		case "", "http":
+		case "", "http", "stdio":
 		default:
-			warn("", fmt.Sprintf("mcp_servers %q: unknown transport %q (valid: http)", ms.Name, ms.Transport))
+			warn("", fmt.Sprintf("mcp_servers %q: unknown transport %q (valid: http, stdio)", ms.Name, ms.Transport))
 		}
 	}
 

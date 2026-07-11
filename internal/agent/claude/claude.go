@@ -272,7 +272,9 @@ func readFileOrEmpty(path string) []byte {
 }
 
 // writeMCPConfigFile serialises servers into a temp JSON file in the format
-// Claude CLI expects for --mcp-config: {"mcpServers":{"name":{"type":"http","url":"...","headers":{...}}}}.
+// Claude CLI expects for --mcp-config.
+// HTTP servers: {"type":"http","url":"...","headers":{...}}
+// Stdio servers: {"type":"stdio","command":"...","args":[...]}
 // The caller must invoke the returned cleanup func when the subprocess exits.
 func writeMCPConfigFile(servers []config.MCPServerConfig) (string, func(), error) {
 	type httpEntry struct {
@@ -280,8 +282,17 @@ func writeMCPConfigFile(servers []config.MCPServerConfig) (string, func(), error
 		URL     string            `json:"url"`
 		Headers map[string]string `json:"headers,omitempty"`
 	}
-	entries := make(map[string]httpEntry, len(servers))
+	type stdioEntry struct {
+		Type    string   `json:"type"`
+		Command string   `json:"command"`
+		Args    []string `json:"args,omitempty"`
+	}
+	entries := make(map[string]any, len(servers))
 	for _, s := range servers {
+		if strings.ToLower(s.Transport) == "stdio" {
+			entries[s.Name] = stdioEntry{Type: "stdio", Command: s.Command, Args: s.Args}
+			continue
+		}
 		entry := httpEntry{Type: "http", URL: s.URL}
 		if strings.ToLower(s.Auth) == "bearer" && s.APIKey != "" {
 			entry.Headers = map[string]string{"Authorization": "Bearer " + s.APIKey}
