@@ -1086,13 +1086,19 @@ func makePermissionHandler(input inputReader, out io.Writer, cs *claudesettings.
 	}
 }
 
-// firstLine returns the text up to the first newline, trimming trailing whitespace.
-// Used to keep tool-hint lines single-line so ANSI dim sequences don't bleed.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimRight(s[:i], " \t\r")
+// dimWrap wraps s in ANSI dim, closing and reopening the dim escape at each
+// embedded newline so every output line is a self-contained dim span and the
+// dim state never bleeds into subsequent lines rendered by the viewport.
+func dimWrap(s string) string {
+	const on, off = "\033[2m", "\033[0m"
+	if !strings.Contains(s, "\n") {
+		return on + s + off
 	}
-	return s
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = on + l + off
+	}
+	return strings.Join(lines, "\n")
 }
 
 // cliToolArgSummary picks the most informative single argument value for display,

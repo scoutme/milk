@@ -926,7 +926,7 @@ func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 	var args map[string]any
 	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
 
-	summary := firstLine(toolArgSummary(args))
+	summary := toolArgSummary(args)
 	if summary != "" {
 		prefix := "⚙ " + tc.Function.Name + ": "
 		if termWidth > 0 {
@@ -939,9 +939,9 @@ func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 				summary = string(runes[:maxSummary-1]) + "…"
 			}
 		}
-		fmt.Fprintf(out, "\n\033[2m⚙ %s: %s\033[0m\n", tc.Function.Name, summary)
+		fmt.Fprintf(out, "\n%s\n", dimWrap("⚙ "+tc.Function.Name+": "+summary))
 	} else {
-		fmt.Fprintf(out, "\n\033[2m⚙ %s\033[0m\n", tc.Function.Name)
+		fmt.Fprintf(out, "\n%s\n", dimWrap("⚙ "+tc.Function.Name))
 	}
 }
 
@@ -972,16 +972,22 @@ func toolDiff(name, argsJSON string) string {
 	return ""
 }
 
-// toolArgSummary extracts the most informative single argument value for display.
-// Returns the full string — truncation is done at the call site using terminal width.
-// firstLine returns the text up to the first newline, trimming trailing whitespace.
-// Used to keep tool-hint lines single-line so ANSI dim sequences don't bleed.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimRight(s[:i], " \t\r")
+// dimWrap wraps s in ANSI dim, closing and reopening the escape at each embedded
+// newline so every output line is a self-contained dim span with no bleed.
+func dimWrap(s string) string {
+	const on, off = "\033[2m", "\033[0m"
+	if !strings.Contains(s, "\n") {
+		return on + s + off
 	}
-	return s
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = on + l + off
+	}
+	return strings.Join(lines, "\n")
 }
+
+// toolArgSummary extracts the most informative single argument value for display.
+// Returns the full string — truncation and dim-wrapping are done at the call site.
 
 func toolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {

@@ -635,10 +635,10 @@ func TestColorizeSingle_HintsNoBleedFenced(t *testing.T) {
 }
 
 func TestApplyInlineMarkdown_MultiLineHintNoBleed(t *testing.T) {
-	// A tool hint whose command argument contains literal newlines (e.g. a
-	// multi-line bash script) produces a multi-line dim block. The response text
-	// that follows must not inherit the dim style.
-	input := "\n\033[2m⚙ bash: cd /tmp && python3 -c \"\nimport openpyxl\nwb = openpyxl.load_workbook('x.xlsx')\nfor shee…\033[0m\nIl portale Storyteller è ancora irraggiungibile."
+	// dimWrap produces per-line \033[2m...\033[0m spans so each line is
+	// self-contained. The response text that follows must not be dim.
+	hint := dimWrap("⚙ bash: cd /tmp && python3 -c \"\nimport openpyxl\nwb = openpyxl.load_workbook('x.xlsx')\nfor shee…")
+	input := "\n" + hint + "\nIl portale Storyteller è ancora irraggiungibile."
 	got := applyInlineMarkdown(input)
 	lines := strings.Split(got, "\n")
 	for i, l := range lines {

@@ -1483,11 +1483,11 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					return
 				}
 				var hint string
-				summary := truncateToolSummary(name, firstLine(cliToolArgSummary(input)), termWidth)
+				summary := truncateToolSummary(name, cliToolArgSummary(input), termWidth)
 				if summary != "" {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
+					hint = "\n" + dimWrap("⚙ "+name+": "+summary) + "\n"
 				} else {
-					hint = fmt.Sprintf("\n\033[2m⚙ %s\033[0m\n", name)
+					hint = "\n" + dimWrap("⚙ "+name) + "\n"
 				}
 				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
 					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
