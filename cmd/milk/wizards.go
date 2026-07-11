@@ -275,11 +275,13 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 type addMCPStep int
 
 const (
-	mcpStepName addMCPStep = iota
-	mcpStepURL
-	mcpStepAuth     // "none", "bearer", "token_cmd" — enter to skip (defaults to none)
-	mcpStepAPIKey   // only when auth == "bearer"
-	mcpStepTokenCmd // only when auth == "token_cmd"
+	mcpStepName      addMCPStep = iota
+	mcpStepTransport            // "http" or "stdio" — enter to skip (defaults to http)
+	mcpStepURL                  // only when transport != "stdio"
+	mcpStepCommand              // only when transport == "stdio"
+	mcpStepAuth                 // "none", "bearer", "token_cmd" — enter to skip (defaults to none)
+	mcpStepAPIKey               // only when auth == "bearer"
+	mcpStepTokenCmd             // only when auth == "token_cmd"
 	mcpStepDone
 )
 
@@ -289,10 +291,12 @@ type addMCPState struct {
 }
 
 // startAddMCP handles `/mcp add [key=val ...]`.
-// Missing required fields (name, url) are prompted interactively.
+// Missing required fields are prompted interactively.
+// For http transport the required field is url; for stdio it is command.
 func (m model) startAddMCP(inline string) model {
 	sc := parseMCPInlineArgs(inline)
-	if sc.Name != "" && sc.URL != "" {
+	isStdio := strings.ToLower(sc.Transport) == "stdio"
+	if sc.Name != "" && ((isStdio && sc.Command != "") || (!isStdio && sc.URL != "")) {
 		return m.commitAddMCP(sc)
 	}
 	st := &addMCPState{sc: sc}
@@ -328,6 +332,12 @@ func parseMCPInlineArgs(s string) config.MCPServerConfig {
 			sc.Timeout = v
 		case "connect_timeout":
 			sc.ConnectTimeout = v
+		case "command":
+			sc.Command = v
+		case "args":
+			if v != "" {
+				sc.Args = strings.Split(v, ",")
+			}
 		}
 	}
 	return sc
@@ -338,8 +348,19 @@ func mcpFirstMissingStep(sc config.MCPServerConfig) addMCPStep {
 	if sc.Name == "" {
 		return mcpStepName
 	}
-	if sc.URL == "" {
-		return mcpStepURL
+	// Transport defaults to http; only ask when not yet set.
+	if sc.Transport == "" {
+		return mcpStepTransport
+	}
+	isStdio := strings.ToLower(sc.Transport) == "stdio"
+	if isStdio {
+		if sc.Command == "" {
+			return mcpStepCommand
+		}
+	} else {
+		if sc.URL == "" {
+			return mcpStepURL
+		}
 	}
 	if sc.Auth == "" {
 		return mcpStepAuth
@@ -359,8 +380,12 @@ func mcpAddPrompt(step addMCPStep) string {
 	switch step {
 	case mcpStepName:
 		return milkTag() + " name:"
+	case mcpStepTransport:
+		return milkTag() + " transport [http/stdio, enter for http]:"
 	case mcpStepURL:
 		return milkTag() + " url:"
+	case mcpStepCommand:
+		return milkTag() + " command:"
 	case mcpStepAuth:
 		return milkTag() + " auth [none/bearer/token_cmd, enter to skip]:"
 	case mcpStepAPIKey:
@@ -393,12 +418,23 @@ func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			st.sc.Name = answer
+		case mcpStepTransport:
+			if answer == "" {
+				answer = "http"
+			}
+			st.sc.Transport = answer
 		case mcpStepURL:
 			if answer == "" {
 				m.appendTranscript(milkTag() + " url is required\n" + mcpAddPrompt(mcpStepURL) + " ")
 				return m, nil
 			}
 			st.sc.URL = answer
+		case mcpStepCommand:
+			if answer == "" {
+				m.appendTranscript(milkTag() + " command is required\n" + mcpAddPrompt(mcpStepCommand) + " ")
+				return m, nil
+			}
+			st.sc.Command = answer
 		case mcpStepAuth:
 			if answer == "" {
 				answer = "none"

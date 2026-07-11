@@ -348,6 +348,9 @@ func applyUserMessage(res *ParseResult, raw []byte, cb eventCallbacks) {
 		if block.Type != "tool_result" {
 			continue
 		}
+		if !block.IsError {
+			continue
+		}
 		if !isStreamClosedContent(block.Content) {
 			continue
 		}

@@ -169,7 +169,8 @@ const interactiveHelp = `
   /mcp                   list configured MCP servers and their status
   /mcp list [<agent>]    list MCP servers for an agent (default: primary)
   /mcp add                add a new MCP server interactively
-  /mcp add name=… url=… [transport=…] [auth=…] [api_key=…] [timeout=…]
+  /mcp add name=… url=… [transport=http] [auth=…] [api_key=…] [timeout=…]
+  /mcp add name=… transport=stdio command=… [args=arg1,arg2,…]
   /mcp remove <name>     remove an MCP server by name
   /mcp enable <name>     enable a disabled MCP server
   /mcp disable <name>    disable an MCP server (keeps config)
@@ -1188,7 +1189,14 @@ func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForSe
 	if len(agents) > 0 {
 		agentBadge = "  [" + strings.Join(agents, ", ") + "]"
 	}
-	fmt.Fprintf(b, "  %-20s  %-8s  %s%s%s%s\n", bold(s.Name), auth, s.URL, agentBadge, connStatus, cfgStatus)
+	endpoint := s.URL
+	if strings.ToLower(s.Transport) == "stdio" {
+		endpoint = s.Command
+		if len(s.Args) > 0 {
+			endpoint += " " + strings.Join(s.Args, " ")
+		}
+	}
+	fmt.Fprintf(b, "  %-20s  %-8s  %s%s%s%s\n", bold(s.Name), auth, endpoint, agentBadge, connStatus, cfgStatus)
 }
 
 // execMCPReconnect resets the dead flag on named server(s) so they will
