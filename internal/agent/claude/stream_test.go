@@ -770,6 +770,26 @@ func TestStream_StreamClosedDenials_NonMatchingContentIgnored(t *testing.T) {
 	}
 }
 
+func TestStream_StreamClosedDenials_NotErrorIgnored(t *testing.T) {
+	// tool_result that contains "Stream closed" as text but is_error:false must not be
+	// captured — this guards against false positives when a tool returns output that
+	// happens to mention "Stream closed" (e.g. reading source files or log output).
+	lines := []string{`{"type":"system","session_id":"s1"}`}
+	lines = append(lines, toolUseEvents("toolu_05", "Read")...)
+	lines = append(lines,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_05","content":"const streamClosedMarker = \"Stream closed\"","is_error":false}]}}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(ndjson(lines...)), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StreamClosedDenials) != 0 {
+		t.Errorf("want no StreamClosedDenials when is_error:false, got %v", res.StreamClosedDenials)
+	}
+}
+
 func TestStream_StreamClosedDenials_MultipleBlocks(t *testing.T) {
 	// Two tools both hit "Stream closed" — both must be captured with correct names.
 	lines := []string{`{"type":"system","session_id":"s1"}`}
