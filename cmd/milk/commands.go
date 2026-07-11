@@ -60,6 +60,7 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if output != "" {
 		m.colorizeForce = true // slash command output may be large — force full re-colorize
 		m.appendTranscript(output + "\n")
+		m.st.notifier.NotifyResponse(context.Background(), "milk", cmd+": "+output)
 	}
 	if dispatch != "" {
 		return m.dispatchAgent(dispatch)
