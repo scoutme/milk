@@ -1483,7 +1483,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					return
 				}
 				var hint string
-				summary := truncateToolSummary(name, cliToolArgSummary(input), termWidth)
+				summary := truncateToolSummary(name, firstLine(cliToolArgSummary(input)), termWidth)
 				if summary != "" {
 					hint = fmt.Sprintf("\n\033[2m⚙ %s: %s\033[0m\n", name, summary)
 				} else {

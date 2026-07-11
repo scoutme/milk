@@ -926,7 +926,7 @@ func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 	var args map[string]any
 	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
 
-	summary := toolArgSummary(args)
+	summary := firstLine(toolArgSummary(args))
 	if summary != "" {
 		prefix := "⚙ " + tc.Function.Name + ": "
 		if termWidth > 0 {
@@ -974,6 +974,15 @@ func toolDiff(name, argsJSON string) string {
 
 // toolArgSummary extracts the most informative single argument value for display.
 // Returns the full string — truncation is done at the call site using terminal width.
+// firstLine returns the text up to the first newline, trimming trailing whitespace.
+// Used to keep tool-hint lines single-line so ANSI dim sequences don't bleed.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimRight(s[:i], " \t\r")
+	}
+	return s
+}
+
 func toolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
 		if v, ok := args[key].(string); ok && v != "" {

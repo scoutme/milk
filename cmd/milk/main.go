@@ -1086,6 +1086,15 @@ func makePermissionHandler(input inputReader, out io.Writer, cs *claudesettings.
 	}
 }
 
+// firstLine returns the text up to the first newline, trimming trailing whitespace.
+// Used to keep tool-hint lines single-line so ANSI dim sequences don't bleed.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimRight(s[:i], " \t\r")
+	}
+	return s
+}
+
 // cliToolArgSummary picks the most informative single argument value for display,
 // mirroring the local agent's toolArgSummary. Returns the full value — truncation
 // is done at the call site using terminal width.
