@@ -11,10 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/scoutme/milk/internal/obs"
 )
+
+const subprocessScope = "github.com/scoutme/milk"
 
 // Runner executes a subprocess agent binary and streams its output.
 type Runner struct {
@@ -72,7 +77,12 @@ func (r *Runner) RunFirst(ctx context.Context, staticContext, dynamicContext, pr
 
 	sessionArgs := r.builder.FirstArgs(sessionID, prompt, contextFiles)
 	args := append(r.builder.BaseArgs(), sessionArgs...)
+
+	start := time.Now()
 	res, err := r.runPipe(ctx, args, opts, out)
+	elapsed := time.Since(start)
+	r.recordMetrics(ctx, "first", elapsed, res, err)
+
 	if res.SessionID != "" {
 		sessionID = res.SessionID
 	}
@@ -91,7 +101,13 @@ func (r *Runner) RunResume(ctx context.Context, sessionID, staticContext, dynami
 
 	sessionArgs := r.builder.ResumeArgs(sessionID, prompt, contextFiles)
 	args := append(r.builder.BaseArgs(), sessionArgs...)
-	return r.runPipe(ctx, args, opts, out)
+
+	start := time.Now()
+	res, err := r.runPipe(ctx, args, opts, out)
+	elapsed := time.Since(start)
+	r.recordMetrics(ctx, "resume", elapsed, res, err)
+
+	return res, err
 }
 
 // runPipe starts the subprocess, feeds its stdout to the parser, and returns.
@@ -125,6 +141,7 @@ func (r *Runner) runPipe(ctx context.Context, args []string, opts ParseOpts, out
 	if err := cmd.Wait(); err != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
+			obs.Info("subprocess.stderr", "bin", r.builder.Bin(), "stderr", stderr)
 			return res, fmt.Errorf("%s exited with error: %s", r.builder.Bin(), stderr)
 		}
 		if parseErr != nil {
@@ -142,6 +159,40 @@ func (r *Runner) runPipe(ctx context.Context, args []string, opts ParseOpts, out
 		return res, fmt.Errorf("%s returned an error response", r.builder.Bin())
 	}
 	return res, nil
+}
+
+// recordMetrics emits turn counter, latency histogram, error counters, token
+// recording, and escalation signal for a completed subprocess run.
+func (r *Runner) recordMetrics(ctx context.Context, mode string, elapsed time.Duration, res ParseResult, err error) {
+	bin := r.builder.Bin()
+	obs.Inc(ctx, subprocessScope, "milk.subprocess.turns",
+		attribute.String("bin", bin),
+		attribute.String("mode", mode),
+	)
+	obs.RecordDuration(ctx, subprocessScope, "milk.subprocess.latency_ms", elapsed,
+		attribute.String("bin", bin),
+		attribute.String("mode", mode),
+	)
+	if err != nil {
+		obs.Inc(ctx, subprocessScope, "milk.subprocess.errors",
+			attribute.String("bin", bin),
+			attribute.String("kind", "subprocess"),
+		)
+	} else if res.IsError {
+		obs.Inc(ctx, subprocessScope, "milk.subprocess.errors",
+			attribute.String("bin", bin),
+			attribute.String("kind", "is_error"),
+		)
+	}
+	if res.InputTokens > 0 || res.OutputTokens > 0 {
+		obs.RecordTokens(ctx, bin, "escalation", res.InputTokens, res.OutputTokens)
+	}
+	if res.EscalationReason != "" {
+		obs.Inc(ctx, subprocessScope, "milk.router.escalation_signals",
+			attribute.String("reason", "explicit_tool_call"),
+			attribute.String("bin", bin),
+		)
+	}
 }
 
 // writeContextFiles writes non-empty context strings to temp files and returns

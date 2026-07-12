@@ -344,6 +344,10 @@ type Config struct {
 	// fail to parse. Useful for diagnosing dropped tokens or unknown events.
 	DebugLocalLog bool `json:"debug_local,omitempty"`
 
+	// DebugSubprocessLog writes every raw stdout line from subprocess agents
+	// (aider-cli, smolagent) to ~/.milk/subprocess_debug.log.
+	DebugSubprocessLog bool `json:"debug_subprocess,omitempty"`
+
 	// AWSAuthRefresh enables AWS credential injection for the claude subprocess.
 	AWSAuthRefresh bool `json:"aws_auth_refresh,omitempty"`
 
@@ -1050,6 +1054,15 @@ func LocalDebugLogPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "local_debug.log"), nil
+}
+
+// SubprocessDebugLogPath returns the path for the subprocess agent raw stdout debug log.
+func SubprocessDebugLogPath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "subprocess_debug.log"), nil
 }
 
 func Dir() (string, error) {

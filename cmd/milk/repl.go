@@ -1737,6 +1737,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 		if tuiSubprocessPrimaryAgent != nil {
 			tuiSubprocessPrimaryAgent = tuiSubprocessPrimaryAgent.WithLogContext(cfg.Otel.LogContext)
+			if dbg, err := openSubprocessDebugLog(cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: cannot open subprocess debug log: %v\n", milkTag(), err)
+			} else if dbg != nil {
+				defer dbg.Close()
+				tuiSubprocessPrimaryAgent = tuiSubprocessPrimaryAgent.WithDebugLog(dbg)
+			}
 		}
 	} else {
 		// Build the local agent without blocking on credential refresh. If
@@ -1776,6 +1782,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 	if tuiSubprocessAgent != nil {
 		tuiSubprocessAgent = tuiSubprocessAgent.WithLogContext(cfg.Otel.LogContext)
+		if dbg, err := openSubprocessDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open subprocess debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			defer dbg.Close()
+			tuiSubprocessAgent = tuiSubprocessAgent.WithDebugLog(dbg)
+		}
 	}
 	if !tuiEscAC.IsExternalProcess() {
 		escAC := applyFreshAWSCreds(cfg, tuiEscAC)

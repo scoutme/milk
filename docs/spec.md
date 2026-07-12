@@ -382,12 +382,13 @@ The editor used by `/config open` is selected from the `config_editors` list (se
 
 | Command | Action |
 |---|---|
-| `milk otel debug enable` | Enable full debug logging: `otel.log_context=true`, `otel.log_level=DEBUG`, `debug_claude_code=true`, `debug_local=true` |
-| `milk otel debug disable` | Disable debug logging: restores `otel.log_context=false`, `otel.log_level=INFO`, `debug_claude_code=false`, `debug_local=false` |
+| `milk otel debug enable` | Enable full debug logging: `otel.log_context=true`, `otel.log_level=DEBUG`, `debug_claude_code=true`, `debug_local=true`, `debug_subprocess=true` |
+| `milk otel debug disable` | Disable debug logging: restores `otel.log_context=false`, `otel.log_level=INFO`, `debug_claude_code=false`, `debug_local=false`, `debug_subprocess=false` |
 
 `milk otel debug enable` prints the paths where each debug stream is written:
 - Claude subprocess NDJSON → `~/.milk/claude_debug.ndjson`
 - Local agent SSE → `~/.milk/local_debug.log`
+- Subprocess agent stdout → `~/.milk/subprocess_debug.log`
 - Request payloads (log_context) → `~/.milk/otel/logs.jsonl`
 
 **/open** opens any file in the configured editor:
@@ -735,6 +736,10 @@ When `true`, every raw NDJSON line emitted by the Claude CLI subprocess is appen
 ### `debug_local` field
 
 When `true`, every raw SSE line received from the local agent's HTTP stream is appended to `~/.milk/local_debug.log` — including lines that are skipped, blank separator lines, and lines that fail to parse. The `.log` extension reflects the content: SSE frames include `data:` and `event:` prefixes, blank separators, and other protocol framing that is not pure JSON. Useful for diagnosing dropped tokens, unknown event types, or SSE parser mismatches. Default: `false`.
+
+### `debug_subprocess` field
+
+When `true`, every raw stdout line emitted by subprocess agents (aider-cli, smolagent) is appended to `~/.milk/subprocess_debug.log`. Useful for diagnosing NDJSON parse errors, unexpected agent output, or protocol mismatches. Default: `false`.
 
 ### `otel.log_context` field
 

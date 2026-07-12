@@ -240,6 +240,11 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 			return nil, nil, fmt.Errorf("unsupported subprocess provider: %s", primaryAC.Provider)
 		}
 		sp = sp.WithLogContext(cfg.Otel.LogContext)
+		if dbg, err := openSubprocessDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open subprocess debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			sp = sp.WithDebugLog(dbg)
+		}
 		r := newSubprocessRunner(sp, primaryAC.Name)
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
@@ -294,6 +299,11 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 		}
 		if sp != nil {
 			sp = sp.WithLogContext(cfg.Otel.LogContext)
+			if dbg, err := openSubprocessDebugLog(cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: cannot open subprocess debug log: %v\n", milkTag(), err)
+			} else if dbg != nil {
+				sp = sp.WithDebugLog(dbg)
+			}
 			r := newSubprocessRunner(sp, escAC.Name)
 			if servers, ts := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
 				r = r.withMCPToolSet(servers, ts)
@@ -533,6 +543,17 @@ func openLocalDebugLog(cfg config.Config) (*os.File, error) {
 		return nil, nil
 	}
 	path, err := config.LocalDebugLogPath()
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+}
+
+func openSubprocessDebugLog(cfg config.Config) (*os.File, error) {
+	if !cfg.DebugSubprocessLog {
+		return nil, nil
+	}
+	path, err := config.SubprocessDebugLogPath()
 	if err != nil {
 		return nil, err
 	}
@@ -1665,8 +1686,9 @@ func init() {
 			}
 			cliPath, _ := config.CLIDebugLogPath()
 			localPath, _ := config.LocalDebugLogPath()
+			subprocessPath, _ := config.SubprocessDebugLogPath()
 			otelDir, _ := config.OtelDir()
-			fmt.Printf("debug logging enabled\n  claude NDJSON → %s\n  local SSE     → %s\n  payloads      → %s/logs.jsonl\n", cliPath, localPath, otelDir)
+			fmt.Printf("debug logging enabled\n  claude NDJSON → %s\n  local SSE     → %s\n  subprocess    → %s\n  payloads      → %s/logs.jsonl\n", cliPath, localPath, subprocessPath, otelDir)
 			return nil
 		},
 	})
@@ -1789,6 +1811,7 @@ func runOtelDebug(enable bool) error {
 	}
 	cfg.DebugCLILog = enable
 	cfg.DebugLocalLog = enable
+	cfg.DebugSubprocessLog = enable
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
