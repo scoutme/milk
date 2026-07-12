@@ -40,6 +40,7 @@ func red(s string) string        { return colorize(s, ansiRed) }
 func dim(s string) string        { return colorize(s, ansiDim) }
 func bold(s string) string       { return colorize(s, ansiBold) }
 func boldYellow(s string) string { return colorize(s, "\033[1;33m") }
+func boldGold(s string) string   { return colorize(s, "\033[1;38;2;255;208;60m") }
 
 // milkTag returns the dimmed [milk] system prefix.
 func milkTag() string { return dim("[milk]") }
@@ -149,8 +150,7 @@ func headerLogo(frame int) string {
 		return logoMark + " milk"
 	}
 	mark := pulseColors[frame%len(pulseColors)] + logoMark + ansiReset
-	// "milk" rendered in bold bright-gold (#FFD060) to match peak pulse color
-	name := "\033[1;38;2;255;208;60m" + "milk" + ansiReset
+	name := boldGold("milk")
 	return mark + " " + name
 }
 

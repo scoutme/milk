@@ -213,6 +213,99 @@ const interactiveHelp = `
   @ prefix
     @path   reference a file path (Tab-completes)`
 
+// renderHelp applies consistent ANSI styling to the interactiveHelp block:
+// section header lines (── … ──) are dimmed and padded to width columns,
+// command tokens are bolded. Pass width=0 to use a default of 80.
+func renderHelp(s string, width int) string {
+	if width <= 0 || width > 80 {
+		width = 80
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		switch {
+		case strings.HasPrefix(line, "──"):
+			// Section header: rebuild trailing dashes to fit exactly width cols.
+			// "── Name ─…─" → prefix "── Name ", then fill with fresh dashes.
+			runes := []rune(line)
+			end := len(runes)
+			for end > 0 && runes[end-1] == '─' {
+				end--
+			}
+			prefix := string(runes[:end]) // e.g. "── Routing "
+			// All chars in prefix are ASCII (1 col) or '─' (1 col), so len(runes[:end]) == prefixCols.
+			fill := width - end
+			if fill < 1 {
+				fill = 1
+			}
+			b.WriteString(dim(prefix + strings.Repeat("─", fill)))
+		case len(line) >= 2 && line[0] == ' ' && line[1] == ' ':
+			// Command or detail line: style slash-command lines.
+			trimmed := strings.TrimLeft(line, " ")
+			if strings.HasPrefix(trimmed, "/") {
+				indent := line[:len(line)-len(trimmed)]
+				b.WriteString(indent)
+				// Emit the /command token in bold-gold.
+				rest := trimmed
+				sp := strings.IndexByte(rest, ' ')
+				if sp < 0 {
+					b.WriteString(boldYellow(rest))
+					b.WriteByte('\n')
+					continue
+				}
+				b.WriteString(boldYellow(rest[:sp]))
+				rest = rest[sp:] // leading space(s) + remainder
+				// Bold any immediately-following subcommand words (lowercase alpha only).
+				// Multiple leading spaces signal description-column padding — stop there.
+				for len(rest) > 0 && rest[0] == ' ' {
+					if len(rest) > 1 && rest[1] == ' ' {
+						break // padding gap, not a subcommand
+					}
+					next := rest[1:] // strip the single space
+					wordEnd := strings.IndexByte(next, ' ')
+					var word string
+					if wordEnd < 0 {
+						word = next
+					} else {
+						word = next[:wordEnd]
+					}
+					if isSubcmd(word) {
+						b.WriteByte(' ')
+						b.WriteString(bold(word))
+						if wordEnd < 0 {
+							rest = ""
+						} else {
+							rest = next[wordEnd:]
+						}
+					} else {
+						break
+					}
+				}
+				b.WriteString(rest)
+			} else {
+				b.WriteString(line)
+			}
+		default:
+			b.WriteString(line)
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// isSubcmd reports whether word is a bare subcommand token (lowercase letters only).
+// Used by renderHelp to decide which tokens after the /command get bold treatment.
+func isSubcmd(word string) bool {
+	if word == "" {
+		return false
+	}
+	for _, ch := range word {
+		if ch < 'a' || ch > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
 const errFmt = "error: %v\n"
 
 // interactiveState holds mutable state for the interactive loop.
@@ -407,7 +500,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 	}
 	switch cmd {
 	case "/help":
-		fmt.Fprint(&out, interactiveHelp)
+		fmt.Fprint(&out, renderHelp(interactiveHelp, 0))
 	case "/new":
 		var err error
 		st.sess, err = session.New(st.cwd, "")
@@ -487,11 +580,14 @@ func execOtel(sub string, st *interactiveState) string {
 		st.cfg.Otel.LogLevel = "DEBUG"
 		st.cfg.DebugCLILog = true
 		st.cfg.DebugLocalLog = true
+		st.cfg.DebugSubprocessLog = true
 		cliPath, _ := config.CLIDebugLogPath()
 		localPath, _ := config.LocalDebugLogPath()
+		subprocessPath, _ := config.SubprocessDebugLogPath()
 		return milkTag() + " debug logging enabled\n" +
 			"  claude NDJSON → " + cliPath + "\n" +
 			"  local SSE     → " + localPath + "\n" +
+			"  subprocess    → " + subprocessPath + "\n" +
 			"  payloads      → " + otelDir + "/logs.jsonl"
 	case "debug disable":
 		if err := runOtelDebug(false); err != nil {
@@ -501,6 +597,7 @@ func execOtel(sub string, st *interactiveState) string {
 		st.cfg.Otel.LogLevel = "INFO" // in-memory reset; disk already restored by runOtelDebug
 		st.cfg.DebugCLILog = false
 		st.cfg.DebugLocalLog = false
+		st.cfg.DebugSubprocessLog = false
 		return milkTag() + " debug logging disabled"
 	default:
 		return milkTag() + " " + obs.FormatStats(otelDir)

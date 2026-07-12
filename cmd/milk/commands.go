@@ -52,6 +52,12 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdMCP {
 		return m.handleMCPCmd(strings.TrimSpace(rest))
 	}
+	if cmd == "/help" {
+		output := renderHelp(interactiveHelp, m.vpWidth())
+		m.colorizeForce = true
+		m.appendTranscript(output + "\n")
+		return m, nil
+	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
 	m.refreshPrompt()
 	if exit {
