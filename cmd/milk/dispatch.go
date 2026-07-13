@@ -51,7 +51,6 @@ func runPrimary(
 		ctxMode = escalation.ContextModeFirst
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 	logStateTransition(sess, session.StateLocal, "run "+agentName+" primary")
 	sess.ForceState(session.StateLocal)
 
@@ -94,6 +93,8 @@ func runPrimary(
 	if err != nil {
 		return err
 	}
+
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
 
 	if res.NewSessionID != "" {
 		sess.PrimarySessionID = res.NewSessionID
@@ -207,7 +208,6 @@ func runEscalation(
 		sess.EscalationBrief = brief
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
 	logStateTransition(sess, session.StateEscalation, "run "+agentName+" escalation")
 	sess.ForceState(session.StateEscalation)
 
@@ -238,6 +238,8 @@ func runEscalation(
 	if err != nil {
 		return err
 	}
+
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
 
 	if res.NewSessionID != "" {
 		sess.EscalationSessionID = res.NewSessionID

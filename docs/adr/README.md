@@ -36,3 +36,4 @@
 * [35. Stream-closed Pre-flight Denial Detection and Retry](0035-stream-closed-pre-flight-denial-handling.md)
 * [36. MCP stdio Subprocess Transport](0036-mcp-stdio-subprocess-transport.md)
 * [37. Experimental Permission Management](0037-experimental-permission-management.md)
+* [38. Move user-turn AddTurn to after Execute](0038-dispatch-addturn-after-execute.md)
