@@ -627,7 +627,8 @@ func isRepeatedPrompt(history []Message, userPrompt string) bool {
 
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
-// history is the prior turns; userPrompt is the new user Message.
+// history is the prior turns only — it must NOT contain the current userPrompt
+// turn (dispatch adds it to sess.History only after Run returns).
 func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, error) {
 	if history == nil {
 		history = []Message{}

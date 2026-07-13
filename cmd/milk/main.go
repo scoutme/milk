@@ -673,18 +673,12 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 	return "", io.EOF
 }
 
-// escalationLocalHistory converts session turns to local.Message format for
-// the escalation-local agent. Unlike sessionToMessages (which filters to local
-// turns only), this includes all prior turns so the escalation agent has full
-// context across both agents.
-//
-// prompt is the current user prompt being escalated. Any trailing unanswered
-// user turn matching prompt is stripped: it was added by runLocal's escalation
-// path and is about to be sent as the live prompt — including it in history
-// would trigger isRepeatedPrompt in Run and cause a spurious EscalationSignal.
-func escalationLocalHistory(sess *session.Session, prompt string) []local.Message {
+// buildEscalationHistory converts sess.History[start:] to local.Message format.
+// Pass 0 for the full history, or session.LastEscalationBoundary(sess) to scope
+// to turns since the last escalation boundary (used on stale-returning turns).
+func buildEscalationHistory(sess *session.Session, start int) []local.Message {
 	var msgs []local.Message
-	for _, t := range sess.History {
+	for _, t := range sess.History[start:] {
 		switch t.Role {
 		case session.RoleUser:
 			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
@@ -696,39 +690,19 @@ func escalationLocalHistory(sess *session.Session, prompt string) []local.Messag
 		case session.RoleToolResult:
 			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
 		}
-	}
-	// Strip a trailing unanswered user turn that matches the prompt being escalated.
-	// Such a turn has no following assistant turn and would cause isRepeatedPrompt to
-	// fire inside the escalation agent's Run, masking the real error.
-	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" && msgs[n-1].Content == prompt {
-		msgs = msgs[:n-1]
 	}
 	return msgs
 }
 
-// escalationLocalHistoryFresh is like escalationLocalHistory but only includes
-// turns since the last escalation boundary (i.e. turns after the most recent
-// escalation assistant turn). Used on stale-returning turns to avoid passing
-// the full prior escalation history through the messages array.
-func escalationLocalHistoryFresh(sess *session.Session, prompt string) []local.Message {
-	var msgs []local.Message
-	for _, t := range sess.History[session.LastEscalationBoundary(sess):] {
-		switch t.Role {
-		case session.RoleUser:
-			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
-		case session.RoleAssistant:
-			if t.Content == "" {
-				continue
-			}
-			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
-		case session.RoleToolResult:
-			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
-		}
-	}
-	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" && msgs[n-1].Content == prompt {
-		msgs = msgs[:n-1]
-	}
-	return msgs
+// escalationLocalHistory returns the full session history as local messages.
+func escalationLocalHistory(sess *session.Session, _ string) []local.Message {
+	return buildEscalationHistory(sess, 0)
+}
+
+// escalationLocalHistoryFresh returns only turns since the last escalation
+// boundary, scoped to avoid sending redundant prior-escalation context.
+func escalationLocalHistoryFresh(sess *session.Session, _ string) []local.Message {
+	return buildEscalationHistory(sess, session.LastEscalationBoundary(sess))
 }
 
 // applyPersistedGrants loads previously-approved tools and directories from
@@ -1339,12 +1313,6 @@ func sessionToMessages(sess *session.Session) []local.Message {
 		case session.RoleToolResult:
 			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
 		}
-	}
-	// runPrimary adds the current user turn to session history before calling
-	// Execute, but local.Agent.Run appends userPrompt separately — drop the
-	// trailing user message here to avoid sending the same prompt twice.
-	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" {
-		msgs = msgs[:n-1]
 	}
 	return msgs
 }
