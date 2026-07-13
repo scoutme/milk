@@ -99,7 +99,9 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 	if sess.CurrentNeed != "" {
 		var turnsAgo int
 		if sess.CurrentNeedSetAt > 0 {
-			turnsAgo = len(sess.History) - (sess.CurrentNeedSetAt - 1)
+			// +1: the current user turn is not yet in History when Execute runs
+			// (dispatch adds it after Execute returns, per ADR-0038).
+			turnsAgo = (len(sess.History) + 1) - (sess.CurrentNeedSetAt - 1)
 		}
 		if turnsAgo >= 4 {
 			b.WriteString("[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n")
@@ -138,7 +140,8 @@ func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string 
 	if sess.CurrentNeed != "" {
 		var turnsAgo int
 		if sess.CurrentNeedSetAt > 0 {
-			turnsAgo = len(sess.History) - (sess.CurrentNeedSetAt - 1)
+			// +1: the current user turn is not yet in History when Execute runs.
+			turnsAgo = (len(sess.History) + 1) - (sess.CurrentNeedSetAt - 1)
 		}
 		if turnsAgo >= 4 {
 			b.WriteString("[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n")
