@@ -213,6 +213,12 @@ type AgentLimits struct {
 	// a fresh start (no --resume) when this many local turns have elapsed since the
 	// last escalation turn. Set to -1 to disable the turn-gap check for this agent.
 	ReturningFreshStartLocalTurns *int `json:"returning_fresh_start_local_turns,omitempty"`
+
+	// TurnTimeoutSecs overrides the per-turn timeout for this agent.
+	// The global default is 10 minutes. Set higher for agents that run long
+	// synchronous workflows (e.g. a claude-cli escalation agent doing multi-sprint work).
+	// Set to -1 for no timeout.
+	TurnTimeoutSecs *int `json:"turn_timeout_secs,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -858,6 +864,21 @@ func (c Config) AgentMaxToolIterations(a AgentConfig) int {
 		return 0 // unlimited
 	}
 	return intOr(c.LocalMaxToolIterations, 20)
+}
+
+// AgentTurnTimeout returns the per-turn timeout for the given agent.
+// Returns 0 when the agent has configured no timeout (-1). Default: 10 minutes.
+func (c Config) AgentTurnTimeout(a AgentConfig) time.Duration {
+	if a.Limits != nil && a.Limits.TurnTimeoutSecs != nil {
+		v := *a.Limits.TurnTimeoutSecs
+		if v < 0 {
+			return 0 // no timeout
+		}
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 10 * time.Minute
 }
 
 // intOr returns v when v > 0, otherwise returns def.

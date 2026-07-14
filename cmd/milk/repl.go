@@ -597,7 +597,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 			// this branch catches any late-arriving cancellation that slipped through.
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		case isContextDeadlineExceeded(msg.err):
-			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond within " + agentTimeout.String() + "\n")
+			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond in time\n")
 		default:
 			m.appendTranscript(milkTag() + " error: " + errText + "\n")
 		}
@@ -1597,12 +1597,13 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	localAvail := agents.localAvail
 	escalationAvail := agents.escalationAvail
 
-	turnCtx, cancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
-	defer cancel()
-
+	// Route first (fast), then apply the per-agent timeout so long-running
+	// escalation agents can have a higher limit than the local default.
 	forceEscalate := st.forceEscalate || st.stickyEscalate || st.autoStickyEscalate
 	forcePrimary := st.forcePrimary || st.stickyPrimary
-	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forcePrimary)
+	routeCtx, routeCancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
+	decision, routeErr := rtr.Route(routeCtx, st.sess, input, forceEscalate, forcePrimary)
+	routeCancel()
 	if routeErr != nil {
 		return fmt.Errorf("routing: %w", routeErr)
 	}
@@ -1629,10 +1630,23 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 
 	targetName := "local"
 	agentName := st.cfg.ActiveAgent().Name
+	agentCfg := st.cfg.ActiveAgent()
 	if target == router.TargetEscalation {
 		targetName = "escalation"
-		agentName = st.cfg.EscalationAgentConfig().Name
+		agentCfg = st.cfg.EscalationAgentConfig()
+		agentName = agentCfg.Name
 	}
+
+	// Apply the per-agent turn timeout now that we know the target.
+	timeout := st.cfg.AgentTurnTimeout(agentCfg)
+	var turnCtx context.Context
+	var cancel context.CancelFunc
+	if timeout <= 0 {
+		turnCtx, cancel = context.WithCancel(ctx)
+	} else {
+		turnCtx, cancel = context.WithTimeoutCause(ctx, timeout, fmt.Errorf("turn timeout"))
+	}
+	defer cancel()
 	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
 
 	sourceLabel := replTurnSourceLabel(st)

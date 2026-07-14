@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -42,6 +46,15 @@ const (
 	RolePrimary    AgentRole = iota
 	RoleEscalation AgentRole = iota
 )
+
+// workflowJournalPollInterval is how often we stat the workflow journal file
+// while waiting for a background workflow to complete. Pure local I/O — no API cost.
+const workflowJournalPollInterval = 5 * time.Second
+
+// workflowResumeTimeout is the deadline applied to the single --resume API call
+// issued after the workflow journal signals completion. Independent of the turn
+// deadline, which may have already expired while waiting for the workflow.
+const workflowResumeTimeout = 10 * time.Minute
 
 // TurnResult is the normalised output of a single agent inference turn.
 type TurnResult struct {
@@ -390,6 +403,49 @@ func (r *cliRunner) Execute(
 		sess.EscalationSessionID = orig
 	}
 
+	// Background-workflow auto-resume: the Workflow tool always runs in background
+	// and --print exits as soon as Claude responds. Wait for the workflow journal
+	// to record a result (local file poll — no API cost), then issue exactly one
+	// --resume so Claude receives the task-notification and reports completion.
+	// If a newly resumed turn launches another workflow, the loop repeats.
+	//
+	// ctx may already be deadline-expired by the time the workflow finishes, so
+	// the poll and the resume both use a fresh context derived from the session
+	// root (no deadline) that only cancels on explicit user interruption (Ctrl+C).
+	for res.HasPendingWorkflow && sessionID != "" {
+		fmt.Fprintf(out, "\n\033[2m[workflow running]\033[0m\n")
+		pollCtx, pollCancel := withoutDeadline(ctx)
+		err := waitForWorkflowResult(pollCtx, res.PendingWorkflowDir)
+		pollCancel()
+		if err != nil {
+			return TurnResult{}, err
+		}
+		baseCtx, baseCancel := withoutDeadline(ctx)
+		resumeCtx, resumeCancel := context.WithTimeout(baseCtx, workflowResumeTimeout)
+		var resumeRes claude.ParseResult
+		var resumeErr error
+		// A non-empty prompt is required — empty prompt triggers a "no deferred
+		// tool marker" error. This sentinel causes Claude to process the pending
+		// task-notification and report workflow completion.
+		resumeRes, resumeErr = agent.RunResume(resumeCtx, sessionID, "", "", "workflow status?", out)
+		resumeCancel()
+		baseCancel()
+		if resumeErr != nil {
+			return TurnResult{}, resumeErr
+		}
+		res.InputTokens += resumeRes.InputTokens
+		res.OutputTokens += resumeRes.OutputTokens
+		res.CacheReadInputTokens += resumeRes.CacheReadInputTokens
+		res.CacheCreationInputTokens += resumeRes.CacheCreationInputTokens
+		res.TotalCostUSD += resumeRes.TotalCostUSD
+		if resumeRes.Text != "" {
+			res.Text = resumeRes.Text
+			res.EndsWithQ = resumeRes.EndsWithQ
+		}
+		res.HasPendingWorkflow = resumeRes.HasPendingWorkflow
+		res.PendingWorkflowDir = resumeRes.PendingWorkflowDir
+	}
+
 	return TurnResult{
 		Text:         res.Text,
 		NewSessionID: sessionID,
@@ -524,6 +580,65 @@ func (r *subprocessRunner) RunToolCall(ctx context.Context, _ config.Config, pro
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// waitForWorkflowResult blocks until the workflow's journal.jsonl contains a
+// {"type":"result"} entry, or ctx is cancelled. ctx must be deadline-free
+// (callers should use withoutDeadline before calling). Returns immediately
+// when transcriptDir is empty.
+func waitForWorkflowResult(ctx context.Context, transcriptDir string) error {
+	if transcriptDir == "" {
+		return nil
+	}
+	journalPath := transcriptDir + "/journal.jsonl"
+	for {
+		if workflowJournalHasResult(journalPath) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(workflowJournalPollInterval):
+		}
+	}
+}
+
+// workflowJournalHasResult returns true if journal.jsonl contains at least one
+// {"type":"result"} entry, indicating the workflow has produced a final result.
+func workflowJournalHasResult(journalPath string) bool {
+	f, err := os.Open(journalPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var entry struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(sc.Bytes(), &entry) == nil && entry.Type == "result" {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutDeadline returns a cancel func and a context that has no deadline but
+// cancels when ctx is cancelled for any reason other than a turn timeout.
+// Callers must call the returned cancel to release resources.
+func withoutDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	child, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		select {
+		case <-ctx.Done():
+			if context.Cause(ctx) != nil && context.Cause(ctx).Error() != "turn timeout" {
+				cancel()
+			}
+			// turn timeout: leave child alive so the caller can continue.
+		case <-child.Done():
+		}
+	}()
+	return child, cancel
+}
 
 func agentConfigForRole(cfg config.Config, role AgentRole) config.AgentConfig {
 	if role == RolePrimary {
