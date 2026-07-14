@@ -453,7 +453,16 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 		if res.IsError {
 			return res, fmt.Errorf("claude returned an error response")
 		}
-		return res, nil
+		// Process was killed because the context was cancelled (e.g. user Ctrl+C
+		// or turn timeout). Surface the context error so callers can distinguish
+		// a clean cancellation from a successful empty turn.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return res, ctxErr
+		}
+		// Process exited non-zero with no stderr and no parse/API error.
+		// This is an unexpected crash (OOM, signal, bug). Surface it so the TUI
+		// shows an error label rather than a silent blank turn.
+		return res, fmt.Errorf("claude exited unexpectedly (no output)")
 	}
 
 	if parseErr != nil {

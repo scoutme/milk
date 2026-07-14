@@ -52,6 +52,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdMCP {
 		return m.handleMCPCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdWorkflow {
+		return m.handleWorkflowCmd(strings.TrimSpace(rest))
+	}
 	if cmd == "/help" {
 		output := renderHelp(interactiveHelp, m.vpWidth())
 		m.colorizeForce = true
@@ -891,8 +894,17 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + " memory panel: off\n")
 		}
 		return m, tick
+	case "workflow":
+		m.workflowPanelOpen = !m.workflowPanelOpen
+		m.syncLayout()
+		if m.workflowPanelOpen {
+			m.appendTranscript(milkTag() + " workflow panel: on\n")
+		} else {
+			m.appendTranscript(milkTag() + " workflow panel: off\n")
+		}
+		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|workflow\n")
 		return m, nil
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+const cmdWorkflow = "/workflow"
 const cmdEscalate = "/escalate"
 const cmdPrimary = "/primary"
 const cmdPaste = "/paste"
@@ -43,7 +44,7 @@ const cmdMCP = "/mcp"
 const cmdUpdate = "/update"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 

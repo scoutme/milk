@@ -201,6 +201,10 @@ Full configuration reference, all provider options, and auth setup: [docs/provid
 | `/memory show <pat\|#id>` | Show full details of a Percept |
 | `/forget <pat>` | Delete a Percept |
 | `/panel memory` | Toggle the memory panel |
+| `/panel workflow` | Toggle the workflow progress panel |
+| `/workflow` | List available workflows |
+| `/workflow dev <task>` | Run the dev workflow (designer → generator → evaluator loop) |
+| `/workflow dev <task> --designer <agent> --generator <agent> --evaluator <agent>` | Run dev workflow with explicit agent assignments |
 | `/export` | Print session transcript (colorized if terminal) |
 | `/export json` | Print session as raw JSON |
 | `/export <path>` | Write transcript to a file |

@@ -32,6 +32,8 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/updater"
+	"github.com/scoutme/milk/internal/workflow"
+	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 )
 
 const agentTimeout = 10 * time.Minute
@@ -115,6 +117,10 @@ type errMsg struct{ err error }
 
 // updateAvailableMsg is sent when the background update check finds a newer release.
 type updateAvailableMsg struct{ release *updater.Release }
+
+// workflowResumeCheckMsg is sent at startup when a saved workflow state file
+// was found for the current session. The TUI prints a one-line resume offer.
+type workflowResumeCheckMsg struct{ state *workflow.State }
 
 // updateProgressMsg carries download progress during /update install.
 type updateProgressMsg struct{ done, total int64 }
@@ -405,6 +411,10 @@ type model struct {
 	// credential refresh only after the bubbletea event loop is running.
 	credRefreshInit tea.Cmd
 
+	// workflowResumeInit, if non-nil, is returned by Init() to check for a
+	// saved workflow state file and emit workflowResumeCheckMsg when found.
+	workflowResumeInit tea.Cmd
+
 	// pendingUpdate is non-nil when an update is available but not yet installed.
 	pendingUpdate *updater.Release
 	// updateInstalling is true while /update install is downloading+applying.
@@ -412,6 +422,11 @@ type model struct {
 	// updateProgress tracks download bytes for the progress indicator.
 	updateProgress int64
 	updateTotal    int64
+
+	// workflow panel
+	workflowPanelOpen     bool
+	workflowState         *workflow.State
+	pendingWorkflowWizard *workflowWizardState
 
 	// injected dependencies
 	ctx    context.Context
@@ -601,6 +616,10 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		default:
 			m.appendTranscript(milkTag() + " error: " + errText + "\n")
 		}
+	} else if m.currentTurnChars == 0 {
+		// No text or thinking was streamed and no error was reported — the agent
+		// produced no visible output. Show a placeholder so the turn is not silent.
+		m.appendTranscript(dim("[no response]") + "\n")
 	}
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
@@ -870,6 +889,9 @@ func (m model) Init() tea.Cmd {
 	if m.credRefreshInit != nil {
 		cmds = append(cmds, m.credRefreshInit)
 	}
+	if m.workflowResumeInit != nil {
+		cmds = append(cmds, m.workflowResumeInit)
+	}
 	if m.st.cfg.ShouldCheckUpdate() {
 		cfg := m.st.cfg
 		cmds = append(cmds, func() tea.Msg {
@@ -913,6 +935,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingInit != nil {
 			return m.handleInitWizardKey(msg)
+		}
+		if m.pendingWorkflowWizard != nil {
+			return m.handleWorkflowWizardKey(msg)
 		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
@@ -974,6 +999,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
+
+	case wfdev.WorkflowProgressMsg:
+		if msg.State.WorkflowName != "" {
+			st := msg.State
+			m.workflowState = &st
+		}
+		m.workflowPanelOpen = true
+		m.syncLayout()
+		return m, nil
+
+	case workflow.WorkflowChunkMsg:
+		m.currentTurnChars += int64(len(msg.Text))
+		m.appendTranscript(msg.Text)
+		m.syncLayout()
+		return m, nil
+
+	case wfdev.WorkflowDoneMsg:
+		m.busy = false
+		m.cancelTurn = nil
+		m.busyHint = ""
+		obs.IncrementTurnCount()
+		m.currentTurnChars = 0
+		m.workflowPanelOpen = true
+		if m.workflowState != nil {
+			m.workflowState.Role = "done"
+		}
+		if m.interrupted {
+			m.interrupted = false
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		} else if isContextCanceled(msg.Err) {
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		} else if msg.Err != nil {
+			m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+		} else {
+			m.appendTranscript(milkTag() + " workflow complete\n")
+		}
+		m.colorizeForce = true
+		m.refreshPrompt()
+		m.syncLayout()
+		return m, nil
+
+	case workflowResumeCheckMsg:
+		if msg.state != nil && msg.state.Role != "done" {
+			st := msg.state
+			m.appendTranscript(fmt.Sprintf(
+				"%s workflow %s in progress (sprint %d pass %d) — /workflow resume to continue, or ignore\n",
+				milkTag(), st.WorkflowName, st.Sprint, st.Pass,
+			))
+			m.syncLayout()
+		}
+		return m, nil
 
 	case spinnerTickMsg:
 		if m.busy {
@@ -1425,6 +1501,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
+
 	return m.submitInput(input, promptLabel(m.st))
 }
 
@@ -1998,6 +2075,24 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		m.credRefreshInit = func() tea.Msg {
 			err := localAgent.WarmToken()
 			return credRefreshReadyMsg{label: "token", err: err}
+		}
+	}
+
+	// Check for a saved workflow state file for the current session.
+	// Deferred to Init() for the same reason as credRefreshInit.
+	{
+		sessID := sess.ID
+		m.workflowResumeInit = func() tea.Msg {
+			stateDir, err := session.Dir()
+			if err != nil {
+				return workflowResumeCheckMsg{}
+			}
+			path := workflow.StatePath(stateDir, sessID)
+			st, err := workflow.LoadState(path)
+			if err != nil || st == nil {
+				return workflowResumeCheckMsg{}
+			}
+			return workflowResumeCheckMsg{state: st}
 		}
 	}
 
