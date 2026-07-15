@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -28,8 +29,10 @@ type WorkflowDoneMsg struct {
 
 // DevWorkflow implements the designer→generator→evaluator loop.
 type DevWorkflow struct {
-	MaxPasses int // maximum generator passes per sprint before halting; default 3
-	Task      string
+	MaxPasses    int // maximum generator passes per sprint before halting; default 3
+	Task         string
+	ResumeSprint int // if > 0, skip designer and start from this sprint
+	ResumePass   int // if > 0, start from this pass within ResumeSprint
 }
 
 func New(task string, maxPasses int) *DevWorkflow {
@@ -37,6 +40,15 @@ func New(task string, maxPasses int) *DevWorkflow {
 		maxPasses = defaultMaxPasses
 	}
 	return &DevWorkflow{Task: task, MaxPasses: maxPasses}
+}
+
+// NewResume creates a DevWorkflow that skips the designer and restarts from
+// the given sprint/pass checkpoint. The plan file must already exist.
+func NewResume(task string, maxPasses, sprint, pass int) *DevWorkflow {
+	wf := New(task, maxPasses)
+	wf.ResumeSprint = sprint
+	wf.ResumePass = pass
+	return wf
 }
 
 func (w *DevWorkflow) Name() string { return "dev" }
@@ -64,32 +76,64 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	// ── Designer ──────────────────────────────────────────────────────────────
-	st.Role = "designer"
-	sendProgress()
-	designerRunner, ok := cfg.Runners["designer"]
-	if !ok {
-		return fmt.Errorf("workflow: no runner for role 'designer'")
-	}
-	emitPrefix(send, "designer")
-	designPlan, err := workflow.Turn(ctx, designerRunner, designerPrompt(w.Task), send)
-	if err != nil {
-		return fmt.Errorf("workflow: designer: %w", err)
-	}
-	if err := os.WriteFile(planPath, []byte(designPlan), 0o600); err != nil {
-		return fmt.Errorf("workflow: writing plan file: %w", err)
+	var designPlan string
+
+	// ── Designer (skip when resuming with an existing plan) ───────────────────
+	if w.ResumeSprint > 0 {
+		// Resuming: read the existing plan file, skip the designer.
+		data, err := os.ReadFile(planPath)
+		if err != nil {
+			return fmt.Errorf("workflow: resume: cannot read plan file %s: %w", planPath, err)
+		}
+		designPlan = string(data)
+		emitPrefix(send, "resumed from sprint "+fmt.Sprintf("%d", w.ResumeSprint))
+	} else {
+		st.Role = "designer"
+		sendProgress()
+		designerRunner, ok := cfg.Runners["designer"]
+		if !ok {
+			return fmt.Errorf("workflow: no runner for role 'designer'")
+		}
+		emitPrefix(send, "designer")
+		var err error
+		designPlan, err = workflow.Turn(ctx, designerRunner, designerPrompt(w.Task), send)
+		if err != nil {
+			return fmt.Errorf("workflow: designer: %w", err)
+		}
+		if err := os.WriteFile(planPath, []byte(designPlan), 0o600); err != nil {
+			return fmt.Errorf("workflow: writing plan file: %w", err)
+		}
 	}
 
-	// Derive sprint count from plan headings.
+	// Derive limits from the plan. Designer-declared values take precedence;
+	// w.MaxPasses (from the caller) is the fallback for max_passes.
+	planMaxPasses, planMaxSprints := parseLimits(designPlan)
+	maxPasses := w.MaxPasses
+	if planMaxPasses > 0 {
+		maxPasses = planMaxPasses
+	}
+
 	sprintCount := countSprints(designPlan)
 	if sprintCount == 0 {
 		sprintCount = 1
 	}
+	// planMaxSprints is a safety cap; if designer declared one, honour it.
+	if planMaxSprints > 0 && sprintCount > planMaxSprints {
+		sprintCount = planMaxSprints
+	}
+
+	startSprint := 1
+	if w.ResumeSprint > 0 {
+		startSprint = w.ResumeSprint
+	}
 
 	// ── Sprint loop ───────────────────────────────────────────────────────────
-	for sprint := 1; sprint <= sprintCount; sprint++ {
+	for sprint := startSprint; sprint <= sprintCount; sprint++ {
 		st.Sprint = sprint
 		st.Pass = 1
+		if sprint == startSprint && w.ResumePass > 1 {
+			st.Pass = w.ResumePass
+		}
 
 		for {
 			sprintPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.sprint%d.md", sess.ID, sprint))
@@ -106,6 +150,11 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			genOutput, err := workflow.Turn(ctx, generatorRunner, generatorPrompt(planPath, sprint, st.Pass, findingsPath), send)
 			if err != nil {
 				return fmt.Errorf("workflow: generator sprint %d pass %d: %w", sprint, st.Pass, err)
+			}
+			// When the generator completes via tool calls and produces no closing text,
+			// substitute a git diff summary so the evaluator can see what changed.
+			if strings.TrimSpace(genOutput) == "" {
+				genOutput = gitDiffSummary()
 			}
 			if err := os.WriteFile(sprintPath, []byte(genOutput), 0o600); err != nil {
 				return fmt.Errorf("workflow: writing sprint file: %w", err)
@@ -145,19 +194,23 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 				// Advance to next sprint.
 				goto nextSprint
 
-			case workflow.VerdictNextSprint:
+			case workflow.VerdictSprintDone:
+				if sprint == sprintCount {
+					_ = os.Remove(statePath)
+					return nil
+				}
 				goto nextSprint
 
 			case workflow.VerdictNeedsRefinement:
-				if st.Pass >= w.MaxPasses {
-					return fmt.Errorf("workflow: sprint %d exceeded %d passes without good_to_go; last findings: %s", sprint, w.MaxPasses, findingsPath)
+				if st.Pass >= maxPasses {
+					return fmt.Errorf("workflow: sprint %d exceeded %d passes without good_to_go; last findings: %s", sprint, maxPasses, findingsPath)
 				}
 				st.Pass++
 
 			default:
 				// VerdictUnknown — treat as needs_refinement with a warning.
-				if st.Pass >= w.MaxPasses {
-					return fmt.Errorf("workflow: sprint %d: evaluator did not return a recognised verdict after %d passes; last findings: %s", sprint, w.MaxPasses, findingsPath)
+				if st.Pass >= maxPasses {
+					return fmt.Errorf("workflow: sprint %d: evaluator did not return a recognised verdict after %d passes; last findings: %s", sprint, maxPasses, findingsPath)
 				}
 				st.Pass++
 			}
@@ -165,6 +218,7 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	nextSprint:
 	}
 
+	_ = os.Remove(statePath)
 	return nil
 }
 
@@ -176,12 +230,56 @@ func countSprints(plan string) int {
 	return len(sprintHeadingRE.FindAllString(plan, -1))
 }
 
+var (
+	maxPassesRE  = regexp.MustCompile(`(?mi)^\s*max_passes\s*:\s*(\d+)`)
+	maxSprintsRE = regexp.MustCompile(`(?mi)^\s*max_sprints\s*:\s*(\d+)`)
+)
+
+// parseLimits extracts max_passes and max_sprints from the plan text.
+// Returns 0 for any value not found.
+func parseLimits(plan string) (maxPasses, maxSprints int) {
+	if m := maxPassesRE.FindStringSubmatch(plan); len(m) == 2 {
+		fmt.Sscanf(m[1], "%d", &maxPasses) //nolint:errcheck
+	}
+	if m := maxSprintsRE.FindStringSubmatch(plan); len(m) == 2 {
+		fmt.Sscanf(m[1], "%d", &maxSprints) //nolint:errcheck
+	}
+	return
+}
+
 func agentMapFromRunners(runners map[string]workflow.TurnRunner) map[string]string {
 	m := make(map[string]string, len(runners))
 	for role, r := range runners {
 		m[role] = r.Name()
 	}
 	return m
+}
+
+// gitDiffSummary returns a human-readable summary of uncommitted changes via
+// `git diff HEAD` (falls back to `git diff` if HEAD doesn't exist). Used when
+// the generator completes its work entirely via tool calls without producing
+// a closing text summary.
+func gitDiffSummary() string {
+	stat, err := exec.Command("git", "diff", "--stat", "HEAD").Output()
+	if err != nil {
+		stat, err = exec.Command("git", "diff", "--stat").Output()
+		if err != nil {
+			return "(generator used tools to make changes; no git diff available)"
+		}
+	}
+	if strings.TrimSpace(string(stat)) == "" {
+		return "(generator completed via tool calls; no uncommitted changes detected)"
+	}
+	diff, err := exec.Command("git", "diff", "HEAD").Output()
+	if err != nil {
+		diff, _ = exec.Command("git", "diff").Output()
+	}
+	const maxDiffBytes = 32 * 1024
+	diffStr := string(diff)
+	if len(diffStr) > maxDiffBytes {
+		diffStr = diffStr[:maxDiffBytes] + "\n... (diff truncated)"
+	}
+	return "Generator completed via tool calls. Changes made:\n\n```diff\n" + strings.TrimSpace(string(stat)) + "\n```\n\n" + diffStr
 }
 
 // emitPrefix writes a dim role label to the transcript (mirrors dispatch.go behaviour).

@@ -45,6 +45,10 @@ type AgentRole int
 const (
 	RolePrimary    AgentRole = iota
 	RoleEscalation AgentRole = iota
+	// RoleWorkflow is used for agents acting as workflow step executors (designer,
+	// generator, evaluator). They receive a clean system prompt — no escalation
+	// framing, no session orientation, no repeated-prompt guard.
+	RoleWorkflow AgentRole = iota
 )
 
 // workflowJournalPollInterval is how often we stat the workflow journal file
@@ -146,6 +150,10 @@ func (r *localRunner) Execute(
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
 	})
 
+	if role == RoleWorkflow {
+		agent = agent.AsWorkflowExecutor()
+	}
+
 	primaryName := cfg.ActiveAgent().Name
 	escalationName := cfg.EscalationAgentConfig().Name
 
@@ -161,6 +169,11 @@ func (r *localRunner) Execute(
 	// Build history depending on role and context mode.
 	var history []local.Message
 	switch role {
+	case RoleWorkflow:
+		// Workflow executors get a fresh empty history — their context comes
+		// entirely from the workflow prompt, not from the REPL session.
+		history = nil
+
 	case RoleEscalation:
 		// Inject orientation as a system message, build appropriately-scoped history.
 		orientationText := escalation.BuildDynamicContext(sess, ctxMode)
@@ -521,14 +534,16 @@ func (r *subprocessRunner) Execute(
 		}, nonce)
 	}
 
-	var staticCtx string
-	if role == RolePrimary {
+	var staticCtx, dynamicCtx string
+	switch role {
+	case RoleWorkflow:
+		// Workflow executors receive no session orientation — their context comes
+		// entirely from the workflow prompt injected by the caller.
+	case RolePrimary:
 		staticCtx = escalation.BuildPrimaryStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
-	} else {
+		dynamicCtx = escalation.BuildPrimaryDynamicContext(sess, ctxMode)
+	default: // RoleEscalation
 		staticCtx = escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
-	}
-	dynamicCtx := escalation.BuildPrimaryDynamicContext(sess, ctxMode)
-	if role == RoleEscalation {
 		dynamicCtx = escalation.BuildDynamicContext(sess, ctxMode)
 	}
 	if r.mcpToolSet != nil {

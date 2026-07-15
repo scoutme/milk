@@ -16,12 +16,24 @@ Produce a detailed spec and sprint plan. Structure your response as follows:
 ## Spec
 A precise description of what needs to be built, including acceptance criteria.
 
+## Limits
+Declare the execution limits for this workflow on two lines, exactly as shown:
+  max_passes: <N>
+  max_sprints: <N>
+
+max_passes is the maximum number of generator→evaluator iterations allowed per sprint
+before the workflow halts with an error. Set it based on task complexity: 1 for trivial
+tasks, 2–3 for normal tasks, up to 5 for tasks where convergence may take several rounds.
+
+max_sprints is a safety cap on the total number of sprints. It must equal or exceed the
+number of ## Sprint N sections you define below. Use it to prevent runaway loops.
+
 ## Sprint Plan
 Use one section per sprint, each headed exactly as "## Sprint N" (e.g. "## Sprint 1").
 For each sprint list the concrete deliverables: files to create or modify, tests to write,
 testing instructions for a human reviewer.
 
-Keep the number of sprints minimal (1–3). If the task fits in one sprint, use one sprint.
+Keep the number of sprints to the minimum needed. If the task fits in one sprint, use one.
 `, task)
 }
 
@@ -47,8 +59,10 @@ func generatorPrompt(planPath string, sprint, pass int, findingsPath string) str
 	}
 
 	fmt.Fprintf(&sb, `Implement all deliverables for Sprint %d as described in the plan.
-Write the code, tests, and testing instructions.
-Be thorough — the evaluator will review your output against the sprint acceptance criteria.
+Use your tools (read_file, write_file, edit_file, bash, etc.) to read, create, and modify files.
+After completing all tool use, write a plain-text summary of what you did: which files were
+created or modified, what each change does, and which acceptance criteria it satisfies.
+This written summary is mandatory — the evaluator reads it to assess the sprint.
 `, sprint)
 
 	return sb.String()
@@ -66,20 +80,26 @@ func evaluatorPrompt(planPath string, sprintOutputPath string, sprint, pass int)
 	}
 	if sprintOutput != "" {
 		fmt.Fprintf(&sb, "## Generator output\n%s\n\n", sprintOutput)
+	} else {
+		fmt.Fprintf(&sb, "## Generator output\n(empty — the generator produced no written summary)\n\n")
+		fmt.Fprintf(&sb, "NOTE: The generator may have used tools to modify files directly without "+
+			"producing a written summary. Use your read_file and bash tools to inspect the codebase "+
+			"and determine whether the sprint deliverables were actually implemented.\n\n")
 	}
 
-	fmt.Fprintf(&sb, `Review the generator's output against the Sprint %d acceptance criteria.
+	fmt.Fprintf(&sb, `Review the sprint deliverables against the Sprint %d acceptance criteria.
+Use your tools to read relevant source files and verify the implementation when needed.
 
 Write a findings section describing what is correct and what needs improvement.
 
 End your response with exactly ONE of these verdict lines:
 - good_to_go
 - needs_refinement
-- next_sprint
+- sprint_done
 
 Use "good_to_go" when all acceptance criteria are met.
 Use "needs_refinement" when there are fixable issues in the same sprint.
-Use "next_sprint" when the sprint deliverables are complete but there is more work in the plan.
+Use "sprint_done" when the sprint deliverables are complete (whether or not more sprints follow).
 `, sprint)
 
 	return sb.String()

@@ -381,7 +381,7 @@ The goal is shown in the memory panel and injected into escalation context so th
 /workflow dev <task> --designer <agent> \
               --generator <agent> \
               --evaluator <agent>                 # inline agent assignment
-/workflow resume                                  # restore saved state panel for this session
+/workflow resume                                  # resume workflow from last sprint/pass checkpoint
 /workflow clear                                   # delete saved state for this session (with confirmation)
 ```
 
@@ -395,7 +395,7 @@ Loop semantics: `needs_refinement` re-runs the generator for the same sprint (up
 
 Agent specifiers accept any name from `config.agents`, plus aliases `primary` (the currently assigned primary agent) and `escalation` (the currently assigned escalation agent). Aliases are resolved once at start; mid-workflow `/agent switch` does not affect a running workflow.
 
-Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` after each evaluator call so the workflow can be resumed after a TUI restart. The state file also records the original task description so `/workflow resume` can show the exact re-run command. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
+Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` after each evaluator call. `/workflow resume` re-launches the workflow from the last checkpointed sprint/pass, skipping the designer (plan file is reused), using the same agents recorded in the state file. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
 
 The workflow progress panel (toggled with `/panel workflow`, auto-opens at start) shows the current sprint, pass, role, and verdict history.
 

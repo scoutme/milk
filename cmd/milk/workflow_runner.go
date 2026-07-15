@@ -28,6 +28,7 @@ type workflowTurnRunner struct {
 	sess      *session.Session
 	mem       *memory.Store
 	role      AgentRole
+	roleName  string // human-readable role (designer, generator, evaluator)
 	nonce     string
 	sessionID string // persists across passes for this role; set after first Execute
 }
@@ -64,6 +65,11 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 	if err != nil {
 		return "", err
 	}
+	if res.EscalationReason != "" {
+		// Local agent fired an escalation signal — no escalation target exists in a
+		// workflow role. Treat it as an error so the workflow halts with a clear message.
+		return "", fmt.Errorf("workflow role %q escalated unexpectedly: %s", r.roleName, res.EscalationReason)
+	}
 	if res.NewSessionID != "" {
 		r.sessionID = res.NewSessionID
 	}
@@ -85,10 +91,9 @@ func newWorkflowSession() *session.Session {
 // buildWorkflowRunners constructs a workflow.TurnRunner adapter for each role
 // using the resolved agent name map.
 //
-// Lookup order: if the resolved name matches the live primary or escalation runner
-// in da, that runner is used directly (it carries the full TUI wiring and works for
-// any provider including claude-cli). For any other named agent a fresh runner is
-// built via getOrBuildToolRunner (local/subprocess providers only).
+// da must be the TUI-wired agents from buildTUIAgents — the primary and escalation
+// runners it contains already carry the correct permission handlers, tool-use
+// callbacks, and skip-permissions setting for the current turn.
 //
 // Each role receives its own scratch session (not the REPL session) so workflow
 // turns do not contaminate the live conversation history.
@@ -124,16 +129,13 @@ func buildWorkflowRunners(
 			}
 		}
 
-		agentRole := RoleEscalation
-		if name == cfg.ActiveAgent().Name {
-			agentRole = RolePrimary
-		}
 		out[role] = &workflowTurnRunner{
-			inner: inner,
-			cfg:   cfg,
-			sess:  newWorkflowSession(),
-			mem:   mem,
-			role:  agentRole,
+			inner:    inner,
+			cfg:      cfg,
+			sess:     newWorkflowSession(),
+			mem:      mem,
+			role:     RoleWorkflow,
+			roleName: role,
 		}
 	}
 	return out, nil

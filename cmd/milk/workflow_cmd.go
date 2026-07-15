@@ -29,6 +29,9 @@ type workflowWizardStep int
 
 const (
 	wizardStepTask         workflowWizardStep = iota // ask for task description
+	wizardStepDesigner                               // ask for designer agent
+	wizardStepGenerator                              // ask for generator agent
+	wizardStepEvaluator                              // ask for evaluator agent
 	wizardStepClearConfirm                           // ask user to type "clear" to confirm
 	wizardStepDone
 )
@@ -39,7 +42,7 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 
 	if len(parts) == 0 {
 		// List available workflows.
-		m.appendTranscript(milkTag() + " available workflows:\n  dev — designer → generator → evaluator loop\n\nUsage:\n  /workflow dev [task] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]\n  /workflow resume — restore saved state for this session\n  /workflow clear  — delete saved state for this session\n")
+		m.appendTranscript(milkTag() + " available workflows:\n  dev — designer → generator → evaluator loop\n\nUsage:\n  /workflow dev [task] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]\n  /workflow resume — resume workflow from last checkpoint\n  /workflow clear  — delete saved state for this session\n")
 		return m, nil
 	}
 
@@ -71,7 +74,8 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 		evaluator: flags["evaluator"],
 	}
 
-	// If task is missing, enter wizard for task only; agent defaults are applied after.
+	// Enter wizard for any missing fields. Agent steps are skipped when all
+	// three were supplied via flags; otherwise the wizard collects them in order.
 	if wizard.task == "" {
 		wizard.step = wizardStepTask
 		m.pendingWorkflowWizard = wizard
@@ -79,16 +83,26 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 		m.refreshPrompt()
 		return m, nil
 	}
-
-	// Default any unspecified agent roles to escalation and launch immediately.
 	if wizard.designer == "" {
-		wizard.designer = workflow.AliasEscalation
+		wizard.step = wizardStepDesigner
+		m.pendingWorkflowWizard = wizard
+		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
+		m.refreshPrompt()
+		return m, nil
 	}
 	if wizard.generator == "" {
-		wizard.generator = workflow.AliasEscalation
+		wizard.step = wizardStepGenerator
+		m.pendingWorkflowWizard = wizard
+		m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
+		m.refreshPrompt()
+		return m, nil
 	}
 	if wizard.evaluator == "" {
-		wizard.evaluator = workflow.AliasEscalation
+		wizard.step = wizardStepEvaluator
+		m.pendingWorkflowWizard = wizard
+		m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
+		m.refreshPrompt()
+		return m, nil
 	}
 
 	return m.launchWorkflow(wizard)
@@ -113,17 +127,42 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 
 	case wizardStepTask:
 		if input == "" {
-			// Blank task is not valid — re-prompt.
 			m.appendTranscript(milkTag() + " task description cannot be empty — enter task description:\n")
 			m.refreshPrompt()
 			return m, nil
 		}
 		w.task = input
-		// Default all three agent roles to escalation and launch immediately.
-		w.designer = workflow.AliasEscalation
-		w.generator = workflow.AliasEscalation
-		w.evaluator = workflow.AliasEscalation
+		w.step = wizardStepDesigner
+		m.pendingWorkflowWizard = w
+		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
+		m.refreshPrompt()
+		return m, nil
+
+	case wizardStepDesigner:
+		w.designer = workflowAgentInput(input)
+		w.step = wizardStepGenerator
+		m.pendingWorkflowWizard = w
+		m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
+		m.refreshPrompt()
+		return m, nil
+
+	case wizardStepGenerator:
+		w.generator = workflowAgentInput(input)
+		w.step = wizardStepEvaluator
+		m.pendingWorkflowWizard = w
+		m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
+		m.refreshPrompt()
+		return m, nil
+
+	case wizardStepEvaluator:
+		w.evaluator = workflowAgentInput(input)
 		w.step = wizardStepDone
+
+		// Record the fully-assembled command in history so the user can
+		// recall and re-run it without stepping through the wizard again.
+		full := "/workflow dev " + w.task
+		m.sessionHistory = appendDeduped(m.sessionHistory, full, maxPersistedHistory)
+		m.globalHistory = appendDeduped(m.globalHistory, full, maxPersistedHistory)
 	}
 
 	m.pendingWorkflowWizard = nil
@@ -208,7 +247,13 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &m.agents)
+	// Build TUI-wired agents (permission handlers, tool-use hints, skip-permissions)
+	// so that workflow roles have the same tool access as normal turns.
+	m.st.toolFutures = map[string]chan string{}
+	ir0 := &tuiInputReader{send: send}
+	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
 		return m, nil
@@ -271,10 +316,8 @@ func (m model) handleWorkflowWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleWorkflowResume loads the saved workflow state for the current session
-// and restores panel state. It does not re-launch the workflow goroutine;
-// re-launch requires the user to run /workflow dev <task> again. The state
-// file path is printed so the user knows where the checkpoint lives.
+// handleWorkflowResume loads saved workflow state and re-launches the workflow
+// from the checkpointed sprint/pass, using the agent names recorded in state.
 func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 	sess := m.st.sess
 	stateDir, err := session.Dir()
@@ -292,18 +335,108 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
 		return m, nil
 	}
-	m.workflowState = st
-	m.workflowPanelOpen = true
-	m.syncLayout()
-	rerunHint := "/workflow dev <task>"
-	if st.Task != "" {
-		rerunHint = "/workflow dev " + st.Task
+
+	// Rebuild wizard state from the saved checkpoint so launchWorkflow can use it.
+	w := &workflowWizardState{
+		name:      st.WorkflowName,
+		task:      st.Task,
+		designer:  st.AgentMap["designer"],
+		generator: st.AgentMap["generator"],
+		evaluator: st.AgentMap["evaluator"],
 	}
-	m.appendTranscript(fmt.Sprintf(
-		"%s workflow %s restored (sprint %d pass %d role %s)\n  state file: %s\n  to re-run: %s\n",
-		milkTag(), st.WorkflowName, st.Sprint, st.Pass, st.Role, path, rerunHint,
-	))
-	return m, nil
+	if w.designer == "" {
+		w.designer = workflow.AliasEscalation
+	}
+	if w.generator == "" {
+		w.generator = workflow.AliasEscalation
+	}
+	if w.evaluator == "" {
+		w.evaluator = workflow.AliasEscalation
+	}
+
+	return m.launchWorkflowResume(w, st.Sprint, st.Pass)
+}
+
+// launchWorkflowResume is like launchWorkflow but resumes from a sprint/pass checkpoint.
+func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass int) (tea.Model, tea.Cmd) {
+	cfg := m.st.cfg
+	sess := m.st.sess
+	send := func(msg tea.Msg) { m.st.program.Send(msg) }
+
+	roles := map[string]string{
+		"designer":  w.designer,
+		"generator": w.generator,
+		"evaluator": w.evaluator,
+	}
+
+	agentNames, err := workflow.ResolveAgentNames(roles, cfg)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	stateDir, err := session.Dir()
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow resume error: cannot determine state dir: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	m.st.toolFutures = map[string]chan string{}
+	ir0 := &tuiInputReader{send: send}
+	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	wf := wfdev.NewResume(w.task, 0, sprint, pass)
+	runCfg := workflow.RunConfig{
+		Session:  sess,
+		Runners:  runners,
+		Send:     send,
+		StateDir: stateDir,
+	}
+
+	m.workflowPanelOpen = true
+	m.busy = true
+	m.spinnerFrame = 0
+	m.workflowState = &workflow.State{
+		WorkflowName: "dev",
+		Task:         w.task,
+		Sprint:       sprint,
+		Pass:         pass,
+		Role:         "generator",
+		AgentMap:     agentNames,
+	}
+	m.appendTranscript(milkTag() + fmt.Sprintf(" resuming workflow dev from sprint %d pass %d (designer: %s  generator: %s  evaluator: %s)\n",
+		sprint, pass, agentNames["designer"], agentNames["generator"], agentNames["evaluator"]))
+	m.syncLayout()
+
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancelTurn = cancel
+	return m, tea.Batch(
+		spinnerTick(),
+		func() tea.Msg {
+			defer cancel()
+			err := wf.Run(ctx, runCfg)
+			return wfdev.WorkflowDoneMsg{Err: err}
+		},
+	)
+}
+
+// workflowAgentPrompt returns the wizard prompt line for an agent role.
+func workflowAgentPrompt(role string) string {
+	return fmt.Sprintf(" workflow dev — %s agent (blank = escalation):\n", role)
+}
+
+// workflowAgentInput normalises a wizard agent answer: blank → AliasEscalation.
+func workflowAgentInput(input string) string {
+	if input == "" {
+		return workflow.AliasEscalation
+	}
+	return input
 }
 
 // parseWorkflowFlags splits args into positional remainder and --key value pairs.

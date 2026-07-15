@@ -65,8 +65,6 @@ func statFile(dir, name string) SignalFileStat {
 	return s
 }
 
-// extractTimestamp does a best-effort scan for a timestamp-like string in a
-// JSON line. Looks for "startTime", "timeUnixNano", or "time" fields.
 func extractTimestamp(line string) string {
 	for _, key := range []string{`"time":"`, `"startTime":"`, `"observedTimeUnixNano":`, `"timeUnixNano":`} {
 		idx := strings.Index(line, key)
@@ -77,7 +75,6 @@ func extractTimestamp(line string) string {
 		if start >= len(line) {
 			continue
 		}
-		// quoted string value
 		if line[start] == '"' {
 			start++
 			end := strings.Index(line[start:], `"`)
@@ -85,11 +82,9 @@ func extractTimestamp(line string) string {
 				return line[start : start+end]
 			}
 		}
-		// numeric nanosecond timestamp
 		end := strings.IndexAny(line[start:], ",}")
 		if end > 0 {
 			ns := line[start : start+end]
-			// strip quotes if present
 			ns = strings.Trim(ns, `"`)
 			return ns
 		}
@@ -118,7 +113,6 @@ func FormatStats(otelDir string) string {
 	return b.String()
 }
 
-// Trim renames each signal file to <name>.<date>.jsonl and creates a fresh empty one.
 func Trim(otelDir string) error {
 	date := time.Now().Format("2006-01-02")
 	names := []string{"traces.jsonl", "metrics.jsonl", "logs.jsonl"}
@@ -132,7 +126,6 @@ func Trim(otelDir string) error {
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}
-		// Create fresh empty file.
 		f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("recreate %s: %w", name, err)
@@ -157,11 +150,9 @@ func formatTS(ts string) string {
 	if ts == "" {
 		return ""
 	}
-	// Try RFC3339 first.
 	if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 		return t.UTC().Format("2006-01-02")
 	}
-	// Nanosecond unix timestamp.
 	var ns int64
 	if _, err := fmt.Sscan(ts, &ns); err == nil && ns > 0 {
 		return time.Unix(0, ns).UTC().Format("2006-01-02")

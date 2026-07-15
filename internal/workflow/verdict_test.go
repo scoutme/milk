@@ -22,17 +22,17 @@ func TestParseVerdict(t *testing.T) {
 		{"needs_refinement uppercase", "NEEDS_REFINEMENT", workflow.VerdictNeedsRefinement},
 		{"needs_refinement in prose", "There are issues. needs_refinement", workflow.VerdictNeedsRefinement},
 
-		{"next_sprint exact", "next_sprint", workflow.VerdictNextSprint},
-		{"next sprint spaced", "Move to next sprint.", workflow.VerdictNextSprint},
-		{"next_sprint uppercase", "NEXT_SPRINT", workflow.VerdictNextSprint},
-		{"next_sprint in prose", "Sprint done. next_sprint", workflow.VerdictNextSprint},
+		{"sprint_done exact", "sprint_done", workflow.VerdictSprintDone},
+		{"sprint done spaced", "This sprint is sprint done.", workflow.VerdictSprintDone},
+		{"sprint_done uppercase", "SPRINT_DONE", workflow.VerdictSprintDone},
+		{"sprint_done in prose", "All work complete. sprint_done", workflow.VerdictSprintDone},
 
-		// Precedence: good_to_go wins over next_sprint
-		{"good_to_go beats next_sprint", "next_sprint but actually good_to_go", workflow.VerdictGoodToGo},
+		// Precedence: good_to_go wins over sprint_done
+		{"good_to_go beats sprint_done", "sprint_done but actually good_to_go", workflow.VerdictGoodToGo},
 		// Precedence: good_to_go wins over needs_refinement
 		{"good_to_go beats needs_refinement", "needs_refinement, wait no good_to_go", workflow.VerdictGoodToGo},
-		// Precedence: next_sprint wins over needs_refinement
-		{"next_sprint beats needs_refinement", "needs_refinement, but next_sprint", workflow.VerdictNextSprint},
+		// Precedence: sprint_done wins over needs_refinement
+		{"sprint_done beats needs_refinement", "needs_refinement, but sprint_done", workflow.VerdictSprintDone},
 
 		{"empty", "", workflow.VerdictUnknown},
 		{"no keyword", "The sprint output looks fine.", workflow.VerdictUnknown},

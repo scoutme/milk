@@ -1,10 +1,15 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -472,6 +477,11 @@ func (s *Session) AddTurn(t Turn) {
 	t.Timestamp = time.Now()
 	s.History = append(s.History, t)
 	s.LastUsed = t.Timestamp
+	obs.Inc(context.Background(), "github.com/scoutme/milk", "milk.session.turns",
+		attribute.String("role", string(t.Role)),
+		attribute.String("agent", string(t.Agent)),
+	)
+	obs.Debug("session turn", "role", t.Role, "agent", t.Agent, "tool_calls", len(t.ToolCalls))
 }
 
 // Transition applies a state transition, returning false if the transition is not valid.

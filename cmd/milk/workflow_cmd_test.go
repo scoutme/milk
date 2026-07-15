@@ -120,23 +120,60 @@ func TestAdvanceWorkflowWizard_BlankTaskTwiceStillRePrompts(t *testing.T) {
 	}
 }
 
-// TestAdvanceWorkflowWizard_NonBlankTaskClearsWizard verifies that a non-empty
-// task causes the wizard to be cleared (launchWorkflow is invoked). We expect
-// launchWorkflow to return an error in the transcript (no live config), but not
-// to leave the wizard pending.
-func TestAdvanceWorkflowWizard_NonBlankTaskClearsWizard(t *testing.T) {
+// TestAdvanceWorkflowWizard_TaskAdvancesToDesigner verifies that a non-empty task
+// advances the wizard to the designer step rather than launching immediately.
+func TestAdvanceWorkflowWizard_TaskAdvancesToDesigner(t *testing.T) {
 	m := testModel()
 	m.pendingWorkflowWizard = &workflowWizardState{name: "dev", step: wizardStepTask}
-	// Provide a minimal st so launchWorkflow doesn't nil-pointer on cfg access.
-	m.st = &interactiveState{}
 
 	newM, _ := m.advanceWorkflowWizard("build a REST API")
 	nm := newM.(model)
 
-	// Wizard must be cleared regardless of whether launchWorkflow succeeded.
-	if nm.pendingWorkflowWizard != nil {
-		t.Errorf("expected wizard cleared after non-blank task, step=%d task=%q",
-			nm.pendingWorkflowWizard.step, nm.pendingWorkflowWizard.task)
+	if nm.pendingWorkflowWizard == nil {
+		t.Fatal("expected wizard still pending after task entry (should be at designer step)")
+	}
+	if nm.pendingWorkflowWizard.step != wizardStepDesigner {
+		t.Errorf("step = %d, want wizardStepDesigner (%d)", nm.pendingWorkflowWizard.step, wizardStepDesigner)
+	}
+	if nm.pendingWorkflowWizard.task != "build a REST API" {
+		t.Errorf("task = %q, want %q", nm.pendingWorkflowWizard.task, "build a REST API")
+	}
+}
+
+// TestAdvanceWorkflowWizard_AgentStepsFlow verifies the full designer→generator→evaluator
+// wizard sequence. After all three agent steps, the wizard is cleared and launchWorkflow
+// is invoked (which will fail in test due to no live config — that's expected).
+func TestAdvanceWorkflowWizard_AgentStepsFlow(t *testing.T) {
+	m := testModel()
+	m.st = &interactiveState{}
+	m.pendingWorkflowWizard = &workflowWizardState{name: "dev", task: "build X", step: wizardStepDesigner}
+
+	// designer: blank → should default to AliasEscalation
+	m1, _ := m.advanceWorkflowWizard("")
+	nm1 := m1.(model)
+	if nm1.pendingWorkflowWizard == nil || nm1.pendingWorkflowWizard.step != wizardStepGenerator {
+		t.Fatalf("after blank designer: want wizardStepGenerator, got step=%v pending=%v",
+			nm1.pendingWorkflowWizard.step, nm1.pendingWorkflowWizard != nil)
+	}
+	if nm1.pendingWorkflowWizard.designer != workflow.AliasEscalation {
+		t.Errorf("designer = %q, want %q", nm1.pendingWorkflowWizard.designer, workflow.AliasEscalation)
+	}
+
+	// generator: explicit name
+	m2, _ := nm1.advanceWorkflowWizard("myagent")
+	nm2 := m2.(model)
+	if nm2.pendingWorkflowWizard == nil || nm2.pendingWorkflowWizard.step != wizardStepEvaluator {
+		t.Fatalf("after generator: want wizardStepEvaluator, got step=%v", nm2.pendingWorkflowWizard.step)
+	}
+	if nm2.pendingWorkflowWizard.generator != "myagent" {
+		t.Errorf("generator = %q, want %q", nm2.pendingWorkflowWizard.generator, "myagent")
+	}
+
+	// evaluator: wizard clears and launchWorkflow is called (fails in test — no session)
+	m3, _ := nm2.advanceWorkflowWizard("")
+	nm3 := m3.(model)
+	if nm3.pendingWorkflowWizard != nil {
+		t.Errorf("expected wizard cleared after evaluator step, still at step=%d", nm3.pendingWorkflowWizard.step)
 	}
 }
 

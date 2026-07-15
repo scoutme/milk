@@ -9,7 +9,7 @@ const (
 	VerdictUnknown         WorkflowVerdict = iota
 	VerdictGoodToGo                        // sprint accepted; advance or finish
 	VerdictNeedsRefinement                 // retry same sprint
-	VerdictNextSprint                      // advance to next sprint unconditionally
+	VerdictSprintDone                      // sprint deliverables complete; advance unconditionally
 )
 
 func (v WorkflowVerdict) String() string {
@@ -18,25 +18,30 @@ func (v WorkflowVerdict) String() string {
 		return "good_to_go"
 	case VerdictNeedsRefinement:
 		return "needs_refinement"
-	case VerdictNextSprint:
-		return "next_sprint"
+	case VerdictSprintDone:
+		return "sprint_done"
 	default:
 		return "unknown"
 	}
 }
 
 // ParseVerdict extracts a structured verdict from the evaluator's text response.
-// Keywords are matched case-insensitively; precedence: good_to_go > next_sprint > needs_refinement.
+// It scans lines from the end of the response and returns the verdict of the
+// last line that contains a recognised keyword (case-insensitive). Scanning
+// from the end ensures that the evaluator's final verdict line wins over any
+// discussion of verdicts earlier in the reasoning section.
 func ParseVerdict(response string) WorkflowVerdict {
-	lower := strings.ToLower(response)
-	switch {
-	case strings.Contains(lower, "good_to_go") || strings.Contains(lower, "good to go"):
-		return VerdictGoodToGo
-	case strings.Contains(lower, "next_sprint") || strings.Contains(lower, "next sprint"):
-		return VerdictNextSprint
-	case strings.Contains(lower, "needs_refinement") || strings.Contains(lower, "needs refinement"):
-		return VerdictNeedsRefinement
-	default:
-		return VerdictUnknown
+	lines := strings.Split(response, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.ToLower(strings.TrimSpace(lines[i]))
+		switch {
+		case strings.Contains(line, "good_to_go") || strings.Contains(line, "good to go"):
+			return VerdictGoodToGo
+		case strings.Contains(line, "sprint_done") || strings.Contains(line, "sprint done"):
+			return VerdictSprintDone
+		case strings.Contains(line, "needs_refinement") || strings.Contains(line, "needs refinement"):
+			return VerdictNeedsRefinement
+		}
 	}
+	return VerdictUnknown
 }

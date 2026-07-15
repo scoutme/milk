@@ -46,13 +46,41 @@ func TestGeneratorPromptRefinementPass(t *testing.T) {
 
 func TestEvaluatorPromptContainsVerdictInstruction(t *testing.T) {
 	p := evaluatorPrompt("/tmp/plan.md", "/tmp/sprint1.md", 1, 1)
-	for _, kw := range []string{"good_to_go", "needs_refinement", "next_sprint"} {
+	for _, kw := range []string{"good_to_go", "needs_refinement", "sprint_done"} {
 		if !strings.Contains(p, kw) {
 			t.Errorf("evaluatorPrompt missing verdict keyword %q", kw)
 		}
 	}
 	if !strings.Contains(p, "Sprint 1") {
 		t.Errorf("evaluatorPrompt missing sprint reference")
+	}
+}
+
+func TestParseLimits(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantPasses  int
+		wantSprints int
+	}{
+		{"empty", "", 0, 0},
+		{"both present", "max_passes: 4\nmax_sprints: 2\n", 4, 2},
+		{"only max_passes", "max_passes: 5\n", 5, 0},
+		{"only max_sprints", "max_sprints: 3\n", 0, 3},
+		{"inline in section", "## Limits\nmax_passes: 2\nmax_sprints: 1\n## Sprint 1\n", 2, 1},
+		{"leading spaces", "  max_passes:  3\n  max_sprints: 2\n", 3, 2},
+		{"ignores non-numeric", "max_passes: abc\n", 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotP, gotS := parseLimits(tt.input)
+			if gotP != tt.wantPasses {
+				t.Errorf("parseLimits max_passes = %d, want %d", gotP, tt.wantPasses)
+			}
+			if gotS != tt.wantSprints {
+				t.Errorf("parseLimits max_sprints = %d, want %d", gotS, tt.wantSprints)
+			}
+		})
 	}
 }
 
@@ -88,6 +116,40 @@ func (s *stubTurnRunner) Name() string { return s.name }
 func (s *stubTurnRunner) Run(_ context.Context, _ string, out io.Writer) (string, error) {
 	_, _ = io.WriteString(out, s.output)
 	return s.output, nil
+}
+
+// TestDevWorkflow_PlanMaxPassesHonoured verifies that max_passes declared in the
+// plan overrides the caller-supplied default.
+func TestDevWorkflow_PlanMaxPassesHonoured(t *testing.T) {
+	dir := t.TempDir()
+
+	// Plan declares max_passes: 1 — workflow must halt after the first pass
+	// instead of retrying when the evaluator returns needs_refinement.
+	designerOut := "## Spec\nBuild foo.\n\n## Limits\nmax_passes: 1\nmax_sprints: 1\n\n## Sprint 1\nImplement foo."
+	generatorOut := "func main() {}"
+	evaluatorOut := "needs_refinement" // would normally trigger a retry
+
+	runners := map[string]workflow.TurnRunner{
+		"designer":  &stubTurnRunner{name: "designer", output: designerOut},
+		"generator": &stubTurnRunner{name: "generator", output: generatorOut},
+		"evaluator": &stubTurnRunner{name: "evaluator", output: evaluatorOut},
+	}
+
+	sess := &session.Session{ID: "test-" + t.Name()}
+	cfg := workflow.RunConfig{
+		Session:  sess,
+		Runners:  runners,
+		StateDir: dir,
+	}
+
+	wf := New("build foo", 3) // caller says 3 passes; plan says 1
+	err := wf.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error due to max_passes:1 exceeded, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeded") && !strings.Contains(err.Error(), "pass") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 // TestDevWorkflow_NoDoneMessageViaSend verifies that Run never calls send with a

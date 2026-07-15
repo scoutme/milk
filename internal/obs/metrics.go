@@ -31,7 +31,6 @@ func FormatMetrics(otelDir string) string {
 	}
 	defer f.Close()
 
-	// latest maps "name{labels}" → metricPoint, keeping only the most recent entry.
 	latest := map[string]metricPoint{}
 
 	scanner := bufio.NewScanner(f)
@@ -48,7 +47,6 @@ func FormatMetrics(otelDir string) string {
 		return "metrics file exists but contains no recognisable data points yet"
 	}
 
-	// Sort keys for stable output.
 	keys := make([]string, 0, len(latest))
 	for k := range latest {
 		keys = append(keys, k)
@@ -68,7 +66,11 @@ func FormatMetrics(otelDir string) string {
 			sort.Strings(parts)
 			label += "{" + strings.Join(parts, ",") + "}"
 		}
-		fmt.Fprintf(&b, "  %-60s %g\n", label, p.value)
+		fmt.Fprintf(&b, "  %-60s %g", label, p.value)
+		if p.ts != "" {
+			fmt.Fprintf(&b, "  @ %s", p.ts)
+		}
+		fmt.Fprintln(&b)
 	}
 	if b.Len() > 0 {
 		fmt.Fprint(&b, "hint: /otel for file sizes, /otel trim to archive")
@@ -76,15 +78,12 @@ func FormatMetrics(otelDir string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// parseMetricLine extracts data points from one OTLP JSON metrics line.
-// The stdoutmetric exporter writes one JSON object per export cycle.
 func parseMetricLine(line string, out map[string]metricPoint) {
 	var root struct {
 		ScopeMetrics []struct {
 			Metrics []struct {
 				Name string `json:"Name"`
 				Data struct {
-					// Sum / Gauge share DataPoints
 					DataPoints []struct {
 						Attributes []struct {
 							Key   string `json:"Key"`
@@ -92,10 +91,8 @@ func parseMetricLine(line string, out map[string]metricPoint) {
 								Value any `json:"Value"`
 							} `json:"Value"`
 						} `json:"Attributes"`
-						StartTime string  `json:"StartTime"`
-						Time      string  `json:"Time"`
-						Value     float64 `json:"Value"`
-						// Int gauge uses Value too, but as int in some versions
+						Time  string  `json:"Time"`
+						Value float64 `json:"Value"`
 					} `json:"DataPoints"`
 				} `json:"Data"`
 			} `json:"Metrics"`
@@ -112,12 +109,7 @@ func parseMetricLine(line string, out map[string]metricPoint) {
 					attrs[a.Key] = fmt.Sprintf("%v", a.Value.Value)
 				}
 				key := metricKey(m.Name, attrs)
-				out[key] = metricPoint{
-					name:  m.Name,
-					value: dp.Value,
-					attrs: attrs,
-					ts:    dp.Time,
-				}
+				out[key] = metricPoint{name: m.Name, value: dp.Value, attrs: attrs, ts: dp.Time}
 			}
 		}
 	}

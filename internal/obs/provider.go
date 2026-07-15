@@ -95,8 +95,6 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		otel.SetMeterProvider(mp)
 		active.mp = mp
 
-		// Register self-observability gauges that report otel file sizes at
-		// every collection. Captures the otelDir in the closure.
 		if err := registerFileSizeGauges(mp, otelDir); err != nil {
 			return nil, err
 		}
@@ -131,7 +129,6 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		})
 	}
 
-	// --- Milk log ---
 	stopDebug, err := initMilkLogger(cfg, otelDir)
 	if err != nil {
 		return nil, err
@@ -149,8 +146,6 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 	}, nil
 }
 
-// registerFileSizeGauges registers three observable gauges that report the
-// current byte size of each otel signal file at every collection cycle.
 func registerFileSizeGauges(mp *sdkmetric.MeterProvider, otelDir string) error {
 	m := mp.Meter("github.com/scoutme/milk/obs")
 	files := []struct {
@@ -182,28 +177,16 @@ func registerFileSizeGauges(mp *sdkmetric.MeterProvider, otelDir string) error {
 	return nil
 }
 
-// metricFlushInterval converts MetricsFlushMinutes to a duration.
-// Falls back to 5 minutes when 0 (session-end export still happens via Shutdown).
 func metricFlushInterval(cfg config.OtelConfig) time.Duration {
 	if cfg.MetricsFlushMinutes > 0 {
 		return time.Duration(cfg.MetricsFlushMinutes) * time.Minute
 	}
-	// Large interval so the periodic reader is effectively session-end only;
-	// Shutdown forces a final export regardless.
 	return 24 * time.Hour
 }
 
-// openSignalFile opens (or creates) a signal file for append.
 func openSignalFile(dir, name string) (*os.File, error) {
 	return os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 }
 
-// Tracer returns a named tracer from the global provider.
-func Tracer(name string) oteltrace.Tracer {
-	return otel.Tracer(name)
-}
-
-// Meter returns a named meter from the global provider.
-func Meter(name string) otelmetric.Meter {
-	return otel.Meter(name)
-}
+func Tracer(name string) oteltrace.Tracer { return otel.Tracer(name) }
+func Meter(name string) otelmetric.Meter  { return otel.Meter(name) }

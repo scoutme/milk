@@ -1542,14 +1542,34 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	st := m.st
 	rtr := m.rtr
-	agents := m.agents
-	termWidth := m.width
-
 	send := func(msg tea.Msg) { st.program.Send(msg) }
 	st.toolFutures = map[string]chan string{}
 
-	tuiAgents := agents
 	ir0 := &tuiInputReader{send: send}
+	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+	return m, tea.Batch(
+		spinnerTick(),
+		func() tea.Msg {
+			defer cancel()
+			sw := &sendWriter{send: send}
+			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
+			return agentDoneMsg{err: err}
+		},
+	)
+}
+
+// buildTUIAgents wires the live TUI callbacks (permission handlers, tool-use
+// hints, thinking, skip-permissions) into a fresh copy of m.agents and returns
+// it alongside the permContext built for the CLI escalation runner.
+// Called by both dispatchAgent (for normal turns) and launchWorkflow (so that
+// workflow roles get the same tool access and permission flow as regular turns).
+func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatchAgents, permContext) {
+	st := m.st
+	agents := m.agents
+	termWidth := m.width
+
+	tuiAgents := agents
+	var cliPC permContext
 	if agents.cliAgent != nil {
 		tuiCliAgent := agents.cliAgent.
 			WithSkipPermissions(st.skipPermissions).
@@ -1580,12 +1600,11 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
 		tuiAgents.cliAgent = tuiCliAgent
+		cliPC = permContext{cs: st.cs, cwd: st.cwd, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}
 		// Only rebuild escalation runner as cliRunner when cliAgent IS the escalation target.
 		if agents.escalationLocal == nil && agents.subprocessAgent == nil {
 			escName := agents.escalation.Name()
-			cr := newCLIRunner(tuiCliAgent, escName,
-				permContext{cs: st.cs, cwd: st.cwd, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash},
-				func() inputReader { return ir0 })
+			cr := newCLIRunner(tuiCliAgent, escName, cliPC, func() inputReader { return ir0 })
 			if servers := st.cfg.EffectiveMCPServers(escName); len(servers) > 0 {
 				cr = cr.withMCPServers(servers)
 			}
@@ -1626,15 +1645,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
-	return m, tea.Batch(
-		spinnerTick(),
-		func() tea.Msg {
-			defer cancel()
-			sw := &sendWriter{send: send}
-			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
-			return agentDoneMsg{err: err}
-		},
-	)
+	return tuiAgents, cliPC
 }
 
 // renderScrollbar returns a single-column string of h lines showing a dim │
