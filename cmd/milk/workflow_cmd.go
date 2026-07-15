@@ -354,11 +354,12 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		w.evaluator = workflow.AliasEscalation
 	}
 
-	return m.launchWorkflowResume(w, st.Sprint, st.Pass)
+	return m.launchWorkflowResume(w, st.Sprint, st.Pass, 0)
 }
 
 // launchWorkflowResume is like launchWorkflow but resumes from a sprint/pass checkpoint.
-func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass int) (tea.Model, tea.Cmd) {
+// maxPasses overrides the plan-declared limit; pass 0 to use the plan value.
+func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPasses int) (tea.Model, tea.Cmd) {
 	cfg := m.st.cfg
 	sess := m.st.sess
 	send := func(msg tea.Msg) { m.st.program.Send(msg) }
@@ -391,7 +392,7 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass int) (t
 		return m, nil
 	}
 
-	wf := wfdev.NewResume(w.task, 0, sprint, pass)
+	wf := wfdev.NewResume(w.task, maxPasses, sprint, pass)
 	runCfg := workflow.RunConfig{
 		Session:  sess,
 		Runners:  runners,
@@ -424,6 +425,36 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass int) (t
 			return wfdev.WorkflowDoneMsg{Err: err}
 		},
 	)
+}
+
+// workflowExtendState holds context for the "passes exhausted — continue?" prompt.
+type workflowExtendState struct {
+	wizard    *workflowWizardState
+	sprint    int
+	maxPasses int // current (exhausted) limit; resume will double it
+}
+
+// handleWorkflowExtendKey handles keypresses while the extend prompt is pending.
+// y/Enter doubles the pass limit and resumes; n/Ctrl+C/Esc dismisses with an error message.
+func (m model) handleWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ext := m.pendingWorkflowExtend
+	switch msg.String() {
+	case "y", "Y", "enter", "ctrl+m":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("y\n")
+		m.pendingWorkflowExtend = nil
+		newMax := ext.maxPasses * 2
+		return m.launchWorkflowResume(ext.wizard, ext.sprint, 1, newMax)
+	case "n", "N", "ctrl+c", "esc":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("n\n" + milkTag() + fmt.Sprintf(" workflow halted after %d passes\n", ext.maxPasses))
+		m.pendingWorkflowExtend = nil
+		m.refreshPrompt()
+		return m, nil
+	}
+	return m, nil
 }
 
 // workflowAgentPrompt returns the wizard prompt line for an agent role.

@@ -14,7 +14,7 @@ import (
 	"github.com/scoutme/milk/internal/workflow"
 )
 
-const defaultMaxPasses = 3
+const defaultMaxPasses = 5
 
 // WorkflowProgressMsg is sent to the TUI after each state transition.
 // cmd/milk handles this type in its Update loop.
@@ -27,12 +27,27 @@ type WorkflowDoneMsg struct {
 	Err error
 }
 
+// ErrPassesExhausted is returned (and wrapped in WorkflowDoneMsg.Err) when a
+// sprint exhausts its pass limit without reaching good_to_go. The TUI detects
+// this sentinel to offer the user a chance to continue with a doubled limit.
+type ErrPassesExhausted struct {
+	Sprint       int
+	MaxPasses    int
+	FindingsPath string
+}
+
+func (e *ErrPassesExhausted) Error() string {
+	return fmt.Sprintf("workflow: sprint %d exceeded %d passes without good_to_go; last findings: %s",
+		e.Sprint, e.MaxPasses, e.FindingsPath)
+}
+
 // DevWorkflow implements the designer→generator→evaluator loop.
 type DevWorkflow struct {
-	MaxPasses    int // maximum generator passes per sprint before halting; default 3
-	Task         string
-	ResumeSprint int // if > 0, skip designer and start from this sprint
-	ResumePass   int // if > 0, start from this pass within ResumeSprint
+	MaxPasses         int  // maximum generator passes per sprint; overridden by plan declaration unless MaxPassesOverride is set
+	MaxPassesOverride bool // when true, MaxPasses wins over the plan-declared max_passes
+	Task              string
+	ResumeSprint      int // if > 0, skip designer and start from this sprint
+	ResumePass        int // if > 0, start from this pass within ResumeSprint
 }
 
 func New(task string, maxPasses int) *DevWorkflow {
@@ -44,10 +59,15 @@ func New(task string, maxPasses int) *DevWorkflow {
 
 // NewResume creates a DevWorkflow that skips the designer and restarts from
 // the given sprint/pass checkpoint. The plan file must already exist.
+// When maxPasses > 0 it is used as a hard override, taking precedence over any
+// max_passes directive in the plan (used when the user extends after exhaustion).
 func NewResume(task string, maxPasses, sprint, pass int) *DevWorkflow {
 	wf := New(task, maxPasses)
 	wf.ResumeSprint = sprint
 	wf.ResumePass = pass
+	if maxPasses > 0 {
+		wf.MaxPassesOverride = true
+	}
 	return wf
 }
 
@@ -105,11 +125,11 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	// Derive limits from the plan. Designer-declared values take precedence;
-	// w.MaxPasses (from the caller) is the fallback for max_passes.
+	// Derive limits from the plan. Designer-declared values take precedence unless
+	// MaxPassesOverride is set (used when the user explicitly extends the limit).
 	planMaxPasses, planMaxSprints := parseLimits(designPlan)
 	maxPasses := w.MaxPasses
-	if planMaxPasses > 0 {
+	if planMaxPasses > 0 && !w.MaxPassesOverride {
 		maxPasses = planMaxPasses
 	}
 
@@ -168,7 +188,7 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 				return fmt.Errorf("workflow: no runner for role 'evaluator'")
 			}
 			emitPrefix(send, fmt.Sprintf("evaluator sprint %d pass %d", sprint, st.Pass))
-			evalOutput, err := workflow.Turn(ctx, evaluatorRunner, evaluatorPrompt(planPath, sprintPath, sprint, st.Pass), send)
+			evalOutput, err := workflow.Turn(ctx, evaluatorRunner, evaluatorPrompt(planPath, sprintPath, sprint, st.Pass, maxPasses), send)
 			if err != nil {
 				return fmt.Errorf("workflow: evaluator sprint %d pass %d: %w", sprint, st.Pass, err)
 			}
@@ -203,14 +223,14 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 
 			case workflow.VerdictNeedsRefinement:
 				if st.Pass >= maxPasses {
-					return fmt.Errorf("workflow: sprint %d exceeded %d passes without good_to_go; last findings: %s", sprint, maxPasses, findingsPath)
+					return &ErrPassesExhausted{Sprint: sprint, MaxPasses: maxPasses, FindingsPath: findingsPath}
 				}
 				st.Pass++
 
 			default:
 				// VerdictUnknown — treat as needs_refinement with a warning.
 				if st.Pass >= maxPasses {
-					return fmt.Errorf("workflow: sprint %d: evaluator did not return a recognised verdict after %d passes; last findings: %s", sprint, maxPasses, findingsPath)
+					return &ErrPassesExhausted{Sprint: sprint, MaxPasses: maxPasses, FindingsPath: findingsPath}
 				}
 				st.Pass++
 			}

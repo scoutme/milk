@@ -22,8 +22,11 @@ Declare the execution limits for this workflow on two lines, exactly as shown:
   max_sprints: <N>
 
 max_passes is the maximum number of generator→evaluator iterations allowed per sprint
-before the workflow halts with an error. Set it based on task complexity: 1 for trivial
-tasks, 2–3 for normal tasks, up to 5 for tasks where convergence may take several rounds.
+before the workflow halts with an error. Set it based on task complexity:
+  1–2 for trivial tasks (a single small file or function)
+  3–5 for moderate tasks (a feature, a small module)
+  6–10 for complex tasks (a full game, a multi-file system, many interacting components)
+Err on the side of more passes — running out of passes halts the workflow with an error.
 
 max_sprints is a safety cap on the total number of sprints. It must equal or exceed the
 number of ## Sprint N sections you define below. Use it to prevent runaway loops.
@@ -68,12 +71,12 @@ This written summary is mandatory — the evaluator reads it to assess the sprin
 	return sb.String()
 }
 
-func evaluatorPrompt(planPath string, sprintOutputPath string, sprint, pass int) string {
+func evaluatorPrompt(planPath string, sprintOutputPath string, sprint, pass, maxPasses int) string {
 	plan := readFileOrEmpty(planPath)
 	sprintOutput := readFileOrEmpty(sprintOutputPath)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "You are the evaluator. Review Sprint %d (pass %d).\n\n", sprint, pass)
+	fmt.Fprintf(&sb, "You are the evaluator. Review Sprint %d (pass %d of %d).\n\n", sprint, pass, maxPasses)
 
 	if plan != "" {
 		fmt.Fprintf(&sb, "## Plan\n%s\n\n", plan)
@@ -98,9 +101,11 @@ End your response with exactly ONE of these verdict lines:
 - sprint_done
 
 Use "good_to_go" when all acceptance criteria are met.
-Use "needs_refinement" when there are fixable issues in the same sprint.
-Use "sprint_done" when the sprint deliverables are complete (whether or not more sprints follow).
-`, sprint)
+Use "needs_refinement" when there are fixable issues AND passes remain (you are on pass %d of %d).
+Use "sprint_done" when the sprint deliverables are substantially complete, OR when this is the last pass and remaining issues are minor or impractical to resolve in one more iteration.
+
+IMPORTANT: if this is the final pass (pass %d = max %d), do NOT return "needs_refinement" — use "sprint_done" instead, since no further refinement will occur.
+`, sprint, pass, maxPasses, pass, maxPasses)
 
 	return sb.String()
 }

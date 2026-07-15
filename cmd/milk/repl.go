@@ -427,6 +427,7 @@ type model struct {
 	workflowPanelOpen     bool
 	workflowState         *workflow.State
 	pendingWorkflowWizard *workflowWizardState
+	pendingWorkflowExtend *workflowExtendState
 
 	// injected dependencies
 	ctx    context.Context
@@ -939,6 +940,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingWorkflowWizard != nil {
 			return m.handleWorkflowWizardKey(msg)
 		}
+		if m.pendingWorkflowExtend != nil {
+			return m.handleWorkflowExtendKey(msg)
+		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
 		}
@@ -1031,7 +1035,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if isContextCanceled(msg.Err) {
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		} else if msg.Err != nil {
-			m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+			var exhausted *wfdev.ErrPassesExhausted
+			if errors.As(msg.Err, &exhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
+				// Offer to continue with doubled pass limit.
+				w := &workflowWizardState{
+					name:      m.workflowState.WorkflowName,
+					task:      m.workflowState.Task,
+					designer:  m.workflowState.AgentMap["designer"],
+					generator: m.workflowState.AgentMap["generator"],
+					evaluator: m.workflowState.AgentMap["evaluator"],
+				}
+				if w.designer == "" {
+					w.designer = workflow.AliasEscalation
+				}
+				if w.generator == "" {
+					w.generator = workflow.AliasEscalation
+				}
+				if w.evaluator == "" {
+					w.evaluator = workflow.AliasEscalation
+				}
+				m.pendingWorkflowExtend = &workflowExtendState{
+					wizard:    w,
+					sprint:    exhausted.Sprint,
+					maxPasses: exhausted.MaxPasses,
+				}
+				m.appendTranscript(fmt.Sprintf(
+					"%s workflow: sprint %d exhausted %d passes — continue with %d passes? [y/n] ",
+					milkTag(), exhausted.Sprint, exhausted.MaxPasses, exhausted.MaxPasses*2,
+				))
+			} else {
+				m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+			}
 		} else {
 			m.appendTranscript(milkTag() + " workflow complete\n")
 		}

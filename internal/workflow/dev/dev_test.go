@@ -45,7 +45,7 @@ func TestGeneratorPromptRefinementPass(t *testing.T) {
 }
 
 func TestEvaluatorPromptContainsVerdictInstruction(t *testing.T) {
-	p := evaluatorPrompt("/tmp/plan.md", "/tmp/sprint1.md", 1, 1)
+	p := evaluatorPrompt("/tmp/plan.md", "/tmp/sprint1.md", 1, 1, 3)
 	for _, kw := range []string{"good_to_go", "needs_refinement", "sprint_done"} {
 		if !strings.Contains(p, kw) {
 			t.Errorf("evaluatorPrompt missing verdict keyword %q", kw)
