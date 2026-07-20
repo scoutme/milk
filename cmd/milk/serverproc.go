@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -95,10 +96,28 @@ func ensureServerRunning(ctx context.Context, url, runCmd, agentName string) err
 		return nil
 	}
 
+	// Redirect server stdout/stderr to a log file so startup errors are visible.
+	logPath, _ := serverLogPath(agentName)
+	var logFile *os.File
+	if logPath != "" {
+		logFile, _ = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	}
+
 	cmd := exec.Command("sh", "-c", runCmd)
 	cmd.SysProcAttr = detachedSysProcAttr()
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		return fmt.Errorf("run_cmd: %w", err)
+	}
+	if logFile != nil {
+		// Close our copy of the fd — the child process keeps its own.
+		logFile.Close()
 	}
 
 	// Record PID so the server can be stopped later.
@@ -155,21 +174,56 @@ func serverStatus(agentName, url string) string {
 	case reachable && pid == 0:
 		return fmt.Sprintf("running  (not started by milk)  url=%s", url)
 	case !reachable && pid != 0:
-		return fmt.Sprintf("unreachable  pid=%d (stale?)  url=%s", pid, url)
+		logPath, _ := serverLogPath(agentName)
+		return fmt.Sprintf("unreachable  pid=%d (stale?)  url=%s  log=%s", pid, url, logPath)
 	default:
 		return fmt.Sprintf("stopped  url=%s", url)
 	}
 }
 
-// isReachable returns true when the HTTP server at url responds to a HEAD
-// request within 2 seconds. Any non-connection-error response counts as up.
+// isReachable returns true when the inference server at url is up and ready.
+// It first tries GET <url>/health expecting {"status":"ok"} (llama-server);
+// if that endpoint is absent (404/405) it falls back to a HEAD on the base URL.
 func isReachable(url string) bool {
 	base := strings.TrimRight(url, "/")
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Head(base)
+
+	resp, err := client.Get(base + "/health")
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return true
+	defer resp.Body.Close()
+
+	// llama-server: 200 with {"status":"ok"} when model is loaded and ready.
+	if resp.StatusCode == http.StatusOK {
+		var body struct {
+			Status string `json:"status"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&body) == nil && body.Status != "" {
+			return body.Status == "ok"
+		}
+		return true // non-JSON 200 from another server — treat as up
+	}
+
+	// /health not implemented (404/405): fall back to base URL HEAD.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		r2, err := client.Head(base)
+		if err != nil {
+			return false
+		}
+		r2.Body.Close()
+		return true
+	}
+
+	// Any other non-2xx (e.g. 503 loading) → not ready.
+	return false
+}
+
+// serverLogPath returns the path for the server's stdout/stderr log file.
+func serverLogPath(agentName string) (string, error) {
+	d, err := pidDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, agentName+".log"), nil
 }
