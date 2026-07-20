@@ -126,6 +126,13 @@ type AgentConfig struct {
 	// STS session tokens mid-request.
 	AWSRefreshCmd string `json:"aws_refresh_cmd,omitempty"`
 
+	// RunCmd is an optional shell command that starts the inference server when
+	// it is not already reachable. milk runs this command in the background on
+	// startup (and on-demand when the agent is first used) if a Ping to the URL
+	// fails. Only meaningful for HTTP-based local providers.
+	// Example: "llama-server -m ~/models/qwen2.5-coder-7b-q4.gguf --port 8080 -ngl 99"
+	RunCmd string `json:"run_cmd,omitempty"`
+
 	// Fields for Provider = "claude-cli".
 	// Bin is the path to the claude binary (default "claude").
 	Bin string `json:"bin,omitempty"`

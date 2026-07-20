@@ -600,8 +600,16 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		if initWizardNeedsChatPath(p) {
 			return initStepChatPath
 		}
+		if p == "local" || p == "" {
+			return initStepRunCmd
+		}
 		return initStepModel
 	case initStepChatPath:
+		if p == "local" || p == "" {
+			return initStepRunCmd
+		}
+		return initStepModel
+	case initStepRunCmd:
 		return initStepModel
 	case initStepModel:
 		if initWizardNeedsAuth(p) {
@@ -713,6 +721,10 @@ func initWizardPrompt(st *initWizardState) string {
 			hint = " (e.g. 'gh auth token' or 'op read op://vault/item/field')"
 		}
 		return milkTag() + " token command" + hint + ": "
+	case initStepRunCmd:
+		return milkTag() + " server start command (leave blank to skip)\n" +
+			dim("  e.g. llama-server -m ~/models/qwen2.5-coder-7b-q4_k_m.gguf --port 8080 -ngl 99") + "\n" +
+			milkTag() + " run_cmd: "
 	case initStepAWSRegion:
 		return milkTag() + " AWS region (e.g. us-east-1): "
 	case initStepLimits:
@@ -831,6 +843,9 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				st.primary.APIKey = answer
 			}
 			// blank → next step will be initStepTokenCmd (handled by nextStep logic)
+
+		case initStepRunCmd:
+			st.primary.RunCmd = answer // blank = not set (omitempty keeps config clean)
 
 		case initStepTokenCmd:
 			// blank → apply the suggested default shown in brackets

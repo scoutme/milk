@@ -55,6 +55,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdWorkflow {
 		return m.handleWorkflowCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdServer {
+		return m.handleServerCmd(strings.TrimSpace(rest))
+	}
 	if cmd == "/help" {
 		output := renderHelp(interactiveHelp, m.vpWidth())
 		m.colorizeForce = true
@@ -905,6 +908,91 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	default:
 		m.appendTranscript(milkTag() + " usage: /panel memory|workflow\n")
+		return m, nil
+	}
+}
+
+// handleServerCmd handles /server [status|start for <agent>|stop [<agent>]].
+func (m model) handleServerCmd(arg string) (tea.Model, tea.Cmd) {
+	// Parse verb and optional agent name.
+	// Supported forms:
+	//   /server status [<agent>]
+	//   /server start for <agent>
+	//   /server stop [<agent>]
+	var verb, agentArg string
+	if strings.HasPrefix(arg, "start for ") {
+		verb = "start"
+		agentArg = strings.TrimSpace(strings.TrimPrefix(arg, "start for "))
+	} else {
+		parts := strings.SplitN(arg, " ", 2)
+		verb = parts[0]
+		if len(parts) == 2 {
+			agentArg = strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Resolve agent config.
+	resolveAC := func() (config.AgentConfig, bool) {
+		cfg := m.st.cfg
+		if agentArg == "" {
+			return activeLocalAgentConfig(cfg), true
+		}
+		for _, a := range cfg.Agents {
+			if strings.EqualFold(a.Name, agentArg) {
+				return a, true
+			}
+		}
+		m.appendTranscript(fmt.Sprintf("%s no agent named %q in config\n", milkTag(), agentArg))
+		return config.AgentConfig{}, false
+	}
+
+	switch verb {
+	case "status", "":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		m.appendTranscript(fmt.Sprintf("%s %s: %s\n", milkTag(), ac.Name, serverStatus(ac.Name, ac.URL)))
+		return m, nil
+
+	case "start":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		if ac.RunCmd == "" {
+			m.appendTranscript(fmt.Sprintf("%s agent %q has no run_cmd configured\n", milkTag(), ac.Name))
+			return m, nil
+		}
+		if isReachable(ac.URL) {
+			m.appendTranscript(fmt.Sprintf("%s server for %q is already reachable at %s\n", milkTag(), ac.Name, ac.URL))
+			return m, nil
+		}
+		m.appendTranscript(fmt.Sprintf("%s starting server for %q…\n", milkTag(), ac.Name))
+		agentName, url, runCmd := ac.Name, ac.URL, ac.RunCmd
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			defer cancel()
+			if err := ensureServerRunning(ctx, url, runCmd, agentName); err != nil {
+				return serverStartDoneMsg{agentName: agentName, url: url, err: err}
+			}
+			pid, _ := readPID(agentName)
+			return serverStartDoneMsg{agentName: agentName, url: url, pid: pid}
+		}
+
+	case "stop":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		agentName := ac.Name
+		return m, func() tea.Msg {
+			stopped, err := serverStop(agentName)
+			return serverStopDoneMsg{agentName: agentName, stopped: stopped, err: err}
+		}
+
+	default:
+		m.appendTranscript(milkTag() + " usage: /server status [<agent>] | /server start for <agent> | /server stop [<agent>]\n")
 		return m, nil
 	}
 }

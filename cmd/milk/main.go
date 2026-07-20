@@ -89,6 +89,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(otelCmd)
 	rootCmd.AddCommand(updateCmd)
+	rootCmd.AddCommand(serverCmd)
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -1784,4 +1785,109 @@ func runOtelDebug(enable bool) error {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
+}
+
+// ── milk server ──────────────────────────────────────────────────────────────
+
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Manage the local inference server process",
+}
+
+func init() {
+	serverCmd.AddCommand(&cobra.Command{
+		Use:   "start [agent]",
+		Short: "Start the inference server for a local agent",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			ac, err := resolveServerAgent(cfg, args)
+			if err != nil {
+				return err
+			}
+			if ac.RunCmd == "" {
+				return fmt.Errorf("agent %q has no run_cmd configured", ac.Name)
+			}
+			if isReachable(ac.URL) {
+				fmt.Printf("server for %q is already reachable at %s\n", ac.Name, ac.URL)
+				return nil
+			}
+			fmt.Printf("starting server for %q…\n", ac.Name)
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			defer cancel()
+			if err := ensureServerRunning(ctx, ac.URL, ac.RunCmd, ac.Name); err != nil {
+				return fmt.Errorf("start: %w", err)
+			}
+			pid, _ := readPID(ac.Name)
+			if pid != 0 {
+				fmt.Printf("server started  pid=%d  url=%s\n", pid, ac.URL)
+			} else {
+				fmt.Printf("server started  url=%s\n", ac.URL)
+			}
+			return nil
+		},
+	})
+
+	serverCmd.AddCommand(&cobra.Command{
+		Use:   "stop [agent]",
+		Short: "Stop the inference server tracked for a local agent",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			ac, err := resolveServerAgent(cfg, args)
+			if err != nil {
+				return err
+			}
+			stopped, err := serverStop(ac.Name)
+			if err != nil {
+				return fmt.Errorf("stop: %w", err)
+			}
+			if !stopped {
+				fmt.Printf("no tracked server process for %q (not started by milk)\n", ac.Name)
+				return nil
+			}
+			fmt.Printf("server for %q stopped\n", ac.Name)
+			return nil
+		},
+	})
+
+	serverCmd.AddCommand(&cobra.Command{
+		Use:   "status [agent]",
+		Short: "Show the status of the inference server for a local agent",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			ac, err := resolveServerAgent(cfg, args)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s: %s\n", ac.Name, serverStatus(ac.Name, ac.URL))
+			return nil
+		},
+	})
+}
+
+// resolveServerAgent returns the AgentConfig to use for a server subcommand.
+// If args is empty, returns the active local agent. If args[0] is given, finds
+// the matching agent by name.
+func resolveServerAgent(cfg config.Config, args []string) (config.AgentConfig, error) {
+	if len(args) == 0 {
+		return activeLocalAgentConfig(cfg), nil
+	}
+	name := args[0]
+	for _, a := range cfg.Agents {
+		if strings.EqualFold(a.Name, name) {
+			return a, nil
+		}
+	}
+	return config.AgentConfig{}, fmt.Errorf("no agent named %q in config", name)
 }
