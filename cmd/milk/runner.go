@@ -219,7 +219,20 @@ func (r *localRunner) Execute(
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			return TurnResult{EscalationReason: esc.Reason}, nil
 		}
-		return TurnResult{}, err
+		// On connection failure, auto-start the server if run_cmd is configured
+		// and retry once. This handles the case where the server was stopped
+		// (manually or between sessions) but milk is already running.
+		if ac.RunCmd != "" && isConnectionRefused(err) {
+			if startErr := ensureServerRunning(ctx, ac.URL, ac.RunCmd, ac.Name); startErr == nil {
+				updatedHistory, err = agent.Run(ctx, history, prompt, out, sess, mem)
+			}
+		}
+		if err != nil {
+			if esc, ok := err.(*local.EscalationSignal); ok {
+				return TurnResult{EscalationReason: esc.Reason}, nil
+			}
+			return TurnResult{}, err
+		}
 	}
 
 	text := ""

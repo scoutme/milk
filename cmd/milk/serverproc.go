@@ -219,6 +219,15 @@ func isReachable(url string) bool {
 	return false
 }
 
+// isConnectionRefused reports whether err indicates the server is not running.
+// The syscall-level check is in the platform-specific files.
+func isConnectionRefused(err error) bool {
+	if connRefusedErrno(err) {
+		return true
+	}
+	return strings.Contains(err.Error(), "connection refused")
+}
+
 // serverLogPath returns the path for the server's stdout/stderr log file.
 func serverLogPath(agentName string) (string, error) {
 	d, err := pidDir()

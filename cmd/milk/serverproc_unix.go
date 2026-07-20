@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -12,6 +13,12 @@ import (
 // is limited to the controlling process group).
 func detachedSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+// connRefusedErrno reports whether err wraps ECONNREFUSED.
+func connRefusedErrno(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno) && errno == syscall.ECONNREFUSED
 }
 
 // killProcess sends SIGTERM to the given PID.
