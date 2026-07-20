@@ -85,6 +85,7 @@ Add `run_cmd` to launch the inference server automatically if it is not reachabl
 - milk checks reachability at startup; if the server is already up the command is skipped.
 - The process is launched detached (its own process group) so it survives milk exiting.
 - milk writes the PID to `~/.milk/servers/<agent-name>.pid` for later teardown.
+- `run_cmd` is executed via `sh -c`. On Windows, Git Bash or WSL2 is required (see [docs/setup.md](setup.md#windows-and-wsl2)).
 
 **Server lifecycle commands**
 
