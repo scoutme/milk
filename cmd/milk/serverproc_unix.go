@@ -21,11 +21,18 @@ func connRefusedErrno(err error) bool {
 	return errors.As(err, &errno) && errno == syscall.ECONNREFUSED
 }
 
-// killProcess sends SIGTERM to the given PID.
+// killProcess sends SIGTERM to the process group of pid (which equals pid
+// because we started the shell with Setpgid: true). This ensures llama-server
+// (child of the sh -c wrapper) is also terminated.
 func killProcess(pid int) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
+	// Negative pid sends the signal to every process in the process group.
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		// Fall back to killing only the process itself.
+		proc, ferr := os.FindProcess(pid)
+		if ferr != nil {
+			return err
+		}
+		return proc.Signal(syscall.SIGTERM)
 	}
-	return proc.Signal(syscall.SIGTERM)
+	return nil
 }
