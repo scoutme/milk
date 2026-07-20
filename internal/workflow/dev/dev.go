@@ -123,6 +123,12 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		if err := os.WriteFile(planPath, []byte(designPlan), 0o600); err != nil {
 			return fmt.Errorf("workflow: writing plan file: %w", err)
 		}
+		// Checkpoint after designer so /workflow resume works even if the
+		// workflow is interrupted before the first evaluator call.
+		st.Sprint = 1
+		st.Pass = 1
+		st.Role = "generator"
+		_ = workflow.SaveState(statePath, st)
 	}
 
 	// Derive limits from the plan. Designer-declared values take precedence unless
