@@ -782,6 +782,56 @@ func init() {
 
 // colorizeGlamour renders the entire text through glamour. Falls back to
 // colorizeCodeBlocks if glamour is unavailable.
+// expandTabsForWrap replaces each \t with spaces to the next 8-column tab stop,
+// accounting for ANSI escape sequences (which have zero visual width).
+// This must be called before ansi.Wrap so that the wrapping width calculation
+// matches what the terminal actually renders — ansi.StringWidth counts \t as 1
+// column but terminals expand to the next multiple-of-8 boundary.
+func expandTabsForWrap(s string) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var sb strings.Builder
+	col := 0
+	i := 0
+	for i < len(s) {
+		// Skip ANSI escape sequences — they contribute zero visual columns.
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			if j < len(s) {
+				j++ // include 'm'
+			}
+			sb.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		ch := s[i]
+		if ch == '\n' {
+			sb.WriteByte('\n')
+			col = 0
+			i++
+			continue
+		}
+		if ch == '\t' {
+			// Expand to next 8-column tab stop.
+			spaces := 8 - (col % 8)
+			for k := 0; k < spaces; k++ {
+				sb.WriteByte(' ')
+			}
+			col += spaces
+			i++
+			continue
+		}
+		sb.WriteByte(ch)
+		col++
+		i++
+	}
+	return sb.String()
+}
+
 func colorizeGlamour(text string) string {
 	if glamourRenderer == nil {
 		return colorizeCodeBlocks(text)

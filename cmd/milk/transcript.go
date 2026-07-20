@@ -85,7 +85,7 @@ func (m *model) wrappedTranscript() string {
 		return raw
 	}
 	if m.colorizeMode == ColorizeOff {
-		return m.applySelectionHighlight(ansi.Wrap(raw, vw, ""))
+		return m.applySelectionHighlight(ansi.Wrap(expandTabsForWrap(raw), vw, ""))
 	}
 
 	txLen := tx.Len()
@@ -106,7 +106,7 @@ func (m *model) wrappedTranscript() string {
 		// Return cached result — append plain-wrapped new text as a fast suffix
 		// so the user sees new content immediately even without re-colorizing.
 		if txGrew > 0 {
-			newText := ansi.Wrap(raw[m.colorizeTransLen:], vw, "")
+			newText := ansi.Wrap(expandTabsForWrap(raw[m.colorizeTransLen:]), vw, "")
 			// Close any open ANSI sequence from the cache before appending raw
 			// text, so a trailing dim/color from e.g. a tool hint line doesn't
 			// bleed into the next chunk of streamed content.
@@ -126,7 +126,7 @@ func (m *model) wrappedTranscript() string {
 	m.colorizeForce = false
 	m.colorizeLinesSeen = 0
 	colorized := colorizeTranscriptWrapped(raw, m.colorizeMode)
-	wrapped := ansi.Wrap(colorized, vw, "")
+	wrapped := ansi.Wrap(expandTabsForWrap(colorized), vw, "")
 
 	// Update cache.
 	m.colorizeCached = wrapped
@@ -156,7 +156,7 @@ func (m *model) transcriptPlainLines() []string {
 				wrapped = raw
 			} else {
 				colorized := colorizeTranscriptWrapped(raw, m.colorizeMode)
-				wrapped = ansi.Wrap(colorized, vw, "")
+				wrapped = ansi.Wrap(expandTabsForWrap(colorized), vw, "")
 			}
 		}
 	}
