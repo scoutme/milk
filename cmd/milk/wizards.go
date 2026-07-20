@@ -37,8 +37,9 @@ const (
 // addAgentState tracks state for the multi-step /agent add wizard.
 // Fields are filled one at a time when the user doesn't supply them inline.
 type addAgentState struct {
-	ac   config.AgentConfig
-	step addAgentStep
+	ac          config.AgentConfig
+	step        addAgentStep
+	runCmdAsked bool // true once the optional run_cmd step has been shown
 }
 
 type addAgentStep int
@@ -47,6 +48,7 @@ const (
 	addStepName addAgentStep = iota
 	addStepProvider
 	addStepURL
+	addStepRunCmd    // only when provider is local (optional)
 	addStepModel
 	addStepAPIKey    // only when provider is bearer
 	addStepAWSRegion // only when provider is bedrock
@@ -68,7 +70,8 @@ func (m model) startAddAgent(inline string) model {
 	}
 
 	// Otherwise start the wizard from the first missing required field.
-	st := &addAgentState{ac: ac}
+	// If run_cmd was supplied inline, mark it as already asked so the wizard skips it.
+	st := &addAgentState{ac: ac, runCmdAsked: ac.RunCmd != ""}
 	st.step = firstMissingStep(ac)
 	m.pendingAdd = st
 	m.appendTranscript(addAgentPrompt(st.step) + " ")
@@ -99,6 +102,8 @@ func parseAgentInlineArgs(s string) config.AgentConfig {
 			ac.AWSRegion = v
 		case "bin":
 			ac.Bin = v
+		case "run_cmd":
+			ac.RunCmd = v
 		}
 	}
 	return ac
@@ -140,6 +145,8 @@ func addAgentPrompt(step addAgentStep) string {
 		return milkTag() + " model:"
 	case addStepProvider:
 		return milkTag() + " provider [local/bedrock/claude-cli/<bearer-name>, enter to skip]:"
+	case addStepRunCmd:
+		return milkTag() + " run_cmd (optional — command to start the server, e.g. llama-server --model ~/models/…):"
 	case addStepAPIKey:
 		return milkTag() + " api_key:"
 	case addStepAWSRegion:
@@ -184,10 +191,20 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.ac.Model = answer
 		case addStepProvider:
 			st.ac.Provider = answer // empty = local, which is fine
+		case addStepRunCmd:
+			st.ac.RunCmd = answer // blank = not set (omitempty keeps config clean)
+			st.runCmdAsked = true
 		case addStepAPIKey:
 			st.ac.APIKey = answer
 		case addStepAWSRegion:
 			st.ac.AWSRegion = answer
+		}
+
+		// After URL is set: inject run_cmd step for local provider before advancing.
+		if st.step == addStepURL && strings.ToLower(st.ac.Provider) == "local" && !st.runCmdAsked {
+			st.step = addStepRunCmd
+			m.appendTranscript(addAgentPrompt(st.step) + " ")
+			return m, nil
 		}
 
 		// Advance to next missing step.

@@ -124,7 +124,7 @@ const interactiveHelp = `
   /agent                 show active primary and escalation agents
   /agent list            list all configured agents (* = active)
   /agent add             add a new agent interactively
-  /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]
+  /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…] [run_cmd=…]
   /agent switch <name> [as primary|escalation]   (prompts if args missing)
   /agent tool list [<agent>|global]              show tool-agents (default: primary)
   /agent tool enable <tool> [for <agent>|global]  enable a tool-agent entry
