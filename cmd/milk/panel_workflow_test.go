@@ -90,9 +90,10 @@ func TestTruncatePanel_ZeroWidthReturnsInput(t *testing.T) {
 // ── workflowPanelLineCount ────────────────────────────────────────────────────
 
 func TestWorkflowPanelLineCount_Nil(t *testing.T) {
+	// title + blank + "no active workflow" = 3
 	got := workflowPanelLineCount(nil)
-	if got != 1 {
-		t.Errorf("lineCount(nil) = %d, want 1", got)
+	if got != 3 {
+		t.Errorf("lineCount(nil) = %d, want 3", got)
 	}
 }
 
@@ -103,8 +104,8 @@ func TestWorkflowPanelLineCount_ActiveRole(t *testing.T) {
 		Pass:         1,
 		Role:         "generator",
 	}
-	// 3 (header lines) + 0 (no verdicts) + 1 (in-progress arrow)
-	want := 4
+	// title + blank + workflow+sprint + pass+role + blank + in-progress arrow = 6
+	want := 6
 	got := workflowPanelLineCount(st)
 	if got != want {
 		t.Errorf("lineCount(active role) = %d, want %d", got, want)
@@ -118,11 +119,11 @@ func TestWorkflowPanelLineCount_DoneRole(t *testing.T) {
 		Pass:         1,
 		Role:         "done",
 	}
-	// 3 + 0 verdicts + 0 (role is "done" so no in-progress line)
-	want := 3
+	// title + blank + workflow+sprint + pass+role + blank + 0 verdicts + 0 arrow = 5
+	want := 5
 	got := workflowPanelLineCount(st)
 	if got != want {
-		t.Errorf("lineCount(done) = %d, want %d (off-by-one bug if %d)", got, want, want+1)
+		t.Errorf("lineCount(done) = %d, want %d", got, want)
 	}
 }
 
@@ -135,8 +136,8 @@ func TestWorkflowPanelLineCount_DoneRoleWithVerdicts(t *testing.T) {
 			{Sprint: 2, Pass: 1, Verdict: "needs_refinement"},
 		},
 	}
-	// 3 + 2 verdicts + 0 (done, no arrow)
-	want := 5
+	// title + blank + workflow+sprint + pass+role + blank + 2 verdicts + 0 arrow = 7
+	want := 7
 	got := workflowPanelLineCount(st)
 	if got != want {
 		t.Errorf("lineCount(done, 2 verdicts) = %d, want %d", got, want)
@@ -151,8 +152,8 @@ func TestWorkflowPanelLineCount_ActiveRoleWithVerdicts(t *testing.T) {
 			{Sprint: 1, Pass: 1, Verdict: "good_to_go"},
 		},
 	}
-	// 3 + 1 verdict + 1 arrow
-	want := 5
+	// title + blank + workflow+sprint + pass+role + blank + 1 verdict + 1 arrow = 7
+	want := 7
 	got := workflowPanelLineCount(st)
 	if got != want {
 		t.Errorf("lineCount(active, 1 verdict) = %d, want %d", got, want)
@@ -162,8 +163,8 @@ func TestWorkflowPanelLineCount_ActiveRoleWithVerdicts(t *testing.T) {
 // TestWorkflowPanelLineCount_DoneVsActive verifies done returns exactly 1 less than active.
 func TestWorkflowPanelLineCount_DoneVsActive(t *testing.T) {
 	verdicts := []workflow.VerdictEntry{{Sprint: 1, Pass: 1, Verdict: "good_to_go"}}
-	active := &workflow.State{Role: "generator", VerdictHistory: verdicts}
-	done := &workflow.State{Role: "done", VerdictHistory: verdicts}
+	active := &workflow.State{WorkflowName: "dev", Role: "generator", VerdictHistory: verdicts}
+	done := &workflow.State{WorkflowName: "dev", Role: "done", VerdictHistory: verdicts}
 	if workflowPanelLineCount(active) != workflowPanelLineCount(done)+1 {
 		t.Errorf("active lineCount=%d, done lineCount=%d — expected active = done+1",
 			workflowPanelLineCount(active), workflowPanelLineCount(done))

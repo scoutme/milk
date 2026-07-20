@@ -81,6 +81,10 @@ type thinkChunkMsg struct{ text string }
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
+// turnTimeoutWarningMsg is sent when a turn exceeds its configured timeout but
+// the turn is still running. The turn is not cancelled — this is a soft warning.
+type turnTimeoutWarningMsg struct{ agentName string }
+
 type spinnerTickMsg struct{}
 
 // copyFeedbackClearMsg clears the transient copy confirmation in the status bar.
@@ -127,6 +131,19 @@ type updateProgressMsg struct{ done, total int64 }
 
 // updateDoneMsg signals a completed self-update attempt.
 type updateDoneMsg struct{ err error }
+
+type serverStartDoneMsg struct {
+	agentName string
+	url       string
+	pid       int
+	err       error
+}
+
+type serverStopDoneMsg struct {
+	agentName string
+	stopped   bool
+	err       error
+}
 
 // openFileMsg is sent by the agent goroutine (or /open command) to request that
 // the TUI open a file in the editor. The goroutine blocks on respCh until the
@@ -613,7 +630,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 			// this branch catches any late-arriving cancellation that slipped through.
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		case isContextDeadlineExceeded(msg.err):
-			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond in time\n")
+			m.appendTranscript(milkTag() + " turn ended: context deadline exceeded\n")
 		default:
 			m.appendTranscript(milkTag() + " error: " + errText + "\n")
 		}
@@ -1004,6 +1021,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
 
+	case turnTimeoutWarningMsg:
+		if m.busy {
+			m.appendTranscript(dim(fmt.Sprintf("[%s is taking longer than expected — still waiting]", msg.agentName)) + "\n")
+			m.syncLayout()
+		}
+		return m, nil
+
 	case wfdev.WorkflowProgressMsg:
 		if msg.State.WorkflowName != "" {
 			st := msg.State
@@ -1186,6 +1210,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.pendingUpdate = nil
 			m.appendTranscript(milkTag() + " update applied — restart milk to use the new version\n")
+		}
+		return m, nil
+
+	case serverStartDoneMsg:
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s server start failed: %v\n", milkTag(), msg.err))
+		} else if msg.pid != 0 {
+			m.appendTranscript(fmt.Sprintf("%s server for %q started  pid=%d  url=%s\n", milkTag(), msg.agentName, msg.pid, msg.url))
+		} else {
+			m.appendTranscript(fmt.Sprintf("%s server for %q started  url=%s\n", milkTag(), msg.agentName, msg.url))
+		}
+		return m, nil
+
+	case serverStopDoneMsg:
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s server stop failed: %v\n", milkTag(), msg.err))
+		} else if msg.stopped {
+			m.appendTranscript(fmt.Sprintf("%s server for %q stopped\n", milkTag(), msg.agentName))
+		} else {
+			m.appendTranscript(fmt.Sprintf("%s no tracked server process for %q (not started by milk)\n", milkTag(), msg.agentName))
 		}
 		return m, nil
 
@@ -1760,15 +1804,25 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	}
 
 	// Apply the per-agent turn timeout now that we know the target.
+	// The turn context has no hard deadline — instead, a warning is sent after the
+	// timeout period if the turn is still running, and the agent continues.
+	// The turn only terminates on explicit user cancellation (Ctrl+C) or completion.
 	timeout := st.cfg.AgentTurnTimeout(agentCfg)
-	var turnCtx context.Context
-	var cancel context.CancelFunc
-	if timeout <= 0 {
-		turnCtx, cancel = context.WithCancel(ctx)
-	} else {
-		turnCtx, cancel = context.WithTimeoutCause(ctx, timeout, fmt.Errorf("turn timeout"))
-	}
+	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if timeout > 0 {
+		go func() {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				if st.program != nil {
+					st.program.Send(turnTimeoutWarningMsg{agentName: agentName})
+				}
+			case <-turnCtx.Done():
+			}
+		}()
+	}
 	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
 
 	sourceLabel := replTurnSourceLabel(st)
@@ -1953,6 +2007,21 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	ctx := context.Background()
+
+	// If the primary local agent has a run_cmd, launch it when the server is
+	// not yet reachable. This happens synchronously so the Ping below reflects
+	// the started server. A failure here is non-fatal — milk continues with the
+	// server unavailable and the user can start it manually.
+	if localAgent != nil {
+		primaryAC := activeLocalAgentConfig(cfg)
+		if primaryAC.RunCmd != "" && !isReachable(primaryAC.URL) {
+			fmt.Fprintln(os.Stderr, milkTag()+" starting local inference server…")
+			if err := ensureServerRunning(ctx, primaryAC.URL, primaryAC.RunCmd, primaryAC.Name); err != nil {
+				fmt.Fprintln(os.Stderr, milkTag()+" warning: run_cmd failed: "+err.Error())
+			}
+		}
+	}
+
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
 	var localAvail, escalationAvail bool

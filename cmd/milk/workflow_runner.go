@@ -25,7 +25,8 @@ import (
 type workflowTurnRunner struct {
 	inner     TurnRunner
 	cfg       config.Config
-	sess      *session.Session
+	sess      *session.Session // scratch session for this role (isolated from REPL)
+	replSess  *session.Session // REPL session for token accounting only
 	mem       *memory.Store
 	role      AgentRole
 	roleName  string // human-readable role (designer, generator, evaluator)
@@ -73,6 +74,12 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 	if res.NewSessionID != "" {
 		r.sessionID = res.NewSessionID
 	}
+	// Accumulate token usage into the REPL session so /usage shows workflow costs.
+	if r.replSess != nil && (res.InputTokens > 0 || res.OutputTokens > 0) {
+		model := r.inner.Name()
+		r.replSess.AddTokensFull(model, "workflow:"+r.roleName,
+			res.InputTokens, res.OutputTokens, res.CacheRead, res.CacheCreate)
+	}
 	return res.Text, nil
 }
 
@@ -100,7 +107,7 @@ func newWorkflowSession() *session.Session {
 func buildWorkflowRunners(
 	agentNames map[string]string,
 	cfg config.Config,
-	_ *session.Session,
+	replSess *session.Session,
 	mem *memory.Store,
 	da *dispatchAgents,
 ) (map[string]workflow.TurnRunner, error) {
@@ -133,6 +140,7 @@ func buildWorkflowRunners(
 			inner:    inner,
 			cfg:      cfg,
 			sess:     newWorkflowSession(),
+			replSess: replSess,
 			mem:      mem,
 			role:     RoleWorkflow,
 			roleName: role,

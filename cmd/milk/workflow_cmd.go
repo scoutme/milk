@@ -23,6 +23,9 @@ type workflowWizardState struct {
 	evaluator string
 	step      workflowWizardStep
 	clearing  bool // true when this wizard is a /workflow clear confirmation
+	resuming  bool // true when completing the wizard should resume rather than start fresh
+	sprint    int  // checkpoint sprint (used when resuming == true)
+	pass      int  // checkpoint pass (used when resuming == true)
 }
 
 type workflowWizardStep int
@@ -166,6 +169,9 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 	}
 
 	m.pendingWorkflowWizard = nil
+	if w.resuming {
+		return m.launchWorkflowResume(w, w.sprint, w.pass, 0)
+	}
 	return m.launchWorkflow(w)
 }
 
@@ -184,6 +190,9 @@ func (m model) handleWorkflowClear() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if st == nil {
+		m.workflowState = nil
+		m.workflowPanelOpen = false
+		m.syncLayout()
 		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
 		return m, nil
 	}
@@ -336,7 +345,24 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Rebuild wizard state from the saved checkpoint so launchWorkflow can use it.
+	// Rebuild wizard state from the saved checkpoint.
+	// If AgentMap is absent (state file predates AgentMap support), enter the
+	// agent wizard so the user can supply the roles before resuming.
+	if len(st.AgentMap) == 0 {
+		w := &workflowWizardState{
+			name:     st.WorkflowName,
+			task:     st.Task,
+			step:     wizardStepDesigner,
+			resuming: true,
+			sprint:   st.Sprint,
+			pass:     st.Pass,
+		}
+		m.pendingWorkflowWizard = w
+		m.appendTranscript(milkTag() + " workflow resume: agent map missing — please specify agents (blank = escalation):\n")
+		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
+		m.refreshPrompt()
+		return m, nil
+	}
 	w := &workflowWizardState{
 		name:      st.WorkflowName,
 		task:      st.Task,
