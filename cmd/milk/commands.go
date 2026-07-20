@@ -465,12 +465,16 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 		inline := strings.TrimSpace(arg[len("add"):])
 		return m.startAddAgent(inline), nil
 
+	case strings.HasPrefix(arg, "remove"):
+		name := strings.TrimSpace(strings.TrimPrefix(arg, "remove"))
+		m.appendTranscript(execAgentRemove(name, m.st) + "\n")
+
 	case arg == "tool", strings.HasPrefix(arg, "tool "):
 		sub := strings.TrimSpace(strings.TrimPrefix(arg, "tool"))
 		m.appendTranscript(execAgentTool(sub, m.st) + "\n")
 
 	default:
-		m.appendTranscript(milkTag() + " usage: /agent [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
+		m.appendTranscript(milkTag() + " usage: /agent [list|add|remove <name>|switch <name>]\n")
 	}
 	return m, nil
 }
@@ -511,6 +515,38 @@ func execAgentList(st *interactiveState) string {
 		}
 	}
 	return b.String()
+}
+
+// execAgentRemove removes the named agent from config.
+// Refuses if the agent is currently active as primary or escalation.
+func execAgentRemove(name string, st *interactiveState) string {
+	if name == "" {
+		return milkTag() + " usage: /agent remove <name>"
+	}
+	primaryName := st.cfg.ActiveAgent().Name
+	escalationName := st.cfg.EscalationAgentConfig().Name
+	if strings.EqualFold(name, primaryName) {
+		return fmt.Sprintf("%s cannot remove %q — it is the active primary agent (switch first with /agent switch)", milkTag(), name)
+	}
+	if strings.EqualFold(name, escalationName) {
+		return fmt.Sprintf("%s cannot remove %q — it is the active escalation agent (switch first with /agent switch)", milkTag(), name)
+	}
+	idx := -1
+	for i, a := range st.cfg.Agents {
+		if strings.EqualFold(a.Name, name) {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
+	}
+	removed := st.cfg.Agents[idx].Name
+	st.cfg.Agents = append(st.cfg.Agents[:idx], st.cfg.Agents[idx+1:]...)
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
+	}
+	return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
 }
 
 // handleConfigCmd dispatches /config, /config init, /config open.
