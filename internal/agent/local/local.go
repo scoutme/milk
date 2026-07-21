@@ -668,15 +668,16 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
-	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD, a.escalationName, a.workflowRole)}}
-	msgs = append(msgs, history...)
+	systemPrompt := buildSystemPrompt(sess.CWD, a.escalationName, a.workflowRole)
 	if sess.CWD != "" {
 		if a.cachedCwd != sess.CWD {
 			a.cachedCwdContext = cwdContext(sess.CWD)
 			a.cachedCwd = sess.CWD
 		}
-		msgs = append(msgs, Message{Role: "system", Content: a.cachedCwdContext})
+		systemPrompt += "\n\n" + a.cachedCwdContext
 	}
+	msgs := []Message{{Role: "system", Content: systemPrompt}}
+	msgs = append(msgs, history...)
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.

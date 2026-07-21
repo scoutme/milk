@@ -48,7 +48,7 @@ const (
 	addStepName addAgentStep = iota
 	addStepProvider
 	addStepURL
-	addStepRunCmd    // only when provider is local (optional)
+	addStepRunCmd // only when provider is local (optional)
 	addStepModel
 	addStepAPIKey    // only when provider is bearer
 	addStepAWSRegion // only when provider is bedrock
