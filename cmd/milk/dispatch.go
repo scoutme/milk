@@ -109,8 +109,12 @@ func runPrimary(
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens, "cost_usd", res.CostUSD)
 
 	// For local HTTP runners, text is only set when a real response came back.
-	// Only add the assistant turn when there is content (mirrors runLocal behaviour).
-	if res.Text != "" || res.EscalationReason == "" {
+	// Only add the assistant turn when there is content: skip both self-escalation
+	// (res.EscalationReason != "") and truly empty responses (res.Text == "").
+	// The previous condition `res.Text != "" || res.EscalationReason == ""` was
+	// incorrect — it evaluated to true when both were empty (false || true), causing
+	// a blank assistant turn to be written to session history.
+	if res.Text != "" {
 		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: res.Text})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
@@ -255,10 +259,20 @@ func runEscalation(
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens,
 		"cache_read", res.CacheRead, "cache_write", res.CacheCreate, "cost_usd", res.CostUSD)
 
-	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
-	sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
-	if res.Text != "" && cbs.OnResponse != nil {
-		cbs.OnResponse(res.Text)
+	// Only persist the assistant turn when there is actual content.
+	// A local-HTTP escalation agent with an empty SSE stream returns res.Text == ""
+	// with no error; writing a blank turn to history corrupts the session context.
+	// For CLI agents: if Claude finished with only tool calls and no closing text,
+	// res.Text is also empty — skipping the AddTurn is safe because the escalation
+	// agent manages its own conversation state via --resume; milk's local history
+	// copy is only used for context handoff back to the primary, where a blank entry
+	// is more harmful than a missing one.
+	if res.Text != "" {
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
+		if cbs.OnResponse != nil {
+			cbs.OnResponse(res.Text)
+		}
 	}
 
 	if res.EndsWithQ {

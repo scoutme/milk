@@ -126,6 +126,13 @@ type AgentConfig struct {
 	// STS session tokens mid-request.
 	AWSRefreshCmd string `json:"aws_refresh_cmd,omitempty"`
 
+	// RunCmd is an optional shell command that starts the inference server when
+	// it is not already reachable. milk runs this command in the background on
+	// startup (and on-demand when the agent is first used) if a Ping to the URL
+	// fails. Only meaningful for HTTP-based local providers.
+	// Example: "llama-server -m ~/models/qwen2.5-coder-7b-q4.gguf --port 8080 -ngl 99"
+	RunCmd string `json:"run_cmd,omitempty"`
+
 	// Fields for Provider = "claude-cli".
 	// Bin is the path to the claude binary (default "claude").
 	Bin string `json:"bin,omitempty"`
@@ -213,6 +220,12 @@ type AgentLimits struct {
 	// a fresh start (no --resume) when this many local turns have elapsed since the
 	// last escalation turn. Set to -1 to disable the turn-gap check for this agent.
 	ReturningFreshStartLocalTurns *int `json:"returning_fresh_start_local_turns,omitempty"`
+
+	// TurnTimeoutSecs overrides the per-turn timeout for this agent.
+	// The global default is 10 minutes. Set higher for agents that run long
+	// synchronous workflows (e.g. a claude-cli escalation agent doing multi-sprint work).
+	// Set to -1 for no timeout.
+	TurnTimeoutSecs *int `json:"turn_timeout_secs,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -858,6 +871,21 @@ func (c Config) AgentMaxToolIterations(a AgentConfig) int {
 		return 0 // unlimited
 	}
 	return intOr(c.LocalMaxToolIterations, 20)
+}
+
+// AgentTurnTimeout returns the per-turn timeout for the given agent.
+// Returns 0 when the agent has configured no timeout (-1). Default: 10 minutes.
+func (c Config) AgentTurnTimeout(a AgentConfig) time.Duration {
+	if a.Limits != nil && a.Limits.TurnTimeoutSecs != nil {
+		v := *a.Limits.TurnTimeoutSecs
+		if v < 0 {
+			return 0 // no timeout
+		}
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 10 * time.Minute
 }
 
 // intOr returns v when v > 0, otherwise returns def.

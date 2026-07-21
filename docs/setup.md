@@ -153,6 +153,32 @@ LLAMA_GPU_LAYERS=28   # partial offload: rest runs on CPU
 # LLAMA_CHAT_TEMPLATE="..."
 ```
 
+Alternatively, invoke `llama-server` directly — useful when configuring `run_cmd` in `~/.milk/config.json` for automatic startup. Examples using the tested local models:
+
+**Qwen2.5-Coder-7B** (port 8090, tool calling enabled via `--jinja`):
+```sh
+~/llama.cpp/build/bin/llama-server \
+  --model ~/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 8090 \
+  --ctx-size 32768 --n-gpu-layers 99 --flash-attn on --jinja
+```
+
+**Qwythos-9B** (port 8080, no `--jinja` — model has a strict built-in template):
+```sh
+~/llama.cpp/build/bin/llama-server \
+  --model ~/llama.cpp/models/Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 8080 \
+  --ctx-size 32768 --n-gpu-layers 99 --flash-attn on
+```
+
+**Gemma-4-E2B** (port 8070):
+```sh
+~/llama.cpp/build/bin/llama-server \
+  --model ~/models/gemma-4-E2B/google_gemma-4-E2B-it-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 8070 \
+  --ctx-size 32768 --n-gpu-layers 99 --flash-attn on
+```
+
 Verify the server is up:
 
 ```sh

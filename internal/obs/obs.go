@@ -1,7 +1,3 @@
-// Package obs is the single OTel boundary for milk. All provider bootstrapping,
-// exporter wiring, and signal accessors live here. Other packages call standard
-// OTel APIs via the accessors in this package — they have no knowledge of how
-// signals are exported.
 package obs
 
 import (
@@ -27,19 +23,16 @@ func CheckFileSizes(cfg config.OtelConfig, otelDir string) (warning string, exce
 		return "", false
 	}
 	stats := FileStats(otelDir)
-	var totalBytes int64
 	for _, s := range stats {
-		totalBytes += s.Bytes
-		mb := int(s.Bytes / 1024 / 1024)
-		if cfg.MaxMB > 0 && mb >= cfg.MaxMB {
-			return fmt.Sprintf("otel file %s is %d MB (max_mb=%d) — OTel disabled for this session; run /otel trim to reset",
+		mb := float64(s.Bytes) / 1024.0 / 1024.0
+		if cfg.MaxMB > 0 && mb >= float64(cfg.MaxMB) {
+			return fmt.Sprintf("otel file %s is %.1f MB (max_mb=%d) — OTel disabled for this session; run /otel trim to reset",
 				s.Name, mb, cfg.MaxMB), true
 		}
-		if cfg.WarnMB > 0 && mb >= cfg.WarnMB {
-			warning = fmt.Sprintf("~/.milk/otel/%s is %d MB — run /otel trim to archive", s.Name, mb)
+		if cfg.WarnMB > 0 && mb >= float64(cfg.WarnMB) {
+			warning = fmt.Sprintf("~/.milk/otel/%s is %.1f MB — run /otel trim to archive", s.Name, mb)
 		}
 	}
-	_ = totalBytes
 	return warning, false
 }
 

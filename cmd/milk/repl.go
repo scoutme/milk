@@ -32,6 +32,8 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/updater"
+	"github.com/scoutme/milk/internal/workflow"
+	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 )
 
 const agentTimeout = 10 * time.Minute
@@ -79,6 +81,10 @@ type thinkChunkMsg struct{ text string }
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
+// turnTimeoutWarningMsg is sent when a turn exceeds its configured timeout but
+// the turn is still running. The turn is not cancelled — this is a soft warning.
+type turnTimeoutWarningMsg struct{ agentName string }
+
 type spinnerTickMsg struct{}
 
 // copyFeedbackClearMsg clears the transient copy confirmation in the status bar.
@@ -116,11 +122,28 @@ type errMsg struct{ err error }
 // updateAvailableMsg is sent when the background update check finds a newer release.
 type updateAvailableMsg struct{ release *updater.Release }
 
+// workflowResumeCheckMsg is sent at startup when a saved workflow state file
+// was found for the current session. The TUI prints a one-line resume offer.
+type workflowResumeCheckMsg struct{ state *workflow.State }
+
 // updateProgressMsg carries download progress during /update install.
 type updateProgressMsg struct{ done, total int64 }
 
 // updateDoneMsg signals a completed self-update attempt.
 type updateDoneMsg struct{ err error }
+
+type serverStartDoneMsg struct {
+	agentName string
+	url       string
+	pid       int
+	err       error
+}
+
+type serverStopDoneMsg struct {
+	agentName string
+	stopped   bool
+	err       error
+}
 
 // openFileMsg is sent by the agent goroutine (or /open command) to request that
 // the TUI open a file in the editor. The goroutine blocks on respCh until the
@@ -405,6 +428,10 @@ type model struct {
 	// credential refresh only after the bubbletea event loop is running.
 	credRefreshInit tea.Cmd
 
+	// workflowResumeInit, if non-nil, is returned by Init() to check for a
+	// saved workflow state file and emit workflowResumeCheckMsg when found.
+	workflowResumeInit tea.Cmd
+
 	// pendingUpdate is non-nil when an update is available but not yet installed.
 	pendingUpdate *updater.Release
 	// updateInstalling is true while /update install is downloading+applying.
@@ -412,6 +439,12 @@ type model struct {
 	// updateProgress tracks download bytes for the progress indicator.
 	updateProgress int64
 	updateTotal    int64
+
+	// workflow panel
+	workflowPanelOpen     bool
+	workflowState         *workflow.State
+	pendingWorkflowWizard *workflowWizardState
+	pendingWorkflowExtend *workflowExtendState
 
 	// injected dependencies
 	ctx    context.Context
@@ -597,10 +630,14 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 			// this branch catches any late-arriving cancellation that slipped through.
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		case isContextDeadlineExceeded(msg.err):
-			m.appendTranscript(milkTag() + " turn timed out — the agent did not respond within " + agentTimeout.String() + "\n")
+			m.appendTranscript(milkTag() + " turn ended: context deadline exceeded\n")
 		default:
 			m.appendTranscript(milkTag() + " error: " + errText + "\n")
 		}
+	} else if m.currentTurnChars == 0 {
+		// No text or thinking was streamed and no error was reported — the agent
+		// produced no visible output. Show a placeholder so the turn is not silent.
+		m.appendTranscript(dim("[no response]") + "\n")
 	}
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
@@ -870,6 +907,9 @@ func (m model) Init() tea.Cmd {
 	if m.credRefreshInit != nil {
 		cmds = append(cmds, m.credRefreshInit)
 	}
+	if m.workflowResumeInit != nil {
+		cmds = append(cmds, m.workflowResumeInit)
+	}
 	if m.st.cfg.ShouldCheckUpdate() {
 		cfg := m.st.cfg
 		cmds = append(cmds, func() tea.Msg {
@@ -913,6 +953,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingInit != nil {
 			return m.handleInitWizardKey(msg)
+		}
+		if m.pendingWorkflowWizard != nil {
+			return m.handleWorkflowWizardKey(msg)
+		}
+		if m.pendingWorkflowExtend != nil {
+			return m.handleWorkflowExtendKey(msg)
 		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
@@ -974,6 +1020,94 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
+
+	case turnTimeoutWarningMsg:
+		if m.busy {
+			m.appendTranscript(dim(fmt.Sprintf("[%s is taking longer than expected — still waiting]", msg.agentName)) + "\n")
+			m.syncLayout()
+		}
+		return m, nil
+
+	case wfdev.WorkflowProgressMsg:
+		if msg.State.WorkflowName != "" {
+			st := msg.State
+			m.workflowState = &st
+		}
+		m.workflowPanelOpen = true
+		m.syncLayout()
+		return m, nil
+
+	case workflow.WorkflowChunkMsg:
+		m.currentTurnChars += int64(len(msg.Text))
+		m.appendTranscript(msg.Text)
+		m.syncLayout()
+		return m, nil
+
+	case wfdev.WorkflowDoneMsg:
+		m.busy = false
+		m.cancelTurn = nil
+		m.busyHint = ""
+		obs.IncrementTurnCount()
+		m.currentTurnChars = 0
+		m.workflowPanelOpen = true
+		if m.workflowState != nil {
+			m.workflowState.Role = "done"
+		}
+		if m.interrupted {
+			m.interrupted = false
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		} else if isContextCanceled(msg.Err) {
+			m.appendTranscript(dim("[interrupted]") + "\n")
+		} else if msg.Err != nil {
+			var exhausted *wfdev.ErrPassesExhausted
+			if errors.As(msg.Err, &exhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
+				// Offer to continue with doubled pass limit.
+				w := &workflowWizardState{
+					name:      m.workflowState.WorkflowName,
+					task:      m.workflowState.Task,
+					designer:  m.workflowState.AgentMap["designer"],
+					generator: m.workflowState.AgentMap["generator"],
+					evaluator: m.workflowState.AgentMap["evaluator"],
+				}
+				if w.designer == "" {
+					w.designer = workflow.AliasEscalation
+				}
+				if w.generator == "" {
+					w.generator = workflow.AliasEscalation
+				}
+				if w.evaluator == "" {
+					w.evaluator = workflow.AliasEscalation
+				}
+				m.pendingWorkflowExtend = &workflowExtendState{
+					wizard:    w,
+					sprint:    exhausted.Sprint,
+					maxPasses: exhausted.MaxPasses,
+				}
+				m.appendTranscript(fmt.Sprintf(
+					"%s workflow: sprint %d exhausted %d passes — continue with %d passes? [y/n] ",
+					milkTag(), exhausted.Sprint, exhausted.MaxPasses, exhausted.MaxPasses*2,
+				))
+			} else {
+				m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+			}
+		} else {
+			m.appendTranscript(milkTag() + " workflow complete\n")
+		}
+		m.colorizeForce = true
+		m.refreshPrompt()
+		m.syncLayout()
+		return m, nil
+
+	case workflowResumeCheckMsg:
+		if msg.state != nil && msg.state.Role != "done" {
+			st := msg.state
+			m.appendTranscript(fmt.Sprintf(
+				"%s workflow %s in progress (sprint %d pass %d) — /workflow resume to continue, or ignore\n",
+				milkTag(), st.WorkflowName, st.Sprint, st.Pass,
+			))
+			m.syncLayout()
+		}
+		return m, nil
 
 	case spinnerTickMsg:
 		if m.busy {
@@ -1076,6 +1210,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.pendingUpdate = nil
 			m.appendTranscript(milkTag() + " update applied — restart milk to use the new version\n")
+		}
+		return m, nil
+
+	case serverStartDoneMsg:
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s server start failed: %v\n", milkTag(), msg.err))
+		} else if msg.pid != 0 {
+			m.appendTranscript(fmt.Sprintf("%s server for %q started  pid=%d  url=%s\n", milkTag(), msg.agentName, msg.pid, msg.url))
+		} else {
+			m.appendTranscript(fmt.Sprintf("%s server for %q started  url=%s\n", milkTag(), msg.agentName, msg.url))
+		}
+		return m, nil
+
+	case serverStopDoneMsg:
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s server stop failed: %v\n", milkTag(), msg.err))
+		} else if msg.stopped {
+			m.appendTranscript(fmt.Sprintf("%s server for %q stopped\n", milkTag(), msg.agentName))
+		} else {
+			m.appendTranscript(fmt.Sprintf("%s no tracked server process for %q (not started by milk)\n", milkTag(), msg.agentName))
 		}
 		return m, nil
 
@@ -1425,6 +1579,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
+
 	return m.submitInput(input, promptLabel(m.st))
 }
 
@@ -1465,14 +1620,34 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	st := m.st
 	rtr := m.rtr
-	agents := m.agents
-	termWidth := m.width
-
 	send := func(msg tea.Msg) { st.program.Send(msg) }
 	st.toolFutures = map[string]chan string{}
 
-	tuiAgents := agents
 	ir0 := &tuiInputReader{send: send}
+	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+	return m, tea.Batch(
+		spinnerTick(),
+		func() tea.Msg {
+			defer cancel()
+			sw := &sendWriter{send: send}
+			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
+			return agentDoneMsg{err: err}
+		},
+	)
+}
+
+// buildTUIAgents wires the live TUI callbacks (permission handlers, tool-use
+// hints, thinking, skip-permissions) into a fresh copy of m.agents and returns
+// it alongside the permContext built for the CLI escalation runner.
+// Called by both dispatchAgent (for normal turns) and launchWorkflow (so that
+// workflow roles get the same tool access and permission flow as regular turns).
+func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatchAgents, permContext) {
+	st := m.st
+	agents := m.agents
+	termWidth := m.width
+
+	tuiAgents := agents
+	var cliPC permContext
 	if agents.cliAgent != nil {
 		tuiCliAgent := agents.cliAgent.
 			WithSkipPermissions(st.skipPermissions).
@@ -1503,12 +1678,11 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
 		tuiAgents.cliAgent = tuiCliAgent
+		cliPC = permContext{cs: st.cs, cwd: st.cwd, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash}
 		// Only rebuild escalation runner as cliRunner when cliAgent IS the escalation target.
 		if agents.escalationLocal == nil && agents.subprocessAgent == nil {
 			escName := agents.escalation.Name()
-			cr := newCLIRunner(tuiCliAgent, escName,
-				permContext{cs: st.cs, cwd: st.cwd, toolFutures: st.toolFutures, contextHash: &st.lastEscalationContextHash},
-				func() inputReader { return ir0 })
+			cr := newCLIRunner(tuiCliAgent, escName, cliPC, func() inputReader { return ir0 })
 			if servers := st.cfg.EffectiveMCPServers(escName); len(servers) > 0 {
 				cr = cr.withMCPServers(servers)
 			}
@@ -1549,15 +1723,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
-	return m, tea.Batch(
-		spinnerTick(),
-		func() tea.Msg {
-			defer cancel()
-			sw := &sendWriter{send: send}
-			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
-			return agentDoneMsg{err: err}
-		},
-	)
+	return tuiAgents, cliPC
 }
 
 // renderScrollbar returns a single-column string of h lines showing a dim │
@@ -1597,12 +1763,13 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	localAvail := agents.localAvail
 	escalationAvail := agents.escalationAvail
 
-	turnCtx, cancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
-	defer cancel()
-
+	// Route first (fast), then apply the per-agent timeout so long-running
+	// escalation agents can have a higher limit than the local default.
 	forceEscalate := st.forceEscalate || st.stickyEscalate || st.autoStickyEscalate
 	forcePrimary := st.forcePrimary || st.stickyPrimary
-	decision, routeErr := rtr.Route(turnCtx, st.sess, input, forceEscalate, forcePrimary)
+	routeCtx, routeCancel := context.WithTimeoutCause(ctx, agentTimeout, fmt.Errorf("turn timeout"))
+	decision, routeErr := rtr.Route(routeCtx, st.sess, input, forceEscalate, forcePrimary)
+	routeCancel()
 	if routeErr != nil {
 		return fmt.Errorf("routing: %w", routeErr)
 	}
@@ -1629,9 +1796,32 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 
 	targetName := "local"
 	agentName := st.cfg.ActiveAgent().Name
+	agentCfg := st.cfg.ActiveAgent()
 	if target == router.TargetEscalation {
 		targetName = "escalation"
-		agentName = st.cfg.EscalationAgentConfig().Name
+		agentCfg = st.cfg.EscalationAgentConfig()
+		agentName = agentCfg.Name
+	}
+
+	// Apply the per-agent turn timeout now that we know the target.
+	// The turn context has no hard deadline — instead, a warning is sent after the
+	// timeout period if the turn is still running, and the agent continues.
+	// The turn only terminates on explicit user cancellation (Ctrl+C) or completion.
+	timeout := st.cfg.AgentTurnTimeout(agentCfg)
+	turnCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if timeout > 0 {
+		go func() {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				if st.program != nil {
+					st.program.Send(turnTimeoutWarningMsg{agentName: agentName})
+				}
+			case <-turnCtx.Done():
+			}
+		}()
 	}
 	st.notifier.NotifyTurnStart(turnCtx, agentName, targetName, input)
 
@@ -1817,6 +2007,21 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	ctx := context.Background()
+
+	// If the primary local agent has a run_cmd, launch it when the server is
+	// not yet reachable. This happens synchronously so the Ping below reflects
+	// the started server. A failure here is non-fatal — milk continues with the
+	// server unavailable and the user can start it manually.
+	if localAgent != nil {
+		primaryAC := activeLocalAgentConfig(cfg)
+		if primaryAC.RunCmd != "" && !isReachable(primaryAC.URL) {
+			fmt.Fprintln(os.Stderr, milkTag()+" starting local inference server…")
+			if err := ensureServerRunning(ctx, primaryAC.URL, primaryAC.RunCmd, primaryAC.Name); err != nil {
+				fmt.Fprintln(os.Stderr, milkTag()+" warning: run_cmd failed: "+err.Error())
+			}
+		}
+	}
+
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
 	var localAvail, escalationAvail bool
@@ -1984,6 +2189,24 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		m.credRefreshInit = func() tea.Msg {
 			err := localAgent.WarmToken()
 			return credRefreshReadyMsg{label: "token", err: err}
+		}
+	}
+
+	// Check for a saved workflow state file for the current session.
+	// Deferred to Init() for the same reason as credRefreshInit.
+	{
+		sessID := sess.ID
+		m.workflowResumeInit = func() tea.Msg {
+			stateDir, err := session.Dir()
+			if err != nil {
+				return workflowResumeCheckMsg{}
+			}
+			path := workflow.StatePath(stateDir, sessID)
+			st, err := workflow.LoadState(path)
+			if err != nil || st == nil {
+				return workflowResumeCheckMsg{}
+			}
+			return workflowResumeCheckMsg{state: st}
 		}
 	}
 

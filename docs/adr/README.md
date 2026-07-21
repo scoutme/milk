@@ -37,3 +37,4 @@
 * [36. MCP stdio Subprocess Transport](0036-mcp-stdio-subprocess-transport.md)
 * [37. Experimental Permission Management](0037-experimental-permission-management.md)
 * [38. Move user-turn AddTurn to after Execute](0038-dispatch-addturn-after-execute.md)
+* [39. Native Workflow Engine](0039-native-workflow-engine.md)

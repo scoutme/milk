@@ -118,6 +118,7 @@ type Agent struct {
 	useResponsesAPI  bool   // true when api_format = "responses"; uses OpenAI Responses API instead of Chat Completions
 	skipRepeatCheck  bool   // true when acting as the escalation target: the repeated-prompt check must not fire
 	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
+	workflowRole     bool   // true when acting as a workflow step executor: neutral system prompt, no escalation framing
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
 	permStore        *PermStore
 	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
@@ -172,6 +173,19 @@ func (a *Agent) AsEscalationTarget(name string) *Agent {
 	copy := *a
 	copy.skipRepeatCheck = true
 	copy.escalationName = name
+	return &copy
+}
+
+// AsWorkflowExecutor returns a shallow copy of the agent configured for use as
+// a workflow step executor (designer, generator, evaluator). The copy receives a
+// neutral system prompt — no escalation framing, no session orientation, no
+// repeated-prompt guard — so the role-specific instructions in the workflow
+// prompt are not overridden by routing-level concerns.
+func (a *Agent) AsWorkflowExecutor() *Agent {
+	copy := *a
+	copy.workflowRole = true
+	copy.skipRepeatCheck = true
+	copy.escalationName = ""
 	return &copy
 }
 
@@ -237,7 +251,7 @@ func (a *Agent) SystemOverheadChars(sess *session.Session) int {
 	if sess != nil {
 		cwd = sess.CWD
 	}
-	n := len(buildSystemPrompt(cwd, a.escalationName))
+	n := len(buildSystemPrompt(cwd, a.escalationName, a.workflowRole))
 	if cwd != "" {
 		if a.cachedCwd != cwd {
 			// Not yet cached; estimate from a fresh call.
@@ -506,6 +520,13 @@ const systemPromptPrimary = `You are a coding and shell automation assistant.
 - Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`
 
+// systemPromptWorkflow is used for workflow step executors (designer, generator,
+// evaluator). No escalation framing, no session orientation — the workflow
+// prompt provides all role-specific instructions.
+const systemPromptWorkflow = `You are a coding and shell automation assistant.
+
+` + systemPromptShared
+
 // systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
 // %s is the escalation agent name (e.g. "haiku-aws").
 const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
@@ -515,11 +536,14 @@ const systemPromptEscalationFmt = `You are a coding and shell automation assista
 - You are the escalation target — do not attempt to escalate further.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
 
-func buildSystemPrompt(cwd, escalationName string) string {
+func buildSystemPrompt(cwd, escalationName string, workflowRole bool) string {
 	var base string
-	if escalationName != "" {
+	switch {
+	case workflowRole:
+		base = systemPromptWorkflow
+	case escalationName != "":
 		base = fmt.Sprintf(systemPromptEscalationFmt, escalationName)
-	} else {
+	default:
 		base = systemPromptPrimary
 	}
 	if cwd == "" {
@@ -644,15 +668,16 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
-	msgs := []Message{{Role: "system", Content: buildSystemPrompt(sess.CWD, a.escalationName)}}
-	msgs = append(msgs, history...)
+	systemPrompt := buildSystemPrompt(sess.CWD, a.escalationName, a.workflowRole)
 	if sess.CWD != "" {
 		if a.cachedCwd != sess.CWD {
 			a.cachedCwdContext = cwdContext(sess.CWD)
 			a.cachedCwd = sess.CWD
 		}
-		msgs = append(msgs, Message{Role: "system", Content: a.cachedCwdContext})
+		systemPrompt += "\n\n" + a.cachedCwdContext
 	}
+	msgs := []Message{{Role: "system", Content: systemPrompt}}
+	msgs = append(msgs, history...)
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
@@ -737,6 +762,10 @@ func (a *Agent) checkPermission(tool, summary string) (allowed bool, denied stri
 			attribute.String("name", tool),
 			attribute.String("source", "skip_perms"),
 		)
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.outcomes",
+			attribute.String("name", tool),
+			attribute.String("outcome", "granted"),
+		)
 		return true, ""
 	}
 	if a.permStore != nil && a.permStore.IsAllowed(tool) {
@@ -744,12 +773,20 @@ func (a *Agent) checkPermission(tool, summary string) (allowed bool, denied stri
 			attribute.String("name", tool),
 			attribute.String("source", "store"),
 		)
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.outcomes",
+			attribute.String("name", tool),
+			attribute.String("outcome", "granted"),
+		)
 		return true, ""
 	}
 	if a.permAsk == nil {
 		// Non-interactive mode: deny and surface a clear error.
 		obs.Inc(context.Background(), inferenceScope, "milk.tools.permission_denials",
 			attribute.String("name", tool),
+		)
+		obs.Inc(context.Background(), inferenceScope, "milk.tools.outcomes",
+			attribute.String("name", tool),
+			attribute.String("outcome", "denied"),
 		)
 		return false, toolResult{Error: "tool " + tool + " requires permission — run interactively or enable skip-permissions"}.String()
 	}
@@ -896,6 +933,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 					attribute.String("name", tc.Function.Name),
 					attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 				)
+				obs.Inc(ctx, inferenceScope, "milk.tools.outcomes",
+					attribute.String("name", tc.Function.Name),
+					attribute.String("outcome", "mcp"),
+				)
 				msgs = append(msgs, Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID})
 				continue
 			}
@@ -909,6 +950,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			attribute.String("name", tc.Function.Name),
 			attribute.String("agent", agentRole),
 		)
+		obs.Inc(ctx, inferenceScope, "milk.tools.outcomes",
+			attribute.String("name", tc.Function.Name),
+			attribute.String("outcome", "executed"),
+		)
 		obs.RecordDuration(ctx, inferenceScope, "milk.tools.latency_ms", toolElapsed,
 			attribute.String("name", tc.Function.Name),
 		)
@@ -919,6 +964,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
 			obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
 				attribute.String("reason", "explicit_tool_call"),
+			)
+			obs.Inc(ctx, inferenceScope, "milk.session.transitions",
+				attribute.String("from", string(sess.State)),
+				attribute.String("to", string(session.StateEscalationWaiting)),
 			)
 			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
 		}

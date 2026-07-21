@@ -20,6 +20,7 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+const cmdWorkflow = "/workflow"
 const cmdEscalate = "/escalate"
 const cmdPrimary = "/primary"
 const cmdPaste = "/paste"
@@ -41,9 +42,10 @@ const cmdConfig = "/config"
 const cmdOpen = "/open"
 const cmdMCP = "/mcp"
 const cmdUpdate = "/update"
+const cmdServer = "/server"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -69,6 +71,7 @@ const (
 	initStepProvider                         // ask provider (menu 1–6)
 	initStepURL                              // ask URL (providers that need it)
 	initStepChatPath                         // ask chat_path (bearer only, skip if standard)
+	initStepRunCmd                           // ask run_cmd (local provider only, optional)
 	initStepModel                            // ask model
 	initStepAuth                             // ask api_key (blank → go to initStepTokenCmd)
 	initStepTokenCmd                         // ask token_cmd
@@ -121,7 +124,8 @@ const interactiveHelp = `
   /agent                 show active primary and escalation agents
   /agent list            list all configured agents (* = active)
   /agent add             add a new agent interactively
-  /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]
+  /agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…] [run_cmd=…]
+  /agent remove <name>   remove an agent from config (must not be active)
   /agent switch <name> [as primary|escalation]   (prompts if args missing)
   /agent tool list [<agent>|global]              show tool-agents (default: primary)
   /agent tool enable <tool> [for <agent>|global]  enable a tool-agent entry
@@ -178,6 +182,11 @@ const interactiveHelp = `
   /mcp reconnect [<name>]  reset dead server(s) so they retry on next use
   /mcp assign <server> for <agent>   add server to agent's mcp_servers list
   /mcp unassign <server> for <agent>  remove server from agent's list
+
+── Server ────────────────────────────────────────────────────────────────
+  /server status [<agent>]          show server status (reachable + PID)
+  /server start for <agent>         start the inference server manually
+  /server stop [<agent>]            stop the server tracked for an agent
 
 ── Setup ─────────────────────────────────────────────────────────────────
   /config                print the current config (~/.milk/config.json)

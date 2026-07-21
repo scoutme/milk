@@ -34,6 +34,7 @@ func logPercept(ctx context.Context, p Percept, sessionID string) {
 		log.String("session_id", sessionID),
 	)
 	logger.Emit(ctx, r)
+	obs.Inc(ctx, meterScope, "milk.memory.percept_events", attribute.String("event", "record"))
 }
 
 // logRecall emits a DEBUG log for a get_memory query.
@@ -49,6 +50,7 @@ func logRecall(ctx context.Context, query string, resultsN int, sessionID string
 		log.String("session_id", sessionID),
 	)
 	logger.Emit(ctx, r)
+	obs.Inc(ctx, meterScope, "milk.memory.percept_events", attribute.String("event", "recall"))
 }
 
 // logConsolidation emits an INFO log for a consolidation run.
@@ -67,6 +69,7 @@ func logConsolidation(ctx context.Context, sessionID string, before, decayed, pr
 		log.Int("global_total", globalTotal),
 	)
 	logger.Emit(ctx, r)
+	obs.Inc(ctx, meterScope, "milk.memory.percept_events", attribute.String("event", "consolidate"))
 }
 
 // metricsRecord increments the percepts_recorded counter.

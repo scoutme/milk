@@ -31,6 +31,9 @@ func sessionsDir() (string, error) {
 	return filepath.Join(dir, "sessions"), nil
 }
 
+// Dir returns the directory where session files are stored (~/.milk/sessions).
+func Dir() (string, error) { return sessionsDir() }
+
 func indexPath() (string, error) {
 	dir, err := sessionsDir()
 	if err != nil {

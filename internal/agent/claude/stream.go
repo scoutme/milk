@@ -121,6 +121,14 @@ type ParseResult struct {
 	CacheCreationInputTokens int64
 	CacheReadInputTokens     int64
 	TotalCostUSD             float64
+	// HasPendingWorkflow is set when a tool_result in this turn contained
+	// "Workflow launched in background." — the caller should watch
+	// PendingWorkflowDir/journal.jsonl for a result entry, then issue one
+	// --resume to deliver the task-notification to Claude.
+	HasPendingWorkflow bool
+	// PendingWorkflowDir is the transcript directory of the background workflow
+	// (parsed from the tool_result). Non-empty when HasPendingWorkflow is true.
+	PendingWorkflowDir string
 	// streamedViaDeltas is set when text_delta events were received, so the
 	// final assistant event's text is skipped to avoid double-printing.
 	streamedViaDeltas bool
@@ -333,6 +341,7 @@ type userMessageEvent struct {
 }
 
 const streamClosedMarker = "Stream closed"
+const workflowLaunchedMarker = "Workflow launched in background."
 
 // applyUserMessage detects tool_result blocks with "Stream closed" content
 // (Claude's pre-flight directory-trust failure) and records them into ParseResult.
@@ -348,6 +357,10 @@ func applyUserMessage(res *ParseResult, raw []byte, cb eventCallbacks) {
 		if block.Type != "tool_result" {
 			continue
 		}
+		if dir := parseWorkflowTranscriptDir(block.Content); dir != "" {
+			res.HasPendingWorkflow = true
+			res.PendingWorkflowDir = dir
+		}
 		if !block.IsError {
 			continue
 		}
@@ -361,6 +374,35 @@ func applyUserMessage(res *ParseResult, raw []byte, cb eventCallbacks) {
 		}
 		res.StreamClosedDenials = append(res.StreamClosedDenials, rec)
 	}
+}
+
+// parseWorkflowTranscriptDir extracts the "Transcript dir: <path>" value from a
+// Workflow tool_result that says "Workflow launched in background." Returns ""
+// if the content is not a background-workflow launch result.
+func parseWorkflowTranscriptDir(content any) string {
+	var s string
+	switch v := content.(type) {
+	case string:
+		s = v
+	case []any:
+		for _, item := range v {
+			m, _ := item.(map[string]any)
+			if m != nil && m["type"] == "text" {
+				s, _ = m["text"].(string)
+				break
+			}
+		}
+	}
+	if !strings.Contains(s, workflowLaunchedMarker) {
+		return ""
+	}
+	const dirPrefix = "Transcript dir: "
+	for _, line := range strings.Split(s, "\n") {
+		if after, ok := strings.CutPrefix(line, dirPrefix); ok {
+			return strings.TrimSpace(after)
+		}
+	}
+	return ""
 }
 
 // isStreamClosedContent returns true if content represents the "Stream closed"

@@ -39,9 +39,7 @@ func TestSessionCacheByRole_IsolatedByRole(t *testing.T) {
 }
 
 func TestFormatTokenUsage_ShowsHitRate(t *testing.T) {
-	entries := []SessionTokenEntry{
-		{Model: "claude", Agent: "escalation", Prompt: 100, Completion: 20, CacheRead: 8000, CacheCreation: 1000},
-	}
+	entries := []SessionTokenEntry{{Model: "claude", Agent: "escalation", Prompt: 100, Completion: 20, CacheRead: 8000, CacheCreation: 1000}}
 	out := FormatTokenUsage(context.TODO(), "/nonexistent", entries, 5)
 	if !strings.Contains(out, "88.9%") {
 		t.Errorf("expected hit rate 88.9%%, got:\n%s", out)
@@ -55,9 +53,7 @@ func TestFormatTokenUsage_ShowsHitRate(t *testing.T) {
 }
 
 func TestFormatTokenUsage_NoCacheShowsDash(t *testing.T) {
-	entries := []SessionTokenEntry{
-		{Model: "qwen", Agent: "primary", Prompt: 500, Completion: 100},
-	}
+	entries := []SessionTokenEntry{{Model: "qwen", Agent: "primary", Prompt: 500, Completion: 100}}
 	out := FormatTokenUsage(context.TODO(), "/nonexistent", entries, 3)
 	if !strings.Contains(out, "—") {
 		t.Errorf("expected dash for no-cache row, got:\n%s", out)

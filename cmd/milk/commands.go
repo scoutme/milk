@@ -52,6 +52,12 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdMCP {
 		return m.handleMCPCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdWorkflow {
+		return m.handleWorkflowCmd(strings.TrimSpace(rest))
+	}
+	if cmd == cmdServer {
+		return m.handleServerCmd(strings.TrimSpace(rest))
+	}
 	if cmd == "/help" {
 		output := renderHelp(interactiveHelp, m.vpWidth())
 		m.colorizeForce = true
@@ -459,12 +465,16 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 		inline := strings.TrimSpace(arg[len("add"):])
 		return m.startAddAgent(inline), nil
 
+	case strings.HasPrefix(arg, "remove"):
+		name := strings.TrimSpace(strings.TrimPrefix(arg, "remove"))
+		m.appendTranscript(execAgentRemove(name, m.st) + "\n")
+
 	case arg == "tool", strings.HasPrefix(arg, "tool "):
 		sub := strings.TrimSpace(strings.TrimPrefix(arg, "tool"))
 		m.appendTranscript(execAgentTool(sub, m.st) + "\n")
 
 	default:
-		m.appendTranscript(milkTag() + " usage: /agent [list|switch <name>|add [name=... url=... model=... provider=...]]\n")
+		m.appendTranscript(milkTag() + " usage: /agent [list|add|remove <name>|switch <name>]\n")
 	}
 	return m, nil
 }
@@ -505,6 +515,38 @@ func execAgentList(st *interactiveState) string {
 		}
 	}
 	return b.String()
+}
+
+// execAgentRemove removes the named agent from config.
+// Refuses if the agent is currently active as primary or escalation.
+func execAgentRemove(name string, st *interactiveState) string {
+	if name == "" {
+		return milkTag() + " usage: /agent remove <name>"
+	}
+	primaryName := st.cfg.ActiveAgent().Name
+	escalationName := st.cfg.EscalationAgentConfig().Name
+	if strings.EqualFold(name, primaryName) {
+		return fmt.Sprintf("%s cannot remove %q — it is the active primary agent (switch first with /agent switch)", milkTag(), name)
+	}
+	if strings.EqualFold(name, escalationName) {
+		return fmt.Sprintf("%s cannot remove %q — it is the active escalation agent (switch first with /agent switch)", milkTag(), name)
+	}
+	idx := -1
+	for i, a := range st.cfg.Agents {
+		if strings.EqualFold(a.Name, name) {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
+	}
+	removed := st.cfg.Agents[idx].Name
+	st.cfg.Agents = append(st.cfg.Agents[:idx], st.cfg.Agents[idx+1:]...)
+	if err := config.Save(st.cfg); err != nil {
+		return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
+	}
+	return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
 }
 
 // handleConfigCmd dispatches /config, /config init, /config open.
@@ -891,8 +933,102 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + " memory panel: off\n")
 		}
 		return m, tick
+	case "workflow":
+		m.workflowPanelOpen = !m.workflowPanelOpen
+		m.syncLayout()
+		if m.workflowPanelOpen {
+			m.appendTranscript(milkTag() + " workflow panel: on\n")
+		} else {
+			m.appendTranscript(milkTag() + " workflow panel: off\n")
+		}
+		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|workflow\n")
+		return m, nil
+	}
+}
+
+// handleServerCmd handles /server [status|start for <agent>|stop [<agent>]].
+func (m model) handleServerCmd(arg string) (tea.Model, tea.Cmd) {
+	// Parse verb and optional agent name.
+	// Supported forms:
+	//   /server status [<agent>]
+	//   /server start for <agent>
+	//   /server stop [<agent>]
+	var verb, agentArg string
+	if strings.HasPrefix(arg, "start for ") {
+		verb = "start"
+		agentArg = strings.TrimSpace(strings.TrimPrefix(arg, "start for "))
+	} else {
+		parts := strings.SplitN(arg, " ", 2)
+		verb = parts[0]
+		if len(parts) == 2 {
+			agentArg = strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Resolve agent config.
+	resolveAC := func() (config.AgentConfig, bool) {
+		cfg := m.st.cfg
+		if agentArg == "" {
+			return activeLocalAgentConfig(cfg), true
+		}
+		for _, a := range cfg.Agents {
+			if strings.EqualFold(a.Name, agentArg) {
+				return a, true
+			}
+		}
+		m.appendTranscript(fmt.Sprintf("%s no agent named %q in config\n", milkTag(), agentArg))
+		return config.AgentConfig{}, false
+	}
+
+	switch verb {
+	case "status", "":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		m.appendTranscript(fmt.Sprintf("%s %s: %s\n", milkTag(), ac.Name, serverStatus(ac.Name, ac.URL)))
+		return m, nil
+
+	case "start":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		if ac.RunCmd == "" {
+			m.appendTranscript(fmt.Sprintf("%s agent %q has no run_cmd configured\n", milkTag(), ac.Name))
+			return m, nil
+		}
+		if isReachable(ac.URL) {
+			m.appendTranscript(fmt.Sprintf("%s server for %q is already reachable at %s\n", milkTag(), ac.Name, ac.URL))
+			return m, nil
+		}
+		m.appendTranscript(fmt.Sprintf("%s starting server for %q…\n", milkTag(), ac.Name))
+		agentName, url, runCmd := ac.Name, ac.URL, ac.RunCmd
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			defer cancel()
+			if err := ensureServerRunning(ctx, url, runCmd, agentName); err != nil {
+				return serverStartDoneMsg{agentName: agentName, url: url, err: err}
+			}
+			pid, _ := readPID(agentName)
+			return serverStartDoneMsg{agentName: agentName, url: url, pid: pid}
+		}
+
+	case "stop":
+		ac, ok := resolveAC()
+		if !ok {
+			return m, nil
+		}
+		agentName := ac.Name
+		return m, func() tea.Msg {
+			stopped, err := serverStop(agentName)
+			return serverStopDoneMsg{agentName: agentName, stopped: stopped, err: err}
+		}
+
+	default:
+		m.appendTranscript(milkTag() + " usage: /server status [<agent>] | /server start for <agent> | /server stop [<agent>]\n")
 		return m, nil
 	}
 }

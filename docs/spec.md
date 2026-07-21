@@ -64,8 +64,13 @@ cmd/milk/
   interactive.go    slash commands, tab completion, prompt label helpers
   ansi.go           ANSI colour helpers and activity spinner
   panel_memory.go   right-side memory panel (/panel memory)
+  panel_workflow.go workflow progress panel (/panel workflow)
+  workflow_cmd.go   /workflow slash command + interactive wizard
+  workflow_runner.go workflowTurnRunner adapter (wraps TurnRunner with per-role session tracking)
 
 internal/
+  workflow/         workflow engine: Workflow interface, TurnRunner adapter interface, State/verdict/turn
+  workflow/dev/     dev workflow: designer→generator→evaluator loop, sprint counting, prompt builders
   config/           config loading and defaults (~/.milk/config.json)
   session/          session state machine + JSON store (~/.milk/sessions/)
   router/           routing: rules layer → weighted scorer → primary-model classifier
@@ -311,13 +316,13 @@ milk [flags] <prompt>         # single-prompt mode
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/config`, `/open`, `/update`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/open`, `/update`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
 
 The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–64 chars). The `#` prefix is optional — bare hex like `a1b2c3d4` also works. The local agent can also delete percepts directly via the `forget_memory` tool (same short-ID resolution, same `#` handling).
 
-**Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default)
+**Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default); `/panel workflow` — toggle the workflow progress panel (auto-opens when a workflow starts)
 
 **/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
 
@@ -367,6 +372,32 @@ The toggle is retroactive — both transcript variants (full and no-think) are m
 ```
 
 The goal is shown in the memory panel and injected into escalation context so the escalation agent knows what is being worked on.
+
+**/workflow** runs a named multi-agent pipeline:
+
+```
+/workflow                                         # list available workflows
+/workflow dev <task>                              # run dev workflow (wizard for missing args)
+/workflow dev <task> --designer <agent> \
+              --generator <agent> \
+              --evaluator <agent>                 # inline agent assignment
+/workflow resume                                  # resume workflow from last sprint/pass checkpoint
+/workflow clear                                   # delete saved state for this session (with confirmation)
+```
+
+The `dev` workflow implements a designer → generator → evaluator loop across one or more sprints:
+
+- **designer** — reads the task description, produces a spec and sprint plan (`<session-id>.workflow.plan.md`).
+- **generator** — executes each sprint according to the plan, writes output to `<session-id>.workflow.sprint<N>.md`.
+- **evaluator** — reviews the sprint output and returns a structured verdict: `good_to_go`, `needs_refinement`, or `next_sprint`. Findings are written to `<session-id>.workflow.findings<N>.md`.
+
+Loop semantics: `needs_refinement` re-runs the generator for the same sprint (up to a configurable pass limit, default 3); `next_sprint` advances; `good_to_go` on the final sprint ends the workflow. Pass limit exceeded halts with an error showing the last findings path.
+
+Agent specifiers accept any name from `config.agents`, plus aliases `primary` (the currently assigned primary agent) and `escalation` (the currently assigned escalation agent). Aliases are resolved once at start; mid-workflow `/agent switch` does not affect a running workflow.
+
+Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` after each evaluator call. `/workflow resume` re-launches the workflow from the last checkpointed sprint/pass, skipping the designer (plan file is reused), using the same agents recorded in the state file. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
+
+The workflow progress panel (toggled with `/panel workflow`, auto-opens at start) shows the current sprint, pass, role, and verdict history.
 
 **/config** manages the milk configuration:
 
