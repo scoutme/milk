@@ -147,23 +147,31 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case wizardStepDesigner:
-		w.designer = workflowAgentInput(input)
+		w.designer = workflowAgentInputWithDefault(input, w.designer, w.reconfiguring)
 		w.step = wizardStepGenerator
 		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
+		if w.reconfiguring {
+			m.appendTranscript(milkTag() + workflowAgentReconfigurePrompt("generator", w.generator))
+		} else {
+			m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
+		}
 		m.refreshPrompt()
 		return m, nil
 
 	case wizardStepGenerator:
-		w.generator = workflowAgentInput(input)
+		w.generator = workflowAgentInputWithDefault(input, w.generator, w.reconfiguring)
 		w.step = wizardStepEvaluator
 		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
+		if w.reconfiguring {
+			m.appendTranscript(milkTag() + workflowAgentReconfigurePrompt("evaluator", w.evaluator))
+		} else {
+			m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
+		}
 		m.refreshPrompt()
 		return m, nil
 
 	case wizardStepEvaluator:
-		w.evaluator = workflowAgentInput(input)
+		w.evaluator = workflowAgentInputWithDefault(input, w.evaluator, w.reconfiguring)
 		w.step = wizardStepDone
 
 		// Record the fully-assembled command in history so the user can
@@ -264,8 +272,13 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 	}
 
 	w := &workflowWizardState{
-		name:          st.WorkflowName,
-		task:          st.Task,
+		name: st.WorkflowName,
+		task: st.Task,
+		// Pre-populate current agent names so the wizard can show them as defaults
+		// and accept blank input to keep the existing value.
+		designer:      st.AgentMap["designer"],
+		generator:     st.AgentMap["generator"],
+		evaluator:     st.AgentMap["evaluator"],
 		step:          wizardStepDesigner,
 		reconfiguring: true,
 		sprint:        st.Sprint,
@@ -277,7 +290,7 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 		" workflow reconfigure — reassign agents for sprint %d pass %d (task: %s)\n",
 		st.Sprint, st.Pass, st.Task,
 	))
-	m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
+	m.appendTranscript(milkTag() + workflowAgentReconfigurePrompt("designer", w.designer))
 	m.refreshPrompt()
 	return m, nil
 }
@@ -591,9 +604,23 @@ func workflowAgentPrompt(role string) string {
 	return fmt.Sprintf(" workflow dev — %s agent (blank = escalation):\n", role)
 }
 
-// workflowAgentInput normalises a wizard agent answer: blank → AliasEscalation.
-func workflowAgentInput(input string) string {
+// workflowAgentReconfigurePrompt returns the wizard prompt for a reconfigure step,
+// showing the current agent name as the default.
+func workflowAgentReconfigurePrompt(role, current string) string {
+	if current == "" {
+		return fmt.Sprintf(" workflow reconfigure — %s agent (blank = escalation):\n", role)
+	}
+	return fmt.Sprintf(" workflow reconfigure — %s agent (blank = keep %q):\n", role, current)
+}
+
+// workflowAgentInputWithDefault normalises a wizard agent answer.
+// In reconfigure mode, blank keeps the existing value (current); in normal mode
+// blank falls back to AliasEscalation.
+func workflowAgentInputWithDefault(input, current string, reconfiguring bool) string {
 	if input == "" {
+		if reconfiguring && current != "" {
+			return current
+		}
 		return workflow.AliasEscalation
 	}
 	return input

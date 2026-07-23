@@ -359,6 +359,75 @@ func TestReconfigureWizardStepsFlow(t *testing.T) {
 	}
 }
 
+// TestReconfigureWizardBlankKeepsCurrent verifies that blank input at a reconfigure
+// wizard step keeps the pre-populated current agent value instead of defaulting
+// to AliasEscalation.
+func TestReconfigureWizardBlankKeepsCurrent(t *testing.T) {
+	m := testModel()
+	m.st = &interactiveState{}
+	m.pendingWorkflowWizard = &workflowWizardState{
+		name:          "dev",
+		task:          "task",
+		designer:      "current-d",
+		generator:     "current-g",
+		evaluator:     "current-e",
+		step:          wizardStepDesigner,
+		reconfiguring: true,
+	}
+
+	// blank designer → keeps "current-d"
+	m1, _ := m.advanceWorkflowWizard("")
+	nm1 := m1.(model)
+	if nm1.pendingWorkflowWizard == nil {
+		t.Fatal("wizard cleared too early")
+	}
+	if nm1.pendingWorkflowWizard.designer != "current-d" {
+		t.Errorf("designer = %q, want %q (blank should keep current)", nm1.pendingWorkflowWizard.designer, "current-d")
+	}
+	if nm1.pendingWorkflowWizard.step != wizardStepGenerator {
+		t.Errorf("step = %d, want wizardStepGenerator", nm1.pendingWorkflowWizard.step)
+	}
+
+	// blank generator → keeps "current-g"
+	m2, _ := nm1.advanceWorkflowWizard("")
+	nm2 := m2.(model)
+	if nm2.pendingWorkflowWizard == nil {
+		t.Fatal("wizard cleared too early")
+	}
+	if nm2.pendingWorkflowWizard.generator != "current-g" {
+		t.Errorf("generator = %q, want %q", nm2.pendingWorkflowWizard.generator, "current-g")
+	}
+}
+
+// TestReconfigureWizardExplicitOverridesDefault verifies that typing a new agent
+// name overrides the pre-populated current value.
+func TestReconfigureWizardExplicitOverridesDefault(t *testing.T) {
+	m := testModel()
+	m.st = &interactiveState{}
+	m.pendingWorkflowWizard = &workflowWizardState{
+		name:          "dev",
+		task:          "task",
+		designer:      "old-d",
+		generator:     "old-g",
+		evaluator:     "old-e",
+		step:          wizardStepDesigner,
+		reconfiguring: true,
+	}
+
+	m1, _ := m.advanceWorkflowWizard("new-d")
+	nm1 := m1.(model)
+	if nm1.pendingWorkflowWizard == nil {
+		t.Fatal("wizard cleared too early")
+	}
+	if nm1.pendingWorkflowWizard.designer != "new-d" {
+		t.Errorf("designer = %q, want %q", nm1.pendingWorkflowWizard.designer, "new-d")
+	}
+	// generator pre-populated value must still be available for the next step
+	if nm1.pendingWorkflowWizard.generator != "old-g" {
+		t.Errorf("generator pre-populated value lost: got %q, want %q", nm1.pendingWorkflowWizard.generator, "old-g")
+	}
+}
+
 // TestReconfigureWizardState_ReconfigFlagPreserved verifies that the reconfiguring
 // flag is propagated through all wizard steps without being cleared.
 func TestReconfigureWizardState_ReconfigFlagPreserved(t *testing.T) {
