@@ -6,7 +6,10 @@ import (
 	"path/filepath"
 )
 
-// State is the persisted workflow checkpoint written after each evaluator call.
+// State is the persisted workflow checkpoint written after each role completes.
+// Role records the next role to run on resume:
+//   - "generator" → generator has not yet run for this sprint/pass
+//   - "evaluator" → generator completed; evaluator has not yet run
 type State struct {
 	WorkflowName   string            `json:"workflow_name"`
 	Task           string            `json:"task,omitempty"`

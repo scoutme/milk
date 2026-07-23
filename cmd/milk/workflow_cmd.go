@@ -170,7 +170,7 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 
 	m.pendingWorkflowWizard = nil
 	if w.resuming {
-		return m.launchWorkflowResume(w, w.sprint, w.pass, 0)
+		return m.launchWorkflowResume(w, w.sprint, w.pass, 0, "generator")
 	}
 	return m.launchWorkflow(w)
 }
@@ -380,12 +380,14 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		w.evaluator = workflow.AliasEscalation
 	}
 
-	return m.launchWorkflowResume(w, st.Sprint, st.Pass, 0)
+	return m.launchWorkflowResume(w, st.Sprint, st.Pass, 0, st.Role)
 }
 
-// launchWorkflowResume is like launchWorkflow but resumes from a sprint/pass checkpoint.
+// launchWorkflowResume is like launchWorkflow but resumes from a sprint/pass/role checkpoint.
+// role should be the saved State.Role value ("generator" or "evaluator"); use "generator" when
+// the role is unknown (e.g. agent-wizard resume or extend-after-exhaustion).
 // maxPasses overrides the plan-declared limit; pass 0 to use the plan value.
-func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPasses int) (tea.Model, tea.Cmd) {
+func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPasses int, role string) (tea.Model, tea.Cmd) {
 	cfg := m.st.cfg
 	sess := m.st.sess
 	send := func(msg tea.Msg) { m.st.program.Send(msg) }
@@ -418,7 +420,7 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 		return m, nil
 	}
 
-	wf := wfdev.NewResume(w.task, maxPasses, sprint, pass)
+	wf := wfdev.NewResume(w.task, maxPasses, sprint, pass, role)
 	runCfg := workflow.RunConfig{
 		Session:  sess,
 		Runners:  runners,
@@ -471,7 +473,7 @@ func (m model) handleWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript("y\n")
 		m.pendingWorkflowExtend = nil
 		newMax := ext.maxPasses * 2
-		return m.launchWorkflowResume(ext.wizard, ext.sprint, 1, newMax)
+		return m.launchWorkflowResume(ext.wizard, ext.sprint, 1, newMax, "generator")
 	case "n", "N", "ctrl+c", "esc":
 		m.ta.Reset()
 		m.syncLayout()
