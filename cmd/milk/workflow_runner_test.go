@@ -31,7 +31,7 @@ func TestBuildWorkflowRunners_ScratchSession(t *testing.T) {
 	}
 	da := &dispatchAgents{} // primary and escalation both nil → primaryName = ""
 
-	runners, err := buildWorkflowRunners(agentNames, config.Config{}, replSess, nil, da)
+	runners, err := buildWorkflowRunners(agentNames, config.Config{}, replSess, nil, da, permContext{}, nil)
 	if err != nil {
 		t.Fatalf("buildWorkflowRunners returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestBuildWorkflowRunners_EachRoleGetsDistinctSession(t *testing.T) {
 	}
 	da := &dispatchAgents{}
 
-	runners, err := buildWorkflowRunners(agentNames, config.Config{}, replSess, nil, da)
+	runners, err := buildWorkflowRunners(agentNames, config.Config{}, replSess, nil, da, permContext{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

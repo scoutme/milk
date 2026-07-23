@@ -260,9 +260,9 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 	// so that workflow roles have the same tool access as normal turns.
 	m.st.toolFutures = map[string]chan string{}
 	ir0 := &tuiInputReader{send: send}
-	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents)
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
 		return m, nil
@@ -410,9 +410,9 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 
 	m.st.toolFutures = map[string]chan string{}
 	ir0 := &tuiInputReader{send: send}
-	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents)
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
 		return m, nil

@@ -102,6 +102,9 @@ func newWorkflowSession() *session.Session {
 // runners it contains already carry the correct permission handlers, tool-use
 // callbacks, and skip-permissions setting for the current turn.
 //
+// cliPC and newInput are forwarded to any cliRunner built for roles that target
+// a claude-cli agent by name.
+//
 // Each role receives its own scratch session (not the REPL session) so workflow
 // turns do not contaminate the live conversation history.
 func buildWorkflowRunners(
@@ -110,6 +113,8 @@ func buildWorkflowRunners(
 	replSess *session.Session,
 	mem *memory.Store,
 	da *dispatchAgents,
+	cliPC permContext,
+	newInput func() inputReader,
 ) (map[string]workflow.TurnRunner, error) {
 	primaryName := ""
 	if da.primary != nil {
@@ -129,10 +134,23 @@ func buildWorkflowRunners(
 		case escalationName:
 			inner = da.escalation
 		default:
-			var err error
-			inner, err = getOrBuildToolRunner(context.Background(), name, cfg, da)
-			if err != nil {
-				return nil, fmt.Errorf("workflow role %q: %w", role, err)
+			ac, ok := findAgentByName(cfg, name)
+			if !ok {
+				return nil, fmt.Errorf("workflow role %q: agent %q not found in config", role, name)
+			}
+			if ac.IsCLI() {
+				cliAg := newCLIAgent(ac)
+				cr := newCLIRunner(cliAg, name, cliPC, newInput)
+				if servers := cfg.EffectiveMCPServers(name); len(servers) > 0 {
+					cr = cr.withMCPServers(servers)
+				}
+				inner = cr
+			} else {
+				var err error
+				inner, err = getOrBuildToolRunner(context.Background(), name, cfg, da)
+				if err != nil {
+					return nil, fmt.Errorf("workflow role %q: %w", role, err)
+				}
 			}
 		}
 
