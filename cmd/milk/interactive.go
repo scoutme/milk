@@ -183,6 +183,14 @@ const interactiveHelp = `
   /mcp assign <server> for <agent>   add server to agent's mcp_servers list
   /mcp unassign <server> for <agent>  remove server from agent's list
 
+── Workflow ───────────────────────────────────────────────────────────────
+  /workflow                          list available workflows
+  /workflow dev [<task>]             start designer→generator→evaluator workflow
+  /workflow dev [<task>] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]
+  /workflow resume                   resume workflow from last checkpoint
+  /workflow reconfigure              reassign agent roles for current workflow (preserves state)
+  /workflow clear                    delete saved workflow state for this session
+
 ── Server ────────────────────────────────────────────────────────────────
   /server status [<agent>]          show server status (reachable + PID)
   /server start for <agent>         start the inference server manually
