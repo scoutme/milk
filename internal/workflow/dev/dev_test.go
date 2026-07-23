@@ -152,6 +152,73 @@ func TestDevWorkflow_PlanMaxPassesHonoured(t *testing.T) {
 	}
 }
 
+// TestDevWorkflow_ResumeSkipsGenerator verifies that when the saved state has
+// role="evaluator", resuming re-runs the evaluator without re-running the generator.
+func TestDevWorkflow_ResumeSkipsGenerator(t *testing.T) {
+	dir := t.TempDir()
+
+	plan := "## Spec\nBuild foo.\n\n## Limits\nmax_passes: 3\nmax_sprints: 1\n\n## Sprint 1\nImplement foo."
+	generatorOut := "func main() {}"
+	evaluatorOut := "verdict: good_to_go"
+
+	generatorCalls := 0
+	evaluatorCalls := 0
+
+	runners := map[string]workflow.TurnRunner{
+		"designer": &stubTurnRunner{name: "designer", output: plan},
+		"generator": &callCountRunner{
+			stubTurnRunner: stubTurnRunner{name: "generator", output: generatorOut},
+			count:          &generatorCalls,
+		},
+		"evaluator": &callCountRunner{
+			stubTurnRunner: stubTurnRunner{name: "evaluator", output: evaluatorOut},
+			count:          &evaluatorCalls,
+		},
+	}
+
+	// Write the plan file (simulating a completed designer turn).
+	sess := &session.Session{ID: "test-" + t.Name()}
+	planPath := dir + "/" + sess.ID + ".workflow.plan.md"
+	if err := os.WriteFile(planPath, []byte(plan), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Write the sprint file (simulating a completed generator turn).
+	sprintPath := dir + "/" + sess.ID + ".workflow.sprint1.md"
+	if err := os.WriteFile(sprintPath, []byte(generatorOut), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := workflow.RunConfig{
+		Session:  sess,
+		Runners:  runners,
+		StateDir: dir,
+	}
+
+	// Resume at sprint=1, pass=1, role="evaluator" — generator must not run.
+	wf := NewResume("build foo", 0, 1, 1, "evaluator")
+	if err := wf.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if generatorCalls != 0 {
+		t.Errorf("generator was called %d time(s), want 0 on evaluator-role resume", generatorCalls)
+	}
+	if evaluatorCalls != 1 {
+		t.Errorf("evaluator was called %d time(s), want 1", evaluatorCalls)
+	}
+}
+
+// callCountRunner wraps stubTurnRunner and increments a counter on each Run call.
+type callCountRunner struct {
+	stubTurnRunner
+	count *int
+}
+
+func (c *callCountRunner) Run(ctx context.Context, prompt string, out io.Writer) (string, error) {
+	*c.count++
+	return c.stubTurnRunner.Run(ctx, prompt, out)
+}
+
 // TestDevWorkflow_NoDoneMessageViaSend verifies that Run never calls send with a
 // WorkflowDoneMsg — the goroutine wrapper in cmd/milk is the sole source of that
 // message. The test drives the workflow with a stub runner that returns

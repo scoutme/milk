@@ -46,8 +46,9 @@ type DevWorkflow struct {
 	MaxPasses         int  // maximum generator passes per sprint; overridden by plan declaration unless MaxPassesOverride is set
 	MaxPassesOverride bool // when true, MaxPasses wins over the plan-declared max_passes
 	Task              string
-	ResumeSprint      int // if > 0, skip designer and start from this sprint
-	ResumePass        int // if > 0, start from this pass within ResumeSprint
+	ResumeSprint      int    // if > 0, skip designer and start from this sprint
+	ResumePass        int    // if > 0, start from this pass within ResumeSprint
+	ResumeRole        string // if "evaluator", skip generator for the first resumed sprint/pass
 }
 
 func New(task string, maxPasses int) *DevWorkflow {
@@ -58,13 +59,15 @@ func New(task string, maxPasses int) *DevWorkflow {
 }
 
 // NewResume creates a DevWorkflow that skips the designer and restarts from
-// the given sprint/pass checkpoint. The plan file must already exist.
+// the given sprint/pass/role checkpoint. The plan file must already exist.
+// role should be the saved State.Role value ("generator" or "evaluator").
 // When maxPasses > 0 it is used as a hard override, taking precedence over any
 // max_passes directive in the plan (used when the user extends after exhaustion).
-func NewResume(task string, maxPasses, sprint, pass int) *DevWorkflow {
+func NewResume(task string, maxPasses, sprint, pass int, role string) *DevWorkflow {
 	wf := New(task, maxPasses)
 	wf.ResumeSprint = sprint
 	wf.ResumePass = pass
+	wf.ResumeRole = role
 	if maxPasses > 0 {
 		wf.MaxPassesOverride = true
 	}
@@ -152,6 +155,13 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	if w.ResumeSprint > 0 {
 		startSprint = w.ResumeSprint
 	}
+	// resumeRole is the role to start from within the first resumed sprint/pass.
+	// Empty string means start from generator (normal case). "evaluator" means
+	// the generator already completed and we resume at the evaluator.
+	resumeRole := ""
+	if w.ResumeSprint > 0 {
+		resumeRole = w.ResumeRole
+	}
 
 	// ── Sprint loop ───────────────────────────────────────────────────────────
 	for sprint := startSprint; sprint <= sprintCount; sprint++ {
@@ -165,25 +175,38 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			sprintPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.sprint%d.md", sess.ID, sprint))
 			findingsPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.findings%d.md", sess.ID, sprint))
 
-			// Generator
-			st.Role = "generator"
-			sendProgress()
-			generatorRunner, ok := cfg.Runners["generator"]
-			if !ok {
-				return fmt.Errorf("workflow: no runner for role 'generator'")
-			}
-			emitPrefix(send, fmt.Sprintf("generator sprint %d pass %d", sprint, st.Pass))
-			genOutput, err := workflow.Turn(ctx, generatorRunner, generatorPrompt(planPath, sprint, st.Pass, findingsPath), send)
-			if err != nil {
-				return fmt.Errorf("workflow: generator sprint %d pass %d: %w", sprint, st.Pass, err)
-			}
-			// When the generator completes via tool calls and produces no closing text,
-			// substitute a git diff summary so the evaluator can see what changed.
-			if strings.TrimSpace(genOutput) == "" {
-				genOutput = gitDiffSummary()
-			}
-			if err := os.WriteFile(sprintPath, []byte(genOutput), 0o600); err != nil {
-				return fmt.Errorf("workflow: writing sprint file: %w", err)
+			// Skip generator when resuming at the evaluator for this sprint/pass.
+			skipGenerator := resumeRole == "evaluator" &&
+				sprint == startSprint && st.Pass == w.ResumePass
+			resumeRole = "" // only applies to the first resumed turn
+
+			if skipGenerator {
+				emitPrefix(send, fmt.Sprintf("resuming at evaluator sprint %d pass %d", sprint, st.Pass))
+			} else {
+				// Generator
+				st.Role = "generator"
+				sendProgress()
+				generatorRunner, ok := cfg.Runners["generator"]
+				if !ok {
+					return fmt.Errorf("workflow: no runner for role 'generator'")
+				}
+				emitPrefix(send, fmt.Sprintf("generator sprint %d pass %d", sprint, st.Pass))
+				genOutput, err := workflow.Turn(ctx, generatorRunner, generatorPrompt(planPath, sprint, st.Pass, findingsPath), send)
+				if err != nil {
+					return fmt.Errorf("workflow: generator sprint %d pass %d: %w", sprint, st.Pass, err)
+				}
+				// When the generator completes via tool calls and produces no closing text,
+				// substitute a git diff summary so the evaluator can see what changed.
+				if strings.TrimSpace(genOutput) == "" {
+					genOutput = gitDiffSummary()
+				}
+				if err := os.WriteFile(sprintPath, []byte(genOutput), 0o600); err != nil {
+					return fmt.Errorf("workflow: writing sprint file: %w", err)
+				}
+				// Checkpoint with role="evaluator" so a resume after generator
+				// completion skips straight to the evaluator.
+				st.Role = "evaluator"
+				_ = workflow.SaveState(statePath, st)
 			}
 
 			// Evaluator

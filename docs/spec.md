@@ -382,6 +382,7 @@ The goal is shown in the memory panel and injected into escalation context so th
               --generator <agent> \
               --evaluator <agent>                 # inline agent assignment
 /workflow resume                                  # resume workflow from last sprint/pass checkpoint
+/workflow reconfigure                             # reassign agent roles without losing saved state
 /workflow clear                                   # delete saved state for this session (with confirmation)
 ```
 
@@ -395,7 +396,7 @@ Loop semantics: `needs_refinement` re-runs the generator for the same sprint (up
 
 Agent specifiers accept any name from `config.agents`, plus aliases `primary` (the currently assigned primary agent) and `escalation` (the currently assigned escalation agent). Aliases are resolved once at start; mid-workflow `/agent switch` does not affect a running workflow.
 
-Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` after each evaluator call. `/workflow resume` re-launches the workflow from the last checkpointed sprint/pass, skipping the designer (plan file is reused), using the same agents recorded in the state file. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
+Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` at two points per pass: after the generator writes its sprint file (with `role: "evaluator"`) and after the evaluator completes (with the verdict recorded). `/workflow resume` re-launches from the last checkpointed sprint/pass/role, skipping the designer (plan file is reused) and, when `role` is `"evaluator"`, also skipping the generator. The same agents recorded in the state file are used. `/workflow reconfigure` runs the agent-role wizard against the current saved state (skipping the task prompt) and writes new agent names into the state file without touching sprint/pass/role, so a subsequent `/workflow resume` continues from the same checkpoint with the new agents. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
 
 The workflow progress panel (toggled with `/panel workflow`, auto-opens at start) shows the current sprint, pass, role, and verdict history.
 
