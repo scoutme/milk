@@ -75,6 +75,34 @@ tasks:
     deps:
       - build
 
+  build:mock:
+    desc: Compile milk-mock binary into current directory
+    cmds:
+      - go build -o ./milk-mock ./cmd/milk-mock
+    deps:
+      - fmt
+
+  mock:server:
+    desc: Start the milk-mock OpenAI-compatible SSE server (name=test, port=19999)
+    cmds:
+      - ./milk-mock server --name test --port 19999
+    deps:
+      - build:mock
+
+  mock:claude:
+    desc: Show usage for milk-mock claude (drop-in claude CLI mock)
+    cmds:
+      - ./milk-mock claude --help
+    deps:
+      - build:mock
+
+  test:integration:
+    desc: Run integration tests (requires milk-mock binary in current directory)
+    cmds:
+      - go test -tags integration ./internal/mockrecorder/
+    deps:
+      - build:mock
+
   ci:
     desc: fmt + vet + test + build
     cmds:
