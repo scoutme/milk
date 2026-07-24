@@ -37,9 +37,10 @@ const (
 // addAgentState tracks state for the multi-step /agent add wizard.
 // Fields are filled one at a time when the user doesn't supply them inline.
 type addAgentState struct {
-	ac          config.AgentConfig
-	step        addAgentStep
-	runCmdAsked bool // true once the optional run_cmd step has been shown
+	ac           config.AgentConfig
+	step         addAgentStep
+	runCmdAsked  bool // true once the optional run_cmd step has been shown
+	promptAsked  bool // true once the optional prompt step has been shown
 }
 
 type addAgentStep int
@@ -52,6 +53,7 @@ const (
 	addStepModel
 	addStepAPIKey    // only when provider is bearer
 	addStepAWSRegion // only when provider is bedrock
+	addStepPrompt    // optional — inline prompt or prompt_file path
 	addStepDone
 )
 
@@ -151,6 +153,8 @@ func addAgentPrompt(step addAgentStep) string {
 		return milkTag() + " api_key:"
 	case addStepAWSRegion:
 		return milkTag() + " aws_region:"
+	case addStepPrompt:
+		return milkTag() + " behaviour (optional — inline prompt text, or file=<path> to load from a file, enter to skip):"
 	default:
 		return ""
 	}
@@ -198,6 +202,13 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.ac.APIKey = answer
 		case addStepAWSRegion:
 			st.ac.AWSRegion = answer
+		case addStepPrompt:
+			if strings.HasPrefix(answer, "file=") {
+				st.ac.PromptFile = strings.TrimPrefix(answer, "file=")
+			} else if answer != "" {
+				st.ac.Prompt = answer
+			}
+			st.promptAsked = true
 		}
 
 		// After URL is set: inject run_cmd step for local provider before advancing.
@@ -209,6 +220,12 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		// Advance to next missing step.
 		st.step = firstMissingStep(st.ac)
+		if st.step == addStepDone && !st.promptAsked {
+			// Inject the optional behaviour step before committing.
+			st.step = addStepPrompt
+			m.appendTranscript(addAgentPrompt(st.step) + " ")
+			return m, nil
+		}
 		if st.step == addStepDone {
 			m.pendingAdd = nil
 			m = m.commitAddAgent(st.ac)

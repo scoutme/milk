@@ -16,6 +16,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/agent/subprocess"
+	"github.com/scoutme/milk/internal/agentprompt"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/mcp"
@@ -148,7 +149,17 @@ func (r *localRunner) Execute(
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, role == RolePrimary),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
-	})
+	}).WithToolTimeout(cfg.AgentToolTimeout(ac))
+
+	// Apply custom prompt (prompt / prompt_file in agent config) when set.
+	if ac.Prompt != "" || ac.PromptFile != "" {
+		vars := buildPromptVars(sess, percepts, cfg)
+		if rendered, err := agentprompt.Render(ac, vars); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: custom prompt render failed for agent %q: %v\n", milkTag(), ac.Name, err)
+		} else if rendered != "" {
+			agent = agent.WithCustomPrompt(rendered)
+		}
+	}
 
 	if role == RoleWorkflow {
 		agent = agent.AsWorkflowExecutor()
@@ -340,6 +351,18 @@ func (r *cliRunner) Execute(
 	if cfg.ExperimentalPermissionManagement {
 		staticCtx += permissionManagementInstruction
 	}
+
+	// Prepend custom prompt from the escalation agent config when set.
+	escAC := cfg.EscalationAgentConfig()
+	if escAC.Prompt != "" || escAC.PromptFile != "" {
+		vars := buildPromptVars(sess, percepts, cfg)
+		if rendered, err := agentprompt.Render(escAC, vars); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: custom prompt render failed for agent %q: %v\n", milkTag(), escAC.Name, err)
+		} else if rendered != "" {
+			staticCtx = rendered + "\n\n" + staticCtx
+		}
+	}
+
 	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
 
 	// Suppress duplicate dynamic context on resume turns (cache preservation).
@@ -484,8 +507,17 @@ func (r *cliRunner) Execute(
 	}, nil
 }
 
-func (r *cliRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
-	return "", errors.New("tool-agent calls not supported for this provider")
+func (r *cliRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+	if !r.agent.SkipPermissions() {
+		return "", errors.New("claude-cli tool-agent requires dangerously_skip_permissions: true")
+	}
+	// Run a fresh first-turn (no session resume) with empty context — tool calls
+	// are stateless one-shot requests, not continuation of an escalation session.
+	_, res, err := r.agent.RunFirst(ctx, "", "", prompt, out)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
 }
 
 // ── subprocessRunner ─────────────────────────────────────────────────────────
@@ -673,4 +705,34 @@ func agentConfigForRole(cfg config.Config, role AgentRole) config.AgentConfig {
 		return cfg.ActiveAgent()
 	}
 	return cfg.EscalationAgentConfig()
+}
+
+// localBuiltinTools is a human-readable list of milk's built-in local-agent tools,
+// used to populate the {{milk:tools}} placeholder in custom prompts.
+const localBuiltinTools = "bash, find_files, grep, read_file, write_file, edit_file, open_file, delete_file, move_file, http_request, list_dir, http_get, get_session_context, escalate, current_need, record_memory, get_memory, export_session"
+
+// buildPromptVars assembles the PlaceholderVars for agentprompt.Render from the
+// current session state and percept list.
+func buildPromptVars(sess *session.Session, percepts []string, _ config.Config) agentprompt.PlaceholderVars {
+	var need string
+	if sess != nil {
+		need = sess.CurrentNeed
+	}
+
+	var escSummary string
+	if sess != nil {
+		escSummary = sess.LastEscalationSummary
+	}
+
+	var memText string
+	if len(percepts) > 0 {
+		memText = escalation.FormatPercepts(percepts)
+	}
+
+	return agentprompt.PlaceholderVars{
+		Memory:     memText,
+		Need:       need,
+		Escalation: escSummary,
+		Tools:      localBuiltinTools,
+	}
 }

@@ -594,3 +594,60 @@ func TestEffectiveToolAgents_UnknownAgentDropped(t *testing.T) {
 		t.Errorf("expected unknown agent to be dropped, got %v", got)
 	}
 }
+
+func TestValidate_BothPromptAndPromptFile(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{
+				Name:       "local",
+				URL:        "http://localhost:8080",
+				Model:      "qwen",
+				Prompt:     "inline text",
+				PromptFile: "/some/file.md",
+			},
+		},
+	}
+	warnings := Validate(cfg)
+	found := false
+	for _, w := range warnings {
+		if w.Agent == "local" && containsSubstr(w.Message, "prompt_file takes precedence") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about prompt_file taking precedence; got warnings: %v", warnings)
+	}
+}
+
+func TestValidate_OnlyPromptNoWarning(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{
+				Name:   "local",
+				URL:    "http://localhost:8080",
+				Model:  "qwen",
+				Prompt: "inline text only",
+			},
+		},
+	}
+	warnings := Validate(cfg)
+	for _, w := range warnings {
+		if containsSubstr(w.Message, "prompt") {
+			t.Errorf("unexpected prompt-related warning: %v", w)
+		}
+	}
+}
+
+func containsSubstr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || findSub(s, sub))
+}
+
+func findSub(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

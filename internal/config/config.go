@@ -171,6 +171,16 @@ type AgentConfig struct {
 	// Tools is an optional per-agent override/extension of Config.AgentTools.
 	// An entry whose Agent name matches a global entry replaces it; new names are appended.
 	Tools []AgentToolEntry `json:"tools,omitempty"`
+
+	// Prompt is an optional inline system prompt prepended to this agent's default
+	// system prompt on every turn. Supports {{milk:memory}}, {{milk:need}},
+	// {{milk:escalation}}, and {{milk:tools}} placeholders.
+	// When PromptFile is also set, PromptFile takes precedence.
+	Prompt string `json:"prompt,omitempty"`
+
+	// PromptFile is a path to a .md or .txt file whose contents are used as the
+	// agent's custom system prompt. Takes precedence over Prompt when both are set.
+	PromptFile string `json:"prompt_file,omitempty"`
 }
 
 // AgentToolEntry defines a peer agent that can be called as a tool by another agent.
@@ -226,6 +236,12 @@ type AgentLimits struct {
 	// synchronous workflows (e.g. a claude-cli escalation agent doing multi-sprint work).
 	// Set to -1 for no timeout.
 	TurnTimeoutSecs *int `json:"turn_timeout_secs,omitempty"`
+
+	// ToolTimeoutSecs is the per-individual-tool timeout, independent of TurnTimeoutSecs.
+	// After a tool runs for this duration its context is cancelled and the tool
+	// call returns an error result to the model. Other tools in the same batch are
+	// unaffected. Default: 120 s (2 min). Set to -1 for no per-tool limit.
+	ToolTimeoutSecs *int `json:"tool_timeout_secs,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -486,6 +502,18 @@ type Config struct {
 	// normal handleStreamClosedDenials path.
 	// Default: false (opt-in, experimental).
 	ExperimentalPermissionManagement bool `json:"experimental_permission_management,omitempty"`
+
+	// DirectBash enables the direct shell-command shortcut: when a turn input
+	// looks like a shell command (heuristic check), milk asks for confirmation
+	// before running it locally instead of forwarding to an agent.
+	// Default: false (opt-in).
+	DirectBash bool `json:"direct_bash,omitempty"`
+
+	// DirectBashAllow is a list of command names (first tokens) that skip the
+	// confirmation prompt when DirectBash is enabled. Matching is case-insensitive
+	// against the first whitespace-delimited token of the input.
+	// Example: ["ls", "git", "docker"]
+	DirectBashAllow []string `json:"direct_bash_allow,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.
@@ -888,6 +916,21 @@ func (c Config) AgentTurnTimeout(a AgentConfig) time.Duration {
 	return 10 * time.Minute
 }
 
+// AgentToolTimeout returns the per-individual-tool timeout for the given agent.
+// Returns 0 when set to -1 (no timeout). Default: 120 s.
+func (c Config) AgentToolTimeout(a AgentConfig) time.Duration {
+	if a.Limits != nil && a.Limits.ToolTimeoutSecs != nil {
+		v := *a.Limits.ToolTimeoutSecs
+		if v < 0 {
+			return 0 // no per-tool timeout
+		}
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 2 * time.Minute // default 2 min
+}
+
 // intOr returns v when v > 0, otherwise returns def.
 func intOr(v, def int) int {
 	if v > 0 {
@@ -1238,6 +1281,11 @@ func Validate(cfg Config) []ValidationWarning {
 				// so we skip this check for non-empty unknown strings.
 				_ = p
 			}
+		}
+
+		// Both prompt and prompt_file set: prompt_file wins; warn so the user knows.
+		if a.Prompt != "" && a.PromptFile != "" {
+			warn(a.Name, "both prompt and prompt_file are set — prompt_file takes precedence")
 		}
 
 		// HTTP providers must have a url.

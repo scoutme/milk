@@ -29,6 +29,98 @@ A built-in entry named `"claude"` with `provider: "claude-cli"` is always availa
 | `allowed_tools` | — | Tools pre-approved; passed as `--allowedTools` |
 | `add_dirs` | — | Extra directories; passed as `--add-dir` |
 
+### claude-cli as a tool-agent
+
+A `claude-cli` agent can be used as a **tool-agent** — called inline during a local agent's tool loop (via `agent_<name>` tool calls). This runs the Claude CLI subprocess headlessly for each tool invocation.
+
+**Requirements**: `dangerously_skip_permissions: true` is mandatory. Tool-agent calls have no interactive permission back-channel — Claude Code's `--permission-prompt-tool stdio` mode cannot be used in a headless context. Without this flag, `buildToolRunner` returns an error to prevent silent hangs.
+
+```json
+{
+  "agents": [
+    {
+      "name": "local",
+      "url": "http://localhost:8080",
+      "model": "qwen2.5-coder",
+      "tools": [
+        {
+          "agent": "claude-tool",
+          "description": "Call Claude Code for complex reasoning or code generation tasks"
+        }
+      ]
+    },
+    {
+      "name": "claude-tool",
+      "provider": "claude-cli",
+      "bin": "claude",
+      "dangerously_skip_permissions": true
+    }
+  ]
+}
+```
+
+**Limitations:**
+- No permission prompts — all tool uses by the subprocess are auto-approved.
+- Each tool-agent call is a fresh first-turn with no session state (stateless per-call).
+- The `claude-cli` tool-agent does not receive the primary agent's session history.
+
+For testing without a live `claude` binary, set `bin` to a `milk-mock claude` wrapper (see [docs/mock-setup.md](mock-setup.md)).
+
+---
+
+## Custom agent behaviour (`prompt` / `prompt_file`)
+
+Any agent entry can carry a custom system prompt that is **prepended** to milk's default system prompt on every turn.
+
+```json
+{
+  "name": "local",
+  "url": "http://localhost:8080",
+  "model": "qwen2.5-coder",
+  "prompt": "You are a strict code reviewer. Only respond in bullet points.\n\nAvailable tools: {{milk:tools}}"
+}
+```
+
+Or load the prompt from a file:
+
+```json
+{
+  "name": "local",
+  "url": "http://localhost:8080",
+  "model": "qwen2.5-coder",
+  "prompt_file": "~/.milk/prompts/code-reviewer.md"
+}
+```
+
+When both `prompt` and `prompt_file` are set, `prompt_file` wins (a config warning is shown at startup).
+
+### Placeholders
+
+The prompt text supports four `{{milk:*}}` placeholders that are substituted at render time:
+
+| Placeholder | Substituted with |
+|---|---|
+| `{{milk:memory}}` | The current remembered-facts block (`[Remembered facts]…`) from percepts |
+| `{{milk:need}}` | The session's current need description (`sess.CurrentNeed`) |
+| `{{milk:escalation}}` | The last escalation-agent summary (`sess.LastEscalationSummary`) |
+| `{{milk:tools}}` | Comma-separated list of built-in local-agent tool names |
+
+An empty placeholder value removes the placeholder text silently.
+
+If **no** `{{milk:*}}` placeholder is present in the prompt text, a compact `*(milk context injected below)*` footer is auto-appended so milk's own system context still reaches the agent.
+
+### Wizard
+
+When adding an agent with `/agent add`, the wizard asks for a behaviour step after all required fields:
+
+```
+[milk] behaviour (optional — inline prompt text, or file=<path> to load from a file, enter to skip):
+```
+
+- Press Enter to skip (no custom prompt).
+- Type inline text to set `prompt`.
+- Type `file=/path/to/prompt.md` to set `prompt_file`.
+
 ---
 
 ## OpenAI Responses API

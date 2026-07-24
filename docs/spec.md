@@ -109,6 +109,7 @@ Any agent in the `agents` list can be exposed as a callable tool to any other ag
 
 Decision order per turn:
 
+0. **Direct-bash shortcut** — when `direct_bash: true` is set in config and the input matches the shell-command heuristic (`IsShellCommand`), milk prompts for `y/N` confirmation before running the command locally via `sh -c`. If the first token is in `direct_bash_allow`, confirmation is skipped. This fires _after_ slash-command handling (so `/git` still works as a slash command) but _before_ agent routing; matching inputs that are not slash commands never reach the agent.
 1. **Explicit flags** — `--escalate` forces escalation agent; `--primary` forces primary (always wins)
 2. **Session state** — if `ESCALATION_WAITING`, bypass router, send directly to escalation agent `--resume`
 3. **Rules layer** — layered scorer:
@@ -117,6 +118,22 @@ Decision order per turn:
    - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open-question prefixes each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`; all lists are configurable (see `rules` field)
 4. **Primary model classification** — when scorer is inconclusive, ask the primary model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
 5. **Default** — attempt primary; escalate if primary returns `escalate(reason)`
+
+### Direct-bash configuration
+
+```json
+{
+  "direct_bash": true,
+  "direct_bash_allow": ["ls", "git", "docker"]
+}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `direct_bash` | `false` | Enable shell-command shortcut |
+| `direct_bash_allow` | `[]` | Commands that skip the confirmation prompt |
+
+The heuristic is intentionally conservative: the first token must be a known binary name; natural-language openers (`what`, `how`, `explain`, …) always fall through to routing; prompts ending with `?` are always treated as questions; tokens longer than 8 alphabetic characters that are not flags or paths trigger rejection.
 
 The classifier uses the same model instance as the primary agent. No second model or second inference server instance.
 
@@ -789,6 +806,68 @@ Use `milk otel debug enable` to turn on the full debug bundle in one command.
 
 ---
 
+## Persistent Task Tracking
+
+milk provides a lightweight task tracker for the local agent. Tasks are stored in two JSON files:
+
+| File | Contents |
+|---|---|
+| `~/.milk/tasks/<session-id>.json` | Active session tasks |
+| `~/.milk/tasks/global.json` | Cross-session tasks (survive restart) |
+
+### Tools exposed to the local agent
+
+| Tool | Parameters | Returns |
+|---|---|---|
+| `create_task` | `title` (required), `tags?` | `{"id": "<8-char id>"}` |
+| `update_task` | `id`, `status` (pending\|in_progress\|done\|blocked), `title?` | `"ok"` |
+| `list_tasks` | `include_global?` | `[{id, title, status, tags}]` |
+| `complete_task` | `id` | `"ok"` |
+
+The task tools are only available to the primary local-agent (HTTP or Bedrock backends). Subprocess and claude-cli agents do not receive them.
+
+### TUI commands
+
+| Command | Description |
+|---|---|
+| `/tasks` | List session + global tasks inline in the transcript |
+| `/task done <id>` | Mark a task done (accepts id prefix ≥ 4 chars) |
+| `/panel tasks` | Toggle the tasks side-panel (right side, 32 cols) |
+
+### Tasks panel
+
+`/panel tasks` opens a persistent right-side panel that shows session and global tasks with status badges. It updates automatically when the agent creates or modifies tasks.
+
+---
+
+## Live Configuration Reload
+
+milk automatically watches `~/.milk/config.json` for changes while the TUI is running. Whenever the file is modified (saved from an editor in another terminal), the updated config is parsed and applied to the in-memory state within ~200 ms.
+
+The `/reload` slash command triggers an immediate re-parse — useful when the file watcher misses a write (e.g. symlink swap or atomic editor replace):
+
+```
+/reload
+```
+
+On success: `[milk] config reloaded` appears in the transcript.
+On error: `[milk] config reload error: <reason>` is shown; the existing in-memory config is kept unchanged.
+
+### What IS hot-reloaded
+
+- All `Config` scalar fields: `direct_bash`, `show_reasoning`, `sticky_escalation`, agent limits, routing rules, OTel settings, etc.
+- Agent configs (name, URL, model, credentials) — effective on the **next turn**.
+- `direct_bash` / `direct_bash_allow` — effective immediately for the next prompt submitted.
+
+### What is NOT hot-reloaded
+
+- **MCP server connections** — existing connections are not restarted. When `mcp_servers` changes are detected, milk shows:
+  `[milk] note: mcp_servers changed — restart milk to apply MCP connection changes`
+- Active agent sessions — a running turn always uses the config that was active at turn start.
+- The `agents` list used to build TurnRunners — new agent instances are only built on the next turn.
+
+---
+
 ## Graceful Degradation
 
 | Primary agent | Escalation agent | behavior |
@@ -797,6 +876,39 @@ Use `milk otel debug enable` to turn on the full debug bundle in one command.
 | down | available | warn once per session, route all to escalation agent |
 | up | unavailable/not installed | warn once per session, stay primary-only |
 | down | unavailable | error + exit |
+
+---
+
+## Concurrent Tool Dispatch
+
+When the local agent emits a batch of tool calls in a single turn, all tools in the batch are dispatched **concurrently** rather than sequentially. Each tool runs in its own goroutine:
+
+- **Turn cancellation propagates immediately**: if the user presses Ctrl-C or `/stop`, the turn context is cancelled and every in-flight tool goroutine receives the cancellation — no tool waits for the turn timeout.
+- **Per-tool timeout**: each tool goroutine gets its own `context.WithTimeout(ctx, toolTimeout)`. If a single tool hangs, it is cancelled after the per-tool limit and returns a timeout error to the model; other tools in the same batch are unaffected.
+- **Result order preserved**: tool results are appended to the message history in the original call order, regardless of which tool finishes first.
+- **Permission checks are synchronous**: `toolNeedsPermission` checks run before dispatch so the TUI can present prompts in order without interleaving.
+
+### Configuration
+
+| Field | Location | Default | Description |
+|---|---|---|---|
+| `tool_timeout_secs` | `agents[*].limits` | 120 (2 min) | Per-individual-tool timeout in seconds. Set to -1 for no limit. |
+| `turn_timeout_secs` | `agents[*].limits` | 600 (10 min) | Per-turn timeout (unchanged by this feature). |
+
+```json
+{
+  "agents": [
+    {
+      "name": "local",
+      "url": "http://localhost:8080",
+      "model": "qwen2.5-coder",
+      "limits": {
+        "tool_timeout_secs": 30
+      }
+    }
+  ]
+}
+```
 
 ---
 
