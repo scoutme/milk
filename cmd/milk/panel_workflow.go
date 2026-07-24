@@ -66,8 +66,19 @@ func (m *model) renderWorkflowPanel(h int) string {
 		lines = lines[:h]
 	}
 
-	content := strings.Join(lines, "\n")
-	return styleWorkflowPanel.Width(inner).Render(content)
+	// Pre-pad each line to exactly inner cols so lipgloss does not re-wrap when
+	// the style is rendered — Width() on a bordered style triggers cellbuf.Wrap,
+	// which adds lines and makes the panel taller than h.
+	var rows []string
+	for _, line := range lines {
+		lineW := len([]rune(stripANSI(line)))
+		if lineW < inner {
+			line += strings.Repeat(" ", inner-lineW)
+		}
+		rows = append(rows, line)
+	}
+	content := strings.Join(rows, "\n")
+	return styleWorkflowPanel.Render(content)
 }
 
 // wordWrapPanel wraps s into lines of at most maxWidth visible characters.
