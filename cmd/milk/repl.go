@@ -724,6 +724,15 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
 		switch ev.Action {
 		case tea.MouseActionPress:
+			if ev.Shift && m.selAnchorLine >= 0 {
+				// Extend existing selection to clicked position.
+				m.selEndLine = contentLine
+				m.selEndCol = ev.X
+				m.selDragging = true
+				m.selText = m.selectionText()
+				m.setViewportContent()
+				break
+			}
 			m.selAnchorLine = contentLine
 			m.selAnchorCol = ev.X
 			m.selEndLine = -1
@@ -1414,6 +1423,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+left", "shift+right", "shift+up", "shift+down", "shift+home", "shift+end",
 		"shift+ctrl+left", "shift+ctrl+right", "shift+alt+left", "shift+alt+right",
 		"ctrl+shift+left", "ctrl+shift+right":
+		if m.selAnchorLine >= 0 {
+			return m.extendTranscriptSel(msg)
+		}
 		return m.handleShiftArrow(msg)
 	case "tab":
 		if m.hintIdx >= 0 && len(m.tabMatches) == 0 {
@@ -1522,6 +1534,85 @@ func (m model) handleShiftArrow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.taSelEnd = m.taCursorOffset()
 	m.syncLayout()
 	return m, cmd
+}
+
+// extendTranscriptSel extends or reduces the current transcript selection using
+// Shift+Arrow keys. The anchor stays fixed; only selEndLine/selEndCol moves.
+func (m model) extendTranscriptSel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	lines := m.transcriptPlainLines()
+	maxLine := len(lines) - 1
+
+	endLine := m.selEndLine
+	endCol := m.selEndCol
+	if endLine < 0 {
+		// Selection was set via mouse-press only (no drag yet): start end at anchor.
+		endLine = m.selAnchorLine
+		endCol = m.selAnchorCol
+	}
+
+	lineLen := func(l int) int {
+		if l < 0 || l > maxLine {
+			return 0
+		}
+		return len([]rune(lines[l]))
+	}
+
+	switch msg.String() {
+	case "shift+up":
+		endLine--
+	case "shift+down":
+		endLine++
+	case "shift+left":
+		if endCol > 0 {
+			endCol--
+		} else if endLine > 0 {
+			endLine--
+			endCol = lineLen(endLine)
+		}
+	case "shift+right":
+		ll := lineLen(endLine)
+		if endCol < ll {
+			endCol++
+		} else if endLine < maxLine {
+			endLine++
+			endCol = 0
+		}
+	case "shift+home":
+		endCol = 0
+	case "shift+end":
+		endCol = lineLen(endLine)
+	}
+
+	if endLine < 0 {
+		endLine = 0
+	}
+	if endLine > maxLine {
+		endLine = maxLine
+	}
+	ll := lineLen(endLine)
+	if endCol < 0 {
+		endCol = 0
+	}
+	if endCol > ll {
+		endCol = ll
+	}
+
+	m.selEndLine = endLine
+	m.selEndCol = endCol
+	m.selText = m.selectionText()
+
+	if m.ready {
+		// Scroll the viewport to keep the moving end of the selection visible.
+		visible0 := m.vp.YOffset
+		visible1 := m.vp.YOffset + m.vp.Height - 1
+		if endLine < visible0 {
+			m.vp.SetYOffset(endLine)
+		} else if endLine > visible1 {
+			m.vp.SetYOffset(endLine - m.vp.Height + 1)
+		}
+		m.setViewportContent()
+	}
+	return m, nil
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
