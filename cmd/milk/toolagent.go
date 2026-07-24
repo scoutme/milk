@@ -25,12 +25,32 @@ func findAgentByName(cfg config.Config, name string) (config.AgentConfig, bool) 
 }
 
 // buildToolRunner constructs a TurnRunner for use as a tool-agent call.
-// Local (OpenAI-compat) and subprocess (aider-cli, subprocess) agents are supported.
-// claude-cli is not supported — use MCP (v3) or the tag-intercept path (v2) instead.
+// Local (OpenAI-compat), subprocess (aider-cli, subprocess), and claude-cli agents
+// are supported.
+//
+// claude-cli tool-agents run headlessly — there is no permission back-channel.
+// The agent config MUST have dangerously_skip_permissions: true; buildToolRunner
+// returns an error when that flag is absent to prevent silent hangs.
+//
 // No session callbacks are wired — RunToolCall passes nil for session everywhere.
 func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config) (TurnRunner, error) {
 	if ac.IsCLI() {
-		return nil, fmt.Errorf("tool-agent %q uses the claude-cli provider; claude-cli tool-agents require the tag-intercept protocol (v2) which is not yet implemented", ac.Name)
+		if !ac.DangerouslySkipPermissions {
+			return nil, fmt.Errorf(
+				"tool-agent %q uses the claude-cli provider but dangerously_skip_permissions is not set; "+
+					"claude-cli tool-agents have no interactive permission back-channel — "+
+					"set dangerously_skip_permissions: true in the agent config to proceed",
+				ac.Name,
+			)
+		}
+		name := ac.Name
+		if name == "" {
+			name = "tool-agent"
+		}
+		cliAgt := newCLIAgent(ac)
+		// Zero permContext and nil newInput — headless; permissions handled by
+		// --dangerously-skip-permissions which is already set on the agent above.
+		return newCLIRunner(cliAgt, name, permContext{}, nil), nil
 	}
 
 	name := ac.Name

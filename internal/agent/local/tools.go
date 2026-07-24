@@ -25,6 +25,24 @@ import (
 var agentToolNameRE = regexp.MustCompile(`[^a-z0-9]+`)
 
 const errMemUnavailable = "memory store not available"
+const errTaskUnavailable = "task store not available"
+
+// TaskStore is the subset of the tasks.Store interface used by the local agent.
+// Defined here to avoid an import cycle between internal/agent/local and internal/tasks.
+type TaskStore interface {
+	Create(title string, tags []string) (TaskEntry, error)
+	Update(id, status, title string) error
+	Complete(id string) error
+	List(includeGlobal bool) ([]TaskEntry, error)
+}
+
+// TaskEntry is a simplified view of tasks.Task used in tool results.
+type TaskEntry struct {
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Status string   `json:"status"`
+	Tags   []string `json:"tags,omitempty"`
+}
 
 type toolResult struct {
 	Output   string `json:"output,omitempty"`
@@ -38,7 +56,7 @@ func (r toolResult) String() string {
 }
 
 // schemas returns the OpenAI function schemas for all built-in tools.
-func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgents []config.AgentToolEntry) []map[string]any {
+func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgents []config.AgentToolEntry, ts TaskStore) []map[string]any {
 	base := []map[string]any{
 		{
 			"type": "function",
@@ -268,8 +286,75 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 		base = append(base, currentNeedSchema())
 		base = append(base, getContextStatsSchema())
 	}
+	if ts != nil {
+		base = append(base, taskSchemas()...)
+	}
 	base = append(base, AgentToolSchemas(toolAgents)...)
 	return base
+}
+
+func taskSchemas() []map[string]any {
+	return []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "create_task",
+				"description": "Create a new task for tracking. Returns the task id.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"title": map[string]any{"type": "string", "description": "Short task title"},
+						"tags":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional labels"},
+					},
+					"required": []string{"title"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "update_task",
+				"description": "Update the status (and optionally title) of a task.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":     map[string]any{"type": "string", "description": "Task id (or unique prefix)"},
+						"status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done", "blocked"}, "description": "New status"},
+						"title":  map[string]any{"type": "string", "description": "Optional new title"},
+					},
+					"required": []string{"id", "status"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "list_tasks",
+				"description": "List current tasks. Returns session tasks; optionally include global tasks.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"include_global": map[string]any{"type": "boolean", "description": "Include cross-session global tasks"},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "complete_task",
+				"description": "Mark a task as done.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{"type": "string", "description": "Task id (or unique prefix)"},
+					},
+					"required": []string{"id"},
+				},
+			},
+		},
+	}
 }
 
 // sanitiseAgentToolName converts an agent name to a safe OpenAI tool function name.
@@ -343,7 +428,7 @@ func exportSessionSchema() map[string]any {
 	}
 }
 
-func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Session, mem *memory.Store, otelDir string) (string, bool) {
+func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Session, mem *memory.Store, otelDir string, ts TaskStore) (string, bool) {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return toolResult{Error: "invalid arguments: " + err.Error()}.String(), false
@@ -412,9 +497,74 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return dispatchGetContextStats(sess, argsJSON), false
 	case "escalate":
 		return "", true // caller checks the bool
+	case "create_task", "update_task", "list_tasks", "complete_task":
+		if ts == nil {
+			return toolResult{Error: errTaskUnavailable}.String(), false
+		}
+		return dispatchTaskTool(name, argsJSON, ts), false
 	default:
 		return toolResult{Error: "unknown tool: " + name}.String(), false
 	}
+}
+
+func dispatchTaskTool(name, argsJSON string, ts TaskStore) string {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return toolResult{Error: "invalid arguments: " + err.Error()}.String()
+	}
+	switch name {
+	case "create_task":
+		title, _ := args["title"].(string)
+		if title == "" {
+			return toolResult{Error: "title is required"}.String()
+		}
+		var tags []string
+		if raw, ok := args["tags"].([]any); ok {
+			for _, v := range raw {
+				if s, ok := v.(string); ok {
+					tags = append(tags, s)
+				}
+			}
+		}
+		t, err := ts.Create(title, tags)
+		if err != nil {
+			return toolResult{Error: err.Error()}.String()
+		}
+		out, _ := json.Marshal(map[string]string{"id": t.ID})
+		return toolResult{Output: string(out)}.String()
+
+	case "update_task":
+		id, _ := args["id"].(string)
+		status, _ := args["status"].(string)
+		title, _ := args["title"].(string)
+		if id == "" || status == "" {
+			return toolResult{Error: "id and status are required"}.String()
+		}
+		if err := ts.Update(id, status, title); err != nil {
+			return toolResult{Error: err.Error()}.String()
+		}
+		return toolResult{Output: "ok"}.String()
+
+	case "list_tasks":
+		includeGlobal, _ := args["include_global"].(bool)
+		tasks, err := ts.List(includeGlobal)
+		if err != nil {
+			return toolResult{Error: err.Error()}.String()
+		}
+		out, _ := json.Marshal(tasks)
+		return toolResult{Output: string(out)}.String()
+
+	case "complete_task":
+		id, _ := args["id"].(string)
+		if id == "" {
+			return toolResult{Error: "id is required"}.String()
+		}
+		if err := ts.Complete(id); err != nil {
+			return toolResult{Error: err.Error()}.String()
+		}
+		return toolResult{Output: "ok"}.String()
+	}
+	return toolResult{Error: "unknown task tool: " + name}.String()
 }
 
 func dispatchExportSession(sess *session.Session, argsJSON string) string {

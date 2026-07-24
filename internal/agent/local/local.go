@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -155,6 +156,15 @@ type Agent struct {
 	// termWidth is the current terminal width used to truncate tool hint lines.
 	// 0 means no truncation.
 	termWidth int
+	// customPrompt is an optional pre-rendered prompt text prepended to the
+	// default system prompt. Set via WithCustomPrompt after Render().
+	customPrompt string
+	// taskStore is an optional task tracker. When non-nil, the agent exposes
+	// create_task/update_task/list_tasks/complete_task tools.
+	taskStore TaskStore
+	// toolTimeout is the per-individual-tool timeout. 0 means no per-tool limit.
+	// Each tool call in a batch gets its own context derived from this timeout.
+	toolTimeout time.Duration
 }
 
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
@@ -238,6 +248,33 @@ func (a *Agent) WithTagCallbacks(nonce, primaryName, escalationName string, onNe
 func (a *Agent) WithMemConfig(mc MemConfig) *Agent {
 	copy := *a
 	copy.memCfg = mc
+	return &copy
+}
+
+// WithCustomPrompt returns a shallow copy of the agent with a pre-rendered
+// custom prompt prepended to the default system prompt on every Run call.
+// Pass the output of agentprompt.Render; pass "" to clear.
+func (a *Agent) WithCustomPrompt(text string) *Agent {
+	copy := *a
+	copy.customPrompt = text
+	return &copy
+}
+
+// WithTaskStore returns a shallow copy of the agent wired to the given task
+// store. When non-nil, the agent exposes create_task, update_task, list_tasks,
+// and complete_task tools.
+func (a *Agent) WithTaskStore(ts TaskStore) *Agent {
+	copy := *a
+	copy.taskStore = ts
+	return &copy
+}
+
+// WithToolTimeout returns a shallow copy of the agent with the per-tool timeout
+// set. 0 means no per-tool timeout. Each individual tool call in a batch
+// receives its own context cancelled after this duration.
+func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
+	copy := *a
+	copy.toolTimeout = d
 	return &copy
 }
 
@@ -676,13 +713,16 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 		systemPrompt += "\n\n" + a.cachedCwdContext
 	}
+	if a.customPrompt != "" {
+		systemPrompt = a.customPrompt + "\n\n" + systemPrompt
+	}
 	msgs := []Message{{Role: "system", Content: systemPrompt}}
 	msgs = append(msgs, history...)
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
 	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
-	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries)
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
 	}
@@ -852,30 +892,23 @@ func capMemToolResult(result string, maxBytes int) string {
 	return string(b)
 }
 
+// toolCallOutcome holds the result of executing one tool call.
+type toolCallOutcome struct {
+	msg     Message
+	escalate bool
+	reason   string
+}
+
 func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
-	for _, tc := range toolCalls {
-		if strings.HasPrefix(tc.Function.Name, "agent_") && a.toolAgentDispatcher != nil {
-			var reqArgs struct {
-				Request string `json:"request"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
-			agentName := tc.Function.Name[len("agent_"):]
-			fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
-			result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
-			if err != nil {
-				obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
-					attribute.String("agent", agentName),
-				)
-				result = toolResult{Error: err.Error()}.String()
-			} else {
-				result = toolResult{Output: result}.String()
-			}
-			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
-				attribute.String("agent", agentName),
-			)
-			msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
-			continue
+
+	// Pre-print tool hints and collect permission decisions synchronously (before
+	// concurrent dispatch) so the TUI displays them in order and permission prompts
+	// are not interleaved.
+	denied := make([]string, len(toolCalls)) // non-empty = denied result for that index
+	for i, tc := range toolCalls {
+		if strings.HasPrefix(tc.Function.Name, "agent_") {
+			continue // agent dispatcher handled below
 		}
 		printToolLine(out, tc, a.termWidth)
 		if a.onToolUse != nil {
@@ -891,18 +924,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		if d := toolDiff(tc.Function.Name, tc.Function.Arguments); d != "" {
 			fmt.Fprint(out, d)
 		}
-
 		if toolNeedsPermission(tc.Function.Name) {
 			var argMap map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
 			summary := toolArgSummary(argMap)
-			if ok, denied := a.checkPermission(tc.Function.Name, summary); !ok {
-				msgs = append(msgs, Message{Role: "tool", Content: denied, ToolCallID: tc.ID})
-				continue
+			if ok, d := a.checkPermission(tc.Function.Name, summary); !ok {
+				denied[i] = d
 			}
 		}
-
-		// Invalidate cwd listing cache when model lists the working directory.
+		// Invalidate cwd listing cache synchronously.
 		if tc.Function.Name == "list_dir" && sess != nil {
 			var listArgs map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &listArgs) //nolint:errcheck
@@ -910,79 +940,154 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 				a.cachedCwd = ""
 			}
 		}
-		if tc.Function.Name == "open_file" {
-			var openArgs struct {
-				Path string `json:"path"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &openArgs) //nolint:errcheck
-			if a.onOpenFile == nil {
-				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Error: "open_file is only available in interactive (TUI) mode"}.String(), ToolCallID: tc.ID})
-				continue
-			}
-			if err := a.onOpenFile(openArgs.Path); err != nil {
-				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Error: err.Error()}.String(), ToolCallID: tc.ID})
-			} else {
-				msgs = append(msgs, Message{Role: "tool", Content: toolResult{Output: "file opened in editor"}.String(), ToolCallID: tc.ID})
-			}
-			continue
-		}
-		// MCP tools (mcp_<server>_<tool> prefix) are dispatched before built-ins.
-		if a.mcpToolSet != nil {
-			if mcpResult, ok := a.mcpToolSet.Dispatch(ctx, tc.Function.Name, tc.Function.Arguments); ok {
-				obs.Inc(ctx, inferenceScope, "milk.tools.calls",
-					attribute.String("name", tc.Function.Name),
-					attribute.String("agent", agentRoleForMetrics(a.escalationName)),
-				)
-				obs.Inc(ctx, inferenceScope, "milk.tools.outcomes",
-					attribute.String("name", tc.Function.Name),
-					attribute.String("outcome", "mcp"),
-				)
-				msgs = append(msgs, Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID})
-				continue
-			}
-		}
+	}
 
-		toolStart := time.Now()
-		result, escalate := dispatchTool(ctx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir)
-		toolElapsed := time.Since(toolStart)
-		agentRole := agentRoleForMetrics(a.escalationName)
-		obs.Inc(ctx, inferenceScope, "milk.tools.calls",
-			attribute.String("name", tc.Function.Name),
-			attribute.String("agent", agentRole),
-		)
-		obs.Inc(ctx, inferenceScope, "milk.tools.outcomes",
-			attribute.String("name", tc.Function.Name),
-			attribute.String("outcome", "executed"),
-		)
-		obs.RecordDuration(ctx, inferenceScope, "milk.tools.latency_ms", toolElapsed,
-			attribute.String("name", tc.Function.Name),
-		)
-		if escalate {
-			var escalateArgs struct {
-				Reason string `json:"reason"`
-			}
-			json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
-			obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
-				attribute.String("reason", "explicit_tool_call"),
+	// Dispatch all tool calls concurrently. Results are stored in order via a
+	// pre-sized slice so messages are appended in the original call order.
+	outcomes := make([]toolCallOutcome, len(toolCalls))
+	var wg sync.WaitGroup
+	for i, tc := range toolCalls {
+		wg.Add(1)
+		go func(i int, tc toolCall) {
+			defer wg.Done()
+			outcome := a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem)
+			outcomes[i] = outcome
+		}(i, tc)
+	}
+	wg.Wait()
+
+	// Collect results in order; stop on first escalation signal.
+	for _, outcome := range outcomes {
+		msgs = append(msgs, outcome.msg)
+		if outcome.escalate {
+			return msgs, &EscalationSignal{Reason: outcome.reason}
+		}
+	}
+	return msgs, nil
+}
+
+// dispatchOneTool executes a single tool call and returns its outcome.
+// deniedResult is non-empty when checkPermission already rejected the tool.
+func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) toolCallOutcome {
+	// Per-tool context: inherits turn cancellation and adds optional per-tool timeout.
+	toolCtx := ctx
+	if a.toolTimeout > 0 {
+		var cancel context.CancelFunc
+		toolCtx, cancel = context.WithTimeout(ctx, a.toolTimeout)
+		defer cancel()
+	}
+
+	// Agent tool dispatchers run through the parent ctx (they handle their own timeouts).
+	if strings.HasPrefix(tc.Function.Name, "agent_") && a.toolAgentDispatcher != nil {
+		var reqArgs struct {
+			Request string `json:"request"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
+		agentName := tc.Function.Name[len("agent_"):]
+		fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
+		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
+		if err != nil {
+			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
+				attribute.String("agent", agentName),
 			)
+			result = toolResult{Error: err.Error()}.String()
+		} else {
+			result = toolResult{Output: result}.String()
+		}
+		obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
+			attribute.String("agent", agentName),
+		)
+		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+	}
+
+	// Pre-checked: permission was already denied before dispatch.
+	if deniedResult != "" {
+		return toolCallOutcome{msg: Message{Role: "tool", Content: deniedResult, ToolCallID: tc.ID}}
+	}
+
+	if tc.Function.Name == "open_file" {
+		var openArgs struct {
+			Path string `json:"path"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &openArgs) //nolint:errcheck
+		if a.onOpenFile == nil {
+			return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Error: "open_file is only available in interactive (TUI) mode"}.String(), ToolCallID: tc.ID}}
+		}
+		if err := a.onOpenFile(openArgs.Path); err != nil {
+			return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Error: err.Error()}.String(), ToolCallID: tc.ID}}
+		}
+		return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Output: "file opened in editor"}.String(), ToolCallID: tc.ID}}
+	}
+
+	// MCP tools dispatched before built-ins.
+	if a.mcpToolSet != nil {
+		if mcpResult, ok := a.mcpToolSet.Dispatch(toolCtx, tc.Function.Name, tc.Function.Arguments); ok {
+			agentRole := agentRoleForMetrics(a.escalationName)
+			obs.Inc(toolCtx, inferenceScope, "milk.tools.calls",
+				attribute.String("name", tc.Function.Name),
+				attribute.String("agent", agentRole),
+			)
+			obs.Inc(toolCtx, inferenceScope, "milk.tools.outcomes",
+				attribute.String("name", tc.Function.Name),
+				attribute.String("outcome", "mcp"),
+			)
+			return toolCallOutcome{msg: Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID}}
+		}
+	}
+
+	toolStart := time.Now()
+	result, escalate := dispatchTool(toolCtx, tc.Function.Name, tc.Function.Arguments, sess, mem, a.otelDir, a.taskStore)
+
+	// Surface per-tool timeout as a clear error message.
+	if toolCtx.Err() != nil && result == "" {
+		result = toolResult{Error: fmt.Sprintf("tool %q timed out after %s", tc.Function.Name, a.toolTimeout)}.String()
+	}
+
+	toolElapsed := time.Since(toolStart)
+	agentRole := agentRoleForMetrics(a.escalationName)
+	obs.Inc(ctx, inferenceScope, "milk.tools.calls",
+		attribute.String("name", tc.Function.Name),
+		attribute.String("agent", agentRole),
+	)
+	obs.Inc(ctx, inferenceScope, "milk.tools.outcomes",
+		attribute.String("name", tc.Function.Name),
+		attribute.String("outcome", "executed"),
+	)
+	obs.RecordDuration(ctx, inferenceScope, "milk.tools.latency_ms", toolElapsed,
+		attribute.String("name", tc.Function.Name),
+	)
+
+	if escalate {
+		var escalateArgs struct {
+			Reason string `json:"reason"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &escalateArgs) //nolint:errcheck
+		obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
+			attribute.String("reason", "explicit_tool_call"),
+		)
+		if sess != nil {
 			obs.Inc(ctx, inferenceScope, "milk.session.transitions",
 				attribute.String("from", string(sess.State)),
 				attribute.String("to", string(session.StateEscalationWaiting)),
 			)
-			return msgs, &EscalationSignal{Reason: escalateArgs.Reason}
 		}
-		if isMemoryReadTool(tc.Function.Name) {
-			if a.memCfg.RelevanceGateEnabled && tc.Function.Name == "list_memory" && mem != nil {
-				result = memory.DispatchListMemoryFiltered(ctx, mem, tc.Function.Arguments, userPrompt)
-			}
-			result = capMemToolResult(result, a.memCfg.ResultMaxBytes)
+		return toolCallOutcome{
+			msg:      Message{Role: "tool", Content: result, ToolCallID: tc.ID},
+			escalate: true,
+			reason:   escalateArgs.Reason,
 		}
-		if isSessionContextTool(tc.Function.Name) {
-			result = capMemToolResult(result, sessionContextResultMaxBytes)
-		}
-		msgs = append(msgs, Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 	}
-	return msgs, nil
+
+	if isMemoryReadTool(tc.Function.Name) {
+		if a.memCfg.RelevanceGateEnabled && tc.Function.Name == "list_memory" && mem != nil {
+			result = memory.DispatchListMemoryFiltered(ctx, mem, tc.Function.Arguments, userPrompt)
+		}
+		result = capMemToolResult(result, a.memCfg.ResultMaxBytes)
+	}
+	if isSessionContextTool(tc.Function.Name) {
+		result = capMemToolResult(result, sessionContextResultMaxBytes)
+	}
+	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 }
 
 // printToolLine writes a one-line dim tool-usage hint to out before a tool is
