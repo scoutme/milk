@@ -20,17 +20,23 @@ func (m *model) viewportHeight() int {
 }
 
 // mainWidth returns the width available for the transcript+input area.
-// When the memory and/or workflow panels are open it is reduced accordingly,
+// When the memory, tasks, and/or workflow panels are open it is reduced accordingly,
 // but only when the panel would actually be rendered (i.e. terminal is wide enough).
 func (m *model) mainWidth() int {
 	w := m.width
 	if m.panelMemory {
 		w -= memoryPanelWidth
 	}
+	if m.panelTasks {
+		w -= tasksPanelWidth
+	}
 	if m.workflowPanelOpen {
 		memW := 0
 		if m.panelMemory {
 			memW = memoryPanelWidth
+		}
+		if m.panelTasks {
+			memW += tasksPanelWidth
 		}
 		if m.width >= memW+workflowPanelWidth+40 {
 			w -= workflowPanelWidth
@@ -161,6 +167,10 @@ func (m model) View() string {
 		panel := m.renderMemoryPanel(vpH)
 		pbar := m.renderPanelScrollbar(vpH)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, panel, pbar)
+	}
+	if m.panelTasks {
+		tpanel := m.renderTasksPanel(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel)
 	}
 	if m.workflowPanelOpen {
 		// Suppress the workflow panel when the terminal is too narrow to render it

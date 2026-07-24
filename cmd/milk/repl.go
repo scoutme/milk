@@ -31,6 +31,8 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/shelldetect"
+	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
@@ -116,7 +118,14 @@ type credRefreshReadyMsg struct {
 // remoteInputMsg carries a prompt injected from the remote oversight interface.
 type remoteInputMsg struct{ text string }
 
-type configReloadMsg struct{}
+// configReloadMsg is sent when the config file changes on disk (via Watcher)
+// or when the user runs /reload. cfg is the freshly parsed config; err is
+// non-nil when the file could not be parsed (cfg is then the zero value and
+// the existing in-memory config should be kept).
+type configReloadMsg struct {
+	cfg config.Config
+	err error
+}
 type errMsg struct{ err error }
 
 // updateAvailableMsg is sent when the background update check finds a newer release.
@@ -331,6 +340,11 @@ type model struct {
 	lastPanelClickID   string
 	lastPanelClickTime time.Time
 
+	// tasks panel
+	panelTasks  bool
+	tasksOffset int
+	taskStore   *tasks.Store
+
 	// pending /forget confirmation
 	pendingForget *forgetState
 
@@ -379,6 +393,10 @@ type model struct {
 
 	// quit confirmation state
 	quitPending bool
+
+	// pendingDirectBash is non-nil while waiting for y/N confirmation to run a
+	// shell command directly. The string holds the command to run on approval.
+	pendingDirectBash *string
 
 	// hasInferenceAgent is true when the user has explicitly configured a
 	// local-agent backend. Used to show setup hints on the welcome screen.
@@ -942,6 +960,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleResize(msg)
 
 	case tea.KeyMsg:
+		if m.pendingDirectBash != nil {
+			return m.handleDirectBashKey(msg)
+		}
 		if m.pendingPerm != nil {
 			return m.handlePermKey(msg)
 		}
@@ -1190,7 +1211,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case configReloadMsg:
-		m.appendTranscript(milkTag() + " config closed — restart milk to apply any changes\n")
+		if msg.err != nil {
+			m.appendTranscript(fmt.Sprintf("%s config reload error: %v\n", milkTag(), msg.err))
+			return m, nil
+		}
+		// Detect MCP server changes — connections are NOT restarted on reload.
+		hasMCPChange := len(msg.cfg.MCPServers) != len(m.st.cfg.MCPServers)
+		m.st.cfg = msg.cfg
+		m.appendTranscript(milkTag() + " config reloaded\n")
+		if hasMCPChange {
+			m.appendTranscript(milkTag() + " note: mcp_servers changed — restart milk to apply MCP connection changes\n")
+		}
 		return m, nil
 
 	case openFileMsg:
@@ -1706,6 +1737,28 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 		return m.handleSlashInput(cmd, rest)
 	}
 
+	// Direct-bash shortcut: if enabled and input looks like a shell command,
+	// ask for confirmation before running it locally (or run immediately if
+	// the first token is in the allow-list).
+	if m.st.cfg.DirectBash {
+		if shellCmd, ok := shelldetect.IsShellCommand(input); ok {
+			first := shelldetect.FirstToken(shellCmd)
+			for _, allowed := range m.st.cfg.DirectBashAllow {
+				if strings.EqualFold(allowed, first) {
+					m.busy = true
+					m.spinnerFrame = 0
+					return m, tea.Batch(spinnerTick(), m.execDirectBash(shellCmd))
+				}
+			}
+			// Show confirmation prompt.
+			cmd := shellCmd
+			m.pendingDirectBash = &cmd
+			m.appendTranscript(milkTag() + " run: " + bold(shellCmd) + "  [y/N] ")
+			m.refreshPrompt()
+			return m, nil
+		}
+	}
+
 	return m.dispatchAgent(input)
 }
 
@@ -2007,6 +2060,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
+	var taskStore *tasks.Store
+	if dir, err := config.Dir(); err == nil {
+		tasksDir := dir + "/tasks"
+		if ts, err := tasks.New(tasksDir, sess.ID); err == nil {
+			taskStore = ts
+		}
+	}
+
 	// Build the primary agent. When the active agent is a subprocess provider
 	// (subprocess, aider-cli), bypass the HTTP local agent.
 	tuiPrimaryAC := cfg.ActiveAgent()
@@ -2045,6 +2106,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			localAgent.WithOtelDir(od)
 		}
 		localAgent.WithLogContext(cfg.Otel.LogContext)
+		if taskStore != nil {
+			localAgent = localAgent.WithTaskStore(tasks.NewAdapter(taskStore))
+		}
 		if dbg, err := openLocalDebugLog(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
 		} else if dbg != nil {
@@ -2255,6 +2319,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
+	m.taskStore = taskStore
 	m.hasInferenceAgent = cfg.HasInferenceAgent()
 	for _, w := range config.Validate(cfg) {
 		m.startupWarnings = append(m.startupWarnings, w.String())
@@ -2315,6 +2380,25 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Wire task store redraw: when tasks change, send a tick to trigger View().
+	if taskStore != nil {
+		taskStore.SetOnChange(func() {
+			p.Send(memoryRefreshMsg{}) // reuse existing refresh msg to trigger a redraw
+		})
+	}
+
+	// Start a config watcher so the TUI updates automatically when config.json
+	// changes on disk (e.g. the user edits it in another terminal).
+	if cfgDir, cfgDirErr := config.Dir(); cfgDirErr == nil {
+		cfgPath := cfgDir + "/config.json"
+		watcher, watchErr := config.NewWatcher(cfgPath, func(newCfg config.Config, err error) {
+			p.Send(configReloadMsg{cfg: newCfg, err: err})
+		})
+		if watchErr == nil {
+			defer watcher.Close()
+		}
+	}
 	if localAgent != nil {
 		localAgent.WithOnSigV4Refresh(func(err error) {
 			p.Send(credRefreshReadyMsg{label: "AWS", err: err})

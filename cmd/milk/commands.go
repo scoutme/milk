@@ -15,6 +15,7 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
 )
 
@@ -58,6 +59,15 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdServer {
 		return m.handleServerCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdReload {
+		return m.handleReloadCmd()
+	}
+	if cmd == cmdTasks {
+		return m.handleTasksCmd(strings.TrimSpace(rest))
+	}
+	if cmd == cmdTask {
+		return m.handleTaskCmd(strings.TrimSpace(rest))
+	}
 	if cmd == "/help" {
 		output := renderHelp(interactiveHelp, m.vpWidth())
 		m.colorizeForce = true
@@ -78,6 +88,81 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m.dispatchAgent(dispatch)
 	}
 	return m, nil
+}
+
+// handleTasksCmd handles `/tasks` — lists current session + global tasks in the transcript.
+func (m model) handleTasksCmd(arg string) (tea.Model, tea.Cmd) {
+	if m.taskStore == nil {
+		m.appendTranscript(milkTag() + " task store not available\n")
+		return m, nil
+	}
+	sessionTasks, _ := m.taskStore.List(tasks.ListOpts{})
+	globalTasks, _ := m.taskStore.List(tasks.ListOpts{IncludeGlobal: true})
+
+	// Build session ID set to find global-only tasks.
+	sessIDs := map[string]bool{}
+	for _, t := range sessionTasks {
+		sessIDs[t.ID] = true
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s tasks:\n", milkTag())
+	if len(sessionTasks) == 0 {
+		fmt.Fprintf(&sb, "  session: (none)\n")
+	} else {
+		fmt.Fprintf(&sb, "  session:\n")
+		for _, t := range sessionTasks {
+			fmt.Fprintf(&sb, "    %s  %-10s  %s\n", t.ID, t.Status, t.Title)
+		}
+	}
+	var globalOnly []tasks.Task
+	for _, t := range globalTasks {
+		if !sessIDs[t.ID] {
+			globalOnly = append(globalOnly, t)
+		}
+	}
+	if len(globalOnly) > 0 {
+		fmt.Fprintf(&sb, "  global:\n")
+		for _, t := range globalOnly {
+			fmt.Fprintf(&sb, "    %s  %-10s  %s\n", t.ID, t.Status, t.Title)
+		}
+	}
+	m.appendTranscript(sb.String())
+	return m, nil
+}
+
+// handleTaskCmd handles `/task done <id>` shortcut.
+func (m model) handleTaskCmd(arg string) (tea.Model, tea.Cmd) {
+	const donePrefix = "done "
+	if !strings.HasPrefix(arg, "done ") {
+		m.appendTranscript(milkTag() + " usage: /task done <id>\n")
+		return m, nil
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(arg, donePrefix))
+	if id == "" {
+		m.appendTranscript(milkTag() + " usage: /task done <id>\n")
+		return m, nil
+	}
+	if m.taskStore == nil {
+		m.appendTranscript(milkTag() + " task store not available\n")
+		return m, nil
+	}
+	if err := m.taskStore.Complete(id); err != nil {
+		m.appendTranscript(fmt.Sprintf("%s task %q: %v\n", milkTag(), id, err))
+		return m, nil
+	}
+	m.appendTranscript(fmt.Sprintf("%s task %s marked done\n", milkTag(), id))
+	return m, nil
+}
+
+// handleReloadCmd re-parses config.json immediately and sends a configReloadMsg.
+// This is the manual equivalent of the file-system watcher callback — useful
+// when the watcher misses a write (e.g. symlink swap, editor atomic replace).
+func (m model) handleReloadCmd() (tea.Model, tea.Cmd) {
+	return m, func() tea.Msg {
+		newCfg, err := config.Load()
+		return configReloadMsg{cfg: newCfg, err: err}
+	}
 }
 
 // handleColorizeCmd handles `/colorize [off|fenced|balanced|full]`.
@@ -595,7 +680,9 @@ func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
 		if err != nil {
 			return errMsg{err: fmt.Errorf("editor exited with error: %w", err)}
 		}
-		return configReloadMsg{}
+		// Re-parse the config file after the editor exits so changes take effect.
+		newCfg, parseErr := config.Load()
+		return configReloadMsg{cfg: newCfg, err: parseErr}
 	})
 }
 
@@ -933,6 +1020,16 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + " memory panel: off\n")
 		}
 		return m, tick
+	case "tasks":
+		m.panelTasks = !m.panelTasks
+		m.refreshPrompt()
+		m.syncLayout()
+		if m.panelTasks {
+			m.appendTranscript(milkTag() + " tasks panel: on\n")
+		} else {
+			m.appendTranscript(milkTag() + " tasks panel: off\n")
+		}
+		return m, nil
 	case "workflow":
 		m.workflowPanelOpen = !m.workflowPanelOpen
 		m.syncLayout()
@@ -943,7 +1040,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory|workflow\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|workflow\n")
 		return m, nil
 	}
 }

@@ -170,11 +170,26 @@ func TestAdvanceWorkflowWizard_AgentStepsFlow(t *testing.T) {
 		t.Errorf("generator = %q, want %q", nm2.pendingWorkflowWizard.generator, "myagent")
 	}
 
-	// evaluator: wizard clears and launchWorkflow is called (fails in test — no session)
+	// evaluator: now advances to generator-behaviour prompt step
 	m3, _ := nm2.advanceWorkflowWizard("")
 	nm3 := m3.(model)
-	if nm3.pendingWorkflowWizard != nil {
-		t.Errorf("expected wizard cleared after evaluator step, still at step=%d", nm3.pendingWorkflowWizard.step)
+	if nm3.pendingWorkflowWizard == nil || nm3.pendingWorkflowWizard.step != wizardStepGeneratorPrompt {
+		t.Fatalf("after evaluator: want wizardStepGeneratorPrompt, got step=%v pending=%v",
+			nm3.pendingWorkflowWizard.step, nm3.pendingWorkflowWizard != nil)
+	}
+
+	// generator behaviour: skip with blank → advances to evaluator-behaviour prompt
+	m4, _ := nm3.advanceWorkflowWizard("")
+	nm4 := m4.(model)
+	if nm4.pendingWorkflowWizard == nil || nm4.pendingWorkflowWizard.step != wizardStepEvaluatorPrompt {
+		t.Fatalf("after generator behaviour: want wizardStepEvaluatorPrompt, got step=%v", nm4.pendingWorkflowWizard.step)
+	}
+
+	// evaluator behaviour: skip → wizard clears and launchWorkflow is called (fails in test — no session)
+	m5, _ := nm4.advanceWorkflowWizard("")
+	nm5 := m5.(model)
+	if nm5.pendingWorkflowWizard != nil {
+		t.Errorf("expected wizard cleared after evaluator behaviour step, still at step=%d", nm5.pendingWorkflowWizard.step)
 	}
 }
 

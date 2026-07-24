@@ -21,6 +21,9 @@ import (
 )
 
 const cmdWorkflow = "/workflow"
+const cmdReload = "/reload"
+const cmdTasks = "/tasks"
+const cmdTask = "/task"
 const cmdEscalate = "/escalate"
 const cmdPrimary = "/primary"
 const cmdPaste = "/paste"
@@ -45,7 +48,7 @@ const cmdUpdate = "/update"
 const cmdServer = "/server"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -145,6 +148,9 @@ const interactiveHelp = `
   /memory show <pat|#id>  show full details of matching percepts
   /forget <pat|#id>      delete a percept (asks for confirmation)
   /panel memory          toggle the memory panel (right side)
+  /panel tasks           toggle the tasks panel (right side)
+  /tasks                 list current session and global tasks
+  /task done <id>        mark a task done
 
 ── Display ──────────────────────────────────────────────────────────────
   /colorize              show current colorization mode
@@ -200,6 +206,7 @@ const interactiveHelp = `
   /config                print the current config (~/.milk/config.json)
   /config init           run the setup wizard (configure primary + escalation agents)
   /config open           open config in $EDITOR / system default editor
+  /reload                re-parse config.json immediately (same as the auto-watcher)
   /open <file>           open any file in $EDITOR (agent can also call the open_file tool)
   /setup telegram        configure Telegram remote oversight interactively
   /setup telegram on     enable Telegram (credentials must already be configured)
