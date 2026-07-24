@@ -116,6 +116,12 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 		b.WriteString("\n\n")
 	}
 
+	if mode == ContextModeFirst && sess.LastEscalationSummary != "" {
+		b.WriteString("[Prior escalation session summary — you previously worked with this user; this is what you last did together]\n")
+		b.WriteString(sess.LastEscalationSummary)
+		b.WriteString("\n\n")
+	}
+
 	if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
 		b.WriteString("[Recent primary agent activity]\n")
 		b.WriteString(sess.LastLocalSummary)

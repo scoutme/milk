@@ -120,6 +120,11 @@ allow direct percept injection without routing through `BuildStaticContext`.
 - When the prior escalation session was productive and the user immediately re-escalates on the
   same topic within the turn-gap threshold, the full prior history is still passed and continuity
   is preserved.
+- When a fresh-start is forced by the need-staleness condition, `BuildDynamicContext` injects
+  `LastEscalationSummary` as a `[Prior escalation session summary]` block. This means Claude
+  retains a condensed record of what was discussed in the abandoned session (e.g. "Option A vs
+  Option B") even though `--resume` is not used. The summary is omitted on `ContextModeReturning`
+  because `--resume` already provides the full prior history there.
 - The need-staleness condition is always active when `CurrentNeedSetAt` is set and cannot be
   disabled independently. The turn-gap condition is disabled by setting the threshold to 0.
 - Default of 8 local turns is intentionally conservative: most topic switches emit a

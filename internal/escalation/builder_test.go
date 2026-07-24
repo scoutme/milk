@@ -169,13 +169,26 @@ func TestBuildContext_ReturningDoesNotIncludeEscalationSummary(t *testing.T) {
 	}
 }
 
-func TestBuildContext_FirstDoesNotIncludeEscalationSummary(t *testing.T) {
+func TestBuildContext_FirstIncludesPriorEscalationSummary(t *testing.T) {
+	// When a fresh session is forced (e.g. needStale), the prior escalation summary
+	// must be injected so Claude remembers what was discussed before the topic shift.
 	sess := &session.Session{
-		LastEscalationSummary: "some prior escalation work",
+		LastEscalationSummary: "discussed Option A vs Option B for auth redesign",
 	}
 	got := BuildContext(sess, "n1", nil, ContextModeFirst, true, "", "")
-	if strings.Contains(got, "[Recent escalation agent activity]") {
-		t.Error("first escalation should not include escalation summary block")
+	if !strings.Contains(got, "[Prior escalation session summary") {
+		t.Error("ContextModeFirst should include prior escalation summary when non-empty")
+	}
+	if !strings.Contains(got, "Option A vs Option B") {
+		t.Error("ContextModeFirst should include prior escalation summary content")
+	}
+}
+
+func TestBuildContext_FirstNoEscalationSummaryWhenEmpty(t *testing.T) {
+	sess := &session.Session{}
+	got := BuildContext(sess, "n1", nil, ContextModeFirst, true, "", "")
+	if strings.Contains(got, "[Prior escalation session summary") {
+		t.Error("ContextModeFirst should not include escalation summary block when empty")
 	}
 }
 

@@ -19,7 +19,7 @@ Pass context as two separate `--append-system-prompt-file` flags:
 
 1. **Static file** — `BuildStaticContext`: `NeedInstruction` + `MemoryInstruction` + percepts. Uses a per-session stable nonce (`sess.EscalationNonce`, generated once at `ContextModeFirst`). This file is byte-identical across turns and hits Claude's prompt cache.
 
-2. **Dynamic file** — `BuildDynamicContext`: identity block + escalation brief + current need + `LastLocalSummary`. Changes per turn but is suppressed when content is unchanged (hash guard). Only re-sending this small file does not invalidate the large static prefix.
+2. **Dynamic file** — `BuildDynamicContext`: identity block + escalation brief + current need + `LastLocalSummary`. On `ContextModeFirst` when a prior escalation session exists (fresh-start forced by staleness), `LastEscalationSummary` is also injected as a `[Prior escalation session summary]` block so Claude retains key context from the dropped session. Changes per turn but is suppressed when content is unchanged (hash guard). Only re-sending this small file does not invalidate the large static prefix.
 
 Claude orients itself from this context without a separate reformulation step.
 
