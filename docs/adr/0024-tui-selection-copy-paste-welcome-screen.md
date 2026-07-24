@@ -26,6 +26,13 @@ Mouse drag on the viewport selects by line+column. Implementation:
 - Release at same point as press → clears selection
 - `wrappedTranscript()` re-renders the selected range with `\x1b[48;5;240m` background (not reverse-video) so it doesn't interact with colored text
 
+**Extending/reducing an active selection:**
+- Shift+Arrow keys (up/down/left/right) → move `selEndLine`/`selEndCol` while anchor stays fixed; viewport auto-scrolls to keep the moving end visible
+- Ctrl+Arrow keys → same behavior as Shift+Arrow (both modifier sets are equivalent for transcript selection)
+- Ctrl+Click → extends the selection to the clicked position instead of resetting the anchor
+
+When a transcript selection is active, `ctrl+up`/`ctrl+down` intercept the normal input-history navigation and extend the selection instead. `ctrl+left`/`ctrl+right` intercept the normal word-jump behavior in the textarea.
+
 **Copy triggers:**
 - Right-click → copies `selText` to clipboard (via `atotto/clipboard` + OSC 52)
 - Ctrl+C with an active selection → copies instead of interrupting

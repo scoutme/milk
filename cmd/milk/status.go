@@ -101,6 +101,12 @@ func (m *model) statusBar() string {
 			selStatus = yellow(fmt.Sprintf(" [selecting: line %d col %d — release to end]", m.selAnchorLine+1, m.selAnchorCol+1))
 		}
 		left += selStatus
+	} else if m.selAnchorLine >= 0 {
+		hint := " [transcript selection — shift/ctrl+arrows or ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]"
+		if m.selText != "" {
+			hint = fmt.Sprintf(" [%d chars selected — shift/ctrl+arrows or ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]", len([]rune(m.selText)))
+		}
+		left += yellow(hint)
 	}
 	// Truncate right (cwd) if it alone exceeds terminal width
 	{

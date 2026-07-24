@@ -271,3 +271,31 @@ func TestExtendTranscriptSel_BareDownIsNoop(t *testing.T) {
 		t.Errorf("bare down should not move transcript selection, got line %d", nm.selEndLine)
 	}
 }
+
+func TestExtendTranscriptSel_CtrlDownMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlDown)
+	if nm.selEndLine != 2 {
+		t.Errorf("ctrl+down: expected selEndLine=2, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlUpMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlUp)
+	if nm.selEndLine != 0 {
+		t.Errorf("ctrl+up: expected selEndLine=0, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlLeftDecrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlLeft) // endCol=4 → 3
+	if nm.selEndCol != 3 {
+		t.Errorf("ctrl+left: expected selEndCol=3, got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlRightIncrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlRight) // endCol=4 → 5
+	if nm.selEndCol != 5 {
+		t.Errorf("ctrl+right: expected selEndCol=5, got %d", nm.selEndCol)
+	}
+}

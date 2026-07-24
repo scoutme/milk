@@ -724,7 +724,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
 		switch ev.Action {
 		case tea.MouseActionPress:
-			if ev.Shift && m.selAnchorLine >= 0 {
+			if ev.Ctrl && m.selAnchorLine >= 0 {
 				// Extend existing selection to clicked position.
 				m.selEndLine = contentLine
 				m.selEndCol = ev.X
@@ -1413,13 +1413,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "ctrl+up":
+		if m.selAnchorLine >= 0 {
+			return m.extendTranscriptSel(msg)
+		}
 		m = m.historyBack()
 		m.syncLayout()
 		return m, nil
 	case "ctrl+down":
+		if m.selAnchorLine >= 0 {
+			return m.extendTranscriptSel(msg)
+		}
 		m = m.historyForward()
 		m.syncLayout()
 		return m, nil
+	case "ctrl+left", "ctrl+right":
+		if m.selAnchorLine >= 0 {
+			return m.extendTranscriptSel(msg)
+		}
 	case "shift+left", "shift+right", "shift+up", "shift+down", "shift+home", "shift+end",
 		"shift+ctrl+left", "shift+ctrl+right", "shift+alt+left", "shift+alt+right",
 		"ctrl+shift+left", "ctrl+shift+right":
@@ -1558,18 +1568,18 @@ func (m model) extendTranscriptSel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "shift+up":
+	case "shift+up", "ctrl+up":
 		endLine--
-	case "shift+down":
+	case "shift+down", "ctrl+down":
 		endLine++
-	case "shift+left":
+	case "shift+left", "ctrl+left":
 		if endCol > 0 {
 			endCol--
 		} else if endLine > 0 {
 			endLine--
 			endCol = lineLen(endLine)
 		}
-	case "shift+right":
+	case "shift+right", "ctrl+right":
 		ll := lineLen(endLine)
 		if endCol < ll {
 			endCol++
