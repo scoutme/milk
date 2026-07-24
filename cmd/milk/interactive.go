@@ -214,18 +214,28 @@ const interactiveHelp = `
     Mouse wheel / PgUp/PgDn / Ctrl+U / Ctrl+F   scroll transcript
 
   Agent control
-    Ctrl+C   interrupt current agent turn
+    Ctrl+C   interrupt current agent turn (or copy if selection is active)
     Ctrl+T   toggle thinking/reasoning visibility (works during streaming)
+
+  Transcript selection
+    Mouse drag                    select by line+column
+    Shift+Arrow / Ctrl+Arrow      extend or reduce selection (when active)
+    Ctrl+Click                    extend selection to clicked position
+    Ctrl+C / right-click          copy selection to clipboard
+    Esc                           clear selection
 
   Input history
     Up / Down (single-line input)   navigate history
-    Ctrl+Up / Ctrl+Down             navigate history
+    Ctrl+Up / Ctrl+Down             navigate history (or extend transcript selection when active)
     Ctrl+R                          reverse incremental search
     Ctrl+S                          forward incremental search
 
   Multi-line input
     Ctrl+N / Shift+Alt+Enter / Alt+Enter   insert newline
     Paste                                  multi-line paste sent as one block
+
+  Memory panel
+    Double-click entry   print memory entry details to transcript
 
   @ prefix
     @path   reference a file path (Tab-completes)`

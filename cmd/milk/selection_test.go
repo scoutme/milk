@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // --- wrapLineIntoRows ---
@@ -144,5 +147,155 @@ func TestApplyInputHighlight_NegativeLo(t *testing.T) {
 	result := applyInputHighlight(line, 0, -3, 5)
 	if !strings.Contains(result, "\x1b[48;5;240m") {
 		t.Error("expected highlight for negative selLo clamped to 0")
+	}
+}
+
+// --- extendTranscriptSel ---
+
+// selModel builds a minimal model with a 3-line transcript and an active
+// selection anchor at line 1, col 2. The viewport is wide enough that each
+// transcript line occupies exactly one wrapped line.
+func selModel() model {
+	tx := &strings.Builder{}
+	tx.WriteString("line zero\nline one\nline two\n")
+	m := model{
+		transcript:        tx,
+		transcriptNoThink: tx,
+		selAnchorLine:     1,
+		selAnchorCol:      2,
+		selEndLine:        1,
+		selEndCol:         4,
+		colorizeMode:      ColorizeOff,
+		vp:                viewport.New(80, 20),
+	}
+	m.vp.SetYOffset(0)
+	return m
+}
+
+func extendSel(m model, kt tea.KeyType) model {
+	result, _ := m.extendTranscriptSel(tea.KeyMsg{Type: kt})
+	return result.(model)
+}
+
+func TestExtendTranscriptSel_ShiftDownMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyShiftDown)
+	if nm.selEndLine != 2 {
+		t.Errorf("shift+down: expected selEndLine=2, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftUpMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyShiftUp) // anchor/end at line 1 → end moves to 0
+	if nm.selEndLine != 0 {
+		t.Errorf("shift+up: expected selEndLine=0, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftUpClampedAtZero(t *testing.T) {
+	m := selModel()
+	m.selEndLine = 0
+	nm := extendSel(m, tea.KeyShiftUp)
+	if nm.selEndLine < 0 {
+		t.Errorf("shift+up at line 0 should clamp, not go negative, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftDownClampedAtMax(t *testing.T) {
+	m := selModel()
+	m.selEndLine = 2
+	nm := extendSel(m, tea.KeyShiftDown)
+	lines := nm.transcriptPlainLines()
+	maxLine := len(lines) - 1
+	if nm.selEndLine > maxLine {
+		t.Errorf("shift+down at last line should clamp, got %d (max %d)", nm.selEndLine, maxLine)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftLeftDecrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyShiftLeft) // endCol=4 → 3
+	if nm.selEndCol != 3 {
+		t.Errorf("shift+left: expected selEndCol=3, got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftLeftAtLineStartWrapsUp(t *testing.T) {
+	m := selModel()
+	m.selEndLine = 1
+	m.selEndCol = 0
+	nm := extendSel(m, tea.KeyShiftLeft)
+	if nm.selEndLine != 0 {
+		t.Errorf("shift+left at col 0 should wrap to previous line, got line %d", nm.selEndLine)
+	}
+	if nm.selEndCol <= 0 {
+		t.Errorf("shift+left wrap: expected col > 0 (end of prev line), got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftRightIncrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyShiftRight) // endCol=4 → 5
+	if nm.selEndCol != 5 {
+		t.Errorf("shift+right: expected selEndCol=5, got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_ShiftRightAtLineEndWrapsDown(t *testing.T) {
+	m := selModel()
+	lines := m.transcriptPlainLines()
+	m.selEndLine = 1
+	m.selEndCol = len([]rune(lines[1])) // at end of "line one"
+	nm := extendSel(m, tea.KeyShiftRight)
+	if nm.selEndLine != 2 {
+		t.Errorf("shift+right at line end should wrap to next line, got line %d", nm.selEndLine)
+	}
+	if nm.selEndCol != 0 {
+		t.Errorf("shift+right wrap: expected col=0, got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_NoEndUsesAnchor(t *testing.T) {
+	// selEndLine=-1 means no drag has happened yet; end should start from anchor.
+	m := selModel()
+	m.selEndLine = -1
+	m.selEndCol = 0
+	nm := extendSel(m, tea.KeyShiftDown)
+	// anchor was at line 1; end should move from 1 to 2.
+	if nm.selEndLine != 2 {
+		t.Errorf("selEndLine=-1: expected selEndLine=2 after shift+down, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_BareDownIsNoop(t *testing.T) {
+	m := selModel()
+	nm := extendSel(m, tea.KeyDown) // unrecognised key — no change
+	if nm.selEndLine != m.selEndLine {
+		t.Errorf("bare down should not move transcript selection, got line %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlDownMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlDown)
+	if nm.selEndLine != 2 {
+		t.Errorf("ctrl+down: expected selEndLine=2, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlUpMovesEndLine(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlUp)
+	if nm.selEndLine != 0 {
+		t.Errorf("ctrl+up: expected selEndLine=0, got %d", nm.selEndLine)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlLeftDecrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlLeft) // endCol=4 → 3
+	if nm.selEndCol != 3 {
+		t.Errorf("ctrl+left: expected selEndCol=3, got %d", nm.selEndCol)
+	}
+}
+
+func TestExtendTranscriptSel_CtrlRightIncrementsCol(t *testing.T) {
+	nm := extendSel(selModel(), tea.KeyCtrlRight) // endCol=4 → 5
+	if nm.selEndCol != 5 {
+		t.Errorf("ctrl+right: expected selEndCol=5, got %d", nm.selEndCol)
 	}
 }
