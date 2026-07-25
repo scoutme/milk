@@ -145,9 +145,29 @@ func isBinaryMIME(mime string) bool {
 // isLikelyFilePath reports whether s looks like an absolute file path that
 // exists on disk. It must start with "/" or "~/", and after home-expansion the
 // path must exist.
-func isLikelyFilePath(s string) bool {
+// unquoteFilePath strips surrounding single quotes added by terminals that
+// shell-quote paths on drag-and-drop (e.g. GNOME Terminal pastes '/path/to/file').
+func unquoteFilePath(s string) string {
 	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "~/") {
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		s = s[1 : len(s)-1]
+	}
+	return s
+}
+
+// looksLikeFilePath returns true when s has a file-path prefix — but does NOT
+// check whether the path actually exists. Used to decide whether to insert
+// @path into the input area when the user declines to attach.
+func looksLikeFilePath(s string) bool {
+	s = unquoteFilePath(s)
+	return strings.HasPrefix(s, "/") ||
+		strings.HasPrefix(s, "~/") ||
+		strings.HasPrefix(s, `\\`) // Windows UNC / network path
+}
+
+func isLikelyFilePath(s string) bool {
+	s = unquoteFilePath(s)
+	if !looksLikeFilePath(s) {
 		return false
 	}
 	// Single "/" is not a file attachment.

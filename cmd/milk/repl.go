@@ -1419,10 +1419,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Paste {
 		// Check whether the pasted content looks like a file path that exists.
 		// If so, ask the user whether to attach it rather than insert it as text.
-		pasted := strings.TrimSpace(msg.String())
+		pasted := strings.TrimSpace(string(msg.Runes))
 		if isLikelyFilePath(pasted) {
-			m.pendingPathPaste = pasted
-			m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [y/N] ", milkTag(), pasted))
+			clean := unquoteFilePath(pasted)
+			m.pendingPathPaste = clean
+			m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [Y/n] ", milkTag(), clean))
+			m.syncLayout()
+			return m, nil
+		}
+		// Path-like string that doesn't exist on disk (e.g. Windows UNC path
+		// or a path to a remote file): insert as @path so the agent sees it.
+		if looksLikeFilePath(pasted) {
+			m.ta.InsertString("@" + unquoteFilePath(pasted))
 			m.syncLayout()
 			return m, nil
 		}
