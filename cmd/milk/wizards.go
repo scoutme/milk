@@ -37,10 +37,10 @@ const (
 // addAgentState tracks state for the multi-step /agent add wizard.
 // Fields are filled one at a time when the user doesn't supply them inline.
 type addAgentState struct {
-	ac           config.AgentConfig
-	step         addAgentStep
-	runCmdAsked  bool // true once the optional run_cmd step has been shown
-	promptAsked  bool // true once the optional prompt step has been shown
+	ac          config.AgentConfig
+	step        addAgentStep
+	runCmdAsked bool // true once the optional run_cmd step has been shown
+	promptAsked bool // true once the optional prompt step has been shown
 }
 
 type addAgentStep int

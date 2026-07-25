@@ -91,7 +91,7 @@ func TestBuildToolRunner_CLIIntegration(t *testing.T) {
 func findMockBinForCLITest(t *testing.T) string {
 	t.Helper()
 	candidates := []string{
-		"../../milk-mock",      // from cmd/milk/ → project root
+		"../../milk-mock", // from cmd/milk/ → project root
 		"./milk-mock",
 	}
 	for _, c := range candidates {
@@ -129,4 +129,3 @@ func assertSessionFileHasTurn(t *testing.T, path, expectedInput string) {
 	}
 	t.Errorf("no turn with input %q found in %s\nfile contents:\n%s", expectedInput, path, string(data))
 }
-

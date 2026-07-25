@@ -153,8 +153,8 @@ func TestStore_OnChange(t *testing.T) {
 	var count int
 	s.SetOnChange(func() { count++ })
 
-	s.Create("t1", nil)   //nolint:errcheck
-	s.Create("t2", nil)   //nolint:errcheck
+	s.Create("t1", nil) //nolint:errcheck
+	s.Create("t2", nil) //nolint:errcheck
 	tasks, _ := s.List(ListOpts{})
 	s.Complete(tasks[0].ID) //nolint:errcheck
 

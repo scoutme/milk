@@ -11,12 +11,12 @@ import (
 
 // TurnRecord captures one prompt/response exchange for a named mock instance.
 type TurnRecord struct {
-	Turn           int               `json:"turn"`
-	Input          string            `json:"input"`
-	ContextSummary string            `json:"context_summary"`
-	ToolCalls      []ToolCallRecord  `json:"tool_calls,omitempty"`
-	Response       string            `json:"response"`
-	TimestampMS    int64             `json:"timestamp_ms"`
+	Turn           int              `json:"turn"`
+	Input          string           `json:"input"`
+	ContextSummary string           `json:"context_summary"`
+	ToolCalls      []ToolCallRecord `json:"tool_calls,omitempty"`
+	Response       string           `json:"response"`
+	TimestampMS    int64            `json:"timestamp_ms"`
 }
 
 // ToolCallRecord holds a single tool call parsed from the input prompt.

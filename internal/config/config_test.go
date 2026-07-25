@@ -639,6 +639,63 @@ func TestValidate_OnlyPromptNoWarning(t *testing.T) {
 	}
 }
 
+func TestValidateMCPServerAuth_OAuth(t *testing.T) {
+	cfg := Config{
+		MCPServers: []MCPServerConfig{
+			{
+				Name: "my-oauth-server",
+				URL:  "https://mcp.example.com",
+				Auth: "oauth",
+			},
+		},
+	}
+	warnings := Validate(cfg)
+	for _, w := range warnings {
+		if containsSubstr(w.Message, "auth") {
+			t.Errorf("unexpected auth-related warning for oauth: %v", w)
+		}
+	}
+}
+
+func TestValidateMCPServerAuth_InvalidRejectd(t *testing.T) {
+	cfg := Config{
+		MCPServers: []MCPServerConfig{
+			{
+				Name: "bad-server",
+				URL:  "https://mcp.example.com",
+				Auth: "magic",
+			},
+		},
+	}
+	warnings := Validate(cfg)
+	found := false
+	for _, w := range warnings {
+		if containsSubstr(w.Message, "unknown auth") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'unknown auth' warning for invalid auth value, got none")
+	}
+}
+
+func TestValidateMCPServerAuth_KnownValues(t *testing.T) {
+	knownAuths := []string{"", "none", "bearer", "token_cmd", "oauth"}
+	for _, auth := range knownAuths {
+		cfg := Config{
+			MCPServers: []MCPServerConfig{
+				{Name: "srv", URL: "https://example.com", Auth: auth},
+			},
+		}
+		warnings := Validate(cfg)
+		for _, w := range warnings {
+			if containsSubstr(w.Message, "unknown auth") {
+				t.Errorf("auth=%q produced unexpected 'unknown auth' warning: %v", auth, w)
+			}
+		}
+	}
+}
+
 func containsSubstr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || findSub(s, sub))
 }

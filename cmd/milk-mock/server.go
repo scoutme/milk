@@ -83,10 +83,10 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 // chatRequest is the incoming OpenAI chat completions request body.
 type chatRequest struct {
-	Model    string               `json:"model"`
-	Messages []map[string]any     `json:"messages"`
-	Stream   bool                 `json:"stream"`
-	Tools    []map[string]any     `json:"tools,omitempty"`
+	Model    string           `json:"model"`
+	Messages []map[string]any `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []map[string]any `json:"tools,omitempty"`
 }
 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request, rec *mockrecorder.Recorder) {
@@ -131,9 +131,9 @@ func serveSSE(w http.ResponseWriter, _ *http.Request, req chatRequest, rec *mock
 		for i, tc := range toolCalls {
 			argsJSON, _ := json.Marshal(tc.Args)
 			toolCallChunk := map[string]any{
-				"id":      id,
-				"object":  "chat.completion.chunk",
-				"model":   model,
+				"id":     id,
+				"object": "chat.completion.chunk",
+				"model":  model,
 				"choices": []map[string]any{{
 					"index": 0,
 					"delta": map[string]any{

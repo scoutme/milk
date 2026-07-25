@@ -17,36 +17,36 @@ import (
 
 // workflowWizardState tracks multi-step wizard input for /workflow.
 type workflowWizardState struct {
-	name          string // workflow name (e.g. "dev")
-	task          string
-	designer      string
-	generator     string
-	evaluator     string
+	name      string // workflow name (e.g. "dev")
+	task      string
+	designer  string
+	generator string
+	evaluator string
 	// generatorPrompt and evaluatorPrompt hold optional inline behaviour prompts
 	// for the generator and evaluator roles. Set during the wizard; applied as
 	// AgentConfig.Prompt overrides at launch (session-local, not persisted to disk).
-	generatorPrompt  string
-	evaluatorPrompt  string
-	promptAsked      bool // true once the behaviour-prompt steps have been shown
-	step             workflowWizardStep
-	clearing         bool   // true when this wizard is a /workflow clear confirmation
-	resuming         bool   // true when completing the wizard should resume rather than start fresh
-	reconfiguring    bool   // true when completing the wizard should update state agent map only
-	sprint           int    // checkpoint sprint (used when resuming/reconfiguring == true)
-	pass             int    // checkpoint pass (used when resuming/reconfiguring == true)
-	role             string // checkpoint role (used when resuming/reconfiguring == true)
+	generatorPrompt string
+	evaluatorPrompt string
+	promptAsked     bool // true once the behaviour-prompt steps have been shown
+	step            workflowWizardStep
+	clearing        bool   // true when this wizard is a /workflow clear confirmation
+	resuming        bool   // true when completing the wizard should resume rather than start fresh
+	reconfiguring   bool   // true when completing the wizard should update state agent map only
+	sprint          int    // checkpoint sprint (used when resuming/reconfiguring == true)
+	pass            int    // checkpoint pass (used when resuming/reconfiguring == true)
+	role            string // checkpoint role (used when resuming/reconfiguring == true)
 }
 
 type workflowWizardStep int
 
 const (
-	wizardStepTask              workflowWizardStep = iota // ask for task description
-	wizardStepDesigner                                    // ask for designer agent
-	wizardStepGenerator                                   // ask for generator agent
-	wizardStepEvaluator                                   // ask for evaluator agent
-	wizardStepGeneratorPrompt                             // optional — behaviour prompt for generator
-	wizardStepEvaluatorPrompt                             // optional — behaviour prompt for evaluator
-	wizardStepClearConfirm                                // ask user to type "clear" to confirm
+	wizardStepTask            workflowWizardStep = iota // ask for task description
+	wizardStepDesigner                                  // ask for designer agent
+	wizardStepGenerator                                 // ask for generator agent
+	wizardStepEvaluator                                 // ask for evaluator agent
+	wizardStepGeneratorPrompt                           // optional — behaviour prompt for generator
+	wizardStepEvaluatorPrompt                           // optional — behaviour prompt for evaluator
+	wizardStepClearConfirm                              // ask user to type "clear" to confirm
 	wizardStepDone
 )
 

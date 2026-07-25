@@ -1318,9 +1318,9 @@ func Validate(cfg Config) []ValidationWarning {
 			warn("", fmt.Sprintf("mcp_servers %q: command is required for stdio transport", ms.Name))
 		}
 		switch strings.ToLower(ms.Auth) {
-		case "", "none", "bearer", "token_cmd":
+		case "", "none", "bearer", "token_cmd", "oauth":
 		default:
-			warn("", fmt.Sprintf("mcp_servers %q: unknown auth %q (valid: none, bearer, token_cmd)", ms.Name, ms.Auth))
+			warn("", fmt.Sprintf("mcp_servers %q: unknown auth %q (valid: none, bearer, token_cmd, oauth)", ms.Name, ms.Auth))
 		}
 		switch strings.ToLower(ms.Transport) {
 		case "", "http", "stdio":

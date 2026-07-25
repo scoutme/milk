@@ -23,10 +23,10 @@ func TestWatcher_FiresOnValidConfig(t *testing.T) {
 	}
 
 	var (
-		mu      sync.Mutex
-		gotCfg  Config
-		gotErr  error
-		fired   = make(chan struct{}, 1)
+		mu     sync.Mutex
+		gotCfg Config
+		gotErr error
+		fired  = make(chan struct{}, 1)
 	)
 
 	w, err := NewWatcher(path, func(cfg Config, err error) {
