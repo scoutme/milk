@@ -80,6 +80,10 @@ type TurnCallbacks struct {
 	OnPercept  func(body, consumerHint string)
 	OnEscalate func(reason string) // nil for escalation runners (they never self-escalate)
 	OnResponse func(text string)   // called with the agent's final text after a successful turn
+	// ImageContextFile is an optional path to a temp file containing image data-URI
+	// blocks. CLI runners append it via --append-system-prompt-file to avoid
+	// inlining large base64 strings in the prompt argument (ARG_MAX).
+	ImageContextFile string
 }
 
 // TurnRunner abstracts provider-specific inference for one agent turn.
@@ -89,6 +93,9 @@ type TurnCallbacks struct {
 type TurnRunner interface {
 	// Name returns the display name used in logs and status lines.
 	Name() string
+	// IsCLI reports whether this runner invokes the claude CLI subprocess.
+	// Used to decide how to pass image attachments (@path vs inline data URI).
+	IsCLI() bool
 	// Ping checks whether the underlying agent binary or endpoint is reachable.
 	Ping() error
 	// Execute runs one inference turn. sessionID is the existing session to
@@ -125,6 +132,7 @@ func newLocalRunner(agent *local.Agent, name string) *localRunner {
 }
 
 func (r *localRunner) Name() string { return r.name }
+func (r *localRunner) IsCLI() bool  { return false }
 func (r *localRunner) Ping() error  { return r.agent.Ping(context.Background()) }
 
 func (r *localRunner) Execute(
@@ -314,6 +322,7 @@ func (r *cliRunner) withMCPServers(servers []config.MCPServerConfig) *cliRunner 
 }
 
 func (r *cliRunner) Name() string { return r.name }
+func (r *cliRunner) IsCLI() bool  { return true }
 func (r *cliRunner) Ping() error  { return r.agent.Ping() }
 
 func (r *cliRunner) Execute(
@@ -364,6 +373,20 @@ func (r *cliRunner) Execute(
 	}
 
 	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
+
+	// Append image context (data-URI blocks) to dynamicCtx so large base64 strings
+	// reach Claude via --append-system-prompt-file (temp file) rather than the
+	// prompt argument, avoiding ARG_MAX failures for large images.
+	if cbs.ImageContextFile != "" {
+		if data, err := os.ReadFile(cbs.ImageContextFile); err == nil && len(data) > 0 {
+			if dynamicCtx != "" {
+				dynamicCtx += "\n"
+			}
+			dynamicCtx += string(data)
+		}
+		os.Remove(cbs.ImageContextFile) //nolint:errcheck
+		cbs.ImageContextFile = ""
+	}
 
 	// Suppress duplicate dynamic context on resume turns (cache preservation).
 	// Re-sending an identical file still shifts the cache suffix and causes a miss.
@@ -544,6 +567,7 @@ func (r *subprocessRunner) withMCPToolSet(servers []config.MCPServerConfig, ts *
 }
 
 func (r *subprocessRunner) Name() string { return r.name }
+func (r *subprocessRunner) IsCLI() bool  { return false }
 func (r *subprocessRunner) Ping() error  { return r.agent.Ping() }
 
 func (r *subprocessRunner) Execute(

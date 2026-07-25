@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/creack/pty"
 )
 
 // viewportHeight is the full terminal height minus the chrome lines.
@@ -57,6 +58,10 @@ func (m *model) vpWidth() int {
 // Sticky-bottom: scrolls to bottom only when already there.
 func (m *model) syncLayout() {
 	if !m.ready {
+		return
+	}
+	// PTY pane owns the viewport area; no transcript layout needed.
+	if m.ptyPane != nil {
 		return
 	}
 	vw := m.vpWidth()
@@ -120,6 +125,20 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 			m.vp.GotoBottom()
 		}
 	}
+	// Resize the PTY to match the new terminal dimensions.
+	if m.ptyPane != nil {
+		newCols := m.mainWidth() - 1
+		if newCols < 10 {
+			newCols = 10
+		}
+		pty.Setsize(m.ptyPane.ptm, &pty.Winsize{ //nolint:errcheck
+			Rows: uint16(vpH),
+			Cols: uint16(newCols),
+		})
+		m.ptyPane.vtMu.Lock()
+		m.ptyPane.vt.Resize(vpH, newCols)
+		m.ptyPane.vtMu.Unlock()
+	}
 	return m, nil
 }
 
@@ -159,6 +178,15 @@ func (m *model) renderSeparator(h int) string {
 func (m model) View() string {
 	if !m.ready {
 		return ""
+	}
+	// PTY pane: replace the transcript viewport with the VT terminal screen.
+	if m.ptyPane != nil {
+		vpH := m.viewportHeight()
+		paneCols := m.mainWidth()
+		ptyContent := m.renderPTYPane(vpH, paneCols)
+		sep := m.renderSeparator(vpH)
+		mainArea := lipgloss.JoinHorizontal(lipgloss.Top, ptyContent, sep)
+		return m.headerBar() + "\n" + mainArea + "\n" + m.statusBar()
 	}
 	vpH := m.viewportHeight()
 	sep := m.renderSeparator(vpH)

@@ -459,6 +459,8 @@ If a newer release is available, milk shows the current and latest versions and 
 
 **Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
 
+**Clipboard binary paste:** When a bracketed paste event yields empty text, milk probes the system clipboard via `xclip` (X11) or `wl-paste` (Wayland) for non-text content. If a non-text MIME type is found (e.g. `image/png`, `application/pdf`), the content is saved to a temp file and staged as a pending attachment, exactly as if `/attach` had been called. If neither tool is installed, a dim inline hint is shown suggesting installation. This is transparent — no key combination required beyond the normal paste gesture (Ctrl+Shift+V or middle-click).
+
 **Keyboard:** Up/Down navigates input history (single-line mode only); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
 
 **Memory panel:** A 34-column right-side panel shows SESSION / GLOBAL / GLOBAL (core) percept sections in real time (polls every 5s). Each percept displays a short `#<6hex>` ID (dim), content wrapped to 2 lines, and weight right-aligned. Percepts updated within the last 60s are highlighted bold+yellow. Toggle with `/panel memory`.

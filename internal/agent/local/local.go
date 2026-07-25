@@ -716,16 +716,23 @@ func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
 	return false
 }
 
-func isRepeatedPrompt(history []Message, userPrompt string) bool {
+func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns int) bool {
 	norm := normalizePrompt(userPrompt)
 	if len(norm) < minRepeatCheckLen {
 		return false
 	}
 
 	// Collect the last repetitionWindow user messages, most-recent last.
+	// skipFirstUserTurns allows the caller to exclude history prior to a
+	// /primary switch so those turns don't count toward the repetition window.
 	var userMsgs []string
+	skipped := 0
 	for _, m := range history {
 		if m.Role == "user" {
+			if skipped < skipFirstUserTurns {
+				skipped++
+				continue
+			}
 			userMsgs = append(userMsgs, normalizePrompt(m.Content))
 		}
 	}
@@ -759,7 +766,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Escalate immediately if the user is repeating the same question.
 	// Skipped when this agent is acting as the escalation target: by definition
 	// it must handle prompts the primary agent already tried.
-	if !a.skipRepeatCheck && isRepeatedPrompt(history, userPrompt) {
+	var skipFirst int
+	if sess != nil {
+		skipFirst = sess.RepetitionBaselineLocalTurns
+	}
+	if !a.skipRepeatCheck && isRepeatedPrompt(history, userPrompt, skipFirst) {
 		obs.Inc(ctx, inferenceScope, "milk.router.escalation_signals",
 			attribute.String("reason", "repeated_prompt"),
 		)

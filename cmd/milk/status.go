@@ -168,6 +168,14 @@ func (m *model) statusBar() string {
 }
 
 func (m *model) statusAgent() string {
+	if m.ptyPane != nil {
+		frame := yellow(bold(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]))
+		cmd := m.ptyPane.shellCmd
+		if len(cmd) > 40 {
+			cmd = cmd[:37] + "…"
+		}
+		return frame + " " + dim("[sh: "+cmd+"]") + "  " + dim("keys forwarded · Ctrl+C = ^C · Ctrl+D = EOF")
+	}
 	if m.searching {
 		label := "reverse-i-search"
 		if m.searchForward {

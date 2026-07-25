@@ -180,7 +180,7 @@ func runEscalation(
 	onResponse func(string),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, out, onResponse, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, onResponse, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
@@ -196,6 +196,7 @@ func runEscalationWithSession(
 	mem *memory.Store,
 	prompt string,
 	sessionContent string,
+	imageContextFile string,
 	out io.Writer,
 	onResponse func(string),
 	prefixOut ...io.Writer,
@@ -268,9 +269,10 @@ func runEscalationWithSession(
 	}
 
 	cbs := TurnCallbacks{
-		OnNeed:     func(body string) { sess.RecordNeed(body) },
-		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
-		OnResponse: onResponse,
+		OnNeed:           func(body string) { sess.RecordNeed(body) },
+		OnPercept:        buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
+		OnResponse:       onResponse,
+		ImageContextFile: imageContextFile,
 	}
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RoleEscalation, ctxMode,

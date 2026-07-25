@@ -218,6 +218,9 @@ const interactiveHelp = `
   /attach <path>         stage a file or image for the next agent turn
                          text files → quoted block in message body
                          images (png/jpg/gif/webp) → multipart vision payload
+  /paste                 probe clipboard for binary content (image, PDF, …)
+                         auto-stages it as an attachment; requires xclip (X11)
+                         or wl-paste (Wayland); also fires on empty paste event
 
 ── General ──────────────────────────────────────────────────────────────
   /help                  show this help
@@ -391,6 +394,18 @@ type interactiveState struct {
 	// attachment placeholders in history instead of full file content.
 	pendingSessionContent string
 
+	// pendingImageContextFile is the path to a temp file containing image data-URI
+	// blocks for the next escalation turn. When set, cliRunner passes it as an
+	// additional --append-system-prompt-file instead of inlining it in the prompt
+	// argument (which can exceed ARG_MAX for large images). Reset and deleted after
+	// each turn.
+	pendingImageContextFile string
+
+	// pendingCLIImageFiles holds temp file paths for images staged for the CLI
+	// escalation path. Each file is prepended as @<path> in the prompt so the
+	// claude binary reads the image natively. Paths are removed after the turn.
+	pendingCLIImageFiles []string
+
 	// activeFallbackTarget is set by runTurn just before a turn runs when the
 	// router's decision was overridden by availability (e.g. local down → escalation).
 	// "" means no override is active. Used by agentLabel to show the correct agent
@@ -506,6 +521,9 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		st.forceEscalate = false
 		st.stickyEscalate = false
 		st.autoStickyEscalate = false
+		if st.sess != nil {
+			st.sess.RepetitionBaselineLocalTurns = st.sess.LocalUserTurnCount()
+		}
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.
 			st.stickyPrimary = true
@@ -568,7 +586,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 			fmt.Fprintf(&out, errFmt, err)
 		}
 	case cmdPaste:
-		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
+		fmt.Fprint(&out, milkTag()+" probing clipboard for non-text content (image, PDF, …)")
 	}
 	return out.String()
 }
