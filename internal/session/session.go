@@ -115,6 +115,12 @@ type Session struct {
 	// Returning/Resume detection. Cleared immediately after use. Not persisted.
 	ForceFreshEscalation bool `json:"-"`
 
+	// RepetitionBaselineLocalTurns is the local user-turn count at the moment the
+	// user last returned to the primary agent via /primary. The repeated-prompt
+	// check skips any user turns before this index so that prompts issued before
+	// the /primary switch do not count toward the repetition window. Transient.
+	RepetitionBaselineLocalTurns int `json:"-"`
+
 	// Tokens holds cumulative token usage for this session, keyed by "model\x00role".
 	// Persisted so /usage can show totals from prior runs of the same session.
 	Tokens map[string]*TokenUsage `json:"tokens,omitempty"`
@@ -340,6 +346,18 @@ func (s *Session) LocalTurnCount() int {
 	count := 0
 	for _, t := range s.History {
 		if t.Role == RoleAssistant && t.Agent == AgentLocal {
+			count++
+		}
+	}
+	return count
+}
+
+// LocalUserTurnCount returns the number of user turns attributed to the local
+// agent in the session history.
+func (s *Session) LocalUserTurnCount() int {
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleUser && t.Agent == AgentLocal {
 			count++
 		}
 	}

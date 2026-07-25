@@ -394,6 +394,18 @@ type interactiveState struct {
 	// attachment placeholders in history instead of full file content.
 	pendingSessionContent string
 
+	// pendingImageContextFile is the path to a temp file containing image data-URI
+	// blocks for the next escalation turn. When set, cliRunner passes it as an
+	// additional --append-system-prompt-file instead of inlining it in the prompt
+	// argument (which can exceed ARG_MAX for large images). Reset and deleted after
+	// each turn.
+	pendingImageContextFile string
+
+	// pendingCLIImageFiles holds temp file paths for images staged for the CLI
+	// escalation path. Each file is prepended as @<path> in the prompt so the
+	// claude binary reads the image natively. Paths are removed after the turn.
+	pendingCLIImageFiles []string
+
 	// activeFallbackTarget is set by runTurn just before a turn runs when the
 	// router's decision was overridden by availability (e.g. local down → escalation).
 	// "" means no override is active. Used by agentLabel to show the correct agent
@@ -509,6 +521,9 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		st.forceEscalate = false
 		st.stickyEscalate = false
 		st.autoStickyEscalate = false
+		if st.sess != nil {
+			st.sess.RepetitionBaselineLocalTurns = st.sess.LocalUserTurnCount()
+		}
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.
 			st.stickyPrimary = true

@@ -17,7 +17,7 @@ func TestIsRepeatedPrompt_NoPendingTurn(t *testing.T) {
 		{Role: "user", Content: "now refactor the session store"},
 		{Role: "assistant", Content: "done"},
 	}
-	if isRepeatedPrompt(history, "a brand new question about deployment") {
+	if isRepeatedPrompt(history, "a brand new question about deployment", 0) {
 		t.Error("isRepeatedPrompt fired for a novel prompt with no pending user turn in history")
 	}
 }
@@ -37,7 +37,7 @@ func TestIsRepeatedPrompt_PendingTurnWouldCauseFalsePositive(t *testing.T) {
 	}
 	// isRepeatedPrompt would fire because the prompt appears at distance 1
 	// (the trailing turn) with score 1.0.
-	if !isRepeatedPrompt(historyWithPending, prompt) {
+	if !isRepeatedPrompt(historyWithPending, prompt, 0) {
 		t.Error("expected isRepeatedPrompt to fire when pending turn is not stripped — this test documents the bug the strip sites prevent")
 	}
 }
