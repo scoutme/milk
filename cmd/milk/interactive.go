@@ -218,6 +218,9 @@ const interactiveHelp = `
   /attach <path>         stage a file or image for the next agent turn
                          text files → quoted block in message body
                          images (png/jpg/gif/webp) → multipart vision payload
+  /paste                 probe clipboard for binary content (image, PDF, …)
+                         auto-stages it as an attachment; requires xclip (X11)
+                         or wl-paste (Wayland); also fires on empty paste event
 
 ── General ──────────────────────────────────────────────────────────────
   /help                  show this help
@@ -568,7 +571,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 			fmt.Fprintf(&out, errFmt, err)
 		}
 	case cmdPaste:
-		fmt.Fprint(&out, milkTag()+" hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline")
+		fmt.Fprint(&out, milkTag()+" probing clipboard for non-text content (image, PDF, …)")
 	}
 	return out.String()
 }

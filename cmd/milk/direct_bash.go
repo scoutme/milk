@@ -1,17 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"fmt"
+	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
-
-const directBashTimeout = 30 * time.Second
 
 // handleDirectBashKey handles y/N keypresses while pendingDirectBash is set.
 // 'y' or Enter runs the command; anything else (including 'n', Esc, Ctrl+C)
@@ -25,7 +20,7 @@ func (m model) handleDirectBashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript("y\n")
 		m.busy = true
 		m.spinnerFrame = 0
-		return m, tea.Batch(spinnerTick(), m.execDirectBash(cmd))
+		return m, execDirectBash(cmd)
 	default:
 		// User declined — route to agent as normal input.
 		m.appendTranscript("n\n")
@@ -34,46 +29,46 @@ func (m model) handleDirectBashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// execDirectBash returns a Cmd that runs shellCmd via sh -c, streams the output
-// to the transcript, and shows the exit code if non-zero. Does NOT forward to agent.
-func (m model) execDirectBash(shellCmd string) tea.Cmd {
-	send := func(msg tea.Msg) {
-		if m.st.program != nil {
-			m.st.program.Send(msg)
-		}
+// execDirectBash runs shellCmd inside script(1) so that:
+//   - the process gets a real PTY (sudo, passwd, vim, etc. work normally)
+//   - all output is recorded to a temp file
+//
+// After the process exits, directBashDoneMsg carries the transcript path so
+// the Update handler can read it and append the output to the milk transcript.
+func execDirectBash(shellCmd string) tea.Cmd {
+	tmp, err := os.CreateTemp("", "milk-bash-*.log")
+	if err != nil {
+		// Can't create temp file — fall back to plain ExecProcess with no recording.
+		c := exec.Command("sh", "-c", shellCmd)
+		return tea.ExecProcess(c, func(err error) tea.Msg {
+			return directBashDoneMsg{err: err}
+		})
 	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), directBashTimeout)
-		defer cancel()
+	tmp.Close()
+	logPath := tmp.Name()
 
-		var buf bytes.Buffer
-		c := exec.CommandContext(ctx, "sh", "-c", shellCmd)
-		c.Stdout = &buf
-		c.Stderr = &buf
+	// script -q -e -c <cmd> <logfile>
+	//   -q  quiet (no "Script started/done" lines)
+	//   -e  exit with the child's exit code
+	//   -c  run a single command rather than an interactive shell
+	c := exec.Command("script", "-q", "-e", "-c", shellCmd, logPath)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return directBashDoneMsg{err: err, logPath: logPath}
+	})
+}
 
-		err := c.Run()
-
-		output := buf.String()
-		if output != "" && !strings.HasSuffix(output, "\n") {
-			output += "\n"
-		}
-
-		var sb strings.Builder
-		if output != "" {
-			sb.WriteString(dim(output))
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				sb.WriteString(fmt.Sprintf("%s direct-bash: command timed out after %s\n", milkTag(), directBashTimeout))
-			} else if exitErr, ok := err.(*exec.ExitError); ok {
-				sb.WriteString(fmt.Sprintf("%s exit %d\n", dim("[sh]"), exitErr.ExitCode()))
-			} else {
-				sb.WriteString(fmt.Sprintf("%s direct-bash error: %v\n", milkTag(), err))
-			}
-		}
-
-		text := sb.String()
-		send(prefixChunkMsg{text: text})
-		return agentDoneMsg{err: nil}
+// readDirectBashLog reads the script(1) typescript file, strips ANSI escape
+// sequences and carriage returns, and returns the cleaned output.
+func readDirectBashLog(path string) string {
+	data, err := os.ReadFile(path)
+	os.Remove(path)
+	if err != nil || len(data) == 0 {
+		return ""
 	}
+	// script prepends a timing header when using --logging-format; with -q it
+	// writes raw PTY output. Strip ANSI and normalize line endings.
+	clean := stripANSI(string(data))
+	clean = strings.ReplaceAll(clean, "\r\n", "\n")
+	clean = strings.ReplaceAll(clean, "\r", "\n")
+	return clean
 }

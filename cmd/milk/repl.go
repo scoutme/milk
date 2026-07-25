@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -82,6 +83,12 @@ type thinkChunkMsg struct{ text string }
 
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
+
+// directBashDoneMsg is sent when a tea.ExecProcess direct-bash command exits.
+type directBashDoneMsg struct {
+	err     error
+	logPath string // path to script(1) typescript; empty if recording unavailable
+}
 
 // turnTimeoutWarningMsg is sent when a turn exceeds its configured timeout but
 // the turn is still running. The turn is not cancelled — this is a soft warning.
@@ -1071,7 +1078,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeToolUse = msg.name
 		return m, nil
 
+	case clipboardAttachMsg:
+		defer os.Remove(msg.path)
+		m = m.handleAttachCmd(msg.path)
+		return m, nil
+
+	case clipboardNoToolMsg:
+		m.appendTranscript(milkTag() + " clipboard paste: no content tool found — install " + bold("xclip") + " (X11) or " + bold("wl-paste") + " (Wayland) to attach non-text clipboard content\n")
+		return m, nil
+
 	case prefixChunkMsg:
+		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscript(msg.text)
 		return m, nil
 
@@ -1088,6 +1105,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
+
+	case directBashDoneMsg:
+		m.busy = false
+		m.cancelTurn = nil
+		m.busyHint = ""
+		if msg.logPath != "" {
+			if out := readDirectBashLog(msg.logPath); out != "" {
+				m.appendTranscript(dim(out))
+				m.currentTurnChars += int64(len(out))
+			}
+		}
+		if msg.err != nil {
+			if exitErr, ok := msg.err.(*exec.ExitError); ok {
+				m.appendTranscript(fmt.Sprintf("%s exit %d\n", dim("[sh]"), exitErr.ExitCode()))
+			} else {
+				m.appendTranscript(fmt.Sprintf("%s direct-bash error: %v\n", milkTag(), msg.err))
+			}
+		}
+		m.appendTranscript("\n")
+		m.refreshPrompt()
+		return m, nil
 
 	case turnTimeoutWarningMsg:
 		if m.busy {
@@ -1346,6 +1384,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [y/N] ", milkTag(), pasted))
 			m.syncLayout()
 			return m, nil
+		}
+		// Empty paste: the clipboard may hold binary/non-text content that the
+		// terminal couldn't relay. Probe via xclip/wl-paste asynchronously.
+		if pasted == "" {
+			return m, m.probeClipboardCmd()
 		}
 		m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
 		m.ta.SetHeight(m.height)
@@ -1776,8 +1819,11 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 	m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
 
 	if input == cmdPaste {
-		m.appendTranscript(dim("[milk]") + " hint: paste multi-line text directly, or use Ctrl+N / Shift+Alt+Enter to insert a newline\n")
-		return m, nil
+		// /paste is also the manual trigger for clipboard binary attachment:
+		// terminals (especially Windows Terminal / WSL2) never send a bracketed-paste
+		// event when the clipboard holds only binary data (image, PDF, etc.), so the
+		// automatic empty-paste hook cannot fire. /paste covers that gap.
+		return m, m.probeClipboardCmd()
 	}
 
 	if cmd, rest, found := extractSlashCommand(input); found {
@@ -1794,13 +1840,13 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 				if strings.EqualFold(allowed, first) {
 					m.busy = true
 					m.spinnerFrame = 0
-					return m, tea.Batch(spinnerTick(), m.execDirectBash(shellCmd))
+					return m, execDirectBash(shellCmd)
 				}
 			}
 			// Show confirmation prompt.
 			cmd := shellCmd
 			m.pendingDirectBash = &cmd
-			m.appendTranscript(milkTag() + " run: " + bold(shellCmd) + "  [y/N] ")
+			m.appendTranscript(milkTag() + " run: " + bold(shellCmd) + "  [Y/n] ")
 			m.refreshPrompt()
 			return m, nil
 		}
