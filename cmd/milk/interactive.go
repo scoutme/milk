@@ -47,9 +47,10 @@ const cmdOpen = "/open"
 const cmdMCP = "/mcp"
 const cmdUpdate = "/update"
 const cmdServer = "/server"
+const cmdBash = "/bash"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -198,6 +199,11 @@ const interactiveHelp = `
   /workflow resume                   resume workflow from last checkpoint
   /workflow reconfigure              reassign agent roles for current workflow (preserves state)
   /workflow clear                    delete saved workflow state for this session
+
+── Direct bash ───────────────────────────────────────────────────────────
+  /bash list             list the auto-allow prefixes (no confirmation prompt)
+  /bash allow <prefix>   add a prefix to the auto-allow list and save config
+  /bash deny <prefix>    remove a prefix from the auto-allow list and save config
 
 ── Server ────────────────────────────────────────────────────────────────
   /server status [<agent>]          show server status (reachable + PID)
@@ -534,6 +540,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 			st.forcePrimary = true
 		}
 		return false, prompt, output
+	case cmdBash:
+		output = execBash(prompt, st)
 	case cmdSkipPerms:
 		output = execSkipPerms(prompt, st)
 	case cmdThink:

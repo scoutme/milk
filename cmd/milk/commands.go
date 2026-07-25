@@ -764,6 +764,60 @@ func execAgentRemove(name string, st *interactiveState) string {
 	return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
 }
 
+// execBash handles /bash [list | allow <prefix> | deny <prefix>].
+func execBash(sub string, st *interactiveState) string {
+	sub = strings.TrimSpace(sub)
+	switch {
+	case sub == "" || sub == "list":
+		if len(st.cfg.DirectBashAllow) == 0 {
+			return milkTag() + " direct_bash_allow: (empty — all commands prompt for confirmation)"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s direct_bash_allow:\n", milkTag())
+		for _, p := range st.cfg.DirectBashAllow {
+			fmt.Fprintf(&b, "  %s\n", p)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	case strings.HasPrefix(sub, "allow "):
+		prefix := strings.TrimSpace(strings.TrimPrefix(sub, "allow "))
+		if prefix == "" {
+			return milkTag() + " usage: /bash allow <prefix>"
+		}
+		for _, p := range st.cfg.DirectBashAllow {
+			if strings.EqualFold(p, prefix) {
+				return fmt.Sprintf("%s %q is already in the allow list", milkTag(), prefix)
+			}
+		}
+		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow, prefix)
+		if err := config.Save(st.cfg); err != nil {
+			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
+		}
+		return fmt.Sprintf("%s added %q to direct_bash_allow", milkTag(), prefix)
+	case strings.HasPrefix(sub, "deny "):
+		prefix := strings.TrimSpace(strings.TrimPrefix(sub, "deny "))
+		if prefix == "" {
+			return milkTag() + " usage: /bash deny <prefix>"
+		}
+		idx := -1
+		for i, p := range st.cfg.DirectBashAllow {
+			if strings.EqualFold(p, prefix) {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return fmt.Sprintf("%s %q not found in allow list", milkTag(), prefix)
+		}
+		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow[:idx], st.cfg.DirectBashAllow[idx+1:]...)
+		if err := config.Save(st.cfg); err != nil {
+			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
+		}
+		return fmt.Sprintf("%s removed %q from direct_bash_allow", milkTag(), prefix)
+	default:
+		return milkTag() + " usage: /bash list | /bash allow <prefix> | /bash deny <prefix>"
+	}
+}
+
 // handleConfigCmd dispatches /config, /config init, /config open.
 func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(sub) {

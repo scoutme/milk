@@ -683,7 +683,8 @@ func normalizePrompt(s string) string {
 // history — the local agent's internal wire format. The router only sees the
 // raw prompt string and session metadata; it has no per-model turn history to
 // compare against.
-const minRepeatCheckLen = 20
+const minRepeatCheckLen = 20  // minimum characters
+const minRepeatCheckWords = 3 // minimum words (OR condition with minRepeatCheckLen)
 
 const repetitionWindow = 10     // number of recent user turns to consider
 const repetitionThreshold = 0.9 // escalate when score exceeds this
@@ -718,7 +719,7 @@ func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
 
 func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns int) bool {
 	norm := normalizePrompt(userPrompt)
-	if len(norm) < minRepeatCheckLen {
+	if len(norm) < minRepeatCheckLen && len(strings.Fields(norm)) < minRepeatCheckWords {
 		return false
 	}
 

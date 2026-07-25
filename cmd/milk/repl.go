@@ -1884,11 +1884,8 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 	// the first token is in the allow-list).
 	if m.st.cfg.DirectBash {
 		if shellCmd, ok := shelldetect.IsShellCommand(input); ok {
-			first := shelldetect.FirstToken(shellCmd)
-			for _, allowed := range m.st.cfg.DirectBashAllow {
-				if strings.EqualFold(allowed, first) {
-					return m.launchPTYPane(shellCmd)
-				}
+			if shelldetect.HasAllowedPrefix(shellCmd, m.st.cfg.DirectBashAllow) {
+				return m.launchPTYPane(shellCmd)
 			}
 			// Show confirmation prompt.
 			cmd := shellCmd

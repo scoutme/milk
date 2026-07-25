@@ -102,6 +102,31 @@ var knownBinaries = map[string]bool{
 	"emacs":    true,
 }
 
+// nlConnectors are short English words that would never appear as positional
+// shell arguments. If any non-flag, non-path token matches one of these the
+// input is treated as natural language regardless of position.
+var nlConnectors = map[string]bool{
+	"to":    true,
+	"in":    true,
+	"on":    true,
+	"at":    true,
+	"of":    true,
+	"for":   true,
+	"with":  true,
+	"from":  true,
+	"into":  true,
+	"onto":  true,
+	"about": true,
+	"and":   true,
+	"or":    true,
+	"but":   true,
+	"the":   true,
+	"a":     true,
+	"an":    true,
+	"my":    true,
+	"your":  true,
+}
+
 // nlStarters are common natural-language question/sentence openers.
 // A prompt whose first token matches one of these is never a shell command.
 var nlStarters = map[string]bool{
@@ -130,9 +155,6 @@ var nlStarters = map[string]bool{
 	"help":     true,
 	"please":   true,
 	"i":        true,
-	"the":      true,
-	"a":        true,
-	"an":       true,
 }
 
 // IsShellCommand reports whether input looks like a direct shell command and
@@ -216,6 +238,11 @@ func isNLWord(tok string) bool {
 			return false
 		}
 	}
+	lower := strings.ToLower(tok)
+	// Short English connectors/prepositions that would never be shell arguments.
+	if nlConnectors[lower] {
+		return true
+	}
 	// Pure alphabetic word longer than 8 chars → suspicious NL word.
 	allAlpha := true
 	for _, r := range tok {
@@ -238,4 +265,29 @@ func FirstToken(input string) string {
 		return ""
 	}
 	return strings.ToLower(fields[0])
+}
+
+// HasAllowedPrefix reports whether cmd matches any entry in allowList.
+// Each entry may be a single token ("git") or a multi-token prefix ("go test").
+// Matching is case-insensitive and requires that the command starts with all
+// tokens of the entry — e.g. "go test" matches "go test ./..." but not "go run".
+func HasAllowedPrefix(cmd string, allowList []string) bool {
+	cmdFields := strings.Fields(strings.ToLower(strings.TrimSpace(cmd)))
+	for _, entry := range allowList {
+		entryFields := strings.Fields(strings.ToLower(strings.TrimSpace(entry)))
+		if len(entryFields) == 0 || len(entryFields) > len(cmdFields) {
+			continue
+		}
+		match := true
+		for i, f := range entryFields {
+			if cmdFields[i] != f {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

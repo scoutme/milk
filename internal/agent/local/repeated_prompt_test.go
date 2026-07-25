@@ -42,10 +42,23 @@ func TestIsRepeatedPrompt_ShortPromptSkipped(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "user", Content: "bye"},
 	}
+	// Under both thresholds: < 20 chars AND < 3 words → skipped.
 	for _, short := range []string{"hi", "hello", "bye", "ok", "yes"} {
 		if isRepeatedPrompt(history, short, 0) {
-			t.Errorf("want false for short prompt %q (under minRepeatCheckLen)", short)
+			t.Errorf("want false for short prompt %q (under both thresholds)", short)
 		}
+	}
+}
+
+func TestIsRepeatedPrompt_ThreeWordsUnder20Chars(t *testing.T) {
+	// "fix the bug" is 11 chars but 3 words → meets the word threshold → check fires.
+	prompt := "fix the bug"
+	history := []Message{
+		{Role: "user", Content: prompt},
+		{Role: "assistant", Content: "tried"},
+	}
+	if !isRepeatedPrompt(history, prompt, 0) {
+		t.Error("want true: 3-word prompt under 20 chars should still be checked")
 	}
 }
 

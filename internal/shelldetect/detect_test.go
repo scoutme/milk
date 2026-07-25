@@ -67,6 +67,11 @@ func TestIsShellCommand(t *testing.T) {
 		{"help me understand docker"},
 		// Ambiguous but caught by NL word heuristic
 		{"git explaining merge conflicts"},
+		// NL connector words after a known binary
+		{"go to main"},
+		{"git push to origin"},
+		{"cd into the project"},
+		{"make a new branch"},
 		// Empty / question mark
 		{""},
 		{"git status?"},
@@ -103,18 +108,40 @@ func TestFirstToken(t *testing.T) {
 }
 
 func TestIsShellCommand_AllowListBypasses(t *testing.T) {
-	// Simulate the allow-list check that dispatch.go does.
+	// Kept for historical coverage; now delegates to HasAllowedPrefix.
 	allowList := []string{"ls", "git"}
-	input := "ls -la"
-	first := FirstToken(input)
-	found := false
-	for _, allowed := range allowList {
-		if allowed == first {
-			found = true
-			break
-		}
+	if !HasAllowedPrefix("ls -la", allowList) {
+		t.Error("HasAllowedPrefix: expected match for single-token entry 'ls'")
 	}
-	if !found {
-		t.Errorf("allow-list check failed for %q (first=%q)", input, first)
+}
+
+func TestHasAllowedPrefix(t *testing.T) {
+	cases := []struct {
+		cmd   string
+		allow []string
+		want  bool
+	}{
+		// Single-token entry matches any subcommand.
+		{"git status", []string{"git"}, true},
+		{"git commit -m msg", []string{"git"}, true},
+		// Multi-token entry matches exact prefix.
+		{"go test ./...", []string{"go test"}, true},
+		{"go build ./...", []string{"go test"}, false},
+		{"go mod tidy", []string{"go mod"}, true},
+		{"go mod tidy", []string{"go test", "go mod"}, true},
+		// Multi-token entry does not match shorter command.
+		{"go", []string{"go test"}, false},
+		// Case-insensitive.
+		{"Go Test ./...", []string{"go test"}, true},
+		// No match.
+		{"rm -rf /", []string{"ls", "git", "go test"}, false},
+		// Empty allow-list.
+		{"ls", []string{}, false},
+	}
+	for _, c := range cases {
+		got := HasAllowedPrefix(c.cmd, c.allow)
+		if got != c.want {
+			t.Errorf("HasAllowedPrefix(%q, %v) = %v, want %v", c.cmd, c.allow, got, c.want)
+		}
 	}
 }
