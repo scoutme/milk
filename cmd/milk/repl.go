@@ -721,6 +721,13 @@ func isContextDeadlineExceeded(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded)
 }
 
+func cleanupCLIImageFiles(st *interactiveState) {
+	for _, p := range st.pendingCLIImageFiles {
+		os.Remove(p) //nolint:errcheck
+	}
+	st.pendingCLIImageFiles = nil
+}
+
 // isEOFOrClosed reports whether err is a normal PTY/pipe EOF or "file already closed"
 // that occurs when the PTY master is closed after the child exits.
 func isEOFOrClosed(err error) bool {
@@ -1105,7 +1112,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case clipboardNoToolMsg:
-		m.appendTranscript(milkTag() + " clipboard paste: no content tool found — install " + bold("xclip") + " (X11) or " + bold("wl-paste") + " (Wayland) to attach non-text clipboard content\n")
+		m.appendTranscript(milkTag() + " clipboard paste: no non-text content found — on WSL2 powershell.exe is used automatically; on X11 install " + bold("xclip") + "; on Wayland install " + bold("wl-paste") + "\n")
 		return m, nil
 
 	case prefixChunkMsg:
@@ -1913,11 +1920,34 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		for _, a := range attachments {
 			fmt.Fprintf(&ph, " %s", attachmentPlaceholder(a))
 			if a.isImage() {
+				// Local agent: multipart image_url content part (base64 data URI).
 				imageParts = append(imageParts, local.ContentPart{
 					Type:     "image_url",
 					ImageURL: &local.ImageURLPart{URL: attachmentDataURI(a)},
 				})
-				fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
+				if m.agents.escalation != nil && m.agents.escalation.IsCLI() {
+					// CLI escalation path: write image to temp file, inject @path reference.
+					// The claude binary reads @path natively — no base64 in the prompt needed.
+					ext := mimeExtension(a.MIMEType)
+					written := false
+					if f, err := os.CreateTemp("", "milk-img-*"+ext); err == nil {
+						if _, werr := f.Write(a.Data); werr == nil {
+							f.Close()
+							m.st.pendingCLIImageFiles = append(m.st.pendingCLIImageFiles, f.Name())
+							fmt.Fprintf(&imgBlocks, "@%s\n", f.Name())
+							written = true
+						} else {
+							f.Close()
+							os.Remove(f.Name())
+						}
+					}
+					if !written {
+						fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
+					}
+				} else {
+					// Non-CLI escalation (local HTTP, subprocess): inline base64 data URI.
+					fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
+				}
 			} else {
 				textBlocks.WriteString(attachmentContextBlock(a))
 			}
@@ -1932,6 +1962,12 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		}
 		sb.WriteString(input)
 		agentInput = sb.String()
+		obs.Debug("dispatch: agentInput prefix", "agentInput[:100]", func() string {
+			if len(agentInput) > 100 {
+				return agentInput[:100]
+			}
+			return agentInput
+		}())
 		// Record compact form in session history (no full file data).
 		m.st.pendingSessionContent = input + ph.String()
 	}
@@ -2185,9 +2221,15 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
+		// Local path: CLI image temp files not needed; clean up.
+		cleanupCLIImageFiles(st)
 		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, pw)
 	case router.TargetEscalation:
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, out, onResponse, pw)
+		imageCtxFile := st.pendingImageContextFile
+		st.pendingImageContextFile = ""
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, onResponse, pw)
+		// CLI image temp files are no longer needed after the turn.
+		cleanupCLIImageFiles(st)
 	}
 	targetLabel := string(target)
 	obs.Inc(turnCtx, milkScope, "milk.turns.total",
