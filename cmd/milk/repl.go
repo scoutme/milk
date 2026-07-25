@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	rw "github.com/mattn/go-runewidth"
@@ -84,11 +85,15 @@ type thinkChunkMsg struct{ text string }
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
-// directBashDoneMsg is sent when a tea.ExecProcess direct-bash command exits.
+// directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
 	err     error
-	logPath string // path to script(1) typescript; empty if recording unavailable
+	logPath string // path to script(1) typescript; empty when using PTY pane
 }
+
+// ptyOutputMsg is sent by the PTY read goroutine whenever new bytes have been
+// written to the VT emulator. Triggers a View() re-render of the PTY pane.
+type ptyOutputMsg struct{}
 
 // turnTimeoutWarningMsg is sent when a turn exceeds its configured timeout but
 // the turn is still running. The turn is not cancelled — this is a soft warning.
@@ -425,6 +430,9 @@ type model struct {
 	// shell command directly. The string holds the command to run on approval.
 	pendingDirectBash *string
 
+	// ptyPane is non-nil while a shell command is running inside an embedded PTY.
+	ptyPane *ptyPaneState
+
 	// hasInferenceAgent is true when the user has explicitly configured a
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
@@ -713,6 +721,16 @@ func isContextDeadlineExceeded(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded)
 }
 
+// isEOFOrClosed reports whether err is a normal PTY/pipe EOF or "file already closed"
+// that occurs when the PTY master is closed after the child exits.
+func isEOFOrClosed(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	// os.ErrClosed is wrapped by the PTY read when the master fd is closed.
+	return errors.Is(err, os.ErrClosed)
+}
+
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
 	inPanel := m.panelMemory && ev.X >= m.mainWidth()
@@ -987,6 +1005,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleResize(msg)
 
 	case tea.KeyMsg:
+		if m.ptyPane != nil {
+			return m.handlePTYKey(msg)
+		}
 		if m.pendingDirectBash != nil {
 			return m.handleDirectBashKey(msg)
 		}
@@ -1106,25 +1127,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
 
+	case ptyOutputMsg:
+		// Clear the pending flag so the read goroutine can enqueue the next refresh.
+		if m.ptyPane != nil {
+			atomic.StoreInt32(&m.ptyPane.pending, 0)
+		}
+		// Returning m triggers View() which redraws the PTY pane.
+		return m, nil
+
 	case directBashDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
 		m.busyHint = ""
-		if msg.logPath != "" {
-			if out := readDirectBashLog(msg.logPath); out != "" {
+		if m.ptyPane != nil {
+			// Snapshot the VT screen and append cleaned output to the transcript.
+			out := m.ptySnapshot()
+			if out != "" {
 				m.appendTranscript(dim(out))
 				m.currentTurnChars += int64(len(out))
 			}
+			_ = m.ptyPane.ptm.Close()
+			m.ptyPane = nil
 		}
 		if msg.err != nil {
 			if exitErr, ok := msg.err.(*exec.ExitError); ok {
 				m.appendTranscript(fmt.Sprintf("%s exit %d\n", dim("[sh]"), exitErr.ExitCode()))
-			} else {
+			} else if !isEOFOrClosed(msg.err) {
 				m.appendTranscript(fmt.Sprintf("%s direct-bash error: %v\n", milkTag(), msg.err))
 			}
 		}
 		m.appendTranscript("\n")
 		m.refreshPrompt()
+		m.syncLayout()
 		return m, nil
 
 	case turnTimeoutWarningMsg:
@@ -1838,9 +1872,7 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 			first := shelldetect.FirstToken(shellCmd)
 			for _, allowed := range m.st.cfg.DirectBashAllow {
 				if strings.EqualFold(allowed, first) {
-					m.busy = true
-					m.spinnerFrame = 0
-					return m, execDirectBash(shellCmd)
+					return m.launchPTYPane(shellCmd)
 				}
 			}
 			// Show confirmation prompt.
