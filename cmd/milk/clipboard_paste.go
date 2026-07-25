@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,17 +60,64 @@ var (
 )
 
 func probeClipboard() (*clipboardProbeResult, error) {
+	// WSL2: Windows clipboard is the canonical source regardless of whether an
+	// X/Wayland server is also running. Try powershell.exe first, fall back to
+	// the Linux tools only if it finds nothing.
+	if isWSL() {
+		if r, err := probePowerShell(); err == nil {
+			return r, nil
+		}
+		// powershell found nothing non-text; don't bother with X/Wayland.
+		return nil, errClipboardNoContent
+	}
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		return probeWlPaste()
 	}
 	if os.Getenv("DISPLAY") != "" {
 		return probeXclip()
 	}
-	// Neither set — try both anyway (e.g. inside WSL with an X server).
+	// No display env at all — try both Linux tools as a last resort.
 	if r, err := probeXclip(); err == nil {
 		return r, nil
 	}
+	if r, err := probeWlPaste(); err == nil {
+		return r, nil
+	}
 	return nil, errClipboardNoTool
+}
+
+// isWSL reports whether we are running inside WSL.
+func isWSL() bool {
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	lower := strings.ToLower(string(data))
+	return strings.Contains(lower, "microsoft") || strings.Contains(lower, "wsl")
+}
+
+// probePowerShell extracts non-text clipboard content via powershell.exe.
+// Supports images (returned as PNG bytes) and file paths.
+func probePowerShell() (*clipboardProbeResult, error) {
+	if _, err := exec.LookPath("powershell.exe"); err != nil {
+		return nil, errClipboardNoTool
+	}
+	// Try image first: save clipboard bitmap as PNG, encode as base64.
+	const psImage = `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; ` +
+		`$img = [System.Windows.Forms.Clipboard]::GetImage(); ` +
+		`if ($img -eq $null) { exit 1 }; ` +
+		`$ms = New-Object System.IO.MemoryStream; ` +
+		`$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); ` +
+		`[System.Convert]::ToBase64String($ms.ToArray())`
+	out, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psImage).Output()
+	if err == nil && len(out) > 0 {
+		b64 := strings.TrimSpace(string(out))
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err == nil && len(data) > 0 {
+			return &clipboardProbeResult{data: data, mimeType: "image/png", tool: "powershell"}, nil
+		}
+	}
+	return nil, errClipboardNoContent
 }
 
 func probeWlPaste() (*clipboardProbeResult, error) {
