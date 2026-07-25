@@ -539,12 +539,12 @@ func (m model) handlePathPasteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch strings.ToLower(msg.String()) {
 	case "y", "enter":
-		m.appendTranscript("y\n")
+		m.appendTranscript("Y\n")
 		return m.handleAttachCmd(path), nil
 	default:
-		// "n", esc, ctrl+c, any other key → insert as plain text.
+		// "n", esc, ctrl+c, any other key → insert as @path reference.
 		m.appendTranscript("n\n")
-		m.ta.InsertString(path)
+		m.ta.InsertString("@" + path)
 		m.syncLayout()
 		return m, nil
 	}

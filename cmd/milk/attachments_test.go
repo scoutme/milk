@@ -193,6 +193,64 @@ func TestAttachmentDataURI_JPEG(t *testing.T) {
 	}
 }
 
+// ── unquoteFilePath ─────────────────────────────────────────────────────────
+
+func TestUnquoteFilePath_SingleQuotes(t *testing.T) {
+	if got := unquoteFilePath("'/tmp/file.png'"); got != "/tmp/file.png" {
+		t.Errorf("got %q, want /tmp/file.png", got)
+	}
+}
+
+func TestUnquoteFilePath_NoQuotes(t *testing.T) {
+	if got := unquoteFilePath("/tmp/file.png"); got != "/tmp/file.png" {
+		t.Errorf("got %q, want /tmp/file.png", got)
+	}
+}
+
+func TestUnquoteFilePath_Whitespace(t *testing.T) {
+	if got := unquoteFilePath("  '/tmp/file.png'  "); got != "/tmp/file.png" {
+		t.Errorf("got %q, want /tmp/file.png", got)
+	}
+}
+
+// ── looksLikeFilePath ───────────────────────────────────────────────────────
+
+func TestLooksLikeFilePath_Absolute(t *testing.T) {
+	if !looksLikeFilePath("/nonexistent/path") {
+		t.Error("want true for /... path")
+	}
+}
+
+func TestLooksLikeFilePath_Home(t *testing.T) {
+	if !looksLikeFilePath("~/nonexistent") {
+		t.Error("want true for ~/... path")
+	}
+}
+
+func TestLooksLikeFilePath_UNC(t *testing.T) {
+	if !looksLikeFilePath(`\\server\share\file.txt`) {
+		t.Error("want true for UNC \\\\server\\share path")
+	}
+}
+
+func TestLooksLikeFilePath_Quoted(t *testing.T) {
+	if !looksLikeFilePath("'/tmp/file.png'") {
+		t.Error("want true for single-quoted path")
+	}
+}
+
+func TestLooksLikeFilePath_Relative(t *testing.T) {
+	if looksLikeFilePath("relative/path.txt") {
+		t.Error("want false for relative path")
+	}
+}
+
+func TestLooksLikeFilePath_PlainText(t *testing.T) {
+	if looksLikeFilePath("hello world") {
+		t.Error("want false for plain text")
+	}
+}
+
 // ── isLikelyFilePath ────────────────────────────────────────────────────────
 
 func TestIsLikelyFilePath_ExistingAbsolute(t *testing.T) {
@@ -240,6 +298,18 @@ func TestIsLikelyFilePath_Whitespace(t *testing.T) {
 	// Leading/trailing whitespace should still match after TrimSpace.
 	if !isLikelyFilePath("  " + path + "  ") {
 		t.Errorf("isLikelyFilePath with whitespace: expected true for existing file %q", path)
+	}
+}
+
+func TestIsLikelyFilePath_SingleQuoted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Terminal drag-and-drop pastes the path in single quotes.
+	if !isLikelyFilePath("'" + path + "'") {
+		t.Errorf("isLikelyFilePath: expected true for single-quoted existing file %q", path)
 	}
 }
 
