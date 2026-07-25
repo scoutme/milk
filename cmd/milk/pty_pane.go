@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
@@ -40,8 +39,7 @@ func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
 
 	cmd := exec.Command("sh", "-c", shellCmd)
 	cmd.Env = os.Environ()
-	// Auto-kill the child when the parent process dies (Linux).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	setPdeathsig(cmd)
 
 	ws := &pty.Winsize{Rows: uint16(vpH), Cols: uint16(paneCols)}
 	ptm, err := pty.StartWithSize(cmd, ws)
