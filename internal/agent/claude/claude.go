@@ -39,6 +39,7 @@ type Agent struct {
 	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
 	logContext        bool                         // when true, log system context and prompt at DEBUG level
 	mcpServers        []config.MCPServerConfig     // MCP servers to expose via --mcp-config
+	onOAuthRequired   func(serverName, url string) // called when stderr indicates an OAuth challenge
 }
 
 func New(bin string) *Agent {
@@ -172,6 +173,55 @@ func (a *Agent) WithExtraDir(dir string) *Agent {
 	c := *a
 	c.addDirs = mergeUniq(a.addDirs, []string{dir})
 	return &c
+}
+
+// WithOAuthRequiredHandler returns a copy of the agent that calls fn when the
+// subprocess stderr indicates an OAuth authorization is needed for an MCP server.
+// fn receives the server name (if detectable from stderr) and the authorization
+// URL (if one appears in the message; may be empty).
+func (a *Agent) WithOAuthRequiredHandler(fn func(serverName, url string)) *Agent {
+	c := *a
+	c.onOAuthRequired = fn
+	return &c
+}
+
+// oauthPhrases is the set of lowercase substrings that indicate an OAuth
+// authorization challenge in Claude CLI stderr output.
+var oauthPhrases = []string{
+	"authorization required",
+	"oauth",
+	"re-authenticate",
+	"reauthenticate",
+	"authentication required",
+	"please authenticate",
+	"login required",
+	"not authorized",
+}
+
+// parseOAuthChallenge scans stderr for OAuth-related messages.
+// Returns the first HTTPS URL found (if any) and whether an OAuth challenge
+// was detected. The server name is inferred from URL hostname when possible.
+func parseOAuthChallenge(stderr string) (url string, needed bool) {
+	lower := strings.ToLower(stderr)
+	for _, phrase := range oauthPhrases {
+		if strings.Contains(lower, phrase) {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return "", false
+	}
+	// Extract the first https:// URL from stderr.
+	if idx := strings.Index(stderr, "https://"); idx >= 0 {
+		rest := stderr[idx:]
+		end := strings.IndexAny(rest, " \t\n\r\"'")
+		if end < 0 {
+			end = len(rest)
+		}
+		url = rest[:end]
+	}
+	return url, true
 }
 
 // Ping checks whether the claude binary is available.
@@ -444,6 +494,11 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 	if err := cmd.Wait(); err != nil {
 		stderr := filterKnownWarnings(strings.TrimSpace(stderrBuf.String()))
 		if stderr != "" {
+			if a.onOAuthRequired != nil {
+				if authURL, needed := parseOAuthChallenge(stderr); needed {
+					a.onOAuthRequired("", authURL)
+				}
+			}
 			return res, fmt.Errorf("claude exited with error: %s", stderr)
 		}
 		// Only benign warnings on stderr — if the parse succeeded, don't error.
