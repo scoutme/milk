@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/creack/pty"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/creack/pty"
 	"github.com/vito/midterm"
 )
 
@@ -125,7 +125,16 @@ func (m *model) ptySnapshot() string {
 	clean := stripANSI(raw)
 	clean = strings.ReplaceAll(clean, "\r\n", "\n")
 	clean = strings.ReplaceAll(clean, "\r", "\n")
-	return clean
+	// Drop trailing blank lines produced by the fixed-size VT screen.
+	lines := strings.Split(clean, "\n")
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	if end == 0 {
+		return ""
+	}
+	return strings.Join(lines[:end], "\n") + "\n"
 }
 
 // handlePTYKey forwards a key event to the PTY master fd.
