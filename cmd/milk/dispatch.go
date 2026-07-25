@@ -34,6 +34,27 @@ func runPrimary(
 	onResponse func(string),
 	prefixOut ...io.Writer,
 ) error {
+	return runPrimaryWithSession(ctx, cfg, sess, runner, escalationRunner, mem, prompt, prompt, out, da, onResponse, prefixOut...)
+}
+
+// runPrimaryWithSession is like runPrimary but accepts a separate sessionContent
+// that is recorded in session history instead of the raw prompt. When
+// attachments are present, sessionContent carries compact placeholders while
+// prompt carries the full file content for inference.
+func runPrimaryWithSession(
+	ctx context.Context,
+	cfg config.Config,
+	sess *session.Session,
+	runner TurnRunner,
+	escalationRunner TurnRunner,
+	mem *memory.Store,
+	prompt string,
+	sessionContent string,
+	out io.Writer,
+	da *dispatchAgents,
+	onResponse func(string),
+	prefixOut ...io.Writer,
+) error {
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
 
@@ -94,7 +115,7 @@ func runPrimary(
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: prompt})
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: sessionContent})
 
 	if res.NewSessionID != "" {
 		sess.PrimarySessionID = res.NewSessionID
@@ -145,10 +166,8 @@ func runPrimary(
 	return session.Save(sess)
 }
 
-// runEscalation executes one escalation-agent turn using runner.
-// It handles context-mode resolution (First/Returning/Resume), fresh-start check,
-// state transitions, nonce management, turn recording, token accounting, and
-// summary rebuild.
+// runEscalation executes one escalation-agent turn.
+// Wrapper around runEscalationWithSession where sessionContent == prompt.
 func runEscalation(
 	ctx context.Context,
 	cfg config.Config,
@@ -157,6 +176,26 @@ func runEscalation(
 	brief string,
 	mem *memory.Store,
 	prompt string,
+	out io.Writer,
+	onResponse func(string),
+	prefixOut ...io.Writer,
+) error {
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, out, onResponse, prefixOut...)
+}
+
+// runEscalationWithSession executes one escalation-agent turn using runner.
+// sessionContent is the compact version stored in session history (may include
+// attachment placeholders instead of raw file data). prompt is the full content
+// sent to the agent.
+func runEscalationWithSession(
+	ctx context.Context,
+	cfg config.Config,
+	sess *session.Session,
+	runner TurnRunner,
+	brief string,
+	mem *memory.Store,
+	prompt string,
+	sessionContent string,
 	out io.Writer,
 	onResponse func(string),
 	prefixOut ...io.Writer,
@@ -243,7 +282,7 @@ func runEscalation(
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: prompt})
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: sessionContent})
 
 	if res.NewSessionID != "" {
 		sess.EscalationSessionID = res.NewSessionID

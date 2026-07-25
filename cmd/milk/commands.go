@@ -50,6 +50,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdUpdate {
 		return m.handleUpdateCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdAttach {
+		return m.handleAttachCmd(strings.TrimSpace(rest)), nil
+	}
 	if cmd == cmdMCP {
 		return m.handleMCPCmd(strings.TrimSpace(rest))
 	}
@@ -520,8 +523,135 @@ func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
 		return m.startAddMCP(rest), nil
 	}
 
+	if verb == "auth" {
+		return m.handleMCPAuth(rest)
+	}
+
 	m.appendTranscript(execMCP(arg, m.st, m.agents.mcpToolSets) + "\n")
 	return m, nil
+}
+
+// handlePathPasteKey handles keypresses while pendingPathPaste is set.
+// "y"/"Y"/Enter → attach the file; "n"/"N"/Esc/Ctrl+C → insert as plain text.
+func (m model) handlePathPasteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	path := m.pendingPathPaste
+	m.pendingPathPaste = ""
+
+	switch strings.ToLower(msg.String()) {
+	case "y", "enter":
+		m.appendTranscript("y\n")
+		return m.handleAttachCmd(path), nil
+	default:
+		// "n", esc, ctrl+c, any other key → insert as plain text.
+		m.appendTranscript("n\n")
+		m.ta.InsertString(path)
+		m.syncLayout()
+		return m, nil
+	}
+}
+
+// handleAttachCmd implements `/attach <path>`.
+// It loads the file, detects the MIME type, and stages it in pendingAttachments.
+// The next submitted turn will include the file as a context block (text) or a
+// multipart vision payload (image). Returns the updated model without a tea.Cmd.
+func (m model) handleAttachCmd(path string) model {
+	if path == "" {
+		m.appendTranscript(milkTag() + " usage: /attach <path>\n")
+		return m
+	}
+	a, err := loadAttachment(path)
+	if err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+		return m
+	}
+	m.pendingAttachments = append(m.pendingAttachments, a)
+	kind := "text"
+	if a.isImage() {
+		kind = "image"
+	}
+	m.appendTranscript(fmt.Sprintf("%s staged %s %q (%s, %d bytes) — %d attachment(s) pending\n",
+		milkTag(), kind, a.Name, a.MIMEType, len(a.Data), len(m.pendingAttachments)))
+	return m
+}
+
+// validateMCPAuthArgs checks the arguments for /mcp auth and returns an error
+// message string (non-empty = invalid) or the resolved server config index.
+// Separated from handleMCPAuth so it can be unit-tested without a live model.
+func validateMCPAuthArgs(serverName string, cfg config.Config) (idx int, errMsg string) {
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
+		return -1, "usage: /mcp auth <server-name>"
+	}
+	idx = findMCPServerIdx(cfg.MCPServers, serverName)
+	if idx < 0 {
+		return -1, fmt.Sprintf("MCP server %q not found — add it with /mcp add first", serverName)
+	}
+	return idx, ""
+}
+
+// handleMCPAuth implements `/mcp auth <server-name>`.
+// It suspends the TUI and launches an interactive `claude` subprocess with the
+// named MCP server's config loaded. Claude CLI will initiate the OAuth
+// authorization flow when it first attempts to connect to the server.
+// After the user completes authorization and exits, the TUI restores.
+func (m model) handleMCPAuth(serverName string) (model, tea.Cmd) {
+	idx, errStr := validateMCPAuthArgs(serverName, m.st.cfg)
+	if errStr != "" {
+		m.appendTranscript(milkTag() + " " + errStr + "\n")
+		return m, nil
+	}
+	serverName = strings.TrimSpace(serverName)
+
+	// Resolve the claude binary path from the escalation agent config.
+	cliAC := cliAgentConfig(m.st.cfg)
+	bin := cliAC.Bin
+	if bin == "" {
+		bin = "claude"
+	}
+
+	// Write a temporary --mcp-config file containing only this server so that
+	// Claude CLI connects to it and triggers the OAuth flow interactively.
+	server := m.st.cfg.MCPServers[idx]
+	mcpCfg := map[string]any{
+		"mcpServers": map[string]any{
+			server.Name: map[string]any{
+				"type": "http",
+				"url":  server.URL,
+			},
+		},
+	}
+	cfgData, err := json.Marshal(mcpCfg)
+	if err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error preparing MCP config: %v\n", milkTag(), err))
+		return m, nil
+	}
+	tmpFile, err := os.CreateTemp("", "milk-mcp-auth-*.json")
+	if err != nil {
+		m.appendTranscript(fmt.Sprintf("%s error creating temp file: %v\n", milkTag(), err))
+		return m, nil
+	}
+	if _, err := tmpFile.Write(cfgData); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		m.appendTranscript(fmt.Sprintf("%s error writing MCP config: %v\n", milkTag(), err))
+		return m, nil
+	}
+	tmpFile.Close()
+	tmpPath := tmpFile.Name()
+
+	m.appendTranscript(fmt.Sprintf("%s starting OAuth flow for MCP server %q\n%s Claude will connect to the server and prompt you to authorize — follow the instructions below\n", milkTag(), serverName, milkTag()))
+
+	// Launch claude interactively with the single-server MCP config.
+	// Claude CLI will attempt to connect to the OAuth server and open the
+	// browser-based authorization flow. The user completes the flow and exits.
+	cmd := exec.Command(bin, "--mcp-config", tmpPath)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		os.Remove(tmpPath) //nolint:errcheck
+		if err != nil {
+			return errMsg{err: fmt.Errorf("mcp auth for %q exited with error: %w", serverName, err)}
+		}
+		return mcpAuthDoneMsg{serverName: serverName}
+	})
 }
 
 // handleAgentCmd handles `/agent [list|switch <name>|add [key=val ...]]`.

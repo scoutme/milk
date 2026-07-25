@@ -39,11 +39,62 @@ func (e *EscalationSignal) Error() string {
 	return "escalate: " + e.Reason
 }
 
+// ContentPart is one element of a multipart message content array, as used by
+// the OpenAI vision API. A text part carries a string; an image_url part carries
+// a data URI in ImageURL.URL.
+type ContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
+}
+
+// ImageURLPart is the payload of a ContentPart with type "image_url".
+type ImageURLPart struct {
+	URL string `json:"url"`
+}
+
+// Message is the wire format for an OpenAI-compatible chat message.
+// When ContentParts is non-nil, the outbound JSON payload uses an array for
+// the "content" field (OpenAI vision format). Otherwise a plain string is used.
+// ContentParts is never serialised to session history — only Content is persisted.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	ToolCalls    []toolCall    `json:"tool_calls,omitempty"`
+	ContentParts []ContentPart `json:"-"` // not persisted; used only for outbound API payload
+}
+
+// MarshalJSON serialises a Message to JSON.
+// When ContentParts is non-nil, the "content" field is emitted as an array;
+// otherwise it is emitted as a plain string (omitempty).
+func (m Message) MarshalJSON() ([]byte, error) {
+	if len(m.ContentParts) > 0 {
+		type messageMultipart struct {
+			Role       string        `json:"role"`
+			Content    []ContentPart `json:"content"`
+			ToolCallID string        `json:"tool_call_id,omitempty"`
+			ToolCalls  []toolCall    `json:"tool_calls,omitempty"`
+		}
+		return json.Marshal(messageMultipart{
+			Role:       m.Role,
+			Content:    m.ContentParts,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+	type messagePlain struct {
+		Role       string     `json:"role"`
+		Content    string     `json:"content,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+		ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	}
+	return json.Marshal(messagePlain{
+		Role:       m.Role,
+		Content:    m.Content,
+		ToolCallID: m.ToolCallID,
+		ToolCalls:  m.ToolCalls,
+	})
 }
 
 type toolCall struct {
@@ -165,6 +216,9 @@ type Agent struct {
 	// toolTimeout is the per-individual-tool timeout. 0 means no per-tool limit.
 	// Each tool call in a batch gets its own context derived from this timeout.
 	toolTimeout time.Duration
+	// pendingImageParts holds multipart ContentParts to inject into the next user
+	// message. Set by SetPendingImageParts before Run; cleared after one use.
+	pendingImageParts []ContentPart
 }
 
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
@@ -272,6 +326,13 @@ func (a *Agent) WithTaskStore(ts TaskStore) *Agent {
 // WithToolTimeout returns a shallow copy of the agent with the per-tool timeout
 // set. 0 means no per-tool timeout. Each individual tool call in a batch
 // receives its own context cancelled after this duration.
+// SetPendingImageParts stores ContentParts to be injected into the next user
+// message as a multipart vision payload. The parts are consumed (cleared)
+// after a single Run call so they do not affect subsequent turns.
+func (a *Agent) SetPendingImageParts(parts []ContentPart) {
+	a.pendingImageParts = parts
+}
+
 func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
 	copy := *a
 	copy.toolTimeout = d
@@ -721,7 +782,13 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
-	msgs = append(msgs, Message{Role: "user", Content: userPrompt})
+	userMsg := Message{Role: "user", Content: userPrompt}
+	if len(a.pendingImageParts) > 0 {
+		// Build a multipart message: text part + image parts.
+		userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, a.pendingImageParts...)
+		a.pendingImageParts = nil // consume once
+	}
+	msgs = append(msgs, userMsg)
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
@@ -894,7 +961,7 @@ func capMemToolResult(result string, maxBytes int) string {
 
 // toolCallOutcome holds the result of executing one tool call.
 type toolCallOutcome struct {
-	msg     Message
+	msg      Message
 	escalate bool
 	reason   string
 }

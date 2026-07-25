@@ -84,6 +84,9 @@ func (m *model) statusBar() string {
 			left += yellow(" [" + m.credLabel + " creds failed: " + m.credStatus + "]")
 		}
 	}
+	if n := len(m.pendingAttachments); n > 0 {
+		left += dim(fmt.Sprintf(" [%d attached]", n))
+	}
 	if m.quitPending {
 		left += yellow(" [press ctrl+c again to exit]")
 	} else if m.busyHint != "" {

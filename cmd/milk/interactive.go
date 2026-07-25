@@ -20,6 +20,7 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
+const cmdAttach = "/attach"
 const cmdWorkflow = "/workflow"
 const cmdReload = "/reload"
 const cmdTasks = "/tasks"
@@ -48,7 +49,7 @@ const cmdUpdate = "/update"
 const cmdServer = "/server"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach,
 	"/new", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -188,6 +189,7 @@ const interactiveHelp = `
   /mcp reconnect [<name>]  reset dead server(s) so they retry on next use
   /mcp assign <server> for <agent>   add server to agent's mcp_servers list
   /mcp unassign <server> for <agent>  remove server from agent's list
+  /mcp auth <name>       run OAuth authorization flow for an MCP server
 
 ── Workflow ───────────────────────────────────────────────────────────────
   /workflow                          list available workflows
@@ -211,6 +213,11 @@ const interactiveHelp = `
   /setup telegram        configure Telegram remote oversight interactively
   /setup telegram on     enable Telegram (credentials must already be configured)
   /setup telegram off    disable Telegram (credentials are preserved)
+
+── Attachments ──────────────────────────────────────────────────────────
+  /attach <path>         stage a file or image for the next agent turn
+                         text files → quoted block in message body
+                         images (png/jpg/gif/webp) → multipart vision payload
 
 ── General ──────────────────────────────────────────────────────────────
   /help                  show this help
@@ -378,6 +385,12 @@ type interactiveState struct {
 	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
 	lastEscalationContextHash string
 
+	// pendingSessionContent overrides the user-turn content recorded in session history
+	// for the next dispatch. When non-empty, runPrimary/runEscalation use this string
+	// instead of the raw prompt. Reset to "" after each turn. Used to store compact
+	// attachment placeholders in history instead of full file content.
+	pendingSessionContent string
+
 	// activeFallbackTarget is set by runTurn just before a turn runs when the
 	// router's decision was overridden by availability (e.g. local down → escalation).
 	// "" means no override is active. Used by agentLabel to show the correct agent
@@ -515,6 +528,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// Handled in repl.go (needs model state and config path). No-op here.
 	case cmdOpen:
 		// Handled in repl.go (needs tea.ExecProcess). No-op here.
+	case cmdAttach:
+		// Handled in commands.go (handleAttachCmd) where model state is available.
 	case cmdMCP:
 		// Handled in commands.go (handleMCPCmd) where model state is available for wizards.
 	case cmdUpdate:
@@ -1215,8 +1230,11 @@ func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet)
 		return execMCPAssign(rest, false, st)
 	case "reconnect":
 		return execMCPReconnect(rest, st, toolSets)
+	case "auth":
+		// /mcp auth is handled in handleMCPCmd (needs tea.ExecProcess for TUI suspend).
+		return milkTag() + " usage: /mcp auth <server-name>  (run this in the TUI)"
 	default:
-		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign, reconnect"
+		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign, reconnect, auth"
 	}
 }
 

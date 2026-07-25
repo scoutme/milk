@@ -732,3 +732,107 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 - Permission prompts with y/n reply — first response (TUI or Telegram) wins
 
 **Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Ignored while an agent turn is in progress.
+
+---
+
+## MCP servers with OAuth
+
+Some MCP servers require an OAuth authorization flow before they can be used. The `claude` CLI handles the OAuth dance interactively, but milk runs Claude as a non-interactive subprocess (`--print --output-format stream-json`), so the flow cannot complete automatically.
+
+### Setup
+
+1. Add the MCP server to `~/.milk/config.json` with `"auth": "oauth"`:
+
+```json
+{
+  "mcp_servers": [
+    {
+      "name": "my-server",
+      "url": "https://mcp.example.com",
+      "auth": "oauth"
+    }
+  ]
+}
+```
+
+2. Assign the server to your escalation agent:
+
+```
+/mcp assign my-server for claude
+```
+
+### Authorizing
+
+The first time Claude tries to use the server, milk will detect the OAuth error in the subprocess stderr and print a notice:
+
+```
+[milk] MCP OAuth authorization required
+[milk] authorization URL: https://auth.example.com/oauth/...
+[milk] run /mcp auth <server-name> to authorize
+```
+
+Run the authorization command — this suspends the TUI and launches an interactive Claude subprocess to complete the OAuth dance:
+
+```
+/mcp auth my-server
+```
+
+Complete the flow in the terminal (open the URL in your browser if prompted). After you finish, press Enter and the TUI resumes. Then reconnect:
+
+```
+/mcp reconnect my-server
+```
+
+### Notes
+
+- OAuth state (tokens, refresh tokens) is stored by the Claude CLI, not by milk. Milk does not read or write OAuth credentials.
+- If the token expires, run `/mcp auth <name>` again to re-authorize.
+- The `"oauth"` auth value passes config validation without warnings. Other milk auth options (`"bearer"`, `"token_cmd"`) are for static or command-generated tokens, not browser-based flows.
+
+---
+
+## File and image attachments
+
+milk can attach files and images to agent turns via the `/attach` command or by pasting a file path.
+
+### `/attach <path>`
+
+Stage a file for the next agent turn:
+
+```
+/attach /path/to/notes.txt
+/attach ~/screenshots/error.png
+```
+
+- **Text files** (`.txt`, `.md`, `.go`, `.py`, source code, …): contents are injected as a fenced code block prepended to your prompt. Both local and CLI agents receive the file contents in full.
+- **Images** (`.png`, `.jpg`, `.gif`, `.webp`): base64-encoded and sent as a multipart vision payload to vision-capable local models (OpenAI `image_url` format). For the Claude CLI escalation path, the data URI is injected as a context block.
+- **PDF and other binary files**: noted as binary with a byte count. Text extraction is not performed.
+
+The status bar shows `[N attached]` while attachments are pending. Attachments are cleared after the turn completes.
+
+### File path detection in paste
+
+When you paste text that looks like an existing absolute file path (starting with `/` or `~/`), milk asks:
+
+```
+[milk] pasted path "/etc/hostname" — attach as file? [y/N]
+```
+
+- Press `y` or Enter to attach the file.
+- Press `n`, Escape, or any other key to insert the path as plain text.
+- Non-existent paths are inserted as plain text without prompting.
+
+### Session history
+
+Attachment data is never stored verbatim in session history. The session records a compact placeholder like `[attached: filename.png]` next to the prompt. File contents are sent to the model on the turn they are attached but not persisted beyond that.
+
+### Supported attachment types
+
+| Extension | MIME type | Handling |
+|---|---|---|
+| `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` | `image/*` | Multipart vision payload |
+| `.txt`, `.md`, `.log` | `text/plain` | Fenced block in prompt |
+| `.go`, `.py`, `.js`, `.ts`, `.sh`, … | `text/x-*` | Fenced block in prompt |
+| `.json`, `.yaml`, `.toml`, `.html`, `.css` | Various text | Fenced block in prompt |
+| `.pdf` | `application/pdf` | Binary notice only |
+| Other | `text/plain` (default) | Fenced block in prompt |

@@ -168,6 +168,18 @@ type permRequestMsg struct {
 	respCh chan string
 }
 
+// oauthRequiredMsg is sent by the claude agent when stderr indicates an MCP
+// server requires OAuth authorization. serverName may be empty when not
+// detectable; authURL may be empty when no URL appeared in the error.
+type oauthRequiredMsg struct {
+	serverName string
+	authURL    string
+}
+
+// mcpAuthDoneMsg is sent after a /mcp auth interactive subprocess exits
+// successfully. serverName is the MCP server that was authorized.
+type mcpAuthDoneMsg struct{ serverName string }
+
 // forgetState holds the pending /forget confirmation dialog.
 type forgetState struct {
 	candidates []memory.Percept // matched percepts shown to the user
@@ -347,6 +359,14 @@ type model struct {
 
 	// pending /forget confirmation
 	pendingForget *forgetState
+
+	// pendingAttachments holds files staged for the next agent turn via /attach
+	// or path-in-paste detection. Cleared after each successful submission.
+	pendingAttachments []PendingAttachment
+
+	// pendingPathPaste is set when the user pastes what looks like a file path.
+	// The TUI asks "Attach as file? [y/N]" and this holds the path until answered.
+	pendingPathPaste string
 
 	// pending /agent add wizard
 	pendingAdd *addAgentState
@@ -966,6 +986,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingPerm != nil {
 			return m.handlePermKey(msg)
 		}
+		if m.pendingPathPaste != "" {
+			return m.handlePathPasteKey(msg)
+		}
 		if m.pendingForget != nil {
 			return m.handleForgetKey(msg)
 		}
@@ -1028,6 +1051,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case permRequestMsg:
 		return m.handlePermRequest(msg)
+
+	case oauthRequiredMsg:
+		notice := milkTag() + " MCP OAuth authorization required"
+		if msg.authURL != "" {
+			notice += "\n" + milkTag() + " authorization URL: " + msg.authURL
+		}
+		notice += "\n" + milkTag() + " run " + bold("/mcp auth <server-name>") + " to authorize"
+		m.appendTranscript(notice + "\n")
+		m.syncLayout()
+		return m, nil
+
+	case mcpAuthDoneMsg:
+		m.appendTranscript(fmt.Sprintf("%s OAuth authorization for MCP server %q completed — use /mcp reconnect to connect\n", milkTag(), msg.serverName))
+		m.syncLayout()
+		return m, nil
 
 	case toolUseMsg:
 		m.activeToolUse = msg.name
@@ -1300,6 +1338,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Pre-expand to terminal height so repositionView() inside ta.Update never
 	// scrolls on a large paste (updateTA's +1 is insufficient for multi-line pastes).
 	if msg.Paste {
+		// Check whether the pasted content looks like a file path that exists.
+		// If so, ask the user whether to attach it rather than insert it as text.
+		pasted := strings.TrimSpace(msg.String())
+		if isLikelyFilePath(pasted) {
+			m.pendingPathPaste = pasted
+			m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [y/N] ", milkTag(), pasted))
+			m.syncLayout()
+			return m, nil
+		}
 		m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
 		m.ta.SetHeight(m.height)
 		var cmd tea.Cmd
@@ -1769,6 +1816,48 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
 
+	// Apply pending attachments.
+	// Text attachments: prepend context blocks to the agent prompt.
+	// Image attachments: set ContentParts on the local agent for multipart vision payload;
+	//   also inject data-URI blocks into the prompt for the CLI escalation path.
+	// Session history uses the original input plus compact [attached: name] placeholders.
+	attachments := m.pendingAttachments
+	m.pendingAttachments = nil // clear before dispatch
+
+	// agentInput: what gets sent to the agent (may include full attachment content).
+	// st.pendingSessionContent: compact version stored in session history (placeholders).
+	agentInput := input
+	var imageParts []local.ContentPart
+	if len(attachments) > 0 {
+		var textBlocks strings.Builder
+		var imgBlocks strings.Builder
+		var ph strings.Builder
+		for _, a := range attachments {
+			fmt.Fprintf(&ph, " %s", attachmentPlaceholder(a))
+			if a.isImage() {
+				imageParts = append(imageParts, local.ContentPart{
+					Type:     "image_url",
+					ImageURL: &local.ImageURLPart{URL: attachmentDataURI(a)},
+				})
+				fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
+			} else {
+				textBlocks.WriteString(attachmentContextBlock(a))
+			}
+		}
+		var sb strings.Builder
+		if textBlocks.Len() > 0 {
+			sb.WriteString(textBlocks.String())
+			sb.WriteByte('\n')
+		}
+		if imgBlocks.Len() > 0 {
+			sb.WriteString(imgBlocks.String())
+		}
+		sb.WriteString(input)
+		agentInput = sb.String()
+		// Record compact form in session history (no full file data).
+		m.st.pendingSessionContent = input + ph.String()
+	}
+
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.cancelTurn = cancel
 
@@ -1779,12 +1868,18 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, _ := m.buildTUIAgents(send, ir0)
+
+	// Wire image parts into the primary local agent so it sends a multipart payload.
+	if len(imageParts) > 0 && tuiAgents.local != nil {
+		tuiAgents.local.SetPendingImageParts(imageParts)
+	}
+
 	return m, tea.Batch(
 		spinnerTick(),
 		func() tea.Msg {
 			defer cancel()
 			sw := &sendWriter{send: send}
-			err := runTurn(turnCtx, st, rtr, &tuiAgents, input, sw, ir0)
+			err := runTurn(turnCtx, st, rtr, &tuiAgents, agentInput, sw, ir0)
 			return agentDoneMsg{err: err}
 		},
 	)
@@ -1805,6 +1900,9 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 	if agents.cliAgent != nil {
 		tuiCliAgent := agents.cliAgent.
 			WithSkipPermissions(st.skipPermissions).
+			WithOAuthRequiredHandler(func(serverName, authURL string) {
+				send(oauthRequiredMsg{serverName: serverName, authURL: authURL})
+			}).
 			WithOnToolUse(func(name string) {
 				send(toolUseMsg{name: name})
 			}).
@@ -1993,6 +2091,14 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	var lastResponseText string
 	onResponse := func(text string) { lastResponseText = text }
 
+	// sessionContent is the compact version stored in history (with attachment
+	// placeholders). Falls back to input when no attachment override is set.
+	sessionContent := input
+	if st.pendingSessionContent != "" {
+		sessionContent = st.pendingSessionContent
+		st.pendingSessionContent = ""
+	}
+
 	switch target {
 	case router.TargetLocal:
 		if mem := st.mem; mem != nil {
@@ -2001,9 +2107,9 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, out, agents, onResponse, pw)
+		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, pw)
 	case router.TargetEscalation:
-		turnErr = runEscalation(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, out, onResponse, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, out, onResponse, pw)
 	}
 	targetLabel := string(target)
 	obs.Inc(turnCtx, milkScope, "milk.turns.total",
