@@ -1233,6 +1233,9 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 	switch role {
 	case "primary":
 		m.st.cfg.Agent = name
+		if m.st.sess != nil {
+			m.st.sess.RepetitionBaselineLocalTurns = m.st.sess.UserTurnCount()
+		}
 		if err := config.Save(m.st.cfg); err != nil {
 			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
 		}

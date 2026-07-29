@@ -19,7 +19,11 @@ import (
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func dhTurn(role session.Role, agent session.Agent, content string) session.Turn {
-	return session.Turn{Role: role, Agent: agent, Content: content}
+	name := "test-primary"
+	if agent == session.AgentEscalation {
+		name = "test-escalation"
+	}
+	return session.Turn{Role: role, Agent: agent, AgentName: name, Content: content}
 }
 
 func rolesOf(msgs []local.Message) []string {
@@ -30,62 +34,72 @@ func rolesOf(msgs []local.Message) []string {
 	return out
 }
 
-// ── sessionToMessages ─────────────────────────────────────────────────────────
+// ── sessionToUnifiedMessages ──────────────────────────────────────────────────
 
-// TestSessionToMessages_NoTrailingUser verifies that sessionToMessages returns
-// all answered turns and that the last message is the most recent assistant turn.
-// After ADR-0038, dispatch no longer pre-adds the user turn before Execute, so
-// history contains only complete answered pairs at the time sessionToMessages runs.
-func TestSessionToMessages_NoTrailingUser(t *testing.T) {
+// TestSessionToUnifiedMessages_NoTrailingUser verifies that sessionToUnifiedMessages
+// returns all answered turns and that the last message is the most recent assistant turn.
+func TestSessionToUnifiedMessages_NoTrailingUser(t *testing.T) {
 	sess := &session.Session{
 		History: []session.Turn{
 			dhTurn(session.RoleUser, session.AgentLocal, "first question"),
 			dhTurn(session.RoleAssistant, session.AgentLocal, "first answer"),
 			dhTurn(session.RoleUser, session.AgentLocal, "second question"),
 			dhTurn(session.RoleAssistant, session.AgentLocal, "second answer"),
-			// No pre-added pending user turn: dispatch adds it only after Execute.
 		},
 	}
-	msgs := sessionToMessages(sess)
+	msgs := sessionToUnifiedMessages(sess, "test-primary")
 	if len(msgs) == 0 {
 		t.Fatal("expected non-empty messages")
 	}
 	last := msgs[len(msgs)-1]
 	if last.Role == "user" {
-		t.Errorf("unexpected trailing user turn in sessionToMessages output: %q", last.Content)
+		t.Errorf("unexpected trailing user turn: %q", last.Content)
 	}
-	if last.Content != "second answer" {
-		t.Errorf("last message should be the most recent assistant turn, got role=%q content=%q", last.Role, last.Content)
+	wantSuffix := "second answer"
+	if len(last.Content) < len(wantSuffix) || last.Content[len(last.Content)-len(wantSuffix):] != wantSuffix {
+		t.Errorf("last message should end with %q, got role=%q content=%q", wantSuffix, last.Role, last.Content)
 	}
 }
 
-// TestSessionToMessages_EmptySession returns nil or empty without panicking.
-func TestSessionToMessages_EmptySession(t *testing.T) {
+// TestSessionToUnifiedMessages_EmptySession returns nil or empty without panicking.
+func TestSessionToUnifiedMessages_EmptySession(t *testing.T) {
 	sess := &session.Session{}
-	msgs := sessionToMessages(sess)
+	msgs := sessionToUnifiedMessages(sess, "test-primary")
 	if len(msgs) != 0 {
 		t.Errorf("expected empty, got %d messages", len(msgs))
 	}
 }
 
-// TestSessionToMessages_OnlyEscalationTurns — escalation turns are filtered out;
-// a trailing escalation user turn must not be confused with a local user turn.
-func TestSessionToMessages_OnlyEscalationTurns(t *testing.T) {
+// TestSessionToUnifiedMessages_OnlyEscalationTurns — user turns are labelled [user];
+// escalation assistant turns appear as system messages labelled with agent name and role.
+func TestSessionToUnifiedMessages_OnlyEscalationTurns(t *testing.T) {
 	sess := &session.Session{
 		History: []session.Turn{
 			dhTurn(session.RoleUser, session.AgentEscalation, "esc question"),
 			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc answer"),
 		},
 	}
-	msgs := sessionToMessages(sess)
-	if len(msgs) != 0 {
-		t.Errorf("escalation turns should be filtered out, got %d", len(msgs))
+	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages (user+system), got %d", len(msgs))
+	}
+	if msgs[0].Role != "user" {
+		t.Errorf("want user turn first, got %q", msgs[0].Role)
+	}
+	if msgs[0].Content != "[user] esc question" {
+		t.Errorf("user turn should be labelled, got %q", msgs[0].Content)
+	}
+	if msgs[1].Role != "system" {
+		t.Errorf("escalation assistant turn should be role=system, got %q", msgs[1].Role)
+	}
+	if msgs[1].Content != "[test-escalation as escalation] esc answer" {
+		t.Errorf("escalation turn should be labelled with name and role, got %q", msgs[1].Content)
 	}
 }
 
-// TestSessionToMessages_MixedAgents — only local turns appear; escalation
-// turns are filtered out. No pre-added pending user turn after ADR-0038.
-func TestSessionToMessages_MixedAgents(t *testing.T) {
+// TestSessionToUnifiedMessages_MixedAgents — all turns appear with correct labels.
+// Own (primary) assistant turns: "you - <name> as primary"; other (escalation): system "[<name> as escalation]".
+func TestSessionToUnifiedMessages_MixedAgents(t *testing.T) {
 	sess := &session.Session{
 		History: []session.Turn{
 			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
@@ -94,11 +108,10 @@ func TestSessionToMessages_MixedAgents(t *testing.T) {
 			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a"),
 			dhTurn(session.RoleUser, session.AgentLocal, "q2"),
 			dhTurn(session.RoleAssistant, session.AgentLocal, "a2"),
-			// No pre-added turn: dispatch adds user turn only after Execute returns.
 		},
 	}
-	msgs := sessionToMessages(sess)
-	wantRoles := []string{"user", "assistant", "user", "assistant"}
+	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	wantRoles := []string{"user", "assistant", "user", "system", "user", "assistant"}
 	got := rolesOf(msgs)
 	if len(got) != len(wantRoles) {
 		t.Fatalf("want %v, got %v", wantRoles, got)
@@ -108,42 +121,54 @@ func TestSessionToMessages_MixedAgents(t *testing.T) {
 			t.Errorf("[%d] want role %q, got %q", i, r, got[i])
 		}
 	}
+	// Own turn labelled with "you - ..."
+	if msgs[1].Content != "[you - test-primary as primary] a1" {
+		t.Errorf("own turn label wrong, got %q", msgs[1].Content)
+	}
+	// Escalation turn becomes system with name and role label
+	if msgs[3].Content != "[test-escalation as escalation] esc a" {
+		t.Errorf("escalation turn label wrong, got %q", msgs[3].Content)
+	}
+	// User turns labelled [user]
+	if msgs[0].Content != "[user] q1" {
+		t.Errorf("user turn label wrong, got %q", msgs[0].Content)
+	}
 }
 
 // ── escalationLocalHistory ────────────────────────────────────────────────────
 
-// TestEscalationLocalHistory_AllAnsweredTurnsIncluded — after ADR-0038,
-// dispatch does not pre-add the user turn, so escalationLocalHistory returns
-// all turns without stripping anything.
+// TestEscalationLocalHistory_AllAnsweredTurnsIncluded — the escalation agent sees
+// all turns. The primary agent's assistant turns become system messages (other agent);
+// the escalation agent's own turns would be assistant (but there are none here).
 func TestEscalationLocalHistory_AllAnsweredTurnsIncluded(t *testing.T) {
-	const prompt = "help me with X"
 	sess := &session.Session{
 		History: []session.Turn{
 			dhTurn(session.RoleUser, session.AgentLocal, "earlier q"),
 			dhTurn(session.RoleAssistant, session.AgentLocal, "earlier a"),
-			// No pre-added pending turn: dispatch adds it after Execute returns.
 		},
 	}
-	msgs := escalationLocalHistory(sess, prompt)
+	msgs := escalationLocalHistory(sess, "test-escalation")
 	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages (all answered turns), got %d", len(msgs))
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
-	if msgs[1].Role != "assistant" {
-		t.Errorf("last message should be assistant turn, got %q", msgs[1].Role)
+	// Primary's assistant turn is "other agent" → system role
+	if msgs[1].Role != "system" {
+		t.Errorf("primary assistant turn should be system for escalation agent, got %q", msgs[1].Role)
 	}
 }
 
-// TestEscalationLocalHistory_IncludesAllRoles — all user/assistant/tool turns
-// are included; no stripping of any kind occurs after ADR-0038.
+// TestEscalationLocalHistory_IncludesAllRoles — user/assistant/tool turns all appear;
+// primary tool results are included (they're the escalation agent's own tools
+// being treated as other-agent tool calls for labelling, but tool results stay as tool).
 func TestEscalationLocalHistory_IncludesAllRoles(t *testing.T) {
 	sess := &session.Session{
 		History: []session.Turn{
 			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
-			dhTurn(session.RoleAssistant, session.AgentLocal, "a1"),
-			dhTurn(session.RoleToolResult, session.AgentLocal, "tool result"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "a1"),
+			dhTurn(session.RoleToolResult, session.AgentEscalation, "tool result"),
 		},
 	}
-	msgs := escalationLocalHistory(sess, "irrelevant prompt")
+	msgs := escalationLocalHistory(sess, "test-escalation")
 	wantRoles := []string{"user", "assistant", "tool"}
 	got := rolesOf(msgs)
 	if len(got) != len(wantRoles) {

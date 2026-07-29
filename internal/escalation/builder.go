@@ -253,7 +253,9 @@ func MemoryInstruction(nonce, primaryName, escalationName string) string {
 		"Omit the prefix to share with both agents (default). " +
 		"Prefix @" + primaryName + ": or @" + escalationName + ": only when the fact is relevant to just that agent.\n" +
 		"Emit when you learn: who the user is or their role; a key preference or working style; " +
-		"a project decision or constraint not derivable from the code; an external resource or tool they use.\n" +
+		"a project decision or constraint not derivable from the code; an external resource or tool they use. " +
+		"Also emit when the user corrects your approach or confirms a non-obvious approach worked — " +
+		"record the rule itself plus why, so it guides future behaviour without being re-stated.\n" +
 		"IMPORTANT — memory precedence: when the user asks you to remember something during a milk session, " +
 		"always emit a " + openTag + "..." + closeTag + " tag so milk can store it in its percept system. " +
 		"Do NOT write to any file-based or external memory system (e.g. Claude Code project memory files) " +

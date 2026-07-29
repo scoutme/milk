@@ -528,7 +528,9 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		st.stickyEscalate = false
 		st.autoStickyEscalate = false
 		if st.sess != nil {
-			st.sess.RepetitionBaselineLocalTurns = st.sess.LocalUserTurnCount()
+			// Use total user-turn count, not local-only: sessionToUnifiedMessages
+			// includes all user turns, so the skip window must match.
+			st.sess.RepetitionBaselineLocalTurns = st.sess.UserTurnCount()
 		}
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.

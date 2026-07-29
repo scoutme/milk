@@ -108,14 +108,14 @@ func runPrimaryWithSession(
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RolePrimary, ctxMode,
 		sess.PrimarySessionID, nonce,
-		perceptsForEscalation(cfg, mem, prompt), true,
+		perceptsForAgent(cfg, mem, prompt, false), true,
 		prompt, cbs, aw)
 	aw.Done()
 	if err != nil {
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: sessionContent})
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, AgentName: agentName, Content: sessionContent})
 
 	if res.NewSessionID != "" {
 		sess.PrimarySessionID = res.NewSessionID
@@ -136,7 +136,7 @@ func runPrimaryWithSession(
 	// incorrect — it evaluated to true when both were empty (false || true), causing
 	// a blank assistant turn to be written to session history.
 	if res.Text != "" {
-		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: res.Text})
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, AgentName: agentName, Content: res.Text})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
 	if res.Text != "" && cbs.OnResponse != nil {
@@ -277,14 +277,14 @@ func runEscalationWithSession(
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RoleEscalation, ctxMode,
 		sess.EscalationSessionID, nonce,
-		perceptsForEscalation(cfg, mem, prompt), injectInstructions,
+		perceptsForAgent(cfg, mem, prompt, true), injectInstructions,
 		prompt, cbs, aw)
 	aw.Done()
 	if err != nil {
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, Content: sessionContent})
+	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, AgentName: agentName, Content: sessionContent})
 
 	if res.NewSessionID != "" {
 		sess.EscalationSessionID = res.NewSessionID
@@ -309,7 +309,7 @@ func runEscalationWithSession(
 	// copy is only used for context handoff back to the primary, where a blank entry
 	// is more harmful than a missing one.
 	if res.Text != "" {
-		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: res.Text})
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, AgentName: agentName, Content: res.Text})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
 		if cbs.OnResponse != nil {
 			cbs.OnResponse(res.Text)

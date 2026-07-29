@@ -169,6 +169,7 @@ type Agent struct {
 	useBedrockNative bool   // true when provider = "bedrock"; uses Converse API instead of /v1/chat/completions
 	useResponsesAPI  bool   // true when api_format = "responses"; uses OpenAI Responses API instead of Chat Completions
 	skipRepeatCheck  bool   // true when acting as the escalation target: the repeated-prompt check must not fire
+	selfName         string // this agent's own name (e.g. "gemma-local"), injected into the system prompt
 	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
 	workflowRole     bool   // true when acting as a workflow step executor: neutral system prompt, no escalation framing
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
@@ -236,6 +237,7 @@ type mcpToolSet interface {
 func (a *Agent) AsEscalationTarget(name string) *Agent {
 	copy := *a
 	copy.skipRepeatCheck = true
+	copy.selfName = name
 	copy.escalationName = name
 	return &copy
 }
@@ -349,7 +351,7 @@ func (a *Agent) SystemOverheadChars(sess *session.Session) int {
 	if sess != nil {
 		cwd = sess.CWD
 	}
-	n := len(buildSystemPrompt(cwd, a.escalationName, a.workflowRole))
+	n := len(buildSystemPrompt(cwd, a.selfName, a.escalationName, a.workflowRole))
 	if cwd != "" {
 		if a.cachedCwd != cwd {
 			// Not yet cached; estimate from a fresh call.
@@ -499,6 +501,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 	return &Agent{
 		baseURL:         strings.TrimRight(ac.URL, "/"),
 		model:           ac.Model,
+		selfName:        ac.Name,
 		chatPath:        chatPath,
 		tokenCmd:        tct,
 		useResponsesAPI: useResponses,
@@ -610,14 +613,6 @@ const systemPromptShared = `Rules:
 4. Only proceed with a commit if step 2 OR step 3 returned clear context that explains the changes and their purpose. Use that context to write an accurate commit message.
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.`
 
-// systemPromptPrimary is prepended for the primary (local) role.
-const systemPromptPrimary = `You are a coding and shell automation assistant.
-
-` + systemPromptShared + `
-- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
-- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`
-
 // systemPromptWorkflow is used for workflow step executors (designer, generator,
 // evaluator). No escalation framing, no session orientation — the workflow
 // prompt provides all role-specific instructions.
@@ -625,24 +620,39 @@ const systemPromptWorkflow = `You are a coding and shell automation assistant.
 
 ` + systemPromptShared
 
-// systemPromptEscalationFmt is a fmt.Sprintf template for the escalation role.
-// %s is the escalation agent name (e.g. "haiku-aws").
-const systemPromptEscalationFmt = `You are a coding and shell automation assistant acting as the escalation agent (%s) in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
-
-` + systemPromptShared + `
-- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
-
-func buildSystemPrompt(cwd, escalationName string, workflowRole bool) string {
+// buildSystemPrompt constructs the role-aware system prompt.
+// selfName is this agent's configured name (e.g. "gemma-local", "claude").
+// escalationName is non-empty when this agent is acting as the escalation target.
+func buildSystemPrompt(cwd, selfName, escalationName string, workflowRole bool) string {
 	var base string
 	switch {
 	case workflowRole:
 		base = systemPromptWorkflow
 	case escalationName != "":
-		base = fmt.Sprintf(systemPromptEscalationFmt, escalationName)
+		// Escalation role: selfName == escalationName here.
+		base = fmt.Sprintf(
+			`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
+
+In the conversation history, your own prior turns are labelled "[you - %s as escalation]" and the primary agent's turns are labelled "[<agent-name> as primary]". User turns are labelled "[user]".
+
+`+systemPromptShared+`
+- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+			selfName, selfName,
+		)
 	default:
-		base = systemPromptPrimary
+		base = fmt.Sprintf(
+			`You are %s, acting as the primary agent in a multi-agent system.
+
+In the conversation history, your own prior turns are labelled "[you - %s as primary]" and the escalation agent's turns are labelled "[<agent-name> as escalation]". User turns are labelled "[user]".
+
+`+systemPromptShared+`
+- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
+- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+			selfName, selfName,
+		)
 	}
 	if cwd == "" {
 		return base
@@ -778,7 +788,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
-	systemPrompt := buildSystemPrompt(sess.CWD, a.escalationName, a.workflowRole)
+	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole)
 	if sess.CWD != "" {
 		if a.cachedCwd != sess.CWD {
 			a.cachedCwdContext = cwdContext(sess.CWD)

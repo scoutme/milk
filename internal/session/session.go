@@ -47,6 +47,7 @@ type ToolCall struct {
 type Turn struct {
 	Role      Role       `json:"role"`
 	Agent     Agent      `json:"agent,omitempty"`
+	AgentName string     `json:"agent_name,omitempty"`
 	Content   string     `json:"content"`
 	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
@@ -115,10 +116,11 @@ type Session struct {
 	// Returning/Resume detection. Cleared immediately after use. Not persisted.
 	ForceFreshEscalation bool `json:"-"`
 
-	// RepetitionBaselineLocalTurns is the local user-turn count at the moment the
-	// user last returned to the primary agent via /primary. The repeated-prompt
-	// check skips any user turns before this index so that prompts issued before
-	// the /primary switch do not count toward the repetition window. Transient.
+	// RepetitionBaselineLocalTurns is the total user-turn count (all agents) at the
+	// moment the user last returned to the primary agent via /primary. The
+	// repeated-prompt check skips any user turns before this index so that prompts
+	// issued before the /primary switch do not count toward the repetition window.
+	// Transient; not persisted.
 	RepetitionBaselineLocalTurns int `json:"-"`
 
 	// Tokens holds cumulative token usage for this session, keyed by "model\x00role".
@@ -358,6 +360,20 @@ func (s *Session) LocalUserTurnCount() int {
 	count := 0
 	for _, t := range s.History {
 		if t.Role == RoleUser && t.Agent == AgentLocal {
+			count++
+		}
+	}
+	return count
+}
+
+// UserTurnCount returns the total number of user turns in the session history,
+// regardless of which agent handled them. Used to set the repetition baseline
+// when the user switches back to the primary agent: sessionToUnifiedMessages
+// includes all user turns, so the skip index must match that count.
+func (s *Session) UserTurnCount() int {
+	count := 0
+	for _, t := range s.History {
+		if t.Role == RoleUser {
 			count++
 		}
 	}

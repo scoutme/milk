@@ -200,9 +200,9 @@ func (r *localRunner) Execute(
 
 		isFirst := !session.EscalationEverActive(sess) || ctxMode == escalation.ContextModeFirst
 		if isFirst && session.EscalationEverActive(sess) {
-			history = escalationLocalHistoryFresh(sess, prompt)
+			history = escalationLocalHistoryFresh(sess, ac.Name)
 		} else {
-			history = escalationLocalHistory(sess, prompt)
+			history = escalationLocalHistory(sess, ac.Name)
 		}
 		if perceptsText != "" {
 			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
@@ -221,7 +221,23 @@ func (r *localRunner) Execute(
 		}
 
 	default: // RolePrimary
-		history = sessionToMessages(sess)
+		history = sessionToUnifiedMessages(sess, ac.Name)
+
+		// Prepend orientation: percepts and current need as system messages,
+		// mirroring the context the escalation agent always receives.
+		if perceptsText := escalation.FormatPercepts(percepts); perceptsText != "" {
+			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
+		}
+		if sess.CurrentNeed != "" {
+			label := "[Current user goal]\n"
+			if sess.CurrentNeedSetAt > 0 {
+				turnsAgo := (len(sess.History) + 1) - (sess.CurrentNeedSetAt - 1)
+				if turnsAgo >= 4 {
+					label = "[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n"
+				}
+			}
+			history = append([]local.Message{{Role: "system", Content: label + sess.CurrentNeed}}, history...)
+		}
 
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {

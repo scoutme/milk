@@ -674,36 +674,62 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 	return "", io.EOF
 }
 
-// buildEscalationHistory converts sess.History[start:] to local.Message format.
-// Pass 0 for the full history, or session.LastEscalationBoundary(sess) to scope
-// to turns since the last escalation boundary (used on stale-returning turns).
-func buildEscalationHistory(sess *session.Session, start int) []local.Message {
+// buildAgentHistory converts sess.History[start:] to the local agent's Message
+// format. Each turn is prefixed with a speaker label so the receiving agent can
+// attribute prior turns correctly:
+//   - user turns          → "[user] …"
+//   - own assistant turns → "[you - <name> as <role>] …"
+//   - other agent's turns → "[<name> as <role>] …"
+//
+// selfAgent and selfName identify the agent that will receive this history.
+// Pass start=0 for full history, or session.LastEscalationBoundary(sess) to
+// scope to turns since the last escalation boundary.
+func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent, selfName string) []local.Message {
 	var msgs []local.Message
 	for _, t := range sess.History[start:] {
 		switch t.Role {
 		case session.RoleUser:
-			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
+			msgs = append(msgs, local.Message{Role: "user", Content: "[user] " + t.Content})
 		case session.RoleAssistant:
 			if t.Content == "" {
 				continue
 			}
-			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
+			name := t.AgentName
+			if name == "" {
+				name = string(t.Agent)
+			}
+			role := string(t.Agent)
+			var label string
+			if t.Agent == selfAgent {
+				label = "[you - " + name + " as " + role + "] "
+			} else {
+				label = "[" + name + " as " + role + "] "
+			}
+			// Own turns stay as "assistant"; other agent's turns become "system"
+			// so the model doesn't continue in their voice.
+			msgRole := "assistant"
+			if t.Agent != selfAgent {
+				msgRole = "system"
+			}
+			msgs = append(msgs, local.Message{Role: msgRole, Content: label + t.Content})
 		case session.RoleToolResult:
-			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+			if t.Agent == selfAgent {
+				msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+			}
 		}
 	}
 	return msgs
 }
 
-// escalationLocalHistory returns the full session history as local messages.
-func escalationLocalHistory(sess *session.Session, _ string) []local.Message {
-	return buildEscalationHistory(sess, 0)
+// escalationLocalHistory returns the full session history for a local escalation agent.
+func escalationLocalHistory(sess *session.Session, selfName string) []local.Message {
+	return buildAgentHistory(sess, 0, session.AgentEscalation, selfName)
 }
 
 // escalationLocalHistoryFresh returns only turns since the last escalation
 // boundary, scoped to avoid sending redundant prior-escalation context.
-func escalationLocalHistoryFresh(sess *session.Session, _ string) []local.Message {
-	return buildEscalationHistory(sess, session.LastEscalationBoundary(sess))
+func escalationLocalHistoryFresh(sess *session.Session, selfName string) []local.Message {
+	return buildAgentHistory(sess, session.LastEscalationBoundary(sess), session.AgentEscalation, selfName)
 }
 
 // applyPersistedGrants loads previously-approved tools and directories from
@@ -1285,37 +1311,11 @@ func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, 
 	return msgs, true
 }
 
-// sessionToMessages converts local-agent session turns to the local agent's Message format.
-// Escalation agent turns are excluded: the local model should only see its own prior conversation.
-// When the escalation agent was the most recent active agent (i.e. there are escalation turns
-// after the last local turn), LastEscalationSummary is prepended so the local model knows what
-// Claude just did. It is not injected if local was already the last agent, to avoid re-showing
-// stale escalation context on every subsequent local turn.
-func sessionToMessages(sess *session.Session) []local.Message {
-	var msgs []local.Message
-	if sess.LastEscalationSummary != "" && session.EscalationMostRecent(sess) {
-		msgs = append(msgs, local.Message{
-			Role:    "assistant",
-			Content: "[Escalation agent summary]\n" + sess.LastEscalationSummary,
-		})
-	}
-	for _, t := range sess.History {
-		if t.Agent != session.AgentLocal {
-			continue
-		}
-		switch t.Role {
-		case session.RoleUser:
-			msgs = append(msgs, local.Message{Role: "user", Content: t.Content})
-		case session.RoleAssistant:
-			if t.Content == "" {
-				continue
-			}
-			msgs = append(msgs, local.Message{Role: "assistant", Content: t.Content})
-		case session.RoleToolResult:
-			msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
-		}
-	}
-	return msgs
+// sessionToUnifiedMessages converts session history to the local agent's Message format,
+// sessionToUnifiedMessages builds history for the primary agent using buildAgentHistory.
+// Context size is managed by trimLocalMessages using the agent's message_budget_chars.
+func sessionToUnifiedMessages(sess *session.Session, selfName string) []local.Message {
+	return buildAgentHistory(sess, 0, session.AgentLocal, selfName)
 }
 
 func runList(all bool) error {
@@ -1373,7 +1373,12 @@ func runDrop() error {
 // should receive: those not exclusively targeted at the local agent and not
 // already produced by Claude (to avoid echo loops). Results are relevance-gated
 // against the prompt and size-capped per config before returning.
-func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) []string {
+// perceptsForAgent returns the percepts that should be injected for the given agent.
+// forEscalation=true filters out ConsumerLocal percepts and ProducerEscalation percepts
+// (Claude wrote them; no need to echo them back). forEscalation=false (primary) filters
+// out ConsumerEscalation percepts only — the primary should receive all other percepts
+// including those produced by the escalation agent.
+func perceptsForAgent(cfg config.Config, mem *memory.Store, prompt string, forEscalation bool) []string {
 	if mem == nil {
 		return nil
 	}
@@ -1381,21 +1386,30 @@ func perceptsForEscalation(cfg config.Config, mem *memory.Store, prompt string) 
 	all := mem.List(memory.ListOpts{})
 	var candidates []memory.Percept
 	for _, p := range all {
-		if p.Producer == memory.ProducerEscalation {
-			continue // Claude wrote it; no need to echo it back
-		}
-		if p.Consumer == memory.ConsumerLocal {
-			continue // explicitly local-only
+		if forEscalation {
+			if p.Producer == memory.ProducerEscalation {
+				continue // Claude wrote it; no need to echo it back
+			}
+			if p.Consumer == memory.ConsumerLocal {
+				continue // explicitly local-only
+			}
+		} else {
+			if p.Consumer == memory.ConsumerEscalation {
+				continue // explicitly escalation-only
+			}
 		}
 		candidates = append(candidates, p)
 	}
 
-	escAC := cfg.EscalationAgentConfig()
-	if cfg.AgentPerceptRelevanceGateEnabled(escAC) {
+	ac := cfg.EscalationAgentConfig()
+	if !forEscalation {
+		ac = cfg.ActiveAgent()
+	}
+	if cfg.AgentPerceptRelevanceGateEnabled(ac) {
 		candidates = memory.FilterByRelevance(candidates, prompt)
 	}
 
-	candidates = memory.LimitInjection(candidates, cfg.AgentPerceptInjectMaxCount(escAC), cfg.AgentPerceptInjectMaxByteCount(escAC))
+	candidates = memory.LimitInjection(candidates, cfg.AgentPerceptInjectMaxCount(ac), cfg.AgentPerceptInjectMaxByteCount(ac))
 
 	out := make([]string, len(candidates))
 	for i, p := range candidates {
