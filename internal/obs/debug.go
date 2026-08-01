@@ -15,7 +15,11 @@ var milkLogger *slog.Logger
 // initMilkLogger opens (or creates) the milk.log file and installs a package-level
 // slog logger filtered by cfg.LogLevel. Returns a shutdown function.
 func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err error) {
-	switch cfg.LogFormat {
+	format := cfg.LogFormat
+	if format == "" {
+		format = "text"
+	}
+	switch format {
 	case "text", "json":
 	default:
 		milkLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -36,7 +40,7 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 
 	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}
 	var h slog.Handler
-	if cfg.LogFormat == "json" {
+	if format == "json" {
 		h = slog.NewJSONHandler(f, opts)
 	} else {
 		h = slog.NewTextHandler(f, opts)

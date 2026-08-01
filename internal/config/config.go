@@ -61,7 +61,7 @@ var DefaultOpenQuestionPrefixes = []string{
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
 	LogLevel            string `json:"log_level"`   // minimum log level: DEBUG | INFO | WARN | ERROR (default INFO)
-	LogFormat           string `json:"log_format"`  // "" or "off" (disabled), "text" (human-readable), "json" (structured)
+	LogFormat           string `json:"log_format"`  // "text" (default, human-readable), "json" (structured), "off" (disabled)
 	LogContext          bool   `json:"log_context"` // when true, log the full serialised request payload on each inference call
 	Traces              bool   `json:"traces"`
 	Metrics             bool   `json:"metrics"`
@@ -142,6 +142,10 @@ type AgentConfig struct {
 	AllowedTools []string `json:"allowed_tools,omitempty"`
 	// AddDirs is a list of extra directories to pass with --add-dir.
 	AddDirs []string `json:"add_dirs,omitempty"`
+	// SettingsJSON is an optional JSON object passed to the Claude CLI via
+	// --settings. Accepts the same schema as Claude's settings.local.json
+	// (e.g. {"env": {"KEY": "value"}}). Written to a temp file at invocation time.
+	SettingsJSON json.RawMessage `json:"settings,omitempty"`
 
 	// Fields for Provider = "subprocess".
 	// ActionType selects the smolagents agent class: "code" (default) or "tool_calling".
@@ -502,6 +506,14 @@ type Config struct {
 	// normal handleStreamClosedDenials path.
 	// Default: false (opt-in, experimental).
 	ExperimentalPermissionManagement bool `json:"experimental_permission_management,omitempty"`
+
+	// ExperimentalLazyHistoryManagement changes how agent history is included in
+	// context. When true, only the current agent's own turns and user turns are
+	// included proactively. Other agents' turns are excluded — the model fetches
+	// them on-demand via the get_session_context tool. Saves context budget,
+	// especially for the local model.
+	// Default: false (include all turns, current behavior).
+	ExperimentalLazyHistoryManagement bool `json:"experimental_lazy_history_management,omitempty"`
 
 	// DirectBash enables the direct shell-command shortcut: when a turn input
 	// looks like a shell command (heuristic check), milk asks for confirmation

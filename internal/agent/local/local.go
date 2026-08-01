@@ -57,8 +57,15 @@ type ImageURLPart struct {
 // When ContentParts is non-nil, the outbound JSON payload uses an array for
 // the "content" field (OpenAI vision format). Otherwise a plain string is used.
 // ContentParts is never serialised to session history — only Content is persisted.
+//
+// Role is the wire role sent to the inference API (user/assistant/system/tool).
+// Speaker is the actual agent role that produced this message (primary,
+// escalation, designer, generator, evaluator, tool, etc.). Speaker is not
+// serialized to the wire payload — it is used by history builders to label
+// turns so the receiving agent can identify who said what.
 type Message struct {
 	Role         string        `json:"role"`
+	Speaker      string        `json:"-"` // actual agent role; not serialized to wire
 	Content      string        `json:"content,omitempty"`
 	ToolCallID   string        `json:"tool_call_id,omitempty"`
 	ToolCalls    []toolCall    `json:"tool_calls,omitempty"`
@@ -124,8 +131,9 @@ type chatRequest struct {
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string     `json:"content"`
-			ToolCalls []toolCall `json:"tool_calls"`
+			Content          string     `json:"content"`
+			ReasoningContent string     `json:"reasoning_content"`
+			ToolCalls        []toolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -202,6 +210,9 @@ type Agent struct {
 	// onToolUse is called just before each tool is dispatched, with the tool name
 	// and a short human-readable summary of its key argument.
 	onToolUse func(name, summary string)
+	// onThinking is called on reasoning_content tokens from reasoning models
+	// (Qwen thinking, DeepSeek-R1, etc.). Mirrors the Claude CLI's onThinking.
+	onThinking func(string)
 	// mcpToolSet holds connected MCP servers whose tools are exposed to this agent.
 	// Nil when no MCP servers are configured for this agent.
 	mcpToolSet mcpToolSet
@@ -569,6 +580,14 @@ func (a *Agent) WithOnToolUse(fn func(name, summary string)) *Agent {
 	return &copy
 }
 
+// WithOnThinking sets the callback fired on reasoning_content tokens from
+// reasoning models (Qwen thinking, DeepSeek-R1, etc.).
+func (a *Agent) WithOnThinking(fn func(string)) *Agent {
+	copy := *a
+	copy.onThinking = fn
+	return &copy
+}
+
 // WithLogContext enables full request payload logging at DEBUG level.
 func (a *Agent) WithLogContext(v bool) *Agent {
 	a.logContext = v
@@ -604,6 +623,7 @@ const systemPromptShared = `Rules:
   - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. Strip any leading "#" from the ID before passing it. Never say "done" or confirm the action without actually calling the tool.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 **MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session.
+- Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.
 - The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:
@@ -633,25 +653,21 @@ func buildSystemPrompt(cwd, selfName, escalationName string, workflowRole bool) 
 		base = fmt.Sprintf(
 			`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
 
-In the conversation history, your own prior turns are labelled "[you - %s as escalation]" and the primary agent's turns are labelled "[<agent-name> as primary]". User turns are labelled "[user]".
-
 `+systemPromptShared+`
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
 - You are the escalation target — do not attempt to escalate further.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-			selfName, selfName,
+			selfName,
 		)
 	default:
 		base = fmt.Sprintf(
 			`You are %s, acting as the primary agent in a multi-agent system.
 
-In the conversation history, your own prior turns are labelled "[you - %s as primary]" and the escalation agent's turns are labelled "[<agent-name> as escalation]". User turns are labelled "[user]".
-
 `+systemPromptShared+`
-- If the user refers to something ("that file", "the previous error", "what we discussed") without enough context, call get_session_context to retrieve shared history. Prefer last_n: 5 for recent context, pattern: "<keyword>" to find a specific fact, or agent: "escalation" to see only the escalation agent's prior turns. Only omit all filters when you genuinely need the full history.
+- If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
 - Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-			selfName, selfName,
+			selfName,
 		)
 	}
 	if cwd == "" {
@@ -1426,6 +1442,9 @@ func (a *Agent) scanSSE(
 			completionTokens = chunk.Usage.CompletionTokens
 		}
 		for _, choice := range chunk.Choices {
+			if choice.Delta.ReasoningContent != "" && a.onThinking != nil {
+				a.onThinking(choice.Delta.ReasoningContent)
+			}
 			processContentToken(choice.Delta.Content, det, textBuf, out)
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 		}

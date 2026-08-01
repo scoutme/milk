@@ -26,6 +26,7 @@ type Agent struct {
 	skipPermissions   bool                         // pass --dangerously-skip-permissions to the CLI
 	allowedTools      []string                     // tools pre-approved via --allowedTools
 	addDirs           []string                     // extra directories granted via --add-dir
+	settingsJSON      []byte                       // optional --settings payload (written to temp file at invocation)
 	permissionHandler PermissionHandler            // nil → denyAllHandler
 	debugLog          io.Writer                    // when non-nil, every raw NDJSON line is written here
 	onToolUse         func(string)                 // called on content_block_start tool_use events
@@ -106,6 +107,14 @@ func (a *Agent) WithOnToolUseReady(fn func(string, map[string]any)) *Agent {
 func (a *Agent) WithOnThinking(fn func(string)) *Agent {
 	c := *a
 	c.onThinking = fn
+	return &c
+}
+
+// WithSettings sets the JSON payload passed to the Claude CLI via --settings.
+// The payload is written to a temp file at invocation time.
+func (a *Agent) WithSettings(json []byte) *Agent {
+	c := *a
+	c.settingsJSON = json
 	return &c
 }
 
@@ -394,6 +403,19 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 	}
 	for _, dir := range a.addDirs {
 		prefix = append(prefix, "--add-dir", dir)
+	}
+	if len(a.settingsJSON) > 0 {
+		f, err := os.CreateTemp("", "milk-settings-*.json")
+		if err == nil {
+			if _, err := f.Write(a.settingsJSON); err == nil {
+				f.Close()
+				prefix = append(prefix, "--settings", f.Name())
+				defer os.Remove(f.Name()) //nolint:errcheck
+			} else {
+				f.Close()
+				os.Remove(f.Name()) //nolint:errcheck
+			}
+		}
 	}
 	if len(a.mcpServers) > 0 {
 		if mcpFile, mcpCleanup, err := writeMCPConfigFile(a.mcpServers); err == nil {

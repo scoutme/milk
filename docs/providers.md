@@ -590,6 +590,7 @@ Expected: streamed response with step/observation progress visible in the TUI.
 | `dangerously_skip_permissions` | bool | false | Auto-approve all tool uses |
 | `allowed_tools` | array | — | Pre-approved tools; passed as `--allowedTools` |
 | `add_dirs` | array | — | Extra directories; passed as `--add-dir` |
+| `settings` | object | — | JSON object passed to Claude CLI via `--settings`. Accepts the same schema as Claude's `settings.local.json` (e.g. `{"env": {"KEY": "value"}}`). Written to a temp file at invocation time. |
 
 ### Root config fields related to agents
 

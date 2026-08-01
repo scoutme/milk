@@ -512,6 +512,7 @@ If a newer release is available, milk shows the current and latest versions and 
   "colorization": "balanced",
   "show_reasoning": true,
   "sticky_escalation": true,
+  "experimental_lazy_history_management": false,
   "aws_auth_refresh": false,
   "rules": {
     "escalate_above_tokens": 2000,
@@ -779,6 +780,12 @@ Example — prefer VS Code, fall back to `$EDITOR`:
 ### `sticky_escalation` field
 
 When `true` (default), the first router-triggered escalation automatically keeps subsequent turns on the escalation agent — shown as `<agent> (sticky)` in the status bar. Cleared by `/primary` or a single-turn `/primary <prompt>` override. Set to `false` to re-evaluate routing on every turn. Explicit `/escalate` pinning is unaffected by this setting.
+
+### `experimental_lazy_history_management` field
+
+When `true`, agent context is built lazily: only the current agent's own turns and user turns directed at it are included verbatim. Contiguous blocks of turns by/for other agents are collapsed into a single placeholder (e.g. `[escalation]: (14 turns omitted)`). The agent can retrieve the omitted turns on-demand via `get_session_context` using the agent role and turn count from the placeholder.
+
+This significantly reduces context size for sessions with heavy cross-agent activity. User turns always show `[user to <agent>]` labels regardless of this setting. Default: `false` (include all turns with full labels).
 
 ### `debug_claude_code` field
 
