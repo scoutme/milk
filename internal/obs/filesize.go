@@ -115,14 +115,15 @@ func FormatStats(otelDir string) string {
 
 func Trim(otelDir string) error {
 	date := time.Now().Format("2006-01-02")
-	names := []string{"traces.jsonl", "metrics.jsonl", "logs.jsonl"}
+	names := []string{"traces.jsonl", "metrics.jsonl", "logs.jsonl", "milk.log"}
 	for _, name := range names {
 		src := filepath.Join(otelDir, name)
 		if _, err := os.Stat(src); os.IsNotExist(err) {
 			continue
 		}
-		ext := strings.TrimSuffix(name, ".jsonl")
-		dst := filepath.Join(otelDir, fmt.Sprintf("%s.%s.jsonl", ext, date))
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		dst := filepath.Join(otelDir, fmt.Sprintf("%s.%s%s", base, date, ext))
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}

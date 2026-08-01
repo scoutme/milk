@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1334,8 +1335,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Detect MCP server changes — connections are NOT restarted on reload.
 		hasMCPChange := len(msg.cfg.MCPServers) != len(m.st.cfg.MCPServers)
+		// Detect whether anything user-visible actually changed. Metadata-only
+		// writes (e.g. update_last_check saved on startup) must not show a banner
+		// that hides the splash screen.
+		oldCfg, newCfg := m.st.cfg, msg.cfg
+		oldCfg.UpdateLastCheck, newCfg.UpdateLastCheck = "", ""
+		oldCfg.UpdateSkippedVersion, newCfg.UpdateSkippedVersion = "", ""
+		contentChanged := !reflect.DeepEqual(oldCfg, newCfg)
 		m.st.cfg = msg.cfg
-		m.appendTranscript(milkTag() + " config reloaded\n")
+		if contentChanged {
+			m.appendTranscript(milkTag() + " config reloaded\n")
+		}
 		if hasMCPChange {
 			m.appendTranscript(milkTag() + " note: mcp_servers changed — restart milk to apply MCP connection changes\n")
 		}
@@ -2081,7 +2091,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
-			WithOnToolUse(localOnToolUse)
+			WithOnToolUse(localOnToolUse).
+			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) })
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
@@ -2090,7 +2101,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
-			WithOnToolUse(localOnToolUse)
+			WithOnToolUse(localOnToolUse).
+			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) })
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}

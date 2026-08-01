@@ -197,12 +197,13 @@ func (r *localRunner) Execute(
 		// Inject orientation as a system message, build appropriately-scoped history.
 		orientationText := escalation.BuildDynamicContext(sess, ctxMode)
 		perceptsText := escalation.FormatPercepts(percepts)
+		skipOther := cfg.ExperimentalLazyHistoryManagement
 
 		isFirst := !session.EscalationEverActive(sess) || ctxMode == escalation.ContextModeFirst
 		if isFirst && session.EscalationEverActive(sess) {
-			history = escalationLocalHistoryFresh(sess, ac.Name)
+			history = escalationLocalHistoryFresh(sess, ac.Name, skipOther)
 		} else {
-			history = escalationLocalHistory(sess, ac.Name)
+			history = escalationLocalHistory(sess, ac.Name, skipOther)
 		}
 		if perceptsText != "" {
 			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
@@ -221,7 +222,7 @@ func (r *localRunner) Execute(
 		}
 
 	default: // RolePrimary
-		history = sessionToUnifiedMessages(sess, ac.Name)
+		history = sessionToUnifiedMessages(sess, ac.Name, cfg.ExperimentalLazyHistoryManagement)
 
 		// Prepend orientation: percepts and current need as system messages,
 		// mirroring the context the escalation agent always receives.

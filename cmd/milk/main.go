@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -392,7 +393,11 @@ func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 			tools = append(tools, t)
 		}
 	}
-	return claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, tools, ac.AddDirs)
+	agent := claude.NewWithOpts(bin, ac.DangerouslySkipPermissions, tools, ac.AddDirs)
+	if len(ac.SettingsJSON) > 0 {
+		agent = agent.WithSettings(ac.SettingsJSON)
+	}
+	return agent
 }
 
 // attachMCPToolSet builds an mcp.ToolSet from the MCP servers configured for
@@ -677,59 +682,145 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 // buildAgentHistory converts sess.History[start:] to the local agent's Message
 // format. Each turn is prefixed with a speaker label so the receiving agent can
 // attribute prior turns correctly:
-//   - user turns          → "[user] …"
-//   - own assistant turns → "[you - <name> as <role>] …"
+//   - user turns          → "[user to <agent>] …"
+//   - own assistant turns → unlabeled (model already knows what it said)
 //   - other agent's turns → "[<name> as <role>] …"
 //
 // selfAgent and selfName identify the agent that will receive this history.
 // Pass start=0 for full history, or session.LastEscalationBoundary(sess) to
 // scope to turns since the last escalation boundary.
-func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent, selfName string) []local.Message {
+//
+// When skipOtherAgents is true, contiguous turns by/for other agents are
+// collapsed into a single aggregated placeholder (e.g. "[escalation]: (24 turns
+// omitted)"). Only the current agent's own turns and user turns targeted at it
+// are included verbatim.
+func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent, selfName string, skipOtherAgents bool) []local.Message {
+	if !skipOtherAgents {
+		return buildAgentHistoryFull(sess.History[start:], selfAgent)
+	}
+
+	// Lazy mode: walk through turns, emitting own turns immediately and
+	// collapsing contiguous blocks of other-agent turns into placeholders.
 	var msgs []local.Message
+	var skipped int                   // count of contiguous omitted turns
+	var skippedAgents map[string]bool // agent names seen in the current skip block
 	for _, t := range sess.History[start:] {
+		own := turnIsForAgent(t, selfAgent)
+		if own {
+			// Flush any pending skip block before emitting an own turn.
+			if skipped > 0 {
+				msgs = append(msgs, makePlaceholder(skipped, skippedAgents))
+				skipped = 0
+				skippedAgents = nil
+			}
+			// Skip empty assistant turns — inference servers reject them.
+			if t.Role == session.RoleAssistant && t.Content == "" {
+				continue
+			}
+			msgs = append(msgs, formatOwnTurn(t, selfAgent))
+		} else {
+			skipped++
+			if skippedAgents == nil {
+				skippedAgents = make(map[string]bool)
+			}
+			skippedAgents[string(t.Agent)] = true
+		}
+	}
+	// Flush trailing skip block.
+	if skipped > 0 {
+		msgs = append(msgs, makePlaceholder(skipped, skippedAgents))
+	}
+	return msgs
+}
+
+// buildAgentHistoryFull includes all turns with labels (non-lazy mode).
+func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent) []local.Message {
+	var msgs []local.Message
+	for _, t := range turns {
 		switch t.Role {
 		case session.RoleUser:
-			msgs = append(msgs, local.Message{Role: "user", Content: "[user] " + t.Content})
+			agentName := t.AgentName
+			if agentName == "" {
+				agentName = string(t.Agent)
+			}
+			msgs = append(msgs, local.Message{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content})
 		case session.RoleAssistant:
 			if t.Content == "" {
 				continue
 			}
-			name := t.AgentName
-			if name == "" {
-				name = string(t.Agent)
-			}
-			role := string(t.Agent)
-			var label string
+			speaker := string(t.Agent)
 			if t.Agent == selfAgent {
-				label = "[you - " + name + " as " + role + "] "
+				msgs = append(msgs, local.Message{Role: "assistant", Speaker: speaker, Content: t.Content})
 			} else {
-				label = "[" + name + " as " + role + "] "
+				name := t.AgentName
+				if name == "" {
+					name = speaker
+				}
+				msgs = append(msgs, local.Message{Role: "system", Speaker: speaker, Content: "[" + name + " as " + speaker + "] " + t.Content})
 			}
-			// Own turns stay as "assistant"; other agent's turns become "system"
-			// so the model doesn't continue in their voice.
-			msgRole := "assistant"
-			if t.Agent != selfAgent {
-				msgRole = "system"
-			}
-			msgs = append(msgs, local.Message{Role: msgRole, Content: label + t.Content})
 		case session.RoleToolResult:
 			if t.Agent == selfAgent {
-				msgs = append(msgs, local.Message{Role: "tool", Content: t.Content})
+				msgs = append(msgs, local.Message{Role: "tool", Speaker: string(t.Agent), Content: t.Content})
 			}
 		}
 	}
 	return msgs
 }
 
+// turnIsForAgent reports whether a turn belongs to (was made by or directed at) the given agent.
+func turnIsForAgent(t session.Turn, agent session.Agent) bool {
+	if t.Role == session.RoleUser {
+		return t.Agent == agent
+	}
+	return t.Agent == agent
+}
+
+// formatOwnTurn formats a turn that belongs to the current agent.
+func formatOwnTurn(t session.Turn, selfAgent session.Agent) local.Message {
+	switch t.Role {
+	case session.RoleUser:
+		agentName := t.AgentName
+		if agentName == "" {
+			agentName = string(t.Agent)
+		}
+		return local.Message{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content}
+	case session.RoleAssistant:
+		return local.Message{Role: "assistant", Speaker: string(t.Agent), Content: t.Content}
+	case session.RoleToolResult:
+		return local.Message{Role: "tool", Speaker: string(t.Agent), Content: t.Content}
+	default:
+		return local.Message{Role: "system", Content: t.Content}
+	}
+}
+
+// makePlaceholder builds an aggregated placeholder for a block of omitted turns.
+func makePlaceholder(count int, agents map[string]bool) local.Message {
+	var names []string
+	for name := range agents {
+		names = append(names, name)
+	}
+	// Stable order for determinism.
+	sort.Strings(names)
+	who := strings.Join(names, " and ")
+	return local.Message{Role: "system", Content: "[" + who + "]: (" + pluralize(count, "turn") + " omitted)"}
+}
+
+func pluralize(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
 // escalationLocalHistory returns the full session history for a local escalation agent.
-func escalationLocalHistory(sess *session.Session, selfName string) []local.Message {
-	return buildAgentHistory(sess, 0, session.AgentEscalation, selfName)
+func escalationLocalHistory(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
+	return buildAgentHistory(sess, 0, session.AgentEscalation, selfName, skipOtherAgents)
 }
 
 // escalationLocalHistoryFresh returns only turns since the last escalation
 // boundary, scoped to avoid sending redundant prior-escalation context.
-func escalationLocalHistoryFresh(sess *session.Session, selfName string) []local.Message {
-	return buildAgentHistory(sess, session.LastEscalationBoundary(sess), session.AgentEscalation, selfName)
+func escalationLocalHistoryFresh(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
+	return buildAgentHistory(sess, session.LastEscalationBoundary(sess), session.AgentEscalation, selfName, skipOtherAgents)
 }
 
 // applyPersistedGrants loads previously-approved tools and directories from
@@ -1314,8 +1405,8 @@ func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, 
 // sessionToUnifiedMessages converts session history to the local agent's Message format,
 // sessionToUnifiedMessages builds history for the primary agent using buildAgentHistory.
 // Context size is managed by trimLocalMessages using the agent's message_budget_chars.
-func sessionToUnifiedMessages(sess *session.Session, selfName string) []local.Message {
-	return buildAgentHistory(sess, 0, session.AgentLocal, selfName)
+func sessionToUnifiedMessages(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
+	return buildAgentHistory(sess, 0, session.AgentLocal, selfName, skipOtherAgents)
 }
 
 func runList(all bool) error {

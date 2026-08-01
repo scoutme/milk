@@ -47,7 +47,7 @@ func TestSessionToUnifiedMessages_NoTrailingUser(t *testing.T) {
 			dhTurn(session.RoleAssistant, session.AgentLocal, "second answer"),
 		},
 	}
-	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	msgs := sessionToUnifiedMessages(sess, "test-primary", false)
 	if len(msgs) == 0 {
 		t.Fatal("expected non-empty messages")
 	}
@@ -64,13 +64,13 @@ func TestSessionToUnifiedMessages_NoTrailingUser(t *testing.T) {
 // TestSessionToUnifiedMessages_EmptySession returns nil or empty without panicking.
 func TestSessionToUnifiedMessages_EmptySession(t *testing.T) {
 	sess := &session.Session{}
-	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	msgs := sessionToUnifiedMessages(sess, "test-primary", false)
 	if len(msgs) != 0 {
 		t.Errorf("expected empty, got %d messages", len(msgs))
 	}
 }
 
-// TestSessionToUnifiedMessages_OnlyEscalationTurns — user turns are labelled [user];
+// TestSessionToUnifiedMessages_OnlyEscalationTurns — user turns are labelled [user to <agent>];
 // escalation assistant turns appear as system messages labelled with agent name and role.
 func TestSessionToUnifiedMessages_OnlyEscalationTurns(t *testing.T) {
 	sess := &session.Session{
@@ -79,14 +79,14 @@ func TestSessionToUnifiedMessages_OnlyEscalationTurns(t *testing.T) {
 			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc answer"),
 		},
 	}
-	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	msgs := sessionToUnifiedMessages(sess, "test-primary", false)
 	if len(msgs) != 2 {
 		t.Fatalf("want 2 messages (user+system), got %d", len(msgs))
 	}
 	if msgs[0].Role != "user" {
 		t.Errorf("want user turn first, got %q", msgs[0].Role)
 	}
-	if msgs[0].Content != "[user] esc question" {
+	if msgs[0].Content != "[user to test-escalation] esc question" {
 		t.Errorf("user turn should be labelled, got %q", msgs[0].Content)
 	}
 	if msgs[1].Role != "system" {
@@ -98,7 +98,8 @@ func TestSessionToUnifiedMessages_OnlyEscalationTurns(t *testing.T) {
 }
 
 // TestSessionToUnifiedMessages_MixedAgents — all turns appear with correct labels.
-// Own (primary) assistant turns: "you - <name> as primary"; other (escalation): system "[<name> as escalation]".
+// Own (primary) assistant turns: no label (model already knows what it said).
+// Other (escalation): system "[<name> as escalation]".
 func TestSessionToUnifiedMessages_MixedAgents(t *testing.T) {
 	sess := &session.Session{
 		History: []session.Turn{
@@ -110,7 +111,7 @@ func TestSessionToUnifiedMessages_MixedAgents(t *testing.T) {
 			dhTurn(session.RoleAssistant, session.AgentLocal, "a2"),
 		},
 	}
-	msgs := sessionToUnifiedMessages(sess, "test-primary")
+	msgs := sessionToUnifiedMessages(sess, "test-primary", false)
 	wantRoles := []string{"user", "assistant", "user", "system", "user", "assistant"}
 	got := rolesOf(msgs)
 	if len(got) != len(wantRoles) {
@@ -121,16 +122,16 @@ func TestSessionToUnifiedMessages_MixedAgents(t *testing.T) {
 			t.Errorf("[%d] want role %q, got %q", i, r, got[i])
 		}
 	}
-	// Own turn labelled with "you - ..."
-	if msgs[1].Content != "[you - test-primary as primary] a1" {
-		t.Errorf("own turn label wrong, got %q", msgs[1].Content)
+	// Own turn: no label, raw content
+	if msgs[1].Content != "a1" {
+		t.Errorf("own turn should have no label, got %q", msgs[1].Content)
 	}
 	// Escalation turn becomes system with name and role label
 	if msgs[3].Content != "[test-escalation as escalation] esc a" {
 		t.Errorf("escalation turn label wrong, got %q", msgs[3].Content)
 	}
-	// User turns labelled [user]
-	if msgs[0].Content != "[user] q1" {
+	// User turns labelled [user to <agent>]
+	if msgs[0].Content != "[user to test-primary] q1" {
 		t.Errorf("user turn label wrong, got %q", msgs[0].Content)
 	}
 }
@@ -147,7 +148,7 @@ func TestEscalationLocalHistory_AllAnsweredTurnsIncluded(t *testing.T) {
 			dhTurn(session.RoleAssistant, session.AgentLocal, "earlier a"),
 		},
 	}
-	msgs := escalationLocalHistory(sess, "test-escalation")
+	msgs := escalationLocalHistory(sess, "test-escalation", false)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -168,7 +169,7 @@ func TestEscalationLocalHistory_IncludesAllRoles(t *testing.T) {
 			dhTurn(session.RoleToolResult, session.AgentEscalation, "tool result"),
 		},
 	}
-	msgs := escalationLocalHistory(sess, "test-escalation")
+	msgs := escalationLocalHistory(sess, "test-escalation", false)
 	wantRoles := []string{"user", "assistant", "tool"}
 	got := rolesOf(msgs)
 	if len(got) != len(wantRoles) {
@@ -184,7 +185,7 @@ func TestEscalationLocalHistory_IncludesAllRoles(t *testing.T) {
 // TestEscalationLocalHistory_EmptyHistory returns empty without panicking.
 func TestEscalationLocalHistory_EmptyHistory(t *testing.T) {
 	sess := &session.Session{}
-	msgs := escalationLocalHistory(sess, "prompt")
+	msgs := escalationLocalHistory(sess, "prompt", false)
 	if len(msgs) != 0 {
 		t.Errorf("expected empty, got %d", len(msgs))
 	}
@@ -206,7 +207,7 @@ func TestEscalationLocalHistoryFresh_ScopedToBoundary(t *testing.T) {
 			// No pre-added pending turn: dispatch adds it after Execute returns.
 		},
 	}
-	msgs := escalationLocalHistoryFresh(sess, "")
+	msgs := escalationLocalHistoryFresh(sess, "", false)
 	// Should contain local q+a only; pre-boundary turns excluded.
 	for _, m := range msgs {
 		if m.Content == "old esc q" || m.Content == "old esc a" {
@@ -217,6 +218,110 @@ func TestEscalationLocalHistoryFresh_ScopedToBoundary(t *testing.T) {
 	got := rolesOf(msgs)
 	if len(got) != len(wantRoles) {
 		t.Fatalf("want roles %v, got %v", wantRoles, got)
+	}
+}
+
+// ── lazy history mode ────────────────────────────────────────────────────────
+
+// TestBuildAgentHistory_LazyMode_Placeholders verifies that when
+// skipOtherAgents is true, contiguous turns by/for other agents are collapsed
+// into a single aggregated placeholder.
+func TestBuildAgentHistory_LazyMode_Placeholders(t *testing.T) {
+	sess := &session.Session{
+		History: []session.Turn{
+			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
+			dhTurn(session.RoleAssistant, session.AgentLocal, "a1"),
+			dhTurn(session.RoleUser, session.AgentEscalation, "esc q"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a"),
+			dhTurn(session.RoleUser, session.AgentLocal, "q2"),
+			dhTurn(session.RoleAssistant, session.AgentLocal, "a2"),
+		},
+	}
+	msgs := sessionToUnifiedMessages(sess, "test-primary", true)
+	// Should contain: user q1, assistant a1, placeholder (2 turns), user q2, assistant a2
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages, got %d", len(msgs))
+	}
+	// Contiguous escalation block → single aggregated placeholder.
+	if msgs[2].Role != "system" {
+		t.Errorf("placeholder should be system role, got %q", msgs[2].Role)
+	}
+	if msgs[2].Content != "[escalation]: (2 turns omitted)" {
+		t.Errorf("placeholder wrong, got %q", msgs[2].Content)
+	}
+	// Own turns are full.
+	if msgs[0].Content != "[user to test-primary] q1" {
+		t.Errorf("own user turn wrong, got %q", msgs[0].Content)
+	}
+	if msgs[1].Content != "a1" {
+		t.Errorf("own assistant turn wrong, got %q", msgs[1].Content)
+	}
+	if msgs[3].Content != "[user to test-primary] q2" {
+		t.Errorf("own user turn wrong, got %q", msgs[3].Content)
+	}
+	if msgs[4].Content != "a2" {
+		t.Errorf("own assistant turn wrong, got %q", msgs[4].Content)
+	}
+}
+
+// TestBuildAgentHistory_LazyMode_SingleTurn verifies a single omitted turn
+// uses singular phrasing.
+func TestBuildAgentHistory_LazyMode_SingleTurn(t *testing.T) {
+	sess := &session.Session{
+		History: []session.Turn{
+			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a"),
+			dhTurn(session.RoleUser, session.AgentLocal, "q2"),
+		},
+	}
+	msgs := sessionToUnifiedMessages(sess, "test-primary", true)
+	if len(msgs) != 3 {
+		t.Fatalf("want 3 messages, got %d", len(msgs))
+	}
+	if msgs[1].Content != "[escalation]: (1 turn omitted)" {
+		t.Errorf("single-turn placeholder wrong, got %q", msgs[1].Content)
+	}
+}
+
+// TestBuildAgentHistory_LazyMode_MultipleAgents verifies that contiguous turns
+// from other agents are collapsed into a single placeholder.
+func TestBuildAgentHistory_LazyMode_MultipleAgents(t *testing.T) {
+	sess := &session.Session{
+		History: []session.Turn{
+			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
+			dhTurn(session.RoleAssistant, session.AgentLocal, "a1"),
+			dhTurn(session.RoleUser, session.AgentEscalation, "esc q"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a"),
+			dhTurn(session.RoleUser, session.AgentEscalation, "esc q2"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a2"),
+			dhTurn(session.RoleUser, session.AgentLocal, "q2"),
+		},
+	}
+	msgs := sessionToUnifiedMessages(sess, "test-primary", true)
+	// q1, a1, placeholder(4 turns), q2 → 4 messages
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	if msgs[2].Content != "[escalation]: (4 turns omitted)" {
+		t.Errorf("multi-turn placeholder wrong, got %q", msgs[2].Content)
+	}
+}
+
+// TestBuildAgentHistory_LazyMode_False verifies that skipOtherAgents=false
+// preserves the current behavior (all turns included).
+func TestBuildAgentHistory_LazyMode_False(t *testing.T) {
+	sess := &session.Session{
+		History: []session.Turn{
+			dhTurn(session.RoleUser, session.AgentLocal, "q1"),
+			dhTurn(session.RoleAssistant, session.AgentLocal, "a1"),
+			dhTurn(session.RoleUser, session.AgentEscalation, "esc q"),
+			dhTurn(session.RoleAssistant, session.AgentEscalation, "esc a"),
+		},
+	}
+	msgs := sessionToUnifiedMessages(sess, "test-primary", false)
+	// All 4 turns should be present.
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages (all turns), got %d", len(msgs))
 	}
 }
 

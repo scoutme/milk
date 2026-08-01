@@ -280,7 +280,7 @@ func TestEval_EscalationLocal(t *testing.T) {
 		baseSess.History = append([]session.Turn(nil), orig.History...)
 		baseAgent := buildBaselineAgent(ts.URL)
 		var baseOut strings.Builder
-		baseAgent.Run(context.Background(), escalationLocalHistory(&baseSess, prompt), prompt, &baseOut, &baseSess, nil) //nolint:errcheck
+		baseAgent.Run(context.Background(), escalationLocalHistory(&baseSess, prompt, false), prompt, &baseOut, &baseSess, nil) //nolint:errcheck
 		baseChars := srv.lastChars()
 		baseSumm := srv.lastSummary()
 		baseHasEsc := srv.hasEscalationTurns(escalationReply)
