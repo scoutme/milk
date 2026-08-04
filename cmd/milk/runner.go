@@ -405,11 +405,13 @@ func (r *cliRunner) Execute(
 		cbs.ImageContextFile = ""
 	}
 
-	// Suppress duplicate dynamic context on resume turns (cache preservation).
-	// Re-sending an identical file still shifts the cache suffix and causes a miss.
+	// Suppress duplicate context on any resume-like turn (cache preservation).
+	// Hash the full combined content so a change to either half still triggers a write.
+	// Re-sending identical files shifts the cache suffix and causes a miss.
 	if r.pc.contextHash != nil {
-		h := fmt.Sprintf("%x", sha256.Sum256([]byte(dynamicCtx)))[:16]
-		if ctxMode == escalation.ContextModeResume && h == *r.pc.contextHash {
+		h := fmt.Sprintf("%x", sha256.Sum256([]byte(staticCtx+dynamicCtx)))[:16]
+		if h == *r.pc.contextHash {
+			staticCtx = ""
 			dynamicCtx = ""
 		} else {
 			*r.pc.contextHash = h
