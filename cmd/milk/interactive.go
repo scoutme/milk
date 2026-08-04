@@ -531,6 +531,10 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 			// Use total user-turn count, not local-only: sessionToUnifiedMessages
 			// includes all user turns, so the skip window must match.
 			st.sess.RepetitionBaselineLocalTurns = st.sess.UserTurnCount()
+			// Reset ESCALATION_WAITING state when explicitly switching to primary.
+			if st.sess.State == session.StateEscalationWaiting {
+				st.sess.ForceState(session.StateRouting)
+			}
 		}
 		if prompt == "" {
 			// No inline prompt: pin all subsequent turns to local.
