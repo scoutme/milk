@@ -427,6 +427,12 @@ type model struct {
 	// quit confirmation state
 	quitPending bool
 
+	// pendingForceFresh is set to true in dispatchAgent when the turn begins with
+	// ForceFreshEscalation so that handleAgentDone can zero lastEscalationContextHash
+	// after the turn completes, preventing a stale hash from suppressing the fresh
+	// session's first context block.
+	pendingForceFresh bool
+
 	// pendingDirectBash is non-nil while waiting for y/N confirmation to run a
 	// shell command directly. The string holds the command to run on approval.
 	pendingDirectBash *string
@@ -660,6 +666,11 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.activeToolUse = ""
 	m.cancelTurn = nil
 	m.busyHint = ""
+
+	if m.pendingForceFresh {
+		m.st.lastEscalationContextHash = ""
+		m.pendingForceFresh = false
+	}
 
 	// Attach accumulated thinking to the last assistant turn in the session.
 	if thinking := m.currentTurnThinking.String(); thinking != "" {
@@ -1986,6 +1997,8 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		// Record compact form in session history (no full file data).
 		m.st.pendingSessionContent = input + ph.String()
 	}
+
+	m.pendingForceFresh = m.st.sess.ForceFreshEscalation
 
 	turnCtx, cancel := context.WithCancel(m.ctx)
 	m.cancelTurn = cancel
