@@ -365,3 +365,66 @@ func TestFormatPercepts_Empty(t *testing.T) {
 		t.Errorf("expected empty string for empty percepts, got %q", got)
 	}
 }
+
+// --- ContextModeContinuation tests ---
+
+func TestBuildStaticContext_ContinuationAlwaysEmpty(t *testing.T) {
+	cases := []struct {
+		name               string
+		injectInstructions bool
+	}{
+		{"inject false", false},
+		{"inject true", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildStaticContext("n1", []string{"a fact"}, ContextModeContinuation, tc.injectInstructions, "primary", "claude")
+			if got != "" {
+				t.Errorf("BuildStaticContext on ContextModeContinuation should always return '', got %q", got)
+			}
+		})
+	}
+}
+
+func TestBuildDynamicContext_ContinuationOnlyChangedSummary(t *testing.T) {
+	sess := &session.Session{
+		CurrentNeed:      "fix the bug",
+		EscalationBrief:  "nil pointer in auth.go",
+		LastLocalSummary: "User: run tests",
+	}
+	got := BuildDynamicContext(sess, ContextModeContinuation)
+	if strings.Contains(got, identityBlock) {
+		t.Error("dynamic context on continuation should not contain identity block")
+	}
+	if strings.Contains(got, "fix the bug") {
+		t.Error("dynamic context on continuation should not contain CurrentNeed")
+	}
+	if strings.Contains(got, "nil pointer in auth.go") {
+		t.Error("dynamic context on continuation should not contain EscalationBrief")
+	}
+	if !strings.Contains(got, "run tests") {
+		t.Errorf("dynamic context on continuation should contain changed LastLocalSummary, got %q", got)
+	}
+}
+
+func TestBuildDynamicContext_ContinuationEmptyWhenSummaryUnchanged(t *testing.T) {
+	sess := &session.Session{
+		LastLocalSummary:         "User: run tests",
+		LastLocalSummaryInjected: "User: run tests",
+	}
+	got := BuildDynamicContext(sess, ContextModeContinuation)
+	if got != "" {
+		t.Errorf("dynamic context on continuation should be empty when summary unchanged, got %q", got)
+	}
+}
+
+func TestBuildDynamicContext_ContinuationEmptyWhenNoSummary(t *testing.T) {
+	sess := &session.Session{
+		CurrentNeed:     "fix the bug",
+		EscalationBrief: "nil pointer",
+	}
+	got := BuildDynamicContext(sess, ContextModeContinuation)
+	if got != "" {
+		t.Errorf("dynamic context on continuation with no summary should be empty, got %q", got)
+	}
+}

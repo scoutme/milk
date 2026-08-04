@@ -437,7 +437,7 @@ func (r *cliRunner) Execute(
 		res    claude.ParseResult
 		runErr error
 	)
-	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
+	if ctxMode == escalation.ContextModeResume || ctxMode == escalation.ContextModeContinuation || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
 		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, sw)
 		if runErr != nil && claude.IsInvalidSession(runErr) {
 			// Stale session ID — Claude's store no longer has this session (evicted,
@@ -647,7 +647,7 @@ func (r *subprocessRunner) Execute(
 		res    subprocess.ParseResult
 		runErr error
 	)
-	if ctxMode == escalation.ContextModeResume || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
+	if ctxMode == escalation.ContextModeResume || ctxMode == escalation.ContextModeContinuation || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
 		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, out)
 	} else {
 		var newID string

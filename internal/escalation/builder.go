@@ -31,6 +31,11 @@ const (
 	// ContextModeReturning is a return to the escalation agent after the primary agent did some work.
 	// The escalation agent has its own prior session but may not know what the primary agent did in the interim.
 	ContextModeReturning
+	// ContextModeContinuation is a sticky follow-up turn where the escalation agent is already
+	// active and the user typed the next message directly (EscalationSessionID != "" and
+	// LocalTurnsSinceLastEscalation() == 0). Like ContextModeResume, static context is suppressed
+	// and only the summary-diff block is sent, avoiding redundant identity/brief re-injection.
+	ContextModeContinuation
 )
 
 // BuildStaticContext assembles the stable part of the system-prompt context for a
@@ -39,11 +44,15 @@ const (
 // remembered percepts. Because the content is stable, the CLI can cache it as a
 // long-lived prefix and only pay tokenisation once per session.
 //
-// Returns "" on ContextModeResume — instructions are already in Claude's cached context.
+// Returns "" on ContextModeResume and ContextModeContinuation — instructions are
+// already in Claude's cached context.
 // On ContextModeFirst and ContextModeReturning the full static block is returned;
 // injectInstructions gates whether the tag-instruction and percept blocks are included
 // (false on re-injection turns that have not crossed the threshold).
 func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+	if mode == ContextModeContinuation {
+		return ""
+	}
 	// On ContextModeResume the static block is suppressed unless the re-injection
 	// threshold has been crossed (injectInstructions=true overrides the suppression).
 	if !injectInstructions {
@@ -73,15 +82,16 @@ func BuildPrimaryStaticContext(nonce string, percepts []string, mode ContextMode
 // Because this content changes frequently it is sent as a separate file from the
 // static instructions, so changes here do not invalidate Claude's cached prefix.
 //
-// ContextModeFirst:     identity · brief · need · primary summary
-// ContextModeResume:    primary summary only (if changed since last injection)
-// ContextModeReturning: identity · brief · need · primary summary
+// ContextModeFirst:        identity · brief · need · primary summary
+// ContextModeResume:       primary summary only (if changed since last injection)
+// ContextModeReturning:    identity · brief · need · primary summary
+// ContextModeContinuation: primary summary only (if changed since last injection)
 //
 // (No escalation summary — --resume already gives Claude its full prior history.)
 func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 	var b strings.Builder
 
-	if mode == ContextModeResume {
+	if mode == ContextModeResume || mode == ContextModeContinuation {
 		if sess.LastLocalSummary != "" && sess.LastLocalSummary != sess.LastLocalSummaryInjected {
 			b.WriteString("[Recent primary agent activity]\n")
 			b.WriteString(sess.LastLocalSummary)
@@ -178,8 +188,8 @@ func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string 
 func BuildContext(sess *session.Session, nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
 	dynamic := BuildDynamicContext(sess, mode)
 	static := BuildStaticContext(nonce, percepts, mode, injectInstructions, primaryName, escalationName)
-	if mode == ContextModeResume {
-		// Resume: dynamic summary only (static already in Claude's cached context).
+	if mode == ContextModeResume || mode == ContextModeContinuation {
+		// Resume/Continuation: dynamic summary only (static already in Claude's cached context).
 		return dynamic
 	}
 	// First/Returning: dynamic orientation first, then static instructions.

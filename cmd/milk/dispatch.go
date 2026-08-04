@@ -229,6 +229,10 @@ func runEscalationWithSession(
 		ctxMode = escalation.ContextModeFirst
 	case sess.State == session.StateEscalationWaiting && sess.EscalationSessionID != "":
 		ctxMode = escalation.ContextModeResume
+	case sess.EscalationSessionID != "" && sess.LocalTurnsSinceLastEscalation() == 0:
+		// Sticky follow-up: escalation agent is already active and the user typed
+		// the next message directly — no local turns have run since last escalation.
+		ctxMode = escalation.ContextModeContinuation
 	case sess.EscalationSessionID != "" || session.EscalationEverActive(sess):
 		// EscalationSessionID is set for CLI/subprocess agents; for local-HTTP agents
 		// there is no session ID, so fall back to history scan to detect returning turns.
@@ -247,7 +251,7 @@ func runEscalationWithSession(
 		}
 	}
 
-	resuming := ctxMode == escalation.ContextModeResume
+	resuming := ctxMode == escalation.ContextModeResume || ctxMode == escalation.ContextModeContinuation
 	if ctxMode == escalation.ContextModeFirst {
 		sess.EscalationBrief = brief
 	}
