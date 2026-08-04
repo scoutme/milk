@@ -21,6 +21,7 @@ Thumbs.db
 
 # Claude
 .claude/
+.workflow/
 
 # aider
 .aider.*
