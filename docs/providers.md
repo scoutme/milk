@@ -68,6 +68,57 @@ For testing without a live `claude` binary, set `bin` to a `milk-mock claude` wr
 
 ---
 
+## Context window declaration (`context_window_tokens`)
+
+Set `context_window_tokens` on any agent entry to declare the model's context window size in tokens. When set, milk automatically derives sensible defaults for two per-turn limits without requiring explicit `limits` overrides:
+
+| Derived limit | Formula | Example (32 768 tokens) |
+|---|---|---|
+| `message_budget_chars` | `context_window_tokens × 3` | 98 304 chars |
+| `max_tool_iterations` | `max(5, context_window_tokens / 4096)` | 8 iterations |
+
+Explicit `limits.message_budget_chars` and `limits.max_tool_iterations` always win over the auto-derived values.
+
+```json
+{
+  "name": "qwythos-local",
+  "url": "http://localhost:8080",
+  "model": "qwythos",
+  "provider": "local",
+  "context_window_tokens": 32768,
+  "run_cmd": "llama-server --model ~/models/qwythos.gguf --ctx-size 32768 --port 8080"
+}
+```
+
+For local models, read the value directly from the `--ctx-size` flag in `run_cmd`.
+
+---
+
+## System prompt verbosity (`system_prompt_tier`)
+
+milk's default system prompt (`standard`) is tuned for capable models. Smaller local models benefit from a shorter prompt that reduces noise and frees context for history and tools.
+
+Set `system_prompt_tier` on any local agent entry:
+
+| Value | Approx. size | Contents |
+|---|---|---|
+| `"minimal"` | ~60 tokens | Core task framing only — no git protocol, no memory mandates, no multi-agent topology rules |
+| `"standard"` | ~700 tokens | Full default prompt (default when omitted) |
+| `"full"` | ~900 tokens | Standard plus additional verbose guidance |
+
+```json
+{
+  "name": "qwen-local",
+  "url": "http://localhost:8090",
+  "model": "qwen2.5-coder",
+  "provider": "local",
+  "context_window_tokens": 8192,
+  "system_prompt_tier": "minimal"
+}
+```
+
+---
+
 ## Custom agent behaviour (`prompt` / `prompt_file`)
 
 Any agent entry can carry a custom system prompt that is **prepended** to milk's default system prompt on every turn.
@@ -678,8 +729,12 @@ All fields are optional. When omitted, the global value (or built-in default) ap
 | `memory_reinjection_bytes` | `memory_reinjection_bytes` / `local_memory_reinjection_bytes` | 40000 | Re-inject memory instructions after N bytes of output |
 | `percept_relevance_gate` | `percept_relevance_gate` | `true` | Enable keyword-intersection filter before percept injection |
 | `max_tool_iterations` | `local_max_tool_iterations` | 20 | Max tool-call cycles per turn (-1 = unlimited) |
+| `included_tools` | — | (all) | Whitelist of built-in tool names to expose to this agent. When non-empty, only the listed tools are offered. |
+| `excluded_tools` | — | (none) | List of built-in tool names to remove from this agent's tool set. Applied after `included_tools`. |
 
-> **Tip — large context window agents:** If your primary agent has a large context window (e.g. Copilot, GPT-4o, Claude 3.7), use `limits` to raise `max_tool_iterations` (suggest `100`), `message_budget_chars` (suggest `3000000`), and `context_budget_chars` (suggest `200000`). The `milk config init` wizard prompts for these automatically when you answer "y" to the large context window question.
+> **Tip — large context window agents:** Set `context_window_tokens` on the agent entry and milk will auto-derive `message_budget_chars` and `max_tool_iterations`. Explicit `limits` overrides remain available when you need exact values. The `milk config init` wizard prompts for `context_window_tokens` automatically.
+
+> **Tip — small local models:** Set `system_prompt_tier: "minimal"` and use `limits.included_tools` to restrict the tool set to the 7–8 tools the model will actually use. This recovers ~700 tokens of system prompt and ~1 000–1 500 tokens of tool schema space per turn.
 
 ---
 

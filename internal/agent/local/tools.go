@@ -55,8 +55,68 @@ func (r toolResult) String() string {
 	return string(b)
 }
 
-// schemas returns the OpenAI function schemas for all built-in tools.
-func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgents []config.AgentToolEntry, ts TaskStore) []map[string]any {
+// toolName extracts the function name from a tool schema map.
+// Returns "" when the schema is malformed.
+func toolName(s map[string]any) string {
+	fn, _ := s["function"].(map[string]any)
+	if fn == nil {
+		return ""
+	}
+	name, _ := fn["name"].(string)
+	return name
+}
+
+// filterTools applies IncludedTools / ExcludedTools from limits to the given
+// tool list and returns the filtered result.
+//
+//  1. If limits is nil (or both lists empty) the original slice is returned
+//     unchanged.
+//  2. If IncludedTools is non-empty, only entries whose name appears in that
+//     list are kept.
+//  3. Names in ExcludedTools are removed from the result of step 2 (or from
+//     the original list when IncludedTools is empty).
+//
+// The filtering is applied to the base built-in tools only. Dynamically
+// appended tools (memory, otel, agent tools) are excluded from filtering so
+// they always appear when the store / directory is available.
+func filterTools(tools []map[string]any, limits *config.AgentLimits) []map[string]any {
+	if limits == nil || (len(limits.IncludedTools) == 0 && len(limits.ExcludedTools) == 0) {
+		return tools
+	}
+	var result []map[string]any
+	if len(limits.IncludedTools) > 0 {
+		inc := make(map[string]bool, len(limits.IncludedTools))
+		for _, n := range limits.IncludedTools {
+			inc[n] = true
+		}
+		for _, s := range tools {
+			if inc[toolName(s)] {
+				result = append(result, s)
+			}
+		}
+	} else {
+		result = make([]map[string]any, len(tools))
+		copy(result, tools)
+	}
+	if len(limits.ExcludedTools) > 0 {
+		exc := make(map[string]bool, len(limits.ExcludedTools))
+		for _, n := range limits.ExcludedTools {
+			exc[n] = true
+		}
+		filtered := result[:0:0]
+		for _, s := range result {
+			if !exc[toolName(s)] {
+				filtered = append(filtered, s)
+			}
+		}
+		result = filtered
+	}
+	return result
+}
+
+// schemas returns the OpenAI function schemas for all built-in tools,
+// filtered by limits when non-nil.
+func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgents []config.AgentToolEntry, ts TaskStore, limits *config.AgentLimits) []map[string]any {
 	base := []map[string]any{
 		{
 			"type": "function",
@@ -275,6 +335,11 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 			},
 		},
 	}
+	// Apply whitelist/blacklist filtering to the base built-in tool set.
+	// Dynamic tools (memory, otel, session, task, agent) are appended after
+	// filtering so they are always available when the backing store is present.
+	base = filterTools(base, limits)
+
 	if mem != nil {
 		base = append(base, memory.Schemas()...)
 	}

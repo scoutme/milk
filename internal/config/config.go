@@ -168,6 +168,24 @@ type AgentConfig struct {
 	// flags without requiring dedicated config fields.
 	ExtraArgs []string `json:"extra_args,omitempty"`
 
+	// SystemPromptTier selects the verbosity level of the system prompt sent to
+	// this agent. Valid values: "minimal", "standard" (default), "full".
+	//   "minimal"  — role framing only; tool-use instructions and reasoning
+	//                guidance sections are omitted.
+	//   "standard" — current default behaviour (role framing + full tool rules).
+	//   "full"     — standard plus additional verbose guidance.
+	// Empty string is treated as "standard".
+	SystemPromptTier string `json:"system_prompt_tier,omitempty"`
+
+	// ContextWindowTokens is the context window size of this agent's model in
+	// tokens. When set and no explicit limits.message_budget_chars or
+	// limits.max_tool_iterations override is configured, milk auto-derives
+	// sensible defaults:
+	//   MessageBudgetChars = ContextWindowTokens * 3  (75% of window × 4 chars/token)
+	//   MaxToolIterations  = max(5, ContextWindowTokens/4096)
+	// Set to 0 (the default) to use the global config defaults instead.
+	ContextWindowTokens int `json:"context_window_tokens,omitempty"`
+
 	// Limits holds optional per-agent overrides for context caps and injection limits.
 	// Nil fields fall back to the global Config defaults.
 	Limits *AgentLimits `json:"limits,omitempty"`
@@ -246,6 +264,16 @@ type AgentLimits struct {
 	// call returns an error result to the model. Other tools in the same batch are
 	// unaffected. Default: 120 s (2 min). Set to -1 for no per-tool limit.
 	ToolTimeoutSecs *int `json:"tool_timeout_secs,omitempty"`
+
+	// IncludedTools is a whitelist of tool names exposed to this agent. When
+	// non-empty, only the listed names are included in the outgoing request
+	// payload (applied to the base tool set before ExcludedTools).
+	// Names must match exactly the tool function names (e.g. "bash", "read_file").
+	IncludedTools []string `json:"included_tools,omitempty"`
+
+	// ExcludedTools is a list of tool names to remove from the base tool set.
+	// Applied after IncludedTools. Names must match exactly (e.g. "http_get").
+	ExcludedTools []string `json:"excluded_tools,omitempty"`
 }
 
 // IsCLI reports whether this agent uses the Claude Code CLI backend.
@@ -787,8 +815,23 @@ func (c Config) AgentContextBudget(a AgentConfig) int {
 	return c.ContextBudget()
 }
 
+// AgentContextWindowTokens returns the context window size (in tokens) for the
+// given agent. Returns 0 when not set, meaning no token-budget auto-derivation
+// will occur. Callers should use this value to auto-derive MessageBudgetChars
+// and MaxToolIterations when the corresponding limits are not explicitly set.
+func (c Config) AgentContextWindowTokens(a AgentConfig) int {
+	if a.ContextWindowTokens > 0 {
+		return a.ContextWindowTokens
+	}
+	return 0
+}
+
 // AgentMessageBudget returns the message-history trim budget for the given agent,
-// falling back to the global LocalContextBudget().
+// falling back (in order) to: explicit limits.message_budget_chars override,
+// auto-derived value from context_window_tokens, global LocalContextBudget().
+//
+// Auto-derivation formula: ContextWindowTokens * 3
+// (assumes ~4 chars/token and uses 75% of the window for history).
 func (c Config) AgentMessageBudget(a AgentConfig) int {
 	if a.Limits != nil && a.Limits.MessageBudgetChars != nil {
 		v := *a.Limits.MessageBudgetChars
@@ -796,6 +839,10 @@ func (c Config) AgentMessageBudget(a AgentConfig) int {
 			return 0
 		}
 		return intOr(v, 24000)
+	}
+	// Auto-derive from context_window_tokens when no explicit override.
+	if ctw := c.AgentContextWindowTokens(a); ctw > 0 {
+		return ctw * 3
 	}
 	return c.LocalContextBudget()
 }
@@ -899,6 +946,10 @@ func (c Config) AgentPerceptRelevanceGateEnabled(a AgentConfig) bool {
 // AgentMaxToolIterations returns the tool-call chain limit for the given agent.
 // Returns 0 to signal "unlimited" when the value resolves to negative.
 // Default: 20.
+//
+// When neither the per-agent limits.max_tool_iterations nor the global
+// local_max_tool_iterations is explicitly set and context_window_tokens is
+// configured on the agent, the cap is auto-derived as max(5, ContextWindowTokens/4096).
 func (c Config) AgentMaxToolIterations(a AgentConfig) int {
 	if a.Limits != nil && a.Limits.MaxToolIterations != nil {
 		v := *a.Limits.MaxToolIterations
@@ -910,7 +961,18 @@ func (c Config) AgentMaxToolIterations(a AgentConfig) int {
 	if c.LocalMaxToolIterations < 0 {
 		return 0 // unlimited
 	}
-	return intOr(c.LocalMaxToolIterations, 20)
+	if c.LocalMaxToolIterations > 0 {
+		return c.LocalMaxToolIterations
+	}
+	// Auto-derive from context_window_tokens when no explicit global override.
+	if ctw := c.AgentContextWindowTokens(a); ctw > 0 {
+		cap := ctw / 4096
+		if cap < 5 {
+			cap = 5
+		}
+		return cap
+	}
+	return 20 // built-in default
 }
 
 // AgentTurnTimeout returns the per-turn timeout for the given agent.

@@ -513,7 +513,7 @@ func TestTaskSchemas_FourDefinitions(t *testing.T) {
 // the 4 task tool definitions when a non-nil TaskStore is passed.
 func TestSchemas_IncludesTaskToolsWhenStorePresent(t *testing.T) {
 	ts := &mockTaskStore{}
-	all := schemas(nil, "", nil, nil, ts)
+	all := schemas(nil, "", nil, nil, ts, nil)
 	taskNames := map[string]bool{
 		"create_task": false, "update_task": false,
 		"list_tasks": false, "complete_task": false,
@@ -538,7 +538,7 @@ func TestSchemas_IncludesTaskToolsWhenStorePresent(t *testing.T) {
 // TestSchemas_ExcludesTaskToolsWhenStoreNil verifies that schemas() does NOT
 // include task tools when TaskStore is nil.
 func TestSchemas_ExcludesTaskToolsWhenStoreNil(t *testing.T) {
-	all := schemas(nil, "", nil, nil, nil)
+	all := schemas(nil, "", nil, nil, nil, nil)
 	for _, s := range all {
 		fn, _ := s["function"].(map[string]any)
 		if fn == nil {
@@ -549,5 +549,114 @@ func TestSchemas_ExcludesTaskToolsWhenStoreNil(t *testing.T) {
 		case "create_task", "update_task", "list_tasks", "complete_task":
 			t.Errorf("task tool %q found in schemas() when TaskStore is nil", name)
 		}
+	}
+}
+
+// ── TestSchemas — IncludedTools / ExcludedTools ───────────────────────────────
+
+// schemaNames extracts the tool function names from a schema slice.
+func schemaNames(schemas []map[string]any) []string {
+	var names []string
+	for _, s := range schemas {
+		if n := toolName(s); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// containsName reports whether name appears in the slice.
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSchemas_EmptyLimitsReturnsFullSet verifies that a nil limits pointer
+// produces the complete base tool set (no filtering applied).
+func TestSchemas_EmptyLimitsReturnsFullSet(t *testing.T) {
+	all := schemas(nil, "", nil, nil, nil, nil)
+	names := schemaNames(all)
+	// All well-known base tools must be present.
+	for _, want := range []string{"bash", "read_file", "write_file", "http_get", "http_request", "list_dir", "escalate"} {
+		if !containsName(names, want) {
+			t.Errorf("expected tool %q in full set, not found", want)
+		}
+	}
+}
+
+// TestSchemas_IncludedToolsFiltersCorrectly verifies that setting IncludedTools
+// keeps only the listed names in the base tool set.
+func TestSchemas_IncludedToolsFiltersCorrectly(t *testing.T) {
+	limits := &config.AgentLimits{
+		IncludedTools: []string{"bash", "read_file"},
+	}
+	all := schemas(nil, "", nil, nil, nil, limits)
+	names := schemaNames(all)
+
+	if !containsName(names, "bash") {
+		t.Error("expected bash in included result")
+	}
+	if !containsName(names, "read_file") {
+		t.Error("expected read_file in included result")
+	}
+	// Tools not in the whitelist must be absent.
+	for _, absent := range []string{"write_file", "http_get", "http_request", "list_dir"} {
+		if containsName(names, absent) {
+			t.Errorf("tool %q should be excluded by IncludedTools filter", absent)
+		}
+	}
+}
+
+// TestSchemas_ExcludedToolsRemovesNamedTools verifies that ExcludedTools removes
+// the listed tool names from the base set while keeping all others.
+func TestSchemas_ExcludedToolsRemovesNamedTools(t *testing.T) {
+	limits := &config.AgentLimits{
+		ExcludedTools: []string{"http_get", "http_request"},
+	}
+	all := schemas(nil, "", nil, nil, nil, limits)
+	names := schemaNames(all)
+
+	for _, absent := range []string{"http_get", "http_request"} {
+		if containsName(names, absent) {
+			t.Errorf("tool %q should have been removed by ExcludedTools", absent)
+		}
+	}
+	// Other tools should still be present.
+	for _, present := range []string{"bash", "read_file", "list_dir"} {
+		if !containsName(names, present) {
+			t.Errorf("tool %q should still be present after ExcludedTools filter", present)
+		}
+	}
+}
+
+// TestSchemas_BothSets_IncludedTakesPrecedenceThenExcluded verifies that when
+// both IncludedTools and ExcludedTools are set, the whitelist is applied first
+// and then the blacklist is applied to the result.
+func TestSchemas_BothSets_IncludedTakesPrecedenceThenExcluded(t *testing.T) {
+	limits := &config.AgentLimits{
+		IncludedTools: []string{"bash", "read_file", "http_get"},
+		ExcludedTools: []string{"http_get"},
+	}
+	all := schemas(nil, "", nil, nil, nil, limits)
+	names := schemaNames(all)
+
+	// bash and read_file: in whitelist, not in blacklist → present.
+	if !containsName(names, "bash") {
+		t.Error("expected bash to be present")
+	}
+	if !containsName(names, "read_file") {
+		t.Error("expected read_file to be present")
+	}
+	// http_get: in whitelist but also in blacklist → excluded.
+	if containsName(names, "http_get") {
+		t.Error("http_get should be excluded by ExcludedTools after IncludedTools")
+	}
+	// Tools not in the whitelist are excluded regardless.
+	if containsName(names, "write_file") {
+		t.Error("write_file was not in IncludedTools and should be absent")
 	}
 }

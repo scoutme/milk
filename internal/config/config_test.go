@@ -595,6 +595,158 @@ func TestEffectiveToolAgents_UnknownAgentDropped(t *testing.T) {
 	}
 }
 
+// --- Sprint 4: context_window_tokens auto-derivation tests ---
+
+func TestAgentContextWindowTokens_Unset(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{}
+	if got := cfg.AgentContextWindowTokens(ac); got != 0 {
+		t.Errorf("expected 0 when unset, got %d", got)
+	}
+}
+
+func TestAgentContextWindowTokens_Set(t *testing.T) {
+	cfg := Config{}
+	ac := AgentConfig{ContextWindowTokens: 8192}
+	if got := cfg.AgentContextWindowTokens(ac); got != 8192 {
+		t.Errorf("expected 8192, got %d", got)
+	}
+}
+
+// TestAgentMessageBudget table-driven tests for context_window_tokens auto-derivation.
+func TestAgentMessageBudget_ContextWindowTokens(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         Config
+		ac          AgentConfig
+		wantBudget  int
+	}{
+		{
+			name:       "no context_window_tokens falls back to global default",
+			cfg:        Config{},
+			ac:         AgentConfig{},
+			wantBudget: 24000, // global default
+		},
+		{
+			name:       "context_window_tokens 8192 auto-derives 24576",
+			cfg:        Config{},
+			ac:         AgentConfig{ContextWindowTokens: 8192},
+			wantBudget: 8192 * 3, // 24576
+		},
+		{
+			name:       "context_window_tokens 32768 auto-derives 98304",
+			cfg:        Config{},
+			ac:         AgentConfig{ContextWindowTokens: 32768},
+			wantBudget: 32768 * 3, // 98304
+		},
+		{
+			name: "explicit limits.message_budget_chars overrides auto-derivation",
+			cfg:  Config{},
+			ac: AgentConfig{
+				ContextWindowTokens: 8192,
+				Limits:              &AgentLimits{MessageBudgetChars: intPtr(50000)},
+			},
+			wantBudget: 50000,
+		},
+		{
+			name: "explicit limits.message_budget_chars=0 uses built-in default (not auto-derived)",
+			cfg:  Config{},
+			ac: AgentConfig{
+				ContextWindowTokens: 8192,
+				Limits:              &AgentLimits{MessageBudgetChars: intPtr(0)},
+			},
+			wantBudget: 24000, // intOr(0, 24000) returns 24000
+		},
+		{
+			name: "global local_context_budget_chars wins when no context_window_tokens",
+			cfg:  Config{LocalContextBudgetChars: 10000},
+			ac:   AgentConfig{},
+			wantBudget: 10000,
+		},
+		{
+			name: "context_window_tokens wins over global local_context_budget_chars",
+			cfg:  Config{LocalContextBudgetChars: 10000},
+			ac:   AgentConfig{ContextWindowTokens: 8192},
+			wantBudget: 8192 * 3, // auto-derive beats global fallback when ctw is set
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.AgentMessageBudget(tt.ac)
+			if got != tt.wantBudget {
+				t.Errorf("AgentMessageBudget() = %d, want %d", got, tt.wantBudget)
+			}
+		})
+	}
+}
+
+// TestAgentMaxToolIterations table-driven tests for context_window_tokens cap.
+func TestAgentMaxToolIterations_ContextWindowTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      Config
+		ac       AgentConfig
+		wantIter int
+	}{
+		{
+			name:     "no context_window_tokens falls back to default 20",
+			cfg:      Config{},
+			ac:       AgentConfig{},
+			wantIter: 20,
+		},
+		{
+			name:     "context_window_tokens 8192 → max(5, 8192/4096)=2 → clamped to 5",
+			cfg:      Config{},
+			ac:       AgentConfig{ContextWindowTokens: 8192},
+			wantIter: 5, // 8192/4096=2, max(5,2)=5
+		},
+		{
+			name:     "context_window_tokens 32768 → max(5, 32768/4096)=8",
+			cfg:      Config{},
+			ac:       AgentConfig{ContextWindowTokens: 32768},
+			wantIter: 8, // 32768/4096=8
+		},
+		{
+			name:     "context_window_tokens 131072 → max(5, 131072/4096)=32",
+			cfg:      Config{},
+			ac:       AgentConfig{ContextWindowTokens: 131072},
+			wantIter: 32,
+		},
+		{
+			name: "explicit limits.max_tool_iterations overrides auto-derivation",
+			cfg:  Config{},
+			ac: AgentConfig{
+				ContextWindowTokens: 131072,
+				Limits:              &AgentLimits{MaxToolIterations: intPtr(10)},
+			},
+			wantIter: 10,
+		},
+		{
+			name:     "explicit global local_max_tool_iterations overrides auto-derivation",
+			cfg:      Config{LocalMaxToolIterations: 15},
+			ac:       AgentConfig{ContextWindowTokens: 131072},
+			wantIter: 15,
+		},
+		{
+			name: "per-agent -1 means unlimited (0), wins over context_window_tokens",
+			cfg:  Config{},
+			ac: AgentConfig{
+				ContextWindowTokens: 131072,
+				Limits:              &AgentLimits{MaxToolIterations: intPtr(-1)},
+			},
+			wantIter: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.AgentMaxToolIterations(tt.ac)
+			if got != tt.wantIter {
+				t.Errorf("AgentMaxToolIterations() = %d, want %d", got, tt.wantIter)
+			}
+		})
+	}
+}
+
 func TestValidate_BothPromptAndPromptFile(t *testing.T) {
 	cfg := Config{
 		Agents: []AgentConfig{

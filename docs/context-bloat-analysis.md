@@ -145,16 +145,14 @@ Files: `internal/agent/local/local.go` (`systemPromptPrimary`, `systemPromptEsca
 
 ---
 
-### A2 — Cache working directory listing within session
-**Impact:** ~578 chars × (turns − 1) per session | **Effort:** Low | **Risk:** Low
+### A2 — Remove working directory listing injection ✓ Done (2026-08-04)
+**Impact:** ~578 chars saved every turn | **Effort:** Low | **Risk:** Low
 
-The cwd listing is injected as a fresh `system` message on every turn (`cwdContext()` in
-`Run()`). It only changes if files are created or deleted. Cache it on the agent after first
-injection; invalidate only when the model calls `list_dir` on the working directory (explicit
-stale signal) or on `/new`.
-
-Implementation: add `cachedCwdContext string` and `cachedCwd string` fields to `Agent`; skip
-`cwdContext()` injection when `cachedCwd == sess.CWD` and cache is populated.
+The `cwdContext()` call that appended a live `list_dir` output to the system prompt on every
+turn has been removed entirely. The working directory path is already present in the system
+prompt via `buildSystemPrompt`; the model calls `list_dir` itself when it needs a listing.
+Removing the injection also eliminates the prompt-cache invalidation that occurred whenever
+any file was added or deleted in the working directory.
 
 Files: `internal/agent/local/local.go`
 

@@ -194,8 +194,6 @@ type Agent struct {
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
 	logContext       bool   // when true, log full request payload at DEBUG level
-	cachedCwd        string // cwd for which cachedCwdContext was built
-	cachedCwdContext string // cached working directory listing system message
 	// onTokens is an optional callback fired after each inference call with real
 	// token counts. Used to persist usage into the session without coupling the
 	// agent to the session package.
@@ -231,6 +229,12 @@ type Agent struct {
 	// pendingImageParts holds multipart ContentParts to inject into the next user
 	// message. Set by SetPendingImageParts before Run; cleared after one use.
 	pendingImageParts []ContentPart
+	// limits holds the per-agent tool whitelist/blacklist configuration.
+	// Nil means no filtering (all tools exposed).
+	limits *config.AgentLimits
+	// systemPromptTier selects the verbosity level of the system prompt.
+	// Valid values: "minimal", "standard" (default), "full". Empty = "standard".
+	systemPromptTier string
 }
 
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
@@ -354,23 +358,15 @@ func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
 
 // SystemOverheadChars returns an estimate of the character overhead that Run
 // will add as system messages on top of the history slice: the role system
-// prompt, the cwd context block (cached after the first call), and the memory
-// instruction block (when re-injection is due). Callers can subtract this from
-// their message-budget before trimming history to avoid silent overruns.
+// prompt and the memory instruction block (when re-injection is due). Callers
+// can subtract this from their message-budget before trimming history to avoid
+// silent overruns.
 func (a *Agent) SystemOverheadChars(sess *session.Session) int {
 	cwd := ""
 	if sess != nil {
 		cwd = sess.CWD
 	}
-	n := len(buildSystemPrompt(cwd, a.selfName, a.escalationName, a.workflowRole))
-	if cwd != "" {
-		if a.cachedCwd != cwd {
-			// Not yet cached; estimate from a fresh call.
-			n += len(cwdContext(cwd))
-		} else {
-			n += len(a.cachedCwdContext)
-		}
-	}
+	n := len(buildSystemPrompt(cwd, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier))
 	// No tag instruction overhead for local HTTP agents — they use injected tools.
 	return n
 }
@@ -470,6 +466,8 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			useBedrockNative: true,
 			client:           &http.Client{Transport: sv4},
 			sigv4:            sv4,
+			limits:           ac.Limits,
+			systemPromptTier: ac.SystemPromptTier,
 		}
 	case "", "local":
 		// plain transport; extra headers may still apply
@@ -510,14 +508,16 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		chatPath = "/v1/responses"
 	}
 	return &Agent{
-		baseURL:         strings.TrimRight(ac.URL, "/"),
-		model:           ac.Model,
-		selfName:        ac.Name,
-		chatPath:        chatPath,
-		tokenCmd:        tct,
-		useResponsesAPI: useResponses,
-		skipHealthCheck: useResponses, // remote API providers typically have no /health
-		client:          &http.Client{Transport: transport},
+		baseURL:          strings.TrimRight(ac.URL, "/"),
+		model:            ac.Model,
+		selfName:         ac.Name,
+		chatPath:         chatPath,
+		tokenCmd:         tct,
+		useResponsesAPI:  useResponses,
+		skipHealthCheck:  useResponses, // remote API providers typically have no /health
+		client:           &http.Client{Transport: transport},
+		limits:           ac.Limits,
+		systemPromptTier: ac.SystemPromptTier,
 	}
 }
 
@@ -640,45 +640,90 @@ const systemPromptWorkflow = `You are a coding and shell automation assistant.
 
 ` + systemPromptShared
 
+// systemPromptSharedFull is additional verbose guidance appended when
+// system_prompt_tier is "full".
+const systemPromptSharedFull = `Additional guidance:
+- When editing code, always read the target file first to confirm the current content before making changes.
+- Prefer targeted edits (edit_file) over full rewrites (write_file) unless the change is pervasive.
+- After a bash command, read any output files or re-read the edited file to verify the result before proceeding.
+- When searching for a symbol or pattern, prefer grep with recursive=true over a sequence of individual read_file calls.
+- Use find_files to locate files by name or extension before attempting to read them by guessed path.
+- If a bash command returns a non-zero exit code, diagnose the error before retrying.`
+
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
 // escalationName is non-empty when this agent is acting as the escalation target.
-func buildSystemPrompt(cwd, selfName, escalationName string, workflowRole bool) string {
+// tier controls prompt verbosity: "minimal" omits tool-use instructions and
+// reasoning guidance; "standard" is the default; "full" adds extra guidance.
+// Empty tier is treated as "standard".
+func buildSystemPrompt(cwd, selfName, escalationName string, workflowRole bool, tier string) string {
+	// Normalise tier.
+	switch tier {
+	case "minimal", "full":
+		// keep
+	default:
+		tier = "standard"
+	}
+
+	// The shared rules block is included for "standard" and "full" but omitted
+	// for "minimal" (role framing only).
+	sharedBlock := ""
+	if tier != "minimal" {
+		sharedBlock = "\n\n" + systemPromptShared
+	}
+
 	var base string
 	switch {
 	case workflowRole:
-		base = systemPromptWorkflow
+		if tier == "minimal" {
+			base = "You are a coding and shell automation assistant."
+		} else {
+			base = systemPromptWorkflow
+		}
 	case escalationName != "":
 		// Escalation role: selfName == escalationName here.
-		base = fmt.Sprintf(
-			`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.
-
-`+systemPromptShared+`
+		if tier == "minimal" {
+			base = fmt.Sprintf(
+				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.`,
+				selfName,
+			)
+		} else {
+			base = fmt.Sprintf(
+				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.`+
+					sharedBlock+`
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
 - You are the escalation target — do not attempt to escalate further.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-			selfName,
-		)
+				selfName,
+			)
+		}
 	default:
-		base = fmt.Sprintf(
-			`You are %s, acting as the primary agent in a multi-agent system.
-
-`+systemPromptShared+`
+		if tier == "minimal" {
+			base = fmt.Sprintf(
+				`You are %s, acting as the primary agent in a multi-agent system.`,
+				selfName,
+			)
+		} else {
+			base = fmt.Sprintf(
+				`You are %s, acting as the primary agent in a multi-agent system.`+
+					sharedBlock+`
 - If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
 - Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-			selfName,
-		)
+				selfName,
+			)
+		}
 	}
+
+	// Append extra verbose guidance for "full" tier.
+	if tier == "full" {
+		base += "\n\n" + systemPromptSharedFull
+	}
+
 	if cwd == "" {
 		return base
 	}
 	return base + "\n\nWorking directory: " + cwd
-}
-
-func cwdContext(cwd string) string {
-	result, _ := runListDir(map[string]any{"path": cwd})
-	return "Working directory listing (" + cwd + "):\n" + result
 }
 
 // normalizePrompt lowercases and collapses whitespace for repetition comparison.
@@ -804,14 +849,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		return history, &EscalationSignal{Reason: "user repeated the same question without expressing satisfaction"}
 	}
 
-	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole)
-	if sess.CWD != "" {
-		if a.cachedCwd != sess.CWD {
-			a.cachedCwdContext = cwdContext(sess.CWD)
-			a.cachedCwd = sess.CWD
-		}
-		systemPrompt += "\n\n" + a.cachedCwdContext
-	}
+	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier)
 	if a.customPrompt != "" {
 		systemPrompt = a.customPrompt + "\n\n" + systemPrompt
 	}
@@ -827,7 +865,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		a.pendingImageParts = nil // consume once
 	}
 	msgs = append(msgs, userMsg)
-	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore)
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, a.limits)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
 	}
@@ -1035,14 +1073,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			summary := toolArgSummary(argMap)
 			if ok, d := a.checkPermission(tc.Function.Name, summary); !ok {
 				denied[i] = d
-			}
-		}
-		// Invalidate cwd listing cache synchronously.
-		if tc.Function.Name == "list_dir" && sess != nil {
-			var listArgs map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &listArgs) //nolint:errcheck
-			if p, _ := listArgs["path"].(string); p == "" || p == sess.CWD || p == "." {
-				a.cachedCwd = ""
 			}
 		}
 	}
