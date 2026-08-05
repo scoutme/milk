@@ -26,11 +26,11 @@ relevant to the current task, `--resume` loads that full history at token cost w
 Non-CLI escalation agents (plain HTTP, Bedrock, OpenRouter, etc.) have two additional gaps that
 the CLI path does not:
 
-1. **No structural orientation.** The CLI path injects an identity block, escalation brief, current
-   need, and local-activity summary via `BuildDynamicContext` before every non-resume turn. The
-   local-provider path passed raw undifferentiated history with no framing. The agent had to infer
-   its role and the current task from conversation context alone, which is a quality regression on
-   every escalation turn.
+1. **No structural orientation.** The CLI path injects an identity block (via `BuildStaticContext`),
+   escalation brief, current need, and local-activity summary (via `BuildDynamicContext`) before
+   every non-resume turn. The local-provider path passed raw undifferentiated history with no
+   framing. The agent had to infer its role and the current task from conversation context alone,
+   which is a quality regression on every escalation turn.
 
 2. **Budget trimmer as history policy.** When accumulated history exceeded `MessageBudgetChars`,
    the trimmer dropped oldest-first. For a returning turn this is the worst heuristic: it discards

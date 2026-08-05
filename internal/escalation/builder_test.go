@@ -133,7 +133,9 @@ func TestBuildContext_NilPercepts(t *testing.T) {
 }
 
 func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
-	// Resume omits identity/need/instructions — only the changed primary summary is sent.
+	// Resume omits need/instructions — only the changed primary summary is sent.
+	// The legacy BuildContext returns only the dynamic part on resume; the identity
+	// block lives in BuildStaticContext (used by the split API, not this legacy path).
 	sess := &session.Session{
 		LastLocalSummary: "User: run tests",
 		CurrentNeed:      "fix failing tests",
@@ -143,7 +145,7 @@ func TestBuildContext_ResumeIncludesLocalSummary(t *testing.T) {
 		t.Error("resume should not include CurrentNeed (already cached in Claude's context)")
 	}
 	if strings.Contains(got, identityBlock) {
-		t.Error("resume should not include identity block (already cached)")
+		t.Error("legacy BuildContext on resume returns dynamic only — no identity block")
 	}
 	if !strings.Contains(got, "run tests") {
 		t.Errorf("expected LastLocalSummary on resume, got %q", got)
@@ -236,10 +238,16 @@ func TestBuildStaticContext_ContainsInstructions(t *testing.T) {
 	}
 }
 
-func TestBuildStaticContext_EmptyOnResumeNoReinjection(t *testing.T) {
+func TestBuildStaticContext_IdentityOnResumeNoReinjection(t *testing.T) {
 	got := BuildStaticContext("n1", []string{"a fact"}, ContextModeResume, false, "primary", "claude")
-	if got != "" {
-		t.Errorf("static context should be empty on resume when injectInstructions=false, got %q", got)
+	if got == "" {
+		t.Error("static context should contain identity block on resume even when injectInstructions=false")
+	}
+	if !strings.Contains(got, identityBlock) {
+		t.Errorf("static context should contain identity block on resume, got %q", got)
+	}
+	if strings.Contains(got, "milk:percept") {
+		t.Error("static context should not contain instructions when injectInstructions=false")
 	}
 }
 
@@ -253,22 +261,28 @@ func TestBuildStaticContext_ReinjectedOnResumeWhenThresholdCrossed(t *testing.T)
 	}
 }
 
-func TestBuildStaticContext_EmptyWhenNoInject(t *testing.T) {
+func TestBuildStaticContext_IdentityWhenNoInject(t *testing.T) {
 	got := BuildStaticContext("n1", []string{"a fact"}, ContextModeFirst, false, "primary", "claude")
-	if got != "" {
-		t.Errorf("static context should be empty when injectInstructions=false, got %q", got)
+	if got == "" {
+		t.Error("static context should contain identity block even when injectInstructions=false")
+	}
+	if !strings.Contains(got, identityBlock) {
+		t.Errorf("static context should contain identity block, got %q", got)
+	}
+	if strings.Contains(got, "milk:percept") {
+		t.Error("static context should not contain instructions when injectInstructions=false")
 	}
 }
 
-func TestBuildDynamicContext_ContainsIdentityAndNeed(t *testing.T) {
+func TestBuildDynamicContext_ContainsNeedAndBrief(t *testing.T) {
 	sess := &session.Session{
 		CurrentNeed:      "fix the bug",
 		EscalationBrief:  "nil pointer in auth.go",
 		LastLocalSummary: "User: run tests\nAssistant: done",
 	}
 	got := BuildDynamicContext(sess, ContextModeFirst)
-	if !strings.Contains(got, identityBlock) {
-		t.Error("dynamic context should contain identity block on first")
+	if strings.Contains(got, identityBlock) {
+		t.Error("dynamic context should NOT contain identity block (moved to static)")
 	}
 	if !strings.Contains(got, "fix the bug") {
 		t.Error("dynamic context should contain CurrentNeed")
@@ -309,10 +323,10 @@ func TestBuildDynamicContext_ResumeEmptyWhenSummaryUnchanged(t *testing.T) {
 	}
 }
 
-func TestBuildStaticContext_DoesNotContainDynamicParts(t *testing.T) {
+func TestBuildStaticContext_ContainsIdentityBlock(t *testing.T) {
 	got := BuildStaticContext("n1", nil, ContextModeFirst, true, "primary", "claude")
-	if strings.Contains(got, identityBlock) {
-		t.Error("static context should not contain identity block")
+	if !strings.Contains(got, identityBlock) {
+		t.Error("static context should contain identity block")
 	}
 }
 
@@ -368,7 +382,7 @@ func TestFormatPercepts_Empty(t *testing.T) {
 
 // --- ContextModeContinuation tests ---
 
-func TestBuildStaticContext_ContinuationAlwaysEmpty(t *testing.T) {
+func TestBuildStaticContext_ContinuationIdentityOnly(t *testing.T) {
 	cases := []struct {
 		name               string
 		injectInstructions bool
@@ -379,8 +393,14 @@ func TestBuildStaticContext_ContinuationAlwaysEmpty(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := BuildStaticContext("n1", []string{"a fact"}, ContextModeContinuation, tc.injectInstructions, "primary", "claude")
-			if got != "" {
-				t.Errorf("BuildStaticContext on ContextModeContinuation should always return '', got %q", got)
+			if !strings.Contains(got, identityBlock) {
+				t.Errorf("BuildStaticContext on ContextModeContinuation should contain identity block, got %q", got)
+			}
+			if strings.Contains(got, "milk:percept") {
+				t.Error("BuildStaticContext on ContextModeContinuation should not contain instructions")
+			}
+			if strings.Contains(got, "milk:need") {
+				t.Error("BuildStaticContext on ContextModeContinuation should not contain need instruction")
 			}
 		})
 	}
