@@ -616,10 +616,10 @@ func TestAgentContextWindowTokens_Set(t *testing.T) {
 // TestAgentMessageBudget table-driven tests for context_window_tokens auto-derivation.
 func TestAgentMessageBudget_ContextWindowTokens(t *testing.T) {
 	tests := []struct {
-		name        string
-		cfg         Config
-		ac          AgentConfig
-		wantBudget  int
+		name       string
+		cfg        Config
+		ac         AgentConfig
+		wantBudget int
 	}{
 		{
 			name:       "no context_window_tokens falls back to global default",
@@ -658,15 +658,15 @@ func TestAgentMessageBudget_ContextWindowTokens(t *testing.T) {
 			wantBudget: 24000, // intOr(0, 24000) returns 24000
 		},
 		{
-			name: "global local_context_budget_chars wins when no context_window_tokens",
-			cfg:  Config{LocalContextBudgetChars: 10000},
-			ac:   AgentConfig{},
+			name:       "global local_context_budget_chars wins when no context_window_tokens",
+			cfg:        Config{LocalContextBudgetChars: 10000},
+			ac:         AgentConfig{},
 			wantBudget: 10000,
 		},
 		{
-			name: "context_window_tokens wins over global local_context_budget_chars",
-			cfg:  Config{LocalContextBudgetChars: 10000},
-			ac:   AgentConfig{ContextWindowTokens: 8192},
+			name:       "context_window_tokens wins over global local_context_budget_chars",
+			cfg:        Config{LocalContextBudgetChars: 10000},
+			ac:         AgentConfig{ContextWindowTokens: 8192},
 			wantBudget: 8192 * 3, // auto-derive beats global fallback when ctw is set
 		},
 	}

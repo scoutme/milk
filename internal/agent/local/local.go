@@ -193,7 +193,7 @@ type Agent struct {
 	onNeed           func(string)
 	onPercept        func(content, consumerHint string)
 	memCfg           MemConfig
-	logContext       bool   // when true, log full request payload at DEBUG level
+	logContext       bool // when true, log full request payload at DEBUG level
 	// onTokens is an optional callback fired after each inference call with real
 	// token counts. Used to persist usage into the session without coupling the
 	// agent to the session package.
