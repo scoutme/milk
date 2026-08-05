@@ -200,8 +200,8 @@ The escalation agent is any entry in `agents` whose name matches `escalation_age
 
 - **AWS credential injection**: when `aws_auth_refresh: true` in `~/.milk/config.json`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn to obtain fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped from the inherited environment to prevent wrong-account overrides. See ADR 23.
 - Context is split across two `--append-system-prompt-file` flags to preserve Claude's prompt cache:
-  - **Static file** (`BuildStaticContext`): per-session stable nonce tags (`NeedInstruction`, `MemoryInstruction`), remembered percepts. Byte-identical across turns → cache hit.
-  - **Dynamic file** (`BuildDynamicContext`): identity block, escalation brief, current need, `LastLocalSummary`. Changes per turn; suppressed when content is unchanged.
+  - **Static file** (`BuildStaticContext`): identity block (always present), per-session stable nonce tags (`NeedInstruction`, `MemoryInstruction`), remembered percepts. Byte-identical across turns → cache hit.
+  - **Dynamic file** (`BuildDynamicContext`): escalation brief, current need, `LastLocalSummary`. Changes per turn; suppressed when content is unchanged.
 - First escalation turn:
   ```
   claude --print --output-format stream-json \

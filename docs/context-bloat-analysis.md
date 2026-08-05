@@ -93,6 +93,7 @@ so the stable prefix can be cached independently of the changing dynamic suffix.
 
 | Component | Chars | Dynamic? |
 |---|---|---|
+| `identityBlock` | 207 | Stable (always present — tells agent it runs inside milk) |
 | `NeedInstruction` | 327 | Stable (per-session nonce) |
 | `MemoryInstruction` | 299 | Stable (per-session nonce + agent names) |
 | Percepts | 0–2,500 | Up to 25 × ~100 chars |
@@ -101,7 +102,6 @@ so the stable prefix can be cached independently of the changing dynamic suffix.
 
 | Component | Chars | Dynamic? |
 |---|---|---|
-| `identityBlock` | 207 | Static text |
 | `EscalationBrief` | 0–500 | Set on `escalate()` calls |
 | `CurrentNeed` | 0–200 | Updated by model tags |
 | `LastLocalSummary` | 0–12,000 | Updated after each primary turn |

@@ -8,11 +8,14 @@ import (
 	"github.com/scoutme/milk/internal/session"
 )
 
-// identityBlock is injected at the top of every system context passed to the CLI escalation agent
-// so it understands it is operating as a milk-hosted agent, not a standalone session.
+// identityBlock is injected at the top of every system context passed to agents
+// running inside milk so they understand they are operating as a milk-hosted
+// agent, not a standalone session. It lives in BuildStaticContext (the cached
+// prefix) so it is present on every turn — first, resume, returning, and
+// continuation alike.
 const identityBlock = "[Milk agent context]\n" +
-	"You are the escalation agent hosted by milk (multi-agent router). " +
-	"You share session history and memory with the primary agent. " +
+	"You are running inside milk, a multi-agent router. " +
+	"You share session history and memory with the other agent in this session. " +
 	"Expect mid-conversation hand-offs and multi-turn resumes.\n" +
 	"IMPORTANT: never launch background workflows or background agents (do not pass run_in_background: true to the Workflow tool, and do not use /bg). " +
 	"milk communicates with you via --print, which exits as soon as you respond — background tasks would run unobserved and their results would never be delivered. " +
@@ -33,8 +36,8 @@ const (
 	ContextModeReturning
 	// ContextModeContinuation is a sticky follow-up turn where the escalation agent is already
 	// active and the user typed the next message directly (EscalationSessionID != "" and
-	// LocalTurnsSinceLastEscalation() == 0). Like ContextModeResume, static context is suppressed
-	// and only the summary-diff block is sent, avoiding redundant identity/brief re-injection.
+	// LocalTurnsSinceLastEscalation() == 0). Static context carries identity only (no
+	// instructions); dynamic context carries only the summary-diff block.
 	ContextModeContinuation
 )
 
@@ -44,21 +47,25 @@ const (
 // remembered percepts. Because the content is stable, the CLI can cache it as a
 // long-lived prefix and only pay tokenisation once per session.
 //
-// Returns "" on ContextModeResume and ContextModeContinuation — instructions are
-// already in Claude's cached context.
+// The identity block is always included — it tells the agent it is running inside
+// milk and must be present on every turn (first, resume, returning, continuation).
+//
 // On ContextModeFirst and ContextModeReturning the full static block is returned;
 // injectInstructions gates whether the tag-instruction and percept blocks are included
 // (false on re-injection turns that have not crossed the threshold).
+// On ContextModeContinuation only the identity block is returned (no instructions).
+// On ContextModeResume with injectInstructions=false, only the identity block.
 func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injectInstructions bool, primaryName, escalationName string) string {
+	var b strings.Builder
+	b.WriteString(identityBlock)
 	if mode == ContextModeContinuation {
-		return ""
+		return b.String()
 	}
 	// On ContextModeResume the static block is suppressed unless the re-injection
 	// threshold has been crossed (injectInstructions=true overrides the suppression).
 	if !injectInstructions {
-		return ""
+		return b.String()
 	}
-	var b strings.Builder
 	b.WriteString(NeedInstruction(nonce))
 	b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
 	b.WriteString(formatPercepts(percepts))
@@ -77,14 +84,17 @@ func BuildPrimaryStaticContext(nonce string, percepts []string, mode ContextMode
 }
 
 // BuildDynamicContext assembles the turn-specific part of the system-prompt context
-// for a CLI escalation. It includes everything that may change each turn: the identity
-// block, escalation brief, current need, and the rolling primary-agent summary.
+// for a CLI escalation. It includes everything that may change each turn: the
+// escalation brief, current need, and the rolling primary-agent summary.
 // Because this content changes frequently it is sent as a separate file from the
 // static instructions, so changes here do not invalidate Claude's cached prefix.
 //
-// ContextModeFirst:        identity · brief · need · primary summary
+// The identity block is NOT included here — it lives in BuildStaticContext so it
+// is part of the cached prefix on every turn.
+//
+// ContextModeFirst:        brief · need · primary summary
 // ContextModeResume:       primary summary only (if changed since last injection)
-// ContextModeReturning:    identity · brief · need · primary summary
+// ContextModeReturning:    brief · need · primary summary
 // ContextModeContinuation: primary summary only (if changed since last injection)
 //
 // (No escalation summary — --resume already gives Claude its full prior history.)
@@ -101,9 +111,7 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 		return b.String()
 	}
 
-	// First and Returning: Claude needs full orientation.
-	b.WriteString(identityBlock)
-
+	// First and Returning: Claude needs full orientation (identity is in static context).
 	if sess.EscalationBrief != "" {
 		b.WriteString("[Escalation brief from primary agent]\n")
 		b.WriteString(sess.EscalationBrief)
@@ -147,15 +155,17 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode) string {
 // inject LastLocalSummary (the agent's own prior turns — redundant and large); instead
 // it injects LastEscalationSummary so the primary knows what the escalation agent did.
 //
-// ContextModeFirst:     identity · current need
-// ContextModeReturning: identity · current need · escalation summary (if changed)
+// The identity block is NOT included here — it lives in BuildStaticContext so it
+// is part of the cached prefix on every turn.
+//
+// ContextModeFirst:     current need
+// ContextModeReturning: current need · escalation summary (if changed)
 // ContextModeResume:    "" (primary subprocess has no waiting state; never called)
 func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string {
 	if mode == ContextModeResume {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(identityBlock)
 
 	if sess.CurrentNeed != "" {
 		var turnsAgo int
