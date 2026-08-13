@@ -12,11 +12,32 @@ import (
 )
 
 func main() {
+	var listAdapters bool
+
 	root := &cobra.Command{
 		Use:   "milk-eval",
 		Short: "Agent evaluation harness for milk",
 		Long:  "Run scenarios against agent adapters, judge results, and generate comparison reports.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if listAdapters {
+				names := eval.List()
+				if len(names) == 0 {
+					fmt.Println("No adapters registered.")
+					return nil
+				}
+				fmt.Println("Available adapters:")
+				for _, n := range names {
+					fmt.Printf("  %s\n", n)
+				}
+				fmt.Printf("\nUsage: milk-eval run --agents %s\n", strings.Join(names, ","))
+				fmt.Println("With args: milk-eval run --agents \"milk-tui[--agent,mimo-local]\"")
+				return nil
+			}
+			return cmd.Help()
+		},
 	}
+
+	root.Flags().BoolVar(&listAdapters, "list", false, "List available agent adapters")
 
 	root.AddCommand(runCmd())
 	root.AddCommand(judgeCmd())
