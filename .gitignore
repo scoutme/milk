@@ -26,3 +26,5 @@ Thumbs.db
 # aider
 .aider.*
 .aider*
+eval/results/
+milk-eval

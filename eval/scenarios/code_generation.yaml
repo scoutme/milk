@@ -1,0 +1,110 @@
+# Code generation scenarios — single-turn.
+category: code_generation
+
+scenarios:
+  - name: fix-typo
+    description: >
+      Agent must find and fix a typo in a README file. The word "projcet"
+      should be corrected to "project".
+    difficulty: easy
+    setup:
+      files:
+        - path: README.md
+          content: |
+            # My Projcet
+
+            This is a sample projcet that does amazing things.
+
+            ## Installation
+
+            Clone the repo and run `make install`.
+    prompt: >
+      There's a typo in README.md — the word "projcet" should be "project".
+      Please fix it.
+    rubric:
+      - criterion: correctness
+        description: >
+          Did the agent replace "projcet" with "project" in both occurrences?
+        weight: 3
+        scoring: binary
+      - criterion: efficiency
+        description: >
+          Did the agent use a minimal number of tool calls (read + edit, or a
+          single edit)?
+        weight: 1
+        scoring: scale_1_5
+
+  - name: add-function
+    description: >
+      Agent must add a `Max(a, b int) int` function to an existing math utils
+      file that already contains a `Min` function.
+    difficulty: medium
+    setup:
+      files:
+        - path: mathutil/mathutil.go
+          content: |
+            package mathutil
+
+            // Min returns the smaller of a and b.
+            func Min(a, b int) int {
+            	if a < b {
+            		return a
+            	}
+            	return b
+            }
+    prompt: >
+      Add a `Max(a, b int) int` function to mathutil/mathutil.go that returns
+      the larger of two integers. Follow the same style as the existing `Min`
+      function.
+    rubric:
+      - criterion: correctness
+        description: >
+          Does the new Max function compile and return the larger of two ints?
+        weight: 3
+        scoring: binary
+      - criterion: code_style
+        description: >
+          Does the function follow Go conventions and match the style of Min
+          (godoc comment, same structure)?
+        weight: 2
+        scoring: scale_1_5
+
+  - name: write-test
+    description: >
+      Agent must write a unit test for an existing `Abs` function in a math
+      utils package.
+    difficulty: medium
+    setup:
+      files:
+        - path: mathutil/mathutil.go
+          content: |
+            package mathutil
+
+            // Abs returns the absolute value of n.
+            func Abs(n int) int {
+            	if n < 0 {
+            		return -n
+            	}
+            	return n
+            }
+    prompt: >
+      Write a unit test for the `Abs` function in mathutil/mathutil.go.
+      Cover positive, negative, and zero inputs. Place the test in
+      mathutil/mathutil_test.go.
+    rubric:
+      - criterion: correctness
+        description: >
+          Do the tests compile and pass when run with `go test`?
+        weight: 3
+        scoring: binary
+      - criterion: coverage
+        description: >
+          Do the tests cover positive, negative, and zero inputs?
+        weight: 2
+        scoring: scale_1_5
+      - criterion: test_quality
+        description: >
+          Are the test cases well-structured with descriptive names and
+          table-driven style?
+        weight: 1
+        scoring: scale_1_5

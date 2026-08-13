@@ -1,0 +1,107 @@
+# Debugging scenarios — single-turn.
+category: debugging
+
+scenarios:
+  - name: fix-nil-pointer
+    description: >
+      Agent must find and fix a nil pointer dereference bug. The code calls
+      a method on a nil *User pointer when the user is not found.
+    difficulty: medium
+    setup:
+      files:
+        - path: user/user.go
+          content: |
+            package user
+
+            import "fmt"
+
+            type User struct {
+            	Name  string
+            	Email string
+            }
+
+            // Greeting returns a personalized greeting.
+            func (u *User) Greeting() string {
+            	return fmt.Sprintf("Hello, %s!", u.Name)
+            }
+
+            // FindUser looks up a user by name. Returns nil if not found.
+            func FindUser(name string) *User {
+            	users := map[string]*User{
+            		"alice": {Name: "Alice", Email: "alice@example.com"},
+            		"bob":   {Name: "Bob", Email: "bob@example.com"},
+            	}
+            	return users[name]
+            }
+
+            // WelcomeUser returns a greeting for the given username.
+            // BUG: panics with nil pointer dereference when user is not found.
+            func WelcomeUser(name string) string {
+            	u := FindUser(name)
+            	return u.Greeting()
+            }
+    prompt: >
+      The `WelcomeUser` function in user/user.go panics when called with an
+      unknown username (e.g. "charlie"). Find the bug and fix it so it returns
+      a sensible default greeting instead of panicking.
+    rubric:
+      - criterion: correctness
+        description: >
+          Does the fix prevent the nil pointer dereference and handle the nil
+          case gracefully?
+        weight: 3
+        scoring: binary
+      - criterion: error_handling
+        description: >
+          Does the fix return a reasonable fallback string (e.g. "Hello,
+          stranger!") rather than silently swallowing the error?
+        weight: 2
+        scoring: scale_1_5
+
+  - name: fix-off-by-one
+    description: >
+      Agent must find and fix an off-by-one error in a slice-slicing function
+      that returns one too few elements.
+    difficulty: easy
+    setup:
+      files:
+        - path: sliceutil/sliceutil.go
+          content: |
+            package sliceutil
+
+            // TakeFirst returns the first n elements of s.
+            // BUG: returns n-1 elements due to off-by-one error.
+            func TakeFirst(s []int, n int) []int {
+            	if n > len(s) {
+            		n = len(s)
+            	}
+            	return s[:n-1]
+            }
+
+            // Contains reports whether v is in s.
+            func Contains(s []int, v int) bool {
+            	for _, x := range s {
+            		if x == v {
+            			return true
+            		}
+            	}
+            	return false
+            }
+    prompt: >
+      The `TakeFirst` function in sliceutil/sliceutil.go is supposed to return
+      the first n elements of a slice, but it returns one fewer than expected.
+      For example, `TakeFirst([]int{1, 2, 3, 4, 5}, 3)` returns `[1, 2]`
+      instead of `[1, 2, 3]`. Find and fix the bug.
+    rubric:
+      - criterion: correctness
+        description: >
+          Does the fix change `s[:n-1]` to `s[:n]` so the function returns
+          exactly n elements?
+        weight: 3
+        scoring: binary
+      - criterion: edge_cases
+        description: >
+          Does the fix handle edge cases correctly (n=0, n > len(s), empty
+          slice)?
+        weight: 1
+        scoring: scale_1_5

@@ -1,0 +1,4 @@
+# Shared rubric defaults applied to all scenarios in this directory.
+# Scenarios can override these per-criterion.
+default_scoring: scale_1_5
+default_weight: 1
