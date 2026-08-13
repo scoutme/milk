@@ -221,13 +221,39 @@ func (a *milkAdapter) loadSession() (*milkSessionFile, error) {
 // waitForTurn polls the session file until the turn completes.
 // A turn is complete when state=="ROUTING", history grew, and the last turn is assistant.
 func (a *milkAdapter) waitForTurn(ctx context.Context, prevHistoryLen int) (*milkSessionFile, error) {
+	// Phase 1: Wait for the state to leave ROUTING (turn started processing).
+	// Milk adds the user turn to history before executing, so checking
+	// state==ROUTING immediately would return before the model runs.
+	startedProcessing := false
 	for {
 		sess, err := a.loadSession()
 		if err == nil {
-			// Turn is complete when state returned to ROUTING and history grew.
-			// We don't require last.Role == "assistant" because milk skips the
-			// assistant turn when the response is empty (e.g. self-escalation,
-			// tool-only turns, or empty completions).
+			if sess.State != "ROUTING" {
+				startedProcessing = true
+				break
+			}
+			// If history grew but state is still ROUTING, the turn may have
+			// already completed (fast turn). Check for assistant turn or
+			// self-escalation.
+			if len(sess.History) > prevHistoryLen {
+				return sess, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	if !startedProcessing {
+		return nil, fmt.Errorf("turn never started processing")
+	}
+
+	// Phase 2: Wait for state to return to ROUTING (turn completed).
+	for {
+		sess, err := a.loadSession()
+		if err == nil {
 			if sess.State == "ROUTING" && len(sess.History) > prevHistoryLen {
 				return sess, nil
 			}
