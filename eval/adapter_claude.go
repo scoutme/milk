@@ -85,10 +85,10 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
 		return fmt.Errorf("tmux send-enter: %w", err)
 	}
 
-	// Wait for Claude Code ready: poll tmux pane for the ">" prompt.
+	// Wait for Claude Code ready: poll tmux pane for the "❯" prompt.
 	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := pollPaneContains(pollCtx, a.sessionName, ">", 500*time.Millisecond); err != nil {
+	if err := pollPaneContains(pollCtx, a.sessionName, "❯", 500*time.Millisecond); err != nil {
 		return fmt.Errorf("waiting for Claude Code ready: %w", err)
 	}
 
