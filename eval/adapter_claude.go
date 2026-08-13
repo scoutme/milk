@@ -20,10 +20,11 @@ func init() {
 
 // claudeAdapter implements AgentAdapter by driving the Claude Code CLI inside a tmux session.
 type claudeAdapter struct {
-	sessionName    string // tmux session name
-	workdir        string // working directory passed to Start
-	sessionID      string // UUID for --session-id
-	transcriptPath string // ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
+	sessionName    string   // tmux session name
+	workdir        string   // working directory passed to Start
+	sessionID      string   // UUID for --session-id
+	transcriptPath string   // ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
+	extraArgs      []string // extra CLI args from --agents spec
 }
 
 // --- JSON types for parsing Claude Code transcript JSONL ---
@@ -55,7 +56,8 @@ type claudeUsage struct {
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
-func (a *claudeAdapter) Name() string { return "claude-code" }
+func (a *claudeAdapter) Name() string         { return "claude-code" }
+func (a *claudeAdapter) SetArgs(args []string) { a.extraArgs = args }
 
 func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
 	a.workdir = workdir
@@ -78,6 +80,9 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
 
 	// Launch Claude Code with the deterministic session ID.
 	cmd := fmt.Sprintf("cd %s && claude --session-id %s", workdir, a.sessionID)
+	if len(a.extraArgs) > 0 {
+		cmd += " " + strings.Join(a.extraArgs, " ")
+	}
 	if err := tmuxSendKeys(a.sessionName, cmd); err != nil {
 		return fmt.Errorf("tmux send-keys: %w", err)
 	}

@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // AgentAdapter wraps a terminal-based agent for automated evaluation.
 type AgentAdapter interface {
 	// Name returns the display name (e.g. "milk-tui", "claude-code").
 	Name() string
+
+	// SetArgs passes extra arguments from the --agents spec (e.g. ["--agent", "mimo-local"]).
+	// Called by the harness after Get() and before Start().
+	SetArgs(args []string)
 
 	// Start launches the agent in a tmux session with the given working directory.
 	Start(ctx context.Context, workdir string) error
@@ -54,4 +59,26 @@ func List() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ParseAdapterSpec parses an adapter spec string into name and extra args.
+// Supported formats:
+//
+//	"milk-tui"                          → name="milk-tui", args=[]
+//	"milk-tui[--agent,mimo-local]"      → name="milk-tui", args=["--agent","mimo-local"]
+//	"claude-code[--verbose]"            → name="claude-code", args=["--verbose"]
+func ParseAdapterSpec(spec string) (name string, args []string) {
+	// Check for bracket syntax: name[args]
+	if idx := strings.Index(spec, "["); idx > 0 && strings.HasSuffix(spec, "]") {
+		name = spec[:idx]
+		inner := spec[idx+1 : len(spec)-1]
+		if inner != "" {
+			args = strings.Split(inner, ",")
+			for i := range args {
+				args[i] = strings.TrimSpace(args[i])
+			}
+		}
+		return name, args
+	}
+	return spec, nil
 }

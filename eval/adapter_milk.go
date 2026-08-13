@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,10 +18,11 @@ func init() {
 
 // milkAdapter implements AgentAdapter by driving the milk TUI inside a tmux session.
 type milkAdapter struct {
-	sessionName string // tmux session name
-	workdir     string // working directory passed to Start
-	sessionPath string // path to ~/.milk/sessions/<uuid>.json
-	sessionID   string // the milk session UUID
+	sessionName string   // tmux session name
+	workdir     string   // working directory passed to Start
+	sessionPath string   // path to ~/.milk/sessions/<uuid>.json
+	sessionID   string   // the milk session UUID
+	extraArgs   []string // extra CLI args from --agents spec (e.g. ["--agent", "mimo-local"])
 }
 
 // --- JSON types for parsing milk session files ---
@@ -61,7 +63,8 @@ type milkTokenUsage struct {
 	CacheCreation int64  `json:"cache_creation,omitempty"`
 }
 
-func (a *milkAdapter) Name() string { return "milk-tui" }
+func (a *milkAdapter) Name() string         { return "milk-tui" }
+func (a *milkAdapter) SetArgs(args []string) { a.extraArgs = args }
 
 func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	a.workdir = workdir
@@ -77,7 +80,11 @@ func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	// scenario files, not the milk project root. The binary is pre-built.
 	home, _ := os.UserHomeDir()
 	milkBin := filepath.Join(home, ".local", "bin", "milk")
-	if err := tmuxSendKeys(a.sessionName, "cd "+workdir+" && "+milkBin); err != nil {
+	cmd := milkBin
+	if len(a.extraArgs) > 0 {
+		cmd += " " + strings.Join(a.extraArgs, " ")
+	}
+	if err := tmuxSendKeys(a.sessionName, "cd "+workdir+" && "+cmd); err != nil {
 		return fmt.Errorf("tmux send-keys: %w", err)
 	}
 	if err := tmuxSendEnter(a.sessionName); err != nil {
