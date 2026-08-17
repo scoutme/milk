@@ -247,10 +247,12 @@ func buildMetricsTable(sr ScenarioResult, agentNames []string) string {
 
 	// Aggregate token totals per agent.
 	type totals struct {
-		input, output, cacheCreate, cacheRead int64
-		cost                                  float64
-		duration                              time.Duration
-		toolCalls                             int
+		input, output, cacheCreate, cacheRead             int64
+		subInput, subOutput, subCacheCreate, subCacheRead int64
+		wfInput, wfOutput, wfCacheCreate, wfCacheRead     int64
+		cost                                              float64
+		duration                                          time.Duration
+		toolCalls                                         int
 	}
 	agentTotals := map[string]totals{}
 	for _, name := range agentNames {
@@ -264,11 +266,29 @@ func buildMetricsTable(sr ScenarioResult, agentNames []string) string {
 			t.output += r.Tokens.OutputTokens
 			t.cacheCreate += r.Tokens.CacheCreate
 			t.cacheRead += r.Tokens.CacheRead
+			t.subInput += r.Tokens.SubagentInputTokens
+			t.subOutput += r.Tokens.SubagentOutputTokens
+			t.subCacheCreate += r.Tokens.SubagentCacheCreate
+			t.subCacheRead += r.Tokens.SubagentCacheRead
+			t.wfInput += r.Tokens.WorkflowInputTokens
+			t.wfOutput += r.Tokens.WorkflowOutputTokens
+			t.wfCacheCreate += r.Tokens.WorkflowCacheCreate
+			t.wfCacheRead += r.Tokens.WorkflowCacheRead
 			t.cost += r.CostUSD
 			t.duration += r.Duration
 			t.toolCalls += len(r.ToolCalls)
 		}
 		agentTotals[name] = t
+	}
+
+	// hasSubagentOrWorkflow reports whether any agent has non-zero subagent or workflow tokens.
+	hasSubagentOrWorkflow := func() bool {
+		for _, t := range agentTotals {
+			if t.subInput != 0 || t.subOutput != 0 || t.wfInput != 0 || t.wfOutput != 0 {
+				return true
+			}
+		}
+		return false
 	}
 
 	// Tokens (in/out).
@@ -286,6 +306,32 @@ func buildMetricsTable(sr ScenarioResult, agentNames []string) string {
 		row += columnLabel(fmt.Sprintf("%s/%s", formatInt(t.cacheCreate), formatInt(t.cacheRead)), 12)
 	}
 	b.WriteString(row + "\n")
+
+	// Subagent tokens — only shown when any agent has non-zero subagent usage.
+	if hasSubagentOrWorkflow() {
+		row = columnLabel("Subagent (in/out)", 20)
+		for _, name := range agentNames {
+			t := agentTotals[name]
+			if t.subInput == 0 && t.subOutput == 0 {
+				row += columnLabel("—", 12)
+			} else {
+				row += columnLabel(fmt.Sprintf("%s/%s", formatInt(t.subInput), formatInt(t.subOutput)), 12)
+			}
+		}
+		b.WriteString(row + "\n")
+
+		// Workflow tokens.
+		row = columnLabel("Workflow (in/out)", 20)
+		for _, name := range agentNames {
+			t := agentTotals[name]
+			if t.wfInput == 0 && t.wfOutput == 0 {
+				row += columnLabel("—", 12)
+			} else {
+				row += columnLabel(fmt.Sprintf("%s/%s", formatInt(t.wfInput), formatInt(t.wfOutput)), 12)
+			}
+		}
+		b.WriteString(row + "\n")
+	}
 
 	// Cache hit rate.
 	row = columnLabel("Cache hit rate", 20)
@@ -453,7 +499,11 @@ func buildCacheAggregateTable(sr ScenarioResult, agentNames []string) string {
 		var total int64
 		for _, r := range ar.RunResults {
 			total += r.Tokens.InputTokens + r.Tokens.OutputTokens +
-				r.Tokens.CacheCreate + r.Tokens.CacheRead
+				r.Tokens.CacheCreate + r.Tokens.CacheRead +
+				r.Tokens.SubagentInputTokens + r.Tokens.SubagentOutputTokens +
+				r.Tokens.SubagentCacheCreate + r.Tokens.SubagentCacheRead +
+				r.Tokens.WorkflowInputTokens + r.Tokens.WorkflowOutputTokens +
+				r.Tokens.WorkflowCacheCreate + r.Tokens.WorkflowCacheRead
 		}
 		row += columnLabel(formatInt(total), 12)
 	}

@@ -81,6 +81,13 @@ type ControlRequest struct {
 // to stdinW before returning. stdinW is Claude's stdin pipe.
 type PermissionHandler func(req ControlRequest, stdinW io.Writer)
 
+type claudeUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
 type streamEvent struct {
 	Type              msgType                  `json:"type"`
 	Subtype           string                   `json:"subtype"`
@@ -91,13 +98,16 @@ type streamEvent struct {
 	RequestID         string                   `json:"request_id"`
 	Request           controlRequestBody       `json:"request"`
 	PermissionDenials []PermissionDenialRecord `json:"permission_denials"`
-	Usage             *struct {
-		InputTokens              int64 `json:"input_tokens"`
-		OutputTokens             int64 `json:"output_tokens"`
-		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	} `json:"usage,omitempty"`
-	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	Usage             *claudeUsage             `json:"usage,omitempty"`
+	// SubagentUsage holds token counts for subagents spawned by the main
+	// Claude Code process (e.g. via the Agent tool). When present, these
+	// tokens are in addition to the main process Usage.
+	SubagentUsage *claudeUsage `json:"subagent_usage,omitempty"`
+	// WorkflowUsage holds token counts for background workflows launched
+	// by the main Claude Code process. When present, these tokens are in
+	// addition to the main process Usage.
+	WorkflowUsage *claudeUsage `json:"workflow_usage,omitempty"`
+	TotalCostUSD  float64      `json:"total_cost_usd,omitempty"`
 }
 
 // PermissionDenialRecord records a tool that was blocked in the final result event.
@@ -121,6 +131,22 @@ type ParseResult struct {
 	CacheCreationInputTokens int64
 	CacheReadInputTokens     int64
 	TotalCostUSD             float64
+	// Subagent token usage — populated when Claude Code's result event
+	// includes a subagent_usage field (subagents spawned via the Agent tool).
+	SubagentInputTokens              int64
+	SubagentOutputTokens             int64
+	SubagentCacheCreationInputTokens int64
+	SubagentCacheReadInputTokens     int64
+	// HasSubagentTokens is true when the result event contained subagent_usage.
+	HasSubagentTokens bool
+	// Workflow token usage — populated when Claude Code's result event
+	// includes a workflow_usage field (background workflows).
+	WorkflowInputTokens              int64
+	WorkflowOutputTokens             int64
+	WorkflowCacheCreationInputTokens int64
+	WorkflowCacheReadInputTokens     int64
+	// HasWorkflowTokens is true when the result event contained workflow_usage.
+	HasWorkflowTokens bool
 	// HasPendingWorkflow is set when a tool_result in this turn contained
 	// "Workflow launched in background." — the caller should watch
 	// PendingWorkflowDir/journal.jsonl for a result entry, then issue one
@@ -322,6 +348,22 @@ func applyResult(res *ParseResult, ev streamEvent) {
 		res.OutputTokens = ev.Usage.OutputTokens
 		res.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
 		res.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
+	}
+	// Subagent token rollup (when Claude Code provides it).
+	if ev.SubagentUsage != nil {
+		res.SubagentInputTokens = ev.SubagentUsage.InputTokens
+		res.SubagentOutputTokens = ev.SubagentUsage.OutputTokens
+		res.SubagentCacheCreationInputTokens = ev.SubagentUsage.CacheCreationInputTokens
+		res.SubagentCacheReadInputTokens = ev.SubagentUsage.CacheReadInputTokens
+		res.HasSubagentTokens = true
+	}
+	// Workflow token rollup (when Claude Code provides it).
+	if ev.WorkflowUsage != nil {
+		res.WorkflowInputTokens = ev.WorkflowUsage.InputTokens
+		res.WorkflowOutputTokens = ev.WorkflowUsage.OutputTokens
+		res.WorkflowCacheCreationInputTokens = ev.WorkflowUsage.CacheCreationInputTokens
+		res.WorkflowCacheReadInputTokens = ev.WorkflowUsage.CacheReadInputTokens
+		res.HasWorkflowTokens = true
 	}
 	res.TotalCostUSD = ev.TotalCostUSD
 }

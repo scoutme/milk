@@ -163,6 +163,34 @@ func (s *Session) AddTokensFull(model, role string, prompt, completion, cacheRea
 	e.CacheCreation += cacheCreation
 }
 
+// SessionTokensByRolePrefix returns the sum of prompt and completion tokens
+// for all roles that start with the given prefix. For example, prefix
+// "escalation" matches "escalation", "escalation:subagent", and
+// "escalation:workflow". This is useful for querying all tokens related to
+// an escalation agent, including its subagents and workflows.
+func (s *Session) SessionTokensByRolePrefix(prefix string) (prompt, completion int64) {
+	for _, u := range s.Tokens {
+		if u.Agent == prefix || strings.HasPrefix(u.Agent, prefix+":") {
+			prompt += u.Prompt
+			completion += u.Completion
+		}
+	}
+	return
+}
+
+// SessionCacheTokensByRolePrefix returns the sum of cache read and cache
+// creation tokens for all roles that start with the given prefix. Mirrors
+// SessionTokensByRolePrefix for cache metrics.
+func (s *Session) SessionCacheTokensByRolePrefix(prefix string) (cacheRead, cacheCreation int64) {
+	for _, u := range s.Tokens {
+		if u.Agent == prefix || strings.HasPrefix(u.Agent, prefix+":") {
+			cacheRead += u.CacheRead
+			cacheCreation += u.CacheCreation
+		}
+	}
+	return
+}
+
 // emptyEscalationSession returns true when a Claude session produced no real work:
 // zero tool calls and response text under the character threshold.
 func emptyEscalationSession(turns []Turn, charThreshold int) bool {

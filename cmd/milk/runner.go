@@ -72,6 +72,20 @@ type TurnResult struct {
 	CacheRead        int64
 	CacheCreate      int64
 	CostUSD          float64
+	// Subagent token usage — populated when the escalation agent's result
+	// includes subagent_usage (subagents spawned via the Agent tool).
+	SubagentInputTokens  int64
+	SubagentOutputTokens int64
+	SubagentCacheRead    int64
+	SubagentCacheCreate  int64
+	HasSubagentTokens    bool
+	// Workflow token usage — populated when the escalation agent's result
+	// includes workflow_usage (background workflows).
+	WorkflowInputTokens  int64
+	WorkflowOutputTokens int64
+	WorkflowCacheRead    int64
+	WorkflowCacheCreate  int64
+	HasWorkflowTokens    bool
 }
 
 // TurnCallbacks carries the tag-intercept callbacks wired per-turn by the dispatcher.
@@ -546,6 +560,18 @@ func (r *cliRunner) Execute(
 		CacheRead:    res.CacheReadInputTokens,
 		CacheCreate:  res.CacheCreationInputTokens,
 		CostUSD:      res.TotalCostUSD,
+		// Subagent tokens
+		SubagentInputTokens:  res.SubagentInputTokens,
+		SubagentOutputTokens: res.SubagentOutputTokens,
+		SubagentCacheRead:    res.SubagentCacheReadInputTokens,
+		SubagentCacheCreate:  res.SubagentCacheCreationInputTokens,
+		HasSubagentTokens:    res.HasSubagentTokens,
+		// Workflow tokens
+		WorkflowInputTokens:  res.WorkflowInputTokens,
+		WorkflowOutputTokens: res.WorkflowOutputTokens,
+		WorkflowCacheRead:    res.WorkflowCacheReadInputTokens,
+		WorkflowCacheCreate:  res.WorkflowCacheCreationInputTokens,
+		HasWorkflowTokens:    res.HasWorkflowTokens,
 	}, nil
 }
 

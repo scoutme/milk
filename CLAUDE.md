@@ -119,3 +119,31 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 - Demotion from escalation back to primary mid-session
 - MCP stdio transport for local subprocess tools ✓ (done — `transport: "stdio"`, `command`, `args` fields in `MCPServerConfig`)
 - TUI: app-managed drag selection (currently terminal-native; selection highlight sticks to screen coords during scroll — Claude Code works around this with non-native selection)
+
+## Token tracking: subagents and workflows
+
+When the escalation agent (Claude Code) spawns subagents via the Agent tool or runs background workflows, milk tracks their token usage separately from the main process. This applies to:
+
+- **Subagent tokens** — subagents spawned by Claude Code's Agent tool
+- **Workflow tokens** — background workflows run by Claude Code
+
+### Agent role strings
+
+Token usage is stored in the session `Tokens` map keyed by `"model\x00role"`. The role strings follow this convention:
+
+| Role string | Meaning |
+|---|---|
+| `primary` | Local agent (router + local model) |
+| `escalation` | Main escalation agent (Claude Code) |
+| `escalation:subagent` | Subagent spawned by the escalation agent |
+| `escalation:workflow` | Background workflow run by the escalation agent |
+
+The colon-separated convention allows prefix queries — `SessionTokensByRolePrefix("escalation")` matches all three escalation-related roles.
+
+### How it works
+
+1. `stream.go` parses `SubagentUsage`/`WorkflowUsage` from the `result` event's stream JSON when present.
+2. `dispatch.go` records these via `sess.AddTokensFull` with the appropriate role string and via `obs.RecordTokens` / `obs.AccumulateCacheTokens` for OTel metrics.
+3. `FormatTokenUsage` in the TUI displays each role string as its own row in the `/usage` table.
+4. The eval harness (`adapter_claude.go`) captures subagent/workflow tokens from the transcript JSONL.
+5. Graceful degradation: when Claude Code does not provide subagent/workflow data, all tokens are attributed to the main `escalation` role as before.

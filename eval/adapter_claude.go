@@ -72,6 +72,11 @@ func readClaudeLastActivity() time.Time {
 type claudeJSONLLine struct {
 	Type    string        `json:"type"`
 	Message claudeMessage `json:"message"`
+	// SubagentUsage and WorkflowUsage are parsed from result-type lines in the
+	// transcript JSONL. When present, these represent token rollups for
+	// subagents spawned via the Agent tool and background workflows.
+	SubagentUsage *claudeUsage `json:"subagent_usage,omitempty"`
+	WorkflowUsage *claudeUsage `json:"workflow_usage,omitempty"`
 }
 
 type claudeMessage struct {
@@ -438,6 +443,8 @@ func (a *claudeAdapter) readNewLines(offset int64) ([]claudeJSONLLine, bool, err
 }
 
 // sumTurnTokens sums token usage from all assistant messages in a turn.
+// It also sums subagent and workflow tokens from result-type lines when
+// present in the transcript.
 func sumTurnTokens(lines []claudeJSONLLine) TokenUsage {
 	var total TokenUsage
 	for _, l := range lines {
@@ -446,6 +453,21 @@ func sumTurnTokens(lines []claudeJSONLLine) TokenUsage {
 			total.OutputTokens += l.Message.Usage.OutputTokens
 			total.CacheCreate += l.Message.Usage.CacheCreationInputTokens
 			total.CacheRead += l.Message.Usage.CacheReadInputTokens
+		}
+		// Parse subagent/workflow token rollups from result-type lines.
+		if l.Type == "result" {
+			if l.SubagentUsage != nil {
+				total.SubagentInputTokens += l.SubagentUsage.InputTokens
+				total.SubagentOutputTokens += l.SubagentUsage.OutputTokens
+				total.SubagentCacheCreate += l.SubagentUsage.CacheCreationInputTokens
+				total.SubagentCacheRead += l.SubagentUsage.CacheReadInputTokens
+			}
+			if l.WorkflowUsage != nil {
+				total.WorkflowInputTokens += l.WorkflowUsage.InputTokens
+				total.WorkflowOutputTokens += l.WorkflowUsage.OutputTokens
+				total.WorkflowCacheCreate += l.WorkflowUsage.CacheCreationInputTokens
+				total.WorkflowCacheRead += l.WorkflowUsage.CacheReadInputTokens
+			}
 		}
 	}
 	return total

@@ -834,3 +834,150 @@ func TestStream_ToolRegistryPopulatedWithoutOnToolUseReadyCallback(t *testing.T)
 		t.Errorf("want Bash denial even without OnToolUseReady, got %v", res.StreamClosedDenials)
 	}
 }
+
+// --- Subagent and Workflow token tests ---
+
+func TestStream_SubagentTokensParsed(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":20},"subagent_usage":{"input_tokens":300,"output_tokens":150,"cache_creation_input_tokens":30,"cache_read_input_tokens":60}}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Main tokens
+	if res.InputTokens != 100 {
+		t.Errorf("InputTokens: want 100, got %d", res.InputTokens)
+	}
+	if res.OutputTokens != 50 {
+		t.Errorf("OutputTokens: want 50, got %d", res.OutputTokens)
+	}
+	if res.CacheCreationInputTokens != 10 {
+		t.Errorf("CacheCreationInputTokens: want 10, got %d", res.CacheCreationInputTokens)
+	}
+	if res.CacheReadInputTokens != 20 {
+		t.Errorf("CacheReadInputTokens: want 20, got %d", res.CacheReadInputTokens)
+	}
+	// Subagent tokens
+	if !res.HasSubagentTokens {
+		t.Error("HasSubagentTokens: want true")
+	}
+	if res.SubagentInputTokens != 300 {
+		t.Errorf("SubagentInputTokens: want 300, got %d", res.SubagentInputTokens)
+	}
+	if res.SubagentOutputTokens != 150 {
+		t.Errorf("SubagentOutputTokens: want 150, got %d", res.SubagentOutputTokens)
+	}
+	if res.SubagentCacheCreationInputTokens != 30 {
+		t.Errorf("SubagentCacheCreationInputTokens: want 30, got %d", res.SubagentCacheCreationInputTokens)
+	}
+	if res.SubagentCacheReadInputTokens != 60 {
+		t.Errorf("SubagentCacheReadInputTokens: want 60, got %d", res.SubagentCacheReadInputTokens)
+	}
+}
+
+func TestStream_WorkflowTokensParsed(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1","usage":{"input_tokens":100,"output_tokens":50},"workflow_usage":{"input_tokens":200,"output_tokens":100,"cache_creation_input_tokens":15,"cache_read_input_tokens":25}}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasWorkflowTokens {
+		t.Error("HasWorkflowTokens: want true")
+	}
+	if res.WorkflowInputTokens != 200 {
+		t.Errorf("WorkflowInputTokens: want 200, got %d", res.WorkflowInputTokens)
+	}
+	if res.WorkflowOutputTokens != 100 {
+		t.Errorf("WorkflowOutputTokens: want 100, got %d", res.WorkflowOutputTokens)
+	}
+	if res.WorkflowCacheCreationInputTokens != 15 {
+		t.Errorf("WorkflowCacheCreationInputTokens: want 15, got %d", res.WorkflowCacheCreationInputTokens)
+	}
+	if res.WorkflowCacheReadInputTokens != 25 {
+		t.Errorf("WorkflowCacheReadInputTokens: want 25, got %d", res.WorkflowCacheReadInputTokens)
+	}
+}
+
+func TestStream_SubagentAndWorkflowTokensBothPresent(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1","usage":{"input_tokens":100,"output_tokens":50},"subagent_usage":{"input_tokens":300,"output_tokens":150},"workflow_usage":{"input_tokens":200,"output_tokens":100}}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasSubagentTokens {
+		t.Error("HasSubagentTokens: want true")
+	}
+	if !res.HasWorkflowTokens {
+		t.Error("HasWorkflowTokens: want true")
+	}
+	if res.SubagentInputTokens != 300 {
+		t.Errorf("SubagentInputTokens: want 300, got %d", res.SubagentInputTokens)
+	}
+	if res.WorkflowInputTokens != 200 {
+		t.Errorf("WorkflowInputTokens: want 200, got %d", res.WorkflowInputTokens)
+	}
+}
+
+func TestStream_NoSubagentWorkflowTokensGracefulDegradation(t *testing.T) {
+	// When result has only main usage (no subagent_usage or workflow_usage),
+	// HasSubagentTokens and HasWorkflowTokens must be false and all subagent/workflow
+	// fields must be zero.
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":20}}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.HasSubagentTokens {
+		t.Error("HasSubagentTokens: want false when subagent_usage absent")
+	}
+	if res.HasWorkflowTokens {
+		t.Error("HasWorkflowTokens: want false when workflow_usage absent")
+	}
+	if res.SubagentInputTokens != 0 || res.SubagentOutputTokens != 0 {
+		t.Errorf("subagent tokens should be zero, got input=%d output=%d", res.SubagentInputTokens, res.SubagentOutputTokens)
+	}
+	if res.WorkflowInputTokens != 0 || res.WorkflowOutputTokens != 0 {
+		t.Errorf("workflow tokens should be zero, got input=%d output=%d", res.WorkflowInputTokens, res.WorkflowOutputTokens)
+	}
+	// Main tokens must still be correct.
+	if res.InputTokens != 100 || res.OutputTokens != 50 {
+		t.Errorf("main tokens: want 100/50, got %d/%d", res.InputTokens, res.OutputTokens)
+	}
+	if res.CacheCreationInputTokens != 10 || res.CacheReadInputTokens != 20 {
+		t.Errorf("cache tokens: want 10/20, got %d/%d", res.CacheCreationInputTokens, res.CacheReadInputTokens)
+	}
+}
+
+func TestStream_NoUsageAtAll(t *testing.T) {
+	// When the result event has no usage field at all, all token fields should be zero.
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InputTokens != 0 || res.OutputTokens != 0 {
+		t.Errorf("tokens should be zero when usage absent, got input=%d output=%d", res.InputTokens, res.OutputTokens)
+	}
+	if res.HasSubagentTokens || res.HasWorkflowTokens {
+		t.Errorf("HasSubagentTokens/HasWorkflowTokens should be false when no usage, got %v/%v", res.HasSubagentTokens, res.HasWorkflowTokens)
+	}
+}

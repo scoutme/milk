@@ -402,6 +402,159 @@ func TestNeedChangedSinceLastEscalation(t *testing.T) {
 	})
 }
 
+func TestAddTokensFull_SubagentWorkflowRoles(t *testing.T) {
+	s := &Session{}
+	s.AddTokensFull("model-a", "escalation", 100, 20, 500, 80)
+	s.AddTokensFull("model-a", "escalation:subagent", 50, 10, 200, 30)
+	s.AddTokensFull("model-a", "escalation:workflow", 25, 5, 100, 15)
+
+	// Main escalation
+	esc := s.Tokens["model-a\x00escalation"]
+	if esc == nil {
+		t.Fatal("expected escalation token entry")
+	}
+	if esc.Prompt != 100 || esc.Completion != 20 {
+		t.Errorf("escalation tokens: prompt=%d completion=%d, want 100/20", esc.Prompt, esc.Completion)
+	}
+	if esc.CacheRead != 500 || esc.CacheCreation != 80 {
+		t.Errorf("escalation cache: read=%d creation=%d, want 500/80", esc.CacheRead, esc.CacheCreation)
+	}
+
+	// Subagent
+	sub := s.Tokens["model-a\x00escalation:subagent"]
+	if sub == nil {
+		t.Fatal("expected escalation:subagent token entry")
+	}
+	if sub.Prompt != 50 || sub.Completion != 10 {
+		t.Errorf("subagent tokens: prompt=%d completion=%d, want 50/10", sub.Prompt, sub.Completion)
+	}
+	if sub.CacheRead != 200 || sub.CacheCreation != 30 {
+		t.Errorf("subagent cache: read=%d creation=%d, want 200/30", sub.CacheRead, sub.CacheCreation)
+	}
+
+	// Workflow
+	wf := s.Tokens["model-a\x00escalation:workflow"]
+	if wf == nil {
+		t.Fatal("expected escalation:workflow token entry")
+	}
+	if wf.Prompt != 25 || wf.Completion != 5 {
+		t.Errorf("workflow tokens: prompt=%d completion=%d, want 25/5", wf.Prompt, wf.Completion)
+	}
+	if wf.CacheRead != 100 || wf.CacheCreation != 15 {
+		t.Errorf("workflow cache: read=%d creation=%d, want 100/15", wf.CacheRead, wf.CacheCreation)
+	}
+}
+
+func TestAddTokensFull_SubagentAndMainAccumulateIndependently(t *testing.T) {
+	s := &Session{}
+	s.AddTokensFull("m", "escalation", 100, 20, 0, 0)
+	s.AddTokensFull("m", "escalation:subagent", 30, 5, 0, 0)
+	s.AddTokensFull("m", "escalation", 50, 10, 0, 0)
+	s.AddTokensFull("m", "escalation:subagent", 15, 3, 0, 0)
+
+	esc := s.Tokens["m\x00escalation"]
+	sub := s.Tokens["m\x00escalation:subagent"]
+	if esc.Prompt != 150 || esc.Completion != 30 {
+		t.Errorf("main accumulation: prompt=%d completion=%d, want 150/30", esc.Prompt, esc.Completion)
+	}
+	if sub.Prompt != 45 || sub.Completion != 8 {
+		t.Errorf("subagent accumulation: prompt=%d completion=%d, want 45/8", sub.Prompt, sub.Completion)
+	}
+}
+
+func TestSessionTokensByRolePrefix(t *testing.T) {
+	s := &Session{}
+	s.AddTokensFull("m", "escalation", 100, 20, 0, 0)
+	s.AddTokensFull("m", "escalation:subagent", 30, 5, 0, 0)
+	s.AddTokensFull("m", "escalation:workflow", 15, 3, 0, 0)
+	s.AddTokensFull("m", "primary", 50, 10, 0, 0)
+
+	t.Run("prefix escalation matches all three", func(t *testing.T) {
+		prompt, completion := s.SessionTokensByRolePrefix("escalation")
+		if prompt != 145 { // 100 + 30 + 15
+			t.Errorf("prompt: got %d, want 145", prompt)
+		}
+		if completion != 28 { // 20 + 5 + 3
+			t.Errorf("completion: got %d, want 28", completion)
+		}
+	})
+
+	t.Run("exact match escalation only", func(t *testing.T) {
+		// "escalation:subagent" prefix matches only that one.
+		prompt, completion := s.SessionTokensByRolePrefix("escalation:subagent")
+		if prompt != 30 {
+			t.Errorf("prompt: got %d, want 30", prompt)
+		}
+		if completion != 5 {
+			t.Errorf("completion: got %d, want 5", completion)
+		}
+	})
+
+	t.Run("prefix primary matches only primary", func(t *testing.T) {
+		prompt, completion := s.SessionTokensByRolePrefix("primary")
+		if prompt != 50 {
+			t.Errorf("prompt: got %d, want 50", prompt)
+		}
+		if completion != 10 {
+			t.Errorf("completion: got %d, want 10", completion)
+		}
+	})
+
+	t.Run("no match returns zero", func(t *testing.T) {
+		prompt, completion := s.SessionTokensByRolePrefix("nonexistent")
+		if prompt != 0 || completion != 0 {
+			t.Errorf("expected zero, got prompt=%d completion=%d", prompt, completion)
+		}
+	})
+}
+
+func TestSessionCacheTokensByRolePrefix(t *testing.T) {
+	s := &Session{}
+	s.AddTokensFull("m", "escalation", 0, 0, 500, 80)
+	s.AddTokensFull("m", "escalation:subagent", 0, 0, 200, 30)
+	s.AddTokensFull("m", "escalation:workflow", 0, 0, 100, 15)
+	s.AddTokensFull("m", "primary", 0, 0, 50, 10)
+
+	t.Run("prefix escalation matches all cache tokens", func(t *testing.T) {
+		cacheRead, cacheCreate := s.SessionCacheTokensByRolePrefix("escalation")
+		if cacheRead != 800 { // 500 + 200 + 100
+			t.Errorf("cacheRead: got %d, want 800", cacheRead)
+		}
+		if cacheCreate != 125 { // 80 + 30 + 15
+			t.Errorf("cacheCreate: got %d, want 125", cacheCreate)
+		}
+	})
+
+	t.Run("exact match escalation:workflow", func(t *testing.T) {
+		cacheRead, cacheCreate := s.SessionCacheTokensByRolePrefix("escalation:workflow")
+		if cacheRead != 100 {
+			t.Errorf("cacheRead: got %d, want 100", cacheRead)
+		}
+		if cacheCreate != 15 {
+			t.Errorf("cacheCreate: got %d, want 15", cacheCreate)
+		}
+	})
+
+	t.Run("no match returns zero", func(t *testing.T) {
+		cacheRead, cacheCreate := s.SessionCacheTokensByRolePrefix("nonexistent")
+		if cacheRead != 0 || cacheCreate != 0 {
+			t.Errorf("expected zero, got cacheRead=%d cacheCreate=%d", cacheRead, cacheCreate)
+		}
+	})
+}
+
+func TestSessionTokensByRolePrefix_EmptySession(t *testing.T) {
+	s := &Session{}
+	prompt, completion := s.SessionTokensByRolePrefix("escalation")
+	if prompt != 0 || completion != 0 {
+		t.Errorf("expected zero for empty session, got prompt=%d completion=%d", prompt, completion)
+	}
+	cacheRead, cacheCreate := s.SessionCacheTokensByRolePrefix("escalation")
+	if cacheRead != 0 || cacheCreate != 0 {
+		t.Errorf("expected zero for empty session, got cacheRead=%d cacheCreate=%d", cacheRead, cacheCreate)
+	}
+}
+
 func TestAddTurn_SetsTimestampAndUpdatesLastUsed(t *testing.T) {
 	s := &Session{}
 	s.AddTurn(Turn{Role: RoleUser, Content: "hello"})

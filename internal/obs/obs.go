@@ -85,15 +85,18 @@ func Add(ctx context.Context, meterName, instrument string, n int64, attrs ...at
 // RecordTokens emits prompt, completion, and total token counters with model
 // and agent-role labels, and updates the in-memory session accumulator.
 // model and agentRole must be non-empty.
-// agentRole should be "primary", "escalation", or "router".
-func RecordTokens(ctx context.Context, model, agentRole string, prompt, completion int64) {
+// agentRole should be "primary", "escalation", "escalation:subagent",
+// "escalation:workflow", or "router".
+// Additional attrs are merged into the metric labels (e.g. "kind" for
+// subagent/workflow classification).
+func RecordTokens(ctx context.Context, model, agentRole string, prompt, completion int64, extraAttrs ...attribute.KeyValue) {
 	if model == "" || agentRole == "" || (prompt == 0 && completion == 0) {
 		return
 	}
-	attrs := []attribute.KeyValue{
+	attrs := append([]attribute.KeyValue{
 		attribute.String("model", model),
 		attribute.String("agent", agentRole),
-	}
+	}, extraAttrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.prompt", prompt, attrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.completion", completion, attrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.total", prompt+completion, attrs...)

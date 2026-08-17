@@ -59,3 +59,31 @@ func TestHeaderBar_NoCacheSegmentWhenZero(t *testing.T) {
 		t.Errorf("want no cache segment when cache tokens are zero, got %q", bar)
 	}
 }
+
+// TestHeaderBar_SubagentWorkflowTokens verifies that subagent/workflow tokens
+// stored under "escalation:subagent" and "escalation:workflow" role strings are
+// included in the header bar's token totals.
+func TestHeaderBar_SubagentWorkflowTokens(t *testing.T) {
+	sess := &session.Session{ID: "test1234"}
+	sess.AddTokensFull("test-model", "escalation", 1000, 200, 500, 100)
+	sess.AddTokensFull("test-model", "escalation:subagent", 300, 50, 150, 30)
+	sess.AddTokensFull("test-model", "escalation:workflow", 100, 20, 50, 10)
+
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: sess,
+			cfg:  config.Config{},
+		},
+	}
+
+	bar := stripANSI(m.headerBar())
+	// Total prompt tokens: 1000 + 300 + 100 = 1400
+	// Total completion tokens: 200 + 50 + 20 = 270
+	// Cache read: 500 + 150 + 50 = 700
+	// Cache creation: 100 + 30 + 10 = 140
+	// Hit rate: 700 / (1400 + 700 + 140) = 31.25% -> 31%
+	if !strings.Contains(bar, "cache:31%") {
+		t.Errorf("want headerBar with cache:31%% (all roles combined), got %q", bar)
+	}
+}

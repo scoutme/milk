@@ -81,11 +81,26 @@ type FileChange struct {
 }
 
 // TokenUsage captures all token categories for one turn.
+// Subagent and workflow fields are populated when the transcript includes
+// subagent_usage or workflow_usage data (e.g. from Claude Code's Agent tool
+// subagents or background workflows). When absent, they remain zero.
 type TokenUsage struct {
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
 	CacheCreate  int64 `json:"cache_create"`
 	CacheRead    int64 `json:"cache_read"`
+	// Subagent token usage — populated when Claude Code's transcript includes
+	// subagent_usage (subagents spawned via the Agent tool).
+	SubagentInputTokens  int64 `json:"subagent_input_tokens,omitempty"`
+	SubagentOutputTokens int64 `json:"subagent_output_tokens,omitempty"`
+	SubagentCacheCreate  int64 `json:"subagent_cache_create,omitempty"`
+	SubagentCacheRead    int64 `json:"subagent_cache_read,omitempty"`
+	// Workflow token usage — populated when Claude Code's transcript includes
+	// workflow_usage (background workflows).
+	WorkflowInputTokens  int64 `json:"workflow_input_tokens,omitempty"`
+	WorkflowOutputTokens int64 `json:"workflow_output_tokens,omitempty"`
+	WorkflowCacheCreate  int64 `json:"workflow_cache_create,omitempty"`
+	WorkflowCacheRead    int64 `json:"workflow_cache_read,omitempty"`
 }
 
 // CacheMetrics derives caching efficiency from TokenUsage.

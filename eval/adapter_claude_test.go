@@ -150,6 +150,187 @@ func TestClaudeAdapter_WaitForCacheCooldown_RespectsContextCancellation(t *testi
 	}
 }
 
+// ---------------------------------------------------------------------------
+// sumTurnTokens tests for subagent/workflow token parsing
+// ---------------------------------------------------------------------------
+
+func mkAssistantLine(input, output, cacheCreate, cacheRead int64) claudeJSONLLine {
+	return claudeJSONLLine{
+		Type: "assistant",
+		Message: claudeMessage{
+			Usage: claudeUsage{
+				InputTokens:              input,
+				OutputTokens:             output,
+				CacheCreationInputTokens: cacheCreate,
+				CacheReadInputTokens:     cacheRead,
+			},
+		},
+	}
+}
+
+func mkResultLine(subagent, workflow *claudeUsage) claudeJSONLLine {
+	return claudeJSONLLine{
+		Type:          "result",
+		SubagentUsage: subagent,
+		WorkflowUsage: workflow,
+	}
+}
+
+func TestSumTurnTokens_MainOnly(t *testing.T) {
+	lines := []claudeJSONLLine{
+		mkAssistantLine(1000, 200, 50, 300),
+		mkAssistantLine(500, 100, 0, 200),
+	}
+	tok := sumTurnTokens(lines)
+	if tok.InputTokens != 1500 {
+		t.Errorf("InputTokens: got %d, want 1500", tok.InputTokens)
+	}
+	if tok.OutputTokens != 300 {
+		t.Errorf("OutputTokens: got %d, want 300", tok.OutputTokens)
+	}
+	if tok.CacheCreate != 50 {
+		t.Errorf("CacheCreate: got %d, want 50", tok.CacheCreate)
+	}
+	if tok.CacheRead != 500 {
+		t.Errorf("CacheRead: got %d, want 500", tok.CacheRead)
+	}
+	if tok.SubagentInputTokens != 0 || tok.WorkflowInputTokens != 0 {
+		t.Errorf("subagent/workflow tokens should be zero, got sub=%d wf=%d", tok.SubagentInputTokens, tok.WorkflowInputTokens)
+	}
+}
+
+func TestSumTurnTokens_SubagentOnly(t *testing.T) {
+	lines := []claudeJSONLLine{
+		mkAssistantLine(1000, 200, 0, 0),
+		mkResultLine(&claudeUsage{
+			InputTokens:              300,
+			OutputTokens:             50,
+			CacheCreationInputTokens: 10,
+			CacheReadInputTokens:     100,
+		}, nil),
+	}
+	tok := sumTurnTokens(lines)
+	if tok.InputTokens != 1000 {
+		t.Errorf("InputTokens: got %d, want 1000", tok.InputTokens)
+	}
+	if tok.SubagentInputTokens != 300 {
+		t.Errorf("SubagentInputTokens: got %d, want 300", tok.SubagentInputTokens)
+	}
+	if tok.SubagentOutputTokens != 50 {
+		t.Errorf("SubagentOutputTokens: got %d, want 50", tok.SubagentOutputTokens)
+	}
+	if tok.SubagentCacheCreate != 10 {
+		t.Errorf("SubagentCacheCreate: got %d, want 10", tok.SubagentCacheCreate)
+	}
+	if tok.SubagentCacheRead != 100 {
+		t.Errorf("SubagentCacheRead: got %d, want 100", tok.SubagentCacheRead)
+	}
+	if tok.WorkflowInputTokens != 0 {
+		t.Errorf("WorkflowInputTokens should be 0, got %d", tok.WorkflowInputTokens)
+	}
+}
+
+func TestSumTurnTokens_WorkflowOnly(t *testing.T) {
+	lines := []claudeJSONLLine{
+		mkAssistantLine(500, 100, 0, 0),
+		mkResultLine(nil, &claudeUsage{
+			InputTokens:              200,
+			OutputTokens:             80,
+			CacheCreationInputTokens: 5,
+			CacheReadInputTokens:     50,
+		}),
+	}
+	tok := sumTurnTokens(lines)
+	if tok.SubagentInputTokens != 0 {
+		t.Errorf("SubagentInputTokens should be 0, got %d", tok.SubagentInputTokens)
+	}
+	if tok.WorkflowInputTokens != 200 {
+		t.Errorf("WorkflowInputTokens: got %d, want 200", tok.WorkflowInputTokens)
+	}
+	if tok.WorkflowOutputTokens != 80 {
+		t.Errorf("WorkflowOutputTokens: got %d, want 80", tok.WorkflowOutputTokens)
+	}
+	if tok.WorkflowCacheCreate != 5 {
+		t.Errorf("WorkflowCacheCreate: got %d, want 5", tok.WorkflowCacheCreate)
+	}
+	if tok.WorkflowCacheRead != 50 {
+		t.Errorf("WorkflowCacheRead: got %d, want 50", tok.WorkflowCacheRead)
+	}
+}
+
+func TestSumTurnTokens_SubagentAndWorkflow(t *testing.T) {
+	lines := []claudeJSONLLine{
+		mkAssistantLine(1000, 200, 0, 0),
+		mkResultLine(
+			&claudeUsage{InputTokens: 300, OutputTokens: 50, CacheCreationInputTokens: 10, CacheReadInputTokens: 100},
+			&claudeUsage{InputTokens: 200, OutputTokens: 80, CacheCreationInputTokens: 5, CacheReadInputTokens: 50},
+		),
+		mkAssistantLine(500, 100, 0, 0),
+		// Second result line with additional tokens (accumulates).
+		mkResultLine(
+			&claudeUsage{InputTokens: 100, OutputTokens: 20, CacheCreationInputTokens: 0, CacheReadInputTokens: 50},
+			nil,
+		),
+	}
+	tok := sumTurnTokens(lines)
+	if tok.InputTokens != 1500 {
+		t.Errorf("InputTokens: got %d, want 1500", tok.InputTokens)
+	}
+	if tok.SubagentInputTokens != 400 {
+		t.Errorf("SubagentInputTokens: got %d, want 400 (300+100)", tok.SubagentInputTokens)
+	}
+	if tok.SubagentOutputTokens != 70 {
+		t.Errorf("SubagentOutputTokens: got %d, want 70 (50+20)", tok.SubagentOutputTokens)
+	}
+	if tok.SubagentCacheRead != 150 {
+		t.Errorf("SubagentCacheRead: got %d, want 150 (100+50)", tok.SubagentCacheRead)
+	}
+	if tok.WorkflowInputTokens != 200 {
+		t.Errorf("WorkflowInputTokens: got %d, want 200", tok.WorkflowInputTokens)
+	}
+	if tok.WorkflowOutputTokens != 80 {
+		t.Errorf("WorkflowOutputTokens: got %d, want 80", tok.WorkflowOutputTokens)
+	}
+}
+
+func TestSumTurnTokens_NonResultLineWithUsageFieldsIgnored(t *testing.T) {
+	// A non-result line that happens to have SubagentUsage/WorkflowUsage set
+	// should NOT have its subagent/workflow tokens counted, thanks to the
+	// l.Type == "result" guard.
+	line := claudeJSONLLine{
+		Type: "assistant",
+		Message: claudeMessage{
+			Usage: claudeUsage{InputTokens: 100, OutputTokens: 20},
+		},
+		SubagentUsage: &claudeUsage{InputTokens: 999, OutputTokens: 999},
+		WorkflowUsage: &claudeUsage{InputTokens: 888, OutputTokens: 888},
+	}
+	tok := sumTurnTokens([]claudeJSONLLine{line})
+	if tok.SubagentInputTokens != 0 {
+		t.Errorf("non-result line SubagentInputTokens should be 0, got %d", tok.SubagentInputTokens)
+	}
+	if tok.WorkflowInputTokens != 0 {
+		t.Errorf("non-result line WorkflowInputTokens should be 0, got %d", tok.WorkflowInputTokens)
+	}
+	if tok.InputTokens != 100 {
+		t.Errorf("InputTokens: got %d, want 100", tok.InputTokens)
+	}
+}
+
+func TestSumTurnTokens_NoUsageData(t *testing.T) {
+	lines := []claudeJSONLLine{
+		{Type: "assistant", Message: claudeMessage{Usage: claudeUsage{InputTokens: 500, OutputTokens: 100}}},
+		{Type: "result"}, // no subagent/workflow usage
+	}
+	tok := sumTurnTokens(lines)
+	if tok.InputTokens != 500 || tok.OutputTokens != 100 {
+		t.Errorf("main tokens wrong: in=%d out=%d", tok.InputTokens, tok.OutputTokens)
+	}
+	if tok.SubagentInputTokens != 0 || tok.WorkflowInputTokens != 0 {
+		t.Errorf("subagent/workflow should be 0: sub=%d wf=%d", tok.SubagentInputTokens, tok.WorkflowInputTokens)
+	}
+}
+
 // TestClaudeAdapter_CooldownPersistsAcrossProcesses simulates two separate
 // `milk eval run` invocations sharing the same state file: the second
 // "process" (a fresh path lookup, no in-memory state carried over) must still

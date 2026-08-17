@@ -5,20 +5,27 @@ import "fmt"
 // ComputeCacheMetrics derives caching efficiency metrics from a single turn's
 // token usage. All rates are computed against the total input budget
 // (CacheRead + CacheCreate + InputTokens). Division by zero returns zero rates.
+// Subagent and workflow cache tokens are included in the totals.
 func ComputeCacheMetrics(tokens TokenUsage) CacheMetrics {
-	total := float64(tokens.CacheRead + tokens.CacheCreate + tokens.InputTokens)
-	if total == 0 {
+	totalInput := tokens.CacheRead + tokens.CacheCreate + tokens.InputTokens +
+		tokens.SubagentCacheRead + tokens.SubagentCacheCreate + tokens.SubagentInputTokens +
+		tokens.WorkflowCacheRead + tokens.WorkflowCacheCreate + tokens.WorkflowInputTokens
+	totalCacheRead := tokens.CacheRead + tokens.SubagentCacheRead + tokens.WorkflowCacheRead
+	totalCacheCreate := tokens.CacheCreate + tokens.SubagentCacheCreate + tokens.WorkflowCacheCreate
+	totalCached := totalCacheRead + totalCacheCreate
+	if totalInput == 0 {
 		return CacheMetrics{}
 	}
 	return CacheMetrics{
-		CacheHitRate:    float64(tokens.CacheRead) / total,
-		CacheCreateRate: float64(tokens.CacheCreate) / total,
-		CachedTokens:    tokens.CacheRead + tokens.CacheCreate,
+		CacheHitRate:    float64(totalCacheRead) / float64(totalInput),
+		CacheCreateRate: float64(totalCacheCreate) / float64(totalInput),
+		CachedTokens:    totalCached,
 	}
 }
 
 // AggregateCacheMetrics sums TokenUsage across every result and computes
-// cache metrics on the aggregate totals.
+// cache metrics on the aggregate totals. Subagent and workflow tokens are
+// included in the aggregation.
 func AggregateCacheMetrics(results []RunResult) CacheMetrics {
 	var total TokenUsage
 	for _, r := range results {
@@ -26,6 +33,14 @@ func AggregateCacheMetrics(results []RunResult) CacheMetrics {
 		total.OutputTokens += r.Tokens.OutputTokens
 		total.CacheCreate += r.Tokens.CacheCreate
 		total.CacheRead += r.Tokens.CacheRead
+		total.SubagentInputTokens += r.Tokens.SubagentInputTokens
+		total.SubagentOutputTokens += r.Tokens.SubagentOutputTokens
+		total.SubagentCacheCreate += r.Tokens.SubagentCacheCreate
+		total.SubagentCacheRead += r.Tokens.SubagentCacheRead
+		total.WorkflowInputTokens += r.Tokens.WorkflowInputTokens
+		total.WorkflowOutputTokens += r.Tokens.WorkflowOutputTokens
+		total.WorkflowCacheCreate += r.Tokens.WorkflowCacheCreate
+		total.WorkflowCacheRead += r.Tokens.WorkflowCacheRead
 	}
 	return ComputeCacheMetrics(total)
 }

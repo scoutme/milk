@@ -308,6 +308,23 @@ func runEscalationWithSession(
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens,
 		"cache_read", res.CacheRead, "cache_write", res.CacheCreate, "cost_usd", res.CostUSD)
 
+	// Record subagent tokens when present.
+	if res.HasSubagentTokens {
+		obs.RecordTokens(ctx, model, "escalation:subagent", res.SubagentInputTokens, res.SubagentOutputTokens)
+		obs.AccumulateCacheTokens(model, "escalation:subagent", res.SubagentCacheRead, res.SubagentCacheCreate)
+		sess.AddTokensFull(model, "escalation:subagent", res.SubagentInputTokens, res.SubagentOutputTokens, res.SubagentCacheRead, res.SubagentCacheCreate)
+		obs.Debug("tokens ("+agentName+" subagent)", "input", res.SubagentInputTokens, "output", res.SubagentOutputTokens,
+			"cache_read", res.SubagentCacheRead, "cache_write", res.SubagentCacheCreate)
+	}
+	// Record workflow tokens when present.
+	if res.HasWorkflowTokens {
+		obs.RecordTokens(ctx, model, "escalation:workflow", res.WorkflowInputTokens, res.WorkflowOutputTokens)
+		obs.AccumulateCacheTokens(model, "escalation:workflow", res.WorkflowCacheRead, res.WorkflowCacheCreate)
+		sess.AddTokensFull(model, "escalation:workflow", res.WorkflowInputTokens, res.WorkflowOutputTokens, res.WorkflowCacheRead, res.WorkflowCacheCreate)
+		obs.Debug("tokens ("+agentName+" workflow)", "input", res.WorkflowInputTokens, "output", res.WorkflowOutputTokens,
+			"cache_read", res.WorkflowCacheRead, "cache_write", res.WorkflowCacheCreate)
+	}
+
 	// Only persist the assistant turn when there is actual content.
 	// A local-HTTP escalation agent with an empty SSE stream returns res.Text == ""
 	// with no error; writing a blank turn to history corrupts the session context.
