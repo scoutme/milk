@@ -33,7 +33,7 @@ func TestLoadScenarios(t *testing.T) {
 	for _, s := range scenarios {
 		categories[s.Category] = true
 	}
-	for _, want := range []string{"code_generation", "debugging", "refactoring"} {
+	for _, want := range []string{"code_generation", "debugging", "refactoring", "smoke"} {
 		if !categories[want] {
 			t.Errorf("missing expected category %q", want)
 		}
@@ -44,15 +44,15 @@ func TestLoadScenarios(t *testing.T) {
 	for _, s := range scenarios {
 		names[s.Name] = true
 	}
-	for _, want := range []string{"fix-typo", "add-function", "write-test", "fix-nil-pointer", "fix-off-by-one", "iterative-refactor", "add-validation"} {
+	for _, want := range []string{"fix-typo", "add-function", "write-test", "fix-nil-pointer", "fix-off-by-one", "iterative-refactor", "add-validation", "say-pong"} {
 		if !names[want] {
 			t.Errorf("missing expected scenario %q", want)
 		}
 	}
 
-	// Total should be 7 scenarios (3 code_generation + 2 debugging + 2 refactoring).
-	if len(scenarios) != 7 {
-		t.Errorf("got %d scenarios, want 7", len(scenarios))
+	// Total should be 8 scenarios (3 code_generation + 2 debugging + 2 refactoring + 1 smoke).
+	if len(scenarios) != 8 {
+		t.Errorf("got %d scenarios, want 8", len(scenarios))
 	}
 
 	t.Logf("Loaded %d scenarios across %d categories", len(scenarios), len(categories))

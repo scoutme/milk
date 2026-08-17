@@ -1,0 +1,20 @@
+# Smoke test scenario — minimal single-turn task for fast adapter validation.
+# Not a quality benchmark: use this to verify the harness pipeline (adapter
+# start, prompt send, completion detection, response capture) works end to end
+# without waiting on a real code-editing task.
+category: smoke
+
+scenarios:
+  - name: say-pong
+    description: >
+      Agent must reply with the single word "pong" to verify the eval
+      harness can send a prompt and capture a response.
+    difficulty: easy
+    prompt: >
+      Reply with only the single word: pong
+    rubric:
+      - criterion: correctness
+        description: >
+          Did the agent's response contain the word "pong"?
+        weight: 1
+        scoring: binary
