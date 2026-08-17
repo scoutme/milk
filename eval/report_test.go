@@ -114,6 +114,31 @@ func sampleScenarioResults() []ScenarioResult {
 	}
 }
 
+// scenarioResultsWithJudgeError returns sampleScenarioResults() with a third
+// scenario where claude-code's judge call failed outright (e.g. rejected by a
+// content filter) — WeightedScore is the zero-value, exactly like a genuine
+// "failed everything" score, but JudgeError is set to distinguish the two.
+func scenarioResultsWithJudgeError() []ScenarioResult {
+	srs := sampleScenarioResults()
+	srs = append(srs, ScenarioResult{
+		ScenarioName: "add-function",
+		Category:     "code_generation",
+		Difficulty:   "medium",
+		AgentResults: map[string]AgentResult{
+			"milk-tui": {
+				RunResults:    []RunResult{{Response: "Added the function.", CostUSD: 0.002}},
+				Scores:        []JudgeScore{{Criterion: "correctness", Score: 5.0}},
+				WeightedScore: 5.0,
+			},
+			"claude-code": {
+				RunResults: []RunResult{{Response: "Added the function.", CostUSD: 0.09}},
+				JudgeError: "scoring turn 0: parsing judge scores from LLM output: no JSON array found in LLM output: The request was rejected because it was considered high risk",
+			},
+		},
+	})
+	return srs
+}
+
 // ---------------------------------------------------------------------------
 // GenerateReport tests
 // ---------------------------------------------------------------------------
@@ -209,6 +234,51 @@ func TestGenerateReport_EmptyScenarios(t *testing.T) {
 	report := GenerateReport(nil)
 	if !strings.Contains(report, "=== Agent Evaluation Report ===") {
 		t.Error("report missing header")
+	}
+}
+
+func TestGenerateReport_JudgeErrorRendersERR(t *testing.T) {
+	report := GenerateReport(scenarioResultsWithJudgeError())
+	if !strings.Contains(report, "ERR") {
+		t.Error("report missing ERR marker for judge-failed agent")
+	}
+	if !strings.Contains(report, "judging failed for claude-code") {
+		t.Error("report missing judging-failed warning line")
+	}
+}
+
+func TestGenerateReport_JudgeErrorExcludedFromAggregate(t *testing.T) {
+	// claude-code's WeightedScore for "fix-typo-in-readme" and
+	// "iterative-refactoring" together average to (3.6+3.9)/2 = 3.75. The
+	// judge-failed "add-function" entry must not pull that average toward 0.
+	srs := scenarioResultsWithJudgeError()
+	report := buildAggregateReport(srs, collectAgentNames(srs))
+	if strings.Contains(report, "1.9") || strings.Contains(report, "1.8") {
+		t.Errorf("aggregate appears to have averaged in the judge-failed 0 score:\n%s", report)
+	}
+}
+
+func TestPickWinner_SkipsJudgeError(t *testing.T) {
+	sr := ScenarioResult{
+		AgentResults: map[string]AgentResult{
+			"failed-judge": {WeightedScore: 0, JudgeError: "refused", RunResults: []RunResult{{CostUSD: 0.001}}},
+			"scored":       {WeightedScore: 2.0, RunResults: []RunResult{{CostUSD: 0.1}}},
+		},
+	}
+	if got := pickWinner(sr); got != "scored" {
+		t.Errorf("pickWinner() = %q, want scored", got)
+	}
+}
+
+func TestPickWinner_AllJudgeErrorsReturnsEmpty(t *testing.T) {
+	sr := ScenarioResult{
+		AgentResults: map[string]AgentResult{
+			"a": {WeightedScore: 0, JudgeError: "refused"},
+			"b": {WeightedScore: 0, JudgeError: "refused"},
+		},
+	}
+	if got := pickWinner(sr); got != "" {
+		t.Errorf("pickWinner() = %q, want empty string", got)
 	}
 }
 
@@ -413,6 +483,49 @@ func TestGenerateJSON_ToolCallCount(t *testing.T) {
 	milk := report.Scenarios[0].Agents["milk-tui"]
 	if milk.ToolCalls != 2 {
 		t.Errorf("tool_calls = %d, want 2", milk.ToolCalls)
+	}
+}
+
+func TestGenerateJSON_JudgeErrorField(t *testing.T) {
+	data := GenerateJSON(scenarioResultsWithJudgeError())
+	var report JSONReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	var found bool
+	for _, sr := range report.Scenarios {
+		if sr.ScenarioName != "add-function" {
+			continue
+		}
+		found = true
+		ar := sr.Agents["claude-code"]
+		if ar.JudgeError == "" {
+			t.Error("expected judge_error to be populated for claude-code/add-function")
+		}
+		if ok := sr.Agents["milk-tui"].JudgeError; ok != "" {
+			t.Errorf("milk-tui/add-function should have no judge_error, got %q", ok)
+		}
+	}
+	if !found {
+		t.Fatal("add-function scenario not found in JSON report")
+	}
+}
+
+func TestGenerateJSON_JudgeErrorExcludedFromAggregate(t *testing.T) {
+	data := GenerateJSON(scenarioResultsWithJudgeError())
+	var report JSONReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// claude-code has 3 scenarios total, but only 2 were judged (3.6, 3.9).
+	// The judge-failed add-function entry must not count toward the average
+	// or dilute the quality/dollar denominator.
+	summary := report.Aggregate.Agents["claude-code"]
+	want := (3.6 + 3.9) / 2
+	if diff := summary.AvgWeightedScore - want; diff > 0.01 || diff < -0.01 {
+		t.Errorf("claude-code avg_weighted_score = %f, want ~%f (judge-failed entry must be excluded)", summary.AvgWeightedScore, want)
 	}
 }
 

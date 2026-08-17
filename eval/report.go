@@ -26,6 +26,14 @@ type AgentResult struct {
 	Scores        []JudgeScore `json:"scores"`
 	WeightedScore float64      `json:"weighted_score"`
 	Cache         CacheMetrics `json:"cache"`
+	// JudgeError is non-empty when the judge failed to score this scenario/agent
+	// at all (e.g. the judge model's own request was rejected by a content
+	// filter, or its output was unparseable even after repair) — as opposed to
+	// the judge genuinely scoring every criterion 0. When set, Scores may be
+	// empty or a partial prefix and WeightedScore is always 0; every report
+	// builder must treat this as "no data," not "a real score of 0," and
+	// exclude it from aggregates.
+	JudgeError string `json:"judge_error,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +64,15 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 
 		// Score comparison table.
 		b.WriteString(buildScoreTable(sr, agentNames))
+
+		// Surface *why* any "ERR" cells above are ERR, not a real 0 — the
+		// judge never scored this scenario/agent, so its WeightedScore is
+		// excluded from every aggregate below rather than treated as data.
+		for _, name := range agentNames {
+			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError != "" {
+				b.WriteString(fmt.Sprintf("⚠ judging failed for %s: %s\n", name, ar.JudgeError))
+			}
+		}
 
 		// Token / cost / duration table.
 		b.WriteString(buildMetricsTable(sr, agentNames))
@@ -181,6 +198,10 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 	for _, c := range criteria {
 		row := columnLabel(c, 20)
 		for _, name := range agentNames {
+			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError != "" {
+				row += columnLabel("ERR", 12)
+				continue
+			}
 			score := lookup[c][name]
 			row += columnLabel(fmt.Sprintf("%.1f", score), 12)
 		}
@@ -194,6 +215,14 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 		ar, ok := sr.AgentResults[name]
 		if !ok {
 			row += columnLabel("-", 12)
+			continue
+		}
+		if ar.JudgeError != "" {
+			// Not a real 0 — the judge never scored this scenario/agent at all
+			// (e.g. its request was rejected by a content filter). Distinct from
+			// a genuine WeightedScore of 0.0 so it isn't misread as "the agent
+			// failed every criterion," and every aggregate below excludes it.
+			row += columnLabel("ERR", 12)
 			continue
 		}
 		row += columnLabel(fmt.Sprintf("%.1f", ar.WeightedScore), 12)
@@ -525,8 +554,8 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 	for _, sr := range scenarioResults {
 		for _, name := range agentNames {
 			ar, ok := sr.AgentResults[name]
-			if !ok {
-				continue
+			if !ok || ar.JudgeError != "" {
+				continue // unjudged — not a real 0, exclude so it can't drag the average down
 			}
 			acc := catAccums[sr.Category][name]
 			acc.sum += ar.WeightedScore
@@ -599,7 +628,12 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 	for _, name := range agentNames {
 		var totalCost, totalQuality float64
 		for _, sr := range scenarioResults {
-			if ar, ok := sr.AgentResults[name]; ok {
+			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
+				// Cost is scoped to judged-only scenarios here too, so the ratio's
+				// numerator and denominator stay over the same subset — mixing an
+				// unjudged scenario's real cost into the denominator while
+				// excluding its (nonexistent) quality from the numerator would
+				// understate quality/dollar for reasons unrelated to quality.
 				for _, r := range ar.RunResults {
 					totalCost += r.CostUSD
 				}
@@ -648,7 +682,7 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 			var cost float64
 			count := 0
 			for _, sr := range scenarioResults {
-				if ar, ok := sr.AgentResults[name]; ok {
+				if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
 					score += ar.WeightedScore
 					for _, r := range ar.RunResults {
 						cost += r.CostUSD
@@ -800,6 +834,11 @@ type JSONAgentResult struct {
 	TotalCostUSD  float64         `json:"total_cost_usd"`
 	DurationSec   float64         `json:"duration_sec"`
 	ToolCalls     int             `json:"tool_calls"`
+	// JudgeError mirrors AgentResult.JudgeError — non-empty means WeightedScore
+	// is not real data (the judge never scored this scenario/agent), so
+	// consumers of the JSON report must exclude it from aggregates rather than
+	// treat 0 as a genuine score.
+	JudgeError string `json:"judge_error,omitempty"`
 }
 
 // JSONRunResult is a serializable per-turn result.
@@ -834,11 +873,15 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 		Scenarios: make([]JSONScenarioResult, 0, len(scenarioResults)),
 	}
 
-	// Per-agent accumulators for the aggregate.
+	// Per-agent accumulators for the aggregate. qualityCost is scoped to
+	// judged-only scenarios (unlike totalCost, which is real spend across all
+	// scenarios) so quality-per-dollar's numerator and denominator stay over
+	// the same subset — mirroring the markdown report's Quality/dollar fix.
 	type accum struct {
 		weightedSum float64
 		count       int
 		totalCost   float64
+		qualityCost float64
 		totalRead   int64
 		totalCreate int64
 		totalInput  int64
@@ -861,6 +904,7 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 				Scores:        ar.Scores,
 				WeightedScore: ar.WeightedScore,
 				Cache:         ar.Cache,
+				JudgeError:    ar.JudgeError,
 			}
 
 			jar.RunResults = make([]JSONRunResult, 0, len(ar.RunResults))
@@ -881,10 +925,20 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 
 			jsr.Agents[name] = jar
 
-			// Accumulate for aggregate.
+			// Accumulate for aggregate. Cache/cost/token totals reflect real
+			// usage regardless of judging outcome, so they accumulate
+			// unconditionally; only the judgment-derived weightedSum/count
+			// (and qualityCost, its cost-denominator counterpart) are skipped
+			// when the judge never scored this scenario/agent — see
+			// AgentResult.JudgeError.
 			acc := accums[name]
-			acc.weightedSum += ar.WeightedScore
-			acc.count++
+			if ar.JudgeError == "" {
+				acc.weightedSum += ar.WeightedScore
+				acc.count++
+				for _, r := range ar.RunResults {
+					acc.qualityCost += r.CostUSD
+				}
+			}
 			for _, r := range ar.RunResults {
 				acc.totalCost += r.CostUSD
 				acc.totalRead += r.Tokens.CacheRead
@@ -915,8 +969,8 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 				avgScore = acc.weightedSum / float64(acc.count)
 			}
 			qpd := 0.0
-			if acc.totalCost > 0 {
-				qpd = (acc.weightedSum) / acc.totalCost
+			if acc.qualityCost > 0 {
+				qpd = acc.weightedSum / acc.qualityCost
 			}
 			total := float64(acc.totalRead + acc.totalCreate + acc.totalInput)
 			hitRate := 0.0
@@ -967,12 +1021,19 @@ func collectAgentNames(srs []ScenarioResult) []string {
 
 // pickWinner returns the agent name with the highest weighted score.
 // Ties are broken by lower total cost.
+// pickWinner returns the agent name with the best WeightedScore (cost as
+// tie-break), skipping any agent the judge failed to score at all — an
+// unjudged scenario has no real WeightedScore to compare. Returns "" if every
+// agent's judging failed.
 func pickWinner(sr ScenarioResult) string {
 	best := ""
 	bestScore := -1.0
 	bestCost := 1e18
 
 	for name, ar := range sr.AgentResults {
+		if ar.JudgeError != "" {
+			continue
+		}
 		var cost float64
 		for _, r := range ar.RunResults {
 			cost += r.CostUSD

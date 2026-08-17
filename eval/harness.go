@@ -232,21 +232,34 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 
 	// 4. Judge scores.
 	scores, err := h.Judge.Score(ctx, scenario, results)
+	var judgeError string
 	if err != nil {
-		// Log but do not fail — we still have results.
+		// Log but do not fail the whole run — we still have RunResults. judgeError
+		// is recorded on the AgentResult so a failed/refused judge call (e.g. the
+		// judge model's own API request being rejected by a content filter) is
+		// never silently treated as a real WeightedScore of 0 — indistinguishable
+		// from "the agent failed every criterion" otherwise. See report.go's
+		// aggregate builders, which exclude JudgeError entries instead of letting
+		// a single unjudged scenario drag down every other scenario's average.
+		judgeError = err.Error()
 		fmt.Fprintf(os.Stderr, "warning: judging %s/%s: %v\n", scenario.Name, adapter.Name(), err)
 	}
 
-	// 5. Compute weighted score.
-	weightedScore := WeightedScore(scores, scenario.Rubric)
-	// For multi-turn, accumulate rubric criteria across turns.
-	if len(scenario.Turns) > 1 {
-		var allRubric []RubricCriterion
-		for _, t := range scenario.Turns {
-			allRubric = append(allRubric, t.Rubric...)
-		}
-		if len(allRubric) > 0 {
-			weightedScore = WeightedScore(scores, allRubric)
+	// 5. Compute weighted score. Skipped entirely on a judge error — scores may
+	// be empty or only a partial prefix (multi-turn judging stops at the first
+	// failing turn), and neither is real data worth weighting.
+	var weightedScore float64
+	if judgeError == "" {
+		weightedScore = WeightedScore(scores, scenario.Rubric)
+		// For multi-turn, accumulate rubric criteria across turns.
+		if len(scenario.Turns) > 1 {
+			var allRubric []RubricCriterion
+			for _, t := range scenario.Turns {
+				allRubric = append(allRubric, t.Rubric...)
+			}
+			if len(allRubric) > 0 {
+				weightedScore = WeightedScore(scores, allRubric)
+			}
 		}
 	}
 
@@ -258,6 +271,7 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 		Scores:        scores,
 		WeightedScore: weightedScore,
 		Cache:         cache,
+		JudgeError:    judgeError,
 	}, nil
 }
 
