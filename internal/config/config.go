@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/scoutme/milk/internal/loop"
 )
 
 type Rules struct {
@@ -513,6 +515,11 @@ type Config struct {
 	// prompts are forwarded to the configured backend (e.g. Telegram).
 	RemoteOversight *RemoteOversightConfig `json:"remote_oversight,omitempty"`
 
+	// LoopDetection configures agent loop detection. When enabled, milk
+	// monitors turns for signs of the agent looping (repeated responses,
+	// high token velocity, echoing tool calls) and warns or interrupts.
+	LoopDetection *LoopDetectionConfig `json:"loop_detection,omitempty"`
+
 	// ConfigEditors is an ordered list of editor commands tried by
 	// "milk config open" / "/config open". The first command found on
 	// PATH is used. Entries may include "$EDITOR" or "$VISUAL" tokens
@@ -593,6 +600,54 @@ type TelegramConfig struct {
 	Token string `json:"token,omitempty"`
 	// ChatID is the numeric chat/user ID to send messages to.
 	ChatID int64 `json:"chat_id,omitempty"`
+}
+
+// LoopDetectionConfig controls agent loop detection. When Enabled is true,
+// milk monitors turns for signs of the agent looping and warns or interrupts.
+type LoopDetectionConfig struct {
+	// Enabled turns on loop detection. Default: true.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// MaxConsecutiveSimilarResponses is how many consecutive near-identical
+	// responses trigger the response-repetition signal. Default: 3.
+	MaxConsecutiveSimilarResponses int `json:"max_consecutive_similar_responses,omitempty"`
+
+	// ResponseSimilarityThreshold is the trigram Jaccard similarity above
+	// which two responses are considered "similar". Default: 0.85.
+	ResponseSimilarityThreshold *float64 `json:"response_similarity_threshold,omitempty"`
+
+	// TokenVelocityWindowSeconds is the sliding window (in seconds) for
+	// measuring token burn rate. Default: 30.
+	TokenVelocityWindowSeconds int `json:"token_velocity_window_seconds,omitempty"`
+
+	// TokenVelocityThreshold is the total tokens (input+output) consumed
+	// within the window that triggers the velocity signal. Default: 50000.
+	TokenVelocityThreshold *int64 `json:"token_velocity_threshold,omitempty"`
+
+	// MaxSilentBurnTokens is the input-token count above which a turn with
+	// near-zero output triggers the silent-burn signal. Default: 20000.
+	MaxSilentBurnTokens *int64 `json:"max_silent_burn_tokens,omitempty"`
+
+	// MaxConsecutiveTurnsWithoutUser is how many consecutive non-user turns
+	// trigger the turn-flood signal. Default: 10.
+	MaxConsecutiveTurnsWithoutUser int `json:"max_consecutive_turns_without_user,omitempty"`
+
+	// ToolEchoThreshold is how many consecutive turns with identical tool
+	// calls trigger the tool-echo signal. Default: 3.
+	ToolEchoThreshold int `json:"tool_echo_threshold,omitempty"`
+
+	// ChunkRepetitionThreshold is how many times the same chunk text must
+	// appear within the sliding window to trigger the intra-turn chunk
+	// repetition signal. Default: 3.
+	ChunkRepetitionThreshold int `json:"chunk_repetition_threshold,omitempty"`
+
+	// ChunkWindowSize is the number of recent chunks kept in the sliding
+	// window for intra-turn repetition detection. Default: 50.
+	ChunkWindowSize int `json:"chunk_window_size,omitempty"`
+
+	// AutoInterrupt causes high-confidence signals to cancel the running
+	// turn automatically. Default: false (warn only).
+	AutoInterrupt *bool `json:"auto_interrupt,omitempty"`
 }
 
 func defaults() Config {
@@ -1505,6 +1560,49 @@ func (c Config) ShouldCheckUpdate() bool {
 // pre-release versions (default: true, since all current releases are pre-releases).
 func (c Config) UpdateCheckIncludePrerelease() bool {
 	return c.UpdateChannel != "stable"
+}
+
+// LoopDetection returns the loop.Config derived from the LoopDetection config
+// section. When LoopDetection is nil, returns a default config with detection
+// enabled.
+func (c Config) LoopDetectionCfg() loop.Config {
+	cfg := loop.Config{Enabled: true}
+	if ld := c.LoopDetection; ld != nil {
+		if ld.Enabled != nil {
+			cfg.Enabled = *ld.Enabled
+		}
+		if ld.MaxConsecutiveSimilarResponses > 0 {
+			cfg.MaxConsecutiveSimilarResponses = ld.MaxConsecutiveSimilarResponses
+		}
+		if ld.ResponseSimilarityThreshold != nil {
+			cfg.ResponseSimilarityThreshold = *ld.ResponseSimilarityThreshold
+		}
+		if ld.TokenVelocityWindowSeconds > 0 {
+			cfg.TokenVelocitySeconds = ld.TokenVelocityWindowSeconds
+		}
+		if ld.TokenVelocityThreshold != nil {
+			cfg.TokenVelocityThreshold = *ld.TokenVelocityThreshold
+		}
+		if ld.MaxSilentBurnTokens != nil {
+			cfg.MaxSilentBurnTokens = *ld.MaxSilentBurnTokens
+		}
+		if ld.MaxConsecutiveTurnsWithoutUser > 0 {
+			cfg.MaxConsecutiveTurnsWithoutUser = ld.MaxConsecutiveTurnsWithoutUser
+		}
+		if ld.ToolEchoThreshold > 0 {
+			cfg.ToolEchoThreshold = ld.ToolEchoThreshold
+		}
+		if ld.ChunkRepetitionThreshold > 0 {
+			cfg.ChunkRepetitionThreshold = ld.ChunkRepetitionThreshold
+		}
+		if ld.ChunkWindowSize > 0 {
+			cfg.ChunkWindowSize = ld.ChunkWindowSize
+		}
+		if ld.AutoInterrupt != nil {
+			cfg.AutoInterrupt = *ld.AutoInterrupt
+		}
+	}
+	return cfg
 }
 
 func Save(cfg Config) error {
