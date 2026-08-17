@@ -1,6 +1,6 @@
 # Evaluation harness (`milk eval`)
 
-> Runs scenario prompts against real agent backends — the `claude` CLI or the actual `milk` TUI, each driven inside a tmux session exactly as a human would — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. Current caveat: the default scenario/results paths (`eval/scenarios`, `eval/results`) are relative and only resolve from a milk source checkout — scenario YAML ships in the repo, not with pre-built release binaries, so a from-release install can't run `milk eval` yet without cloning the repo for the scenario files. See [Known limitations](#known-limitations).
+> Runs scenario prompts against real agent backends — the `claude` CLI or the actual `milk` TUI, each driven inside a tmux session exactly as a human would — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. `--scenarios`/`--results` default to `eval/scenarios`/`eval/results` relative to your current working directory — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
 >
 > `milk eval` is a subcommand of the main `milk` binary (`cmd/milk/main.go` mounts `eval.Command()`) — there is no separate `milk-eval` binary. Build with `task build` / `task build:local` like any other milk command.
 
@@ -46,7 +46,9 @@ Prints registered adapter names and a usage hint. New adapters register themselv
 
 ## Scenarios
 
-YAML files under `eval/scenarios/`. A file starting with `_` (e.g. `_base.yaml`) is a shared-defaults file, not an executable scenario — it's skipped when loading, and its `default_scoring`/`default_weight` backfill any rubric criterion that omits them in the same directory.
+The default scenarios ship as YAML files under `eval/scenarios/` in the milk repo — there's nothing to install or generate, they're just checked-in examples you can read, copy, or run as-is. `--scenarios`/`--results` (see [Commands](#commands)) resolve relative to your current working directory and default to `eval/scenarios`/`eval/results`, so running `milk eval run` from the repo root picks them up automatically. Running from elsewhere, or want your own scenario set entirely (a different directory, a different repo, scenarios specific to your own project)? Pass `--scenarios <path>` — any directory with the same file format works, the default is just a convenient starting point, not a requirement.
+
+A file starting with `_` (e.g. `_base.yaml`) is a shared-defaults file, not an executable scenario — it's skipped when loading, and its `default_scoring`/`default_weight` backfill any rubric criterion that omits them in the same directory.
 
 A file holds either one scenario (flat) or several under a `scenarios:` list; a top-level `category:` is inherited by every scenario in the file unless overridden per-scenario.
 
@@ -259,7 +261,6 @@ The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and to
 
 ## Known limitations
 
-- **Relative default paths** (`eval/scenarios`, `eval/results`) only resolve when run from a milk source checkout — scenario YAML isn't packaged with pre-built release binaries, so a from-release install currently needs `git clone` (at least for the `eval/scenarios/` directory) before `milk eval run` has anything to run. Point `--scenarios`/`--results` at any directory to work around this in the meantime; making the harness fully standalone (e.g. embedding default scenarios in the binary) is open.
 - **`milk-tui` shells to the *installed* binary** (`~/.local/bin/milk`), not whatever's in your working tree — run `task build` after code changes before evaluating, or the harness silently scores a stale binary.
 - **`CostUSD` is unpopulated** (see [Reports](#reports)).
 - **`--cache-cooldown` is `claude-code`-only** — `milk-tui` doesn't exhibit this caching behavior (no Anthropic-style prompt cache in the local-model path), so there's nothing for it to control there.
