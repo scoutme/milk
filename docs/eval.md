@@ -1,6 +1,6 @@
 # Evaluation harness (`milk eval`)
 
-> Runs scenario prompts against real agent backends — the `claude` CLI or the actual `milk` TUI, each driven inside a tmux session exactly as a human would — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. Current caveat: the default scenario/results paths (`eval/scenarios`, `eval/results`) are relative and only resolve from a milk source checkout — scenario YAML ships in the repo, not with pre-built release binaries, so a from-release install can't run `milk eval` yet without cloning the repo for the scenario files. See [Known limitations](#known-limitations).
+> Runs scenario prompts against real agent backends — the `claude` CLI or the actual `milk` TUI, each driven inside a tmux session exactly as a human would — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. `--scenarios`/`--results` default to `eval/scenarios`/`eval/results` relative to your current working directory — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
 >
 > `milk eval` is a subcommand of the main `milk` binary (`cmd/milk/main.go` mounts `eval.Command()`) — there is no separate `milk-eval` binary. Build with `task build` / `task build:local` like any other milk command.
 
@@ -46,27 +46,171 @@ Prints registered adapter names and a usage hint. New adapters register themselv
 
 ## Scenarios
 
-YAML files under `eval/scenarios/`. A file starting with `_` (e.g. `_base.yaml`) is a shared-defaults file, not an executable scenario — it's skipped when loading, and its `default_scoring`/`default_weight` backfill any rubric criterion that omits them in the same directory.
+The default scenarios ship as YAML files under `eval/scenarios/` in the milk repo — there's nothing to install or generate, they're just checked-in examples you can read, copy, or run as-is. `--scenarios`/`--results` (see [Commands](#commands)) resolve relative to your current working directory and default to `eval/scenarios`/`eval/results`, so running `milk eval run` from the repo root picks them up automatically. Running from elsewhere, or want your own scenario set entirely (a different directory, a different repo, scenarios specific to your own project)? Pass `--scenarios <path>` — any directory with the same file format works, the default is just a convenient starting point, not a requirement.
+
+A file starting with `_` (e.g. `_base.yaml`) is a shared-defaults file, not an executable scenario — it's skipped when loading, and its `default_scoring`/`default_weight` backfill any rubric criterion that omits them in the same directory.
 
 A file holds either one scenario (flat) or several under a `scenarios:` list; a top-level `category:` is inherited by every scenario in the file unless overridden per-scenario.
 
-```yaml
-category: smoke
+### Field reference
 
-scenarios:
-  - name: say-pong
-    description: Agent must reply with the single word "pong".
-    difficulty: easy          # easy | medium | hard
-    prompt: >                 # single-turn shorthand
-      Reply with only the single word: pong
-    rubric:
-      - criterion: correctness
-        description: Did the response contain "pong"?
-        weight: 1
-        scoring: binary       # binary (0/1) | scale_1_5
+Matches `Scenario` in `eval/scenario.go` — that struct is the source of truth; this table is a convenience.
+
+| Field | YAML key | Type | Notes |
+| --- | --- | --- | --- |
+| `Name` | `name` | string | Scenario identifier, shown in reports. |
+| `Description` | `description` | string | Human-readable summary — shown in reports, never sent to the agent. |
+| `Category` | `category` | string | Inherited from the file's top-level `category:` if omitted per-scenario. Filter with `--category`. |
+| `Difficulty` | `difficulty` | `easy` \| `medium` \| `hard` | Informational only — not enforced, not scored. |
+| `MultiTurn` | `multi_turn` | bool | Must be `true` for `turns:` to take effect, and to be selected by `--multi-turn`. |
+| `Setup.Files` | `setup.files` | list of `{path, content}` | Files written into the scenario's temp workdir before the first turn — see [Adapters](#adapters) for how each adapter's workdir is created. |
+| `Prompt` | `prompt` | string | Single-turn shorthand. Ignored once `turns:` is set. |
+| `Turns` | `turns` | list of `{prompt, rubric}` | Multi-turn steps, sent in order as separate turns in the *same* adapter session (same tmux session, same conversation). |
+| `Rubric` | `rubric` | list of criteria | Top-level rubric for single-turn scenarios (i.e. those using `prompt:`, not `turns:`). |
+| `Expected` | `expected` → `{contains, files_changed}` | — | Parsed but **not currently consumed** — see caveat below. |
+| `CacheExpect` | `cache_expect` → `{min_cache_hit_rate_after_turn1, no_cache_recreate_after_turn1}` | — | Automated cache-reuse assertions for multi-turn scenarios — see [Multi-turn example](#multi-turn-example-with-cache_expect). |
+
+Each rubric criterion (`rubric:` items, top-level or per-turn):
+
+| Field | YAML key | Type | Notes |
+| --- | --- | --- | --- |
+| `Criterion` | `criterion` | string | Dimension name, e.g. `correctness`, `efficiency` — shown as its own report column. |
+| `Description` | `description` | string | Given to the LLM judge as the scoring instruction for this dimension. |
+| `Weight` | `weight` | int | Relative weight in `WeightedScore`. Backfilled from `_base.yaml`'s `default_weight` if omitted. |
+| `Scoring` | `scoring` | `binary` \| `scale_1_5` | `binary`: judge returns 0.0 or 1.0. `scale_1_5`: judge returns 1.0–5.0. Backfilled from `_base.yaml`'s `default_scoring` if omitted. |
+
+> **`expected` is currently a no-op.** The YAML parses (`Contains []string`, `FilesChanged []FileExpect{Path, Contains}`) but nothing in `eval/harness.go` or `eval/judge.go` reads `scenario.Expected` — no automated pass/fail assertion is actually checked against it today. Scoring is entirely LLM-judge-driven. Don't rely on `expected:` doing anything until this is wired up; the LLM judge's rubric is the only thing currently gating a score.
+
+### `_base.yaml` — shared defaults
+
+```yaml
+# Shared rubric defaults applied to all scenarios in this directory.
+# Scenarios can override these per-criterion.
+default_scoring: scale_1_5
+default_weight: 1
 ```
 
-Multi-turn scenarios use `multi_turn: true` and a `turns:` list (each with its own `prompt`/`rubric`) instead of the flat `prompt`/`rubric` fields — see `eval/scenarios/refactoring.yaml` for a real example, including `setup.files` (workdir files to create before the first turn) and `cache_expect` (asserts on cache reuse across turns, since a real multi-turn conversation should hit cache from turn 2 onward — this is about the *adapter's own* conversation cache, not the cross-run concern `--cache-cooldown` addresses below).
+Applied per rubric criterion that omits `scoring`/`weight` — see `applyBaseDefaults` in `eval/harness.go`.
+
+### Single-turn example
+
+`eval/scenarios/code_generation.yaml`'s `fix-typo` — the shape every single-turn scenario in `code_generation.yaml` and `debugging.yaml` follows:
+
+```yaml
+category: code_generation
+
+scenarios:
+  - name: fix-typo
+    description: >
+      Agent must find and fix a typo in a README file. The word "projcet"
+      should be corrected to "project".
+    difficulty: easy
+    setup:
+      files:
+        - path: README.md
+          content: |
+            # My Projcet
+
+            This is a sample projcet that does amazing things.
+
+            ## Installation
+
+            Clone the repo and run `make install`.
+    prompt: >
+      There's a typo in README.md — the word "projcet" should be "project".
+      Please fix it.
+    rubric:
+      - criterion: correctness
+        description: >
+          Did the agent replace "projcet" with "project" in both occurrences?
+        weight: 3
+        scoring: binary
+      - criterion: efficiency
+        description: >
+          Did the agent use a minimal number of tool calls (read + edit, or a
+          single edit)?
+        weight: 1
+        scoring: scale_1_5
+```
+
+### Multi-turn example (with `cache_expect`)
+
+`eval/scenarios/refactoring.yaml`'s `add-validation` — `multi_turn: true`, a `turns:` list instead of `prompt:`/`rubric:`, and `cache_expect` asserting the *adapter's own conversation cache* reuses context from turn 2 onward (a different concern from `--cache-cooldown`, which is about cross-*run* reproducibility, not within-session reuse):
+
+```yaml
+category: refactoring
+
+scenarios:
+  - name: add-validation
+    description: >
+      Agent adds validation to a config loader, then refactors the validation
+      into a separate function. Two turns; tests that the second turn benefits
+      from cached context.
+    difficulty: easy
+    multi_turn: true
+    cache_expect:
+      min_cache_hit_rate_after_turn1: 0.3
+      no_cache_recreate_after_turn1: true
+    setup:
+      files:
+        - path: config/config.go
+          content: |
+            package config
+            # ... (see the real file for the full Load() implementation)
+    turns:
+      - prompt: >
+          Add validation to the `Load` function in config/config.go:
+          port must be between 1 and 65535, host must not be empty,
+          and db_url must not be empty. Return an error describing
+          all validation failures.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does the validation check port range, non-empty host, and
+              non-empty db_url?
+            weight: 3
+            scoring: binary
+          - criterion: error_messages
+            description: >
+              Does the error message list all validation failures, not just
+              the first one?
+            weight: 2
+            scoring: scale_1_5
+
+      - prompt: >
+          Refactor: extract the validation logic into a separate
+          `Validate(*Config) error` function. Add validation for api_key
+          (must not be empty). Keep the error accumulation pattern.
+        rubric:
+          - criterion: correctness
+            description: >
+              Is validation extracted into a standalone Validate function
+              that is called from Load?
+            weight: 3
+            scoring: binary
+          - criterion: completeness
+            description: >
+              Does Validate also check api_key is non-empty?
+            weight: 2
+            scoring: binary
+```
+
+### Current scenarios
+
+Everything that ships in `eval/scenarios/` today:
+
+| File | Scenario | Category | Difficulty | Turns | Notable fields |
+| --- | --- | --- | --- | --- | --- |
+| `smoke.yaml` | `say-pong` | smoke | easy | 1 | Minimal pipeline sanity check — no real code editing. |
+| `code_generation.yaml` | `fix-typo` | code_generation | easy | 1 | `setup.files` |
+| `code_generation.yaml` | `add-function` | code_generation | medium | 1 | `setup.files` |
+| `code_generation.yaml` | `write-test` | code_generation | medium | 1 | `setup.files` |
+| `debugging.yaml` | `fix-nil-pointer` | debugging | medium | 1 | `setup.files` |
+| `debugging.yaml` | `fix-off-by-one` | debugging | easy | 1 | `setup.files` |
+| `refactoring.yaml` | `iterative-refactor` | refactoring | medium | 3 | `multi_turn`, `cache_expect` |
+| `refactoring.yaml` | `add-validation` | refactoring | easy | 2 | `multi_turn`, `cache_expect` |
+
+None of the shipped scenarios use `expected:` (see the no-op caveat above). `iterative-refactor` is the fullest multi-turn example (3 turns, higher `min_cache_hit_rate_after_turn1`) if `add-validation` above isn't enough — read it directly in `eval/scenarios/refactoring.yaml`.
 
 ---
 
@@ -117,7 +261,7 @@ The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and to
 
 ## Known limitations
 
-- **Relative default paths** (`eval/scenarios`, `eval/results`) only resolve when run from a milk source checkout — scenario YAML isn't packaged with pre-built release binaries, so a from-release install currently needs `git clone` (at least for the `eval/scenarios/` directory) before `milk eval run` has anything to run. Point `--scenarios`/`--results` at any directory to work around this in the meantime; making the harness fully standalone (e.g. embedding default scenarios in the binary) is open.
 - **`milk-tui` shells to the *installed* binary** (`~/.local/bin/milk`), not whatever's in your working tree — run `task build` after code changes before evaluating, or the harness silently scores a stale binary.
 - **`CostUSD` is unpopulated** (see [Reports](#reports)).
 - **`--cache-cooldown` is `claude-code`-only** — `milk-tui` doesn't exhibit this caching behavior (no Anthropic-style prompt cache in the local-model path), so there's nothing for it to control there.
+- **`expected:` is a no-op** (see [Scenarios](#scenarios)) — it parses but nothing checks it. Scoring is entirely LLM-judge-driven today.
