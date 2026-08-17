@@ -7,6 +7,7 @@ Switch models, not context. Routes prompts between a local LLM (any OpenAI-compa
 - [docs/setup.md](docs/setup.md) — local inference server setup (llama.cpp), tested models, local testing procedure
 - [docs/providers.md](docs/providers.md) — all agent/provider config (Claude CLI, Bedrock, OpenRouter, smolagents, …), memory/context tuning, remote oversight
 - [docs/spec.md](docs/spec.md) — full product and architecture spec
+- [docs/eval.md](docs/eval.md) — `milk eval` usage: commands, scenario format, adapters and their per-adapter options, judging, reports
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records (why things are the way they are)
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch naming, conventional commits, per-step branch plan
 
@@ -31,6 +32,7 @@ internal/agent/smolagent/     # subprocess provider (wraps subprocess agent)
 internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
+eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui), judge, report (see docs/eval.md)
 ```
 
 ## Key design decisions

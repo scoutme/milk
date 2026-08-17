@@ -19,6 +19,7 @@ import (
 
 	"github.com/scoutme/milk/internal/updater"
 
+	"github.com/scoutme/milk/eval"
 	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -39,14 +40,16 @@ import (
 const milkScope = "github.com/scoutme/milk"
 
 var (
-	flagEscalate bool
-	flagPrimary  bool
-	flagNew      bool
-	flagSession  string
-	flagContinue bool
-	flagList     bool
-	flagListAll  bool
-	flagDrop     bool
+	flagEscalate   bool
+	flagPrimary    bool
+	flagNew        bool
+	flagSession    string
+	flagContinue   bool
+	flagList       bool
+	flagListAll    bool
+	flagDrop       bool
+	flagAgent      string // --agent: override primary agent name
+	flagEscalation string // --escalation-agent: override escalation agent name
 )
 
 // Set via -ldflags at build time.
@@ -86,11 +89,14 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagList, "list", false, "List sessions for current cwd")
 	rootCmd.Flags().BoolVar(&flagListAll, "all", false, "With --list: show all sessions across all directories")
 	rootCmd.Flags().BoolVar(&flagDrop, "drop", false, "Delete the current session")
+	rootCmd.Flags().StringVar(&flagAgent, "agent", "", "Override primary agent (by name)")
+	rootCmd.Flags().StringVar(&flagEscalation, "escalation-agent", "", "Override escalation agent (by name)")
 
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(otelCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(eval.Command())
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -106,6 +112,14 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Apply CLI overrides for agent selection.
+	if flagAgent != "" {
+		cfg.Agent = flagAgent
+	}
+	if flagEscalation != "" {
+		cfg.EscalationAgent = flagEscalation
 	}
 
 	cwd, err := os.Getwd()

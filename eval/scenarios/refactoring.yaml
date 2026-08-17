@@ -1,0 +1,193 @@
+# Refactoring scenarios — multi-turn.
+category: refactoring
+
+scenarios:
+  - name: iterative-refactor
+    description: >
+      Agent refactors a flat handler function into a struct-based approach
+      across three turns. Tests cache reuse: turn 1 creates the cache,
+      turns 2 and 3 should hit it.
+    difficulty: medium
+    multi_turn: true
+    cache_expect:
+      min_cache_hit_rate_after_turn1: 0.5
+      no_cache_recreate_after_turn1: true
+    setup:
+      files:
+        - path: handler/handler.go
+          content: |
+            package handler
+
+            import (
+            	"encoding/json"
+            	"fmt"
+            	"net/http"
+            )
+
+            // HandleUser processes user-related HTTP requests.
+            func HandleUser(w http.ResponseWriter, r *http.Request) {
+            	switch r.Method {
+            	case "GET":
+            		name := r.URL.Query().Get("name")
+            		if name == "" {
+            			http.Error(w, "missing name", http.StatusBadRequest)
+            			return
+            		}
+            		resp := map[string]string{"greeting": fmt.Sprintf("Hello, %s!", name)}
+            		w.Header().Set("Content-Type", "application/json")
+            		json.NewEncoder(w).Encode(resp)
+            	case "POST":
+            		var body struct {
+            			Name  string `json:"name"`
+            			Email string `json:"email"`
+            		}
+            		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+            			http.Error(w, "bad request", http.StatusBadRequest)
+            			return
+            		}
+            		if body.Name == "" || body.Email == "" {
+            			http.Error(w, "name and email required", http.StatusBadRequest)
+            			return
+            		}
+            		resp := map[string]string{"status": "created", "name": body.Name}
+            		w.Header().Set("Content-Type", "application/json")
+            		json.NewEncoder(w).Encode(resp)
+            	default:
+            		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+            	}
+            }
+    turns:
+      - prompt: >
+          Refactor handler/handler.go: extract the GET and POST logic into
+          separate methods on a `UserHandler` struct. The struct should hold
+          no state for now — just group the methods. Keep the existing
+          `HandleUser` function as a thin dispatcher that delegates to the
+          struct methods.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does the refactored code compile and preserve the same behavior?
+            weight: 3
+            scoring: binary
+          - criterion: structure
+            description: >
+              Are GET and POST handlers properly separated into distinct
+              methods on a UserHandler struct?
+            weight: 2
+            scoring: scale_1_5
+
+      - prompt: >
+          Now add input validation to the POST handler: email must contain
+          an "@" character. Return 400 with an error message if validation
+          fails. Add a `validate` helper method on UserHandler.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does the validation check for "@" in the email and return 400
+              on failure?
+            weight: 3
+            scoring: binary
+          - criterion: code_quality
+            description: >
+              Is the validation logic extracted into a reusable helper method?
+            weight: 1
+            scoring: scale_1_5
+
+      - prompt: >
+          Add a logger field to UserHandler (type `*log.Logger`) and inject it
+          via a constructor `NewUserHandler(logger *log.Logger) *UserHandler`.
+          Log each incoming request method and path before dispatching.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does the constructor accept a logger and does the dispatcher
+              log request details?
+            weight: 3
+            scoring: binary
+          - criterion: dependency_injection
+            description: >
+              Is the logger injected via constructor rather than created
+              internally?
+            weight: 2
+            scoring: scale_1_5
+
+  - name: add-validation
+    description: >
+      Agent adds validation to a config loader, then refactors the validation
+      into a separate function. Two turns; tests that the second turn benefits
+      from cached context.
+    difficulty: easy
+    multi_turn: true
+    cache_expect:
+      min_cache_hit_rate_after_turn1: 0.3
+      no_cache_recreate_after_turn1: true
+    setup:
+      files:
+        - path: config/config.go
+          content: |
+            package config
+
+            import (
+            	"encoding/json"
+            	"os"
+            )
+
+            // Config holds application configuration.
+            type Config struct {
+            	Port    int    `json:"port"`
+            	Host    string `json:"host"`
+            	DBUrl   string `json:"db_url"`
+            	APIKey  string `json:"api_key"`
+            }
+
+            // Load reads a JSON config file and returns a Config.
+            // BUG: no validation — zero values silently accepted.
+            func Load(path string) (*Config, error) {
+            	f, err := os.Open(path)
+            	if err != nil {
+            		return nil, err
+            	}
+            	defer f.Close()
+
+            	var cfg Config
+            	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+            		return nil, err
+            	}
+            	return &cfg, nil
+            }
+    turns:
+      - prompt: >
+          Add validation to the `Load` function in config/config.go:
+          port must be between 1 and 65535, host must not be empty,
+          and db_url must not be empty. Return an error describing
+          all validation failures.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does the validation check port range, non-empty host, and
+              non-empty db_url?
+            weight: 3
+            scoring: binary
+          - criterion: error_messages
+            description: >
+              Does the error message list all validation failures, not just
+              the first one?
+            weight: 2
+            scoring: scale_1_5
+
+      - prompt: >
+          Refactor: extract the validation logic into a separate
+          `Validate(*Config) error` function. Add validation for api_key
+          (must not be empty). Keep the error accumulation pattern.
+        rubric:
+          - criterion: correctness
+            description: >
+              Is validation extracted into a standalone Validate function
+              that is called from Load?
+            weight: 3
+            scoring: binary
+          - criterion: completeness
+            description: >
+              Does Validate also check api_key is non-empty?
+            weight: 2
+            scoring: binary
