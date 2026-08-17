@@ -42,6 +42,8 @@ Score each criterion. Output a JSON array: [{"criterion":"...","score":0.0,"reas
 For "binary" scoring: score is 0.0 or 1.0.
 For "scale_1_5" scoring: score is 1.0 to 5.0.
 Consider both the text response AND the file changes when scoring correctness.
+In "reasoning", never use a double-quote character — use single quotes or backticks instead
+when quoting code, identifiers, or messages, so the JSON stays valid.
 Output ONLY the JSON array, no other text.`))
 
 // judgeInput holds the template data for JudgePrompt.
@@ -70,15 +72,27 @@ type Judge struct {
 	HTTPClient *http.Client
 }
 
-// NewJudgeFromConfig creates a Judge using the primary agent's URL and model from ~/.milk/config.json.
-func NewJudgeFromConfig() (*Judge, error) {
+// NewJudgeFromConfig creates a Judge from ~/.milk/config.json. If agentName is
+// empty, it uses the primary agent (same resolution milk itself uses); otherwise
+// it looks up that agent by name.
+func NewJudgeFromConfig(agentName string) (*Judge, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading milk config: %w", err)
 	}
-	agent := cfg.ActiveAgent()
+
+	var agent config.AgentConfig
+	if agentName == "" {
+		agent = cfg.ActiveAgent()
+	} else {
+		var ok bool
+		agent, ok = cfg.AgentByName(agentName)
+		if !ok {
+			return nil, fmt.Errorf("no agent named %q configured", agentName)
+		}
+	}
 	if agent.URL == "" {
-		return nil, fmt.Errorf("no URL configured for primary agent %q", agent.Name)
+		return nil, fmt.Errorf("no URL configured for judge agent %q", agent.Name)
 	}
 	return &Judge{
 		URL:    strings.TrimRight(agent.URL, "/"),
@@ -271,9 +285,56 @@ func parseJudgeScores(content string) ([]JudgeScore, error) {
 
 	var scores []JudgeScore
 	if err := json.Unmarshal([]byte(jsonStr), &scores); err != nil {
-		return nil, fmt.Errorf("unmarshalling judge scores JSON: %w (input: %s)", err, truncate(jsonStr, 200))
+		// Judge models routinely emit literal, unescaped '"' inside the
+		// "reasoning" string (e.g. quoting a Go error message or identifier)
+		// despite being told not to. Retry once against a repaired string
+		// before giving up.
+		if err2 := json.Unmarshal([]byte(repairUnescapedQuotes(jsonStr)), &scores); err2 != nil {
+			return nil, fmt.Errorf("unmarshalling judge scores JSON: %w (input: %s)", err, truncate(jsonStr, 200))
+		}
 	}
 	return scores, nil
+}
+
+// repairUnescapedQuotes fixes a common LLM JSON mistake: a '"' inside a
+// string value that was meant literally rather than as the string's
+// terminator. It walks the input tracking whether it's inside a string, and
+// treats a '"' as a real terminator only when it's immediately followed (after
+// optional whitespace) by a JSON structural character (',', '}', ']', ':') or
+// the end of input; otherwise it escapes the quote in place.
+func repairUnescapedQuotes(s string) string {
+	var out strings.Builder
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString && c == '\\' && i+1 < len(s) {
+			out.WriteByte(c)
+			out.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		if c != '"' {
+			out.WriteByte(c)
+			continue
+		}
+		if !inString {
+			inString = true
+			out.WriteByte(c)
+			continue
+		}
+		j := i + 1
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+			j++
+		}
+		if j >= len(s) || strings.ContainsRune(",}]:", rune(s[j])) {
+			inString = false
+			out.WriteByte(c)
+			continue
+		}
+		out.WriteByte('\\')
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 // WeightedScore computes the weighted average: sum(score * weight) / sum(weight).

@@ -1,4 +1,4 @@
-package main
+package eval
 
 import (
 	"context"
@@ -7,20 +7,22 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scoutme/milk/eval"
 	"github.com/spf13/cobra"
 )
 
-func main() {
+// Command builds the "eval" command tree: run scenarios against agent
+// adapters, judge results, and generate comparison reports. Mounted as a
+// subcommand of the main milk CLI (`milk eval ...`).
+func Command() *cobra.Command {
 	var listAdapters bool
 
 	root := &cobra.Command{
-		Use:   "milk-eval",
+		Use:   "eval",
 		Short: "Agent evaluation harness for milk",
 		Long:  "Run scenarios against agent adapters, judge results, and generate comparison reports.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listAdapters {
-				names := eval.List()
+				names := List()
 				if len(names) == 0 {
 					fmt.Println("No adapters registered.")
 					return nil
@@ -29,8 +31,8 @@ func main() {
 				for _, n := range names {
 					fmt.Printf("  %s\n", n)
 				}
-				fmt.Printf("\nUsage: milk-eval run --agents %s\n", strings.Join(names, ","))
-				fmt.Println("With args: milk-eval run --agents \"milk-tui[--agent,mimo-local]\"")
+				fmt.Printf("\nUsage: milk eval run --agents %s\n", strings.Join(names, ","))
+				fmt.Println("With args: milk eval run --agents \"milk-tui[--agent,mimo-local]\"")
 				return nil
 			}
 			return cmd.Help()
@@ -39,26 +41,25 @@ func main() {
 
 	root.Flags().BoolVar(&listAdapters, "list", false, "List available agent adapters")
 
-	root.AddCommand(runCmd())
-	root.AddCommand(judgeCmd())
-	root.AddCommand(reportCmd())
+	root.AddCommand(evalRunCmd())
+	root.AddCommand(evalJudgeCmd())
+	root.AddCommand(evalReportCmd())
 
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return root
 }
 
 // ---------------------------------------------------------------------------
 // run subcommand
 // ---------------------------------------------------------------------------
 
-func runCmd() *cobra.Command {
+func evalRunCmd() *cobra.Command {
 	var (
 		scenarioDir string
 		agents      string
 		category    string
 		multiTurn   bool
 		resultsDir  string
+		judgeAgent  string
 	)
 
 	cmd := &cobra.Command{
@@ -70,14 +71,14 @@ func runCmd() *cobra.Command {
 			// Parse agent names.
 			agentNames := parseCommaList(agents)
 			if len(agentNames) == 0 {
-				agentNames = eval.List()
+				agentNames = List()
 			}
 			if len(agentNames) == 0 {
 				return fmt.Errorf("no adapters registered; import adapter packages for side effects")
 			}
 
 			// Create harness.
-			h, err := eval.NewHarness(agentNames)
+			h, err := NewHarness(agentNames, judgeAgent)
 			if err != nil {
 				return fmt.Errorf("creating harness: %w", err)
 			}
@@ -94,7 +95,7 @@ func runCmd() *cobra.Command {
 			}
 
 			// Print summary report to stdout.
-			report := eval.GenerateReport(results)
+			report := GenerateReport(results)
 			fmt.Println(report)
 
 			return nil
@@ -106,6 +107,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&category, "category", "", "filter by category name")
 	cmd.Flags().BoolVar(&multiTurn, "multi-turn", false, "only run multi-turn scenarios")
 	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "output directory for results")
+	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 
 	return cmd
 }
@@ -114,10 +116,11 @@ func runCmd() *cobra.Command {
 // judge subcommand
 // ---------------------------------------------------------------------------
 
-func judgeCmd() *cobra.Command {
+func evalJudgeCmd() *cobra.Command {
 	var (
 		resultsDir  string
 		scenarioDir string
+		judgeAgent  string
 	)
 
 	cmd := &cobra.Command{
@@ -127,11 +130,11 @@ func judgeCmd() *cobra.Command {
 			ctx := context.Background()
 
 			// Load scenarios for rubric lookup.
-			scenarios, err := eval.LoadScenarios(scenarioDir)
+			scenarios, err := LoadScenarios(scenarioDir)
 			if err != nil {
 				return fmt.Errorf("loading scenarios: %w", err)
 			}
-			scenarioMap := make(map[string]eval.Scenario, len(scenarios))
+			scenarioMap := make(map[string]Scenario, len(scenarios))
 			for _, s := range scenarios {
 				scenarioMap[s.Name] = s
 			}
@@ -143,7 +146,7 @@ func judgeCmd() *cobra.Command {
 			}
 
 			// Create judge.
-			judge, err := eval.NewJudgeFromConfig()
+			judge, err := NewJudgeFromConfig(judgeAgent)
 			if err != nil {
 				return fmt.Errorf("creating judge: %w", err)
 			}
@@ -163,7 +166,7 @@ func judgeCmd() *cobra.Command {
 						continue
 					}
 					ar.Scores = scores
-					ar.WeightedScore = eval.WeightedScore(scores, scenario.Rubric)
+					ar.WeightedScore = WeightedScore(scores, scenario.Rubric)
 					sr.AgentResults[agentName] = ar
 				}
 				results[i] = sr
@@ -175,7 +178,7 @@ func judgeCmd() *cobra.Command {
 			}
 
 			// Print report.
-			report := eval.GenerateReport(results)
+			report := GenerateReport(results)
 			fmt.Println(report)
 
 			return nil
@@ -184,6 +187,7 @@ func judgeCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "results directory from a prior run")
 	cmd.Flags().StringVar(&scenarioDir, "scenarios", "eval/scenarios", "scenario files directory for rubric lookup")
+	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 
 	return cmd
 }
@@ -192,7 +196,7 @@ func judgeCmd() *cobra.Command {
 // report subcommand
 // ---------------------------------------------------------------------------
 
-func reportCmd() *cobra.Command {
+func evalReportCmd() *cobra.Command {
 	var (
 		resultsDir string
 		outputFile string
@@ -212,12 +216,12 @@ func reportCmd() *cobra.Command {
 
 			var report string
 			if jsonFmt {
-				data := eval.GenerateJSON(results)
+				data := GenerateJSON(results)
 				report = string(data)
 			} else if cacheOnly {
-				report = eval.GenerateCacheReport(results)
+				report = GenerateCacheReport(results)
 			} else {
-				report = eval.GenerateReport(results)
+				report = GenerateReport(results)
 			}
 
 			// Write output.
@@ -248,7 +252,7 @@ func reportCmd() *cobra.Command {
 
 // writeResults persists ScenarioResults as JSON. Each scenario gets its own
 // directory with a result file per agent.
-func writeResults(dir string, results []eval.ScenarioResult) error {
+func writeResults(dir string, results []ScenarioResult) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating results dir: %w", err)
 	}
@@ -267,14 +271,14 @@ func writeResults(dir string, results []eval.ScenarioResult) error {
 }
 
 // loadResults reads ScenarioResults from a results directory.
-func loadResults(dir string) ([]eval.ScenarioResult, error) {
+func loadResults(dir string) ([]ScenarioResult, error) {
 	resultsFile := dir + "/results.json"
 	data, err := os.ReadFile(resultsFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", resultsFile, err)
 	}
 
-	var results []eval.ScenarioResult
+	var results []ScenarioResult
 	if err := json.Unmarshal(data, &results); err != nil {
 		return nil, fmt.Errorf("parsing results JSON: %w", err)
 	}
@@ -286,18 +290,36 @@ func loadResults(dir string) ([]eval.ScenarioResult, error) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// parseCommaList splits a comma-separated string into trimmed, non-empty tokens.
+// parseCommaList splits a comma-separated string into trimmed, non-empty
+// tokens, treating "[...]" adapter-arg brackets as atomic — a comma inside
+// brackets (e.g. "claude-code[--cache-cooldown,5m]") does not split the token.
 func parseCommaList(s string) []string {
 	if s == "" {
 		return nil
 	}
-	parts := strings.Split(s, ",")
 	var result []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
+	depth := 0
+	start := 0
+	flush := func(end int) {
+		if tok := strings.TrimSpace(s[start:end]); tok != "" {
+			result = append(result, tok)
 		}
 	}
+	for i, r := range s {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				flush(i)
+				start = i + 1
+			}
+		}
+	}
+	flush(len(s))
 	return result
 }

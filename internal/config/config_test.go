@@ -66,6 +66,37 @@ func TestActiveAgent_EmptyConfigReturnsZero(t *testing.T) {
 	}
 }
 
+func TestAgentByName_Found(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{
+			{Name: "first", URL: "http://first", Model: "m1"},
+			{Name: "second", URL: "http://second", Model: "m2", Provider: "bedrock"},
+		},
+	}
+	got, ok := cfg.AgentByName("SECOND")
+	if !ok || got.URL != "http://second" || got.Provider != "bedrock" {
+		t.Fatalf("expected second/bedrock, got %+v ok=%v", got, ok)
+	}
+}
+
+func TestAgentByName_NotFound(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentConfig{{Name: "only", URL: "http://only", Model: "m"}},
+	}
+	_, ok := cfg.AgentByName("missing")
+	if ok {
+		t.Fatal("expected ok=false for unknown agent name")
+	}
+}
+
+func TestAgentByName_BuiltinClaudeCLI(t *testing.T) {
+	cfg := Config{}
+	got, ok := cfg.AgentByName("claude")
+	if !ok || !got.IsCLI() {
+		t.Fatalf("expected built-in claude-cli agent, got %+v ok=%v", got, ok)
+	}
+}
+
 func TestEscalationAgentConfig_DefaultClaude(t *testing.T) {
 	cfg := Config{}
 	got := cfg.EscalationAgentConfig()

@@ -63,7 +63,7 @@ type milkTokenUsage struct {
 	CacheCreation int64  `json:"cache_creation,omitempty"`
 }
 
-func (a *milkAdapter) Name() string         { return "milk-tui" }
+func (a *milkAdapter) Name() string          { return "milk-tui" }
 func (a *milkAdapter) SetArgs(args []string) { a.extraArgs = args }
 
 func (a *milkAdapter) Start(ctx context.Context, workdir string) error {

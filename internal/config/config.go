@@ -1155,6 +1155,17 @@ func (c Config) ActiveAgent() AgentConfig {
 	return AgentConfig{}
 }
 
+// AgentByName looks up an agent by name (case-insensitive), including the
+// built-in claude-cli entry. Reports false if no agent with that name exists.
+func (c Config) AgentByName(name string) (AgentConfig, bool) {
+	for _, a := range c.effectiveAgents() {
+		if strings.EqualFold(a.Name, name) {
+			return a, true
+		}
+	}
+	return AgentConfig{}, false
+}
+
 // EscalationAgentConfig returns the AgentConfig for the escalation backend.
 // Defaults to the built-in claude-cli entry when EscalationAgent is empty or "claude".
 func (c Config) EscalationAgentConfig() AgentConfig {

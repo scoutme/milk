@@ -19,9 +19,10 @@ type Harness struct {
 }
 
 // NewHarness creates a Harness from adapter specs. The judge is created from
-// the milk config (primary agent URL and model).
+// the milk config; judgeAgent names the agent to judge with, or "" for the
+// primary agent (same resolution milk itself uses).
 // Adapter specs support args: "milk-tui[--agent,mimo-local]"
-func NewHarness(adapterSpecs []string) (*Harness, error) {
+func NewHarness(adapterSpecs []string, judgeAgent string) (*Harness, error) {
 	var adapters []AgentAdapter
 	for _, spec := range adapterSpecs {
 		name, args := ParseAdapterSpec(spec)
@@ -33,7 +34,7 @@ func NewHarness(adapterSpecs []string) (*Harness, error) {
 		adapters = append(adapters, a)
 	}
 
-	judge, err := NewJudgeFromConfig()
+	judge, err := NewJudgeFromConfig(judgeAgent)
 	if err != nil {
 		return nil, fmt.Errorf("creating judge: %w", err)
 	}
@@ -224,6 +225,7 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 		result, err := adapter.RunPrompt(ctx, turn.Prompt)
 		if err != nil {
 			result.Error = err
+			fmt.Fprintf(os.Stderr, "  ERROR: %s/%s turn failed: %v\n", scenario.Name, adapter.Name(), err)
 		}
 		results = append(results, result)
 	}

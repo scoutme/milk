@@ -305,6 +305,18 @@ func TestParseJudgeScores_NoArray(t *testing.T) {
 	}
 }
 
+func TestParseJudgeScores_UnescapedQuoteInReasoning(t *testing.T) {
+	input := `[{"criterion": "correctness", "score": 1.0, "reasoning": "checks port with "if c.Port < 1"` +
+		` before returning"}]`
+	scores, err := parseJudgeScores(input)
+	if err != nil {
+		t.Fatalf("parseJudgeScores() error: %v", err)
+	}
+	if len(scores) != 1 || scores[0].Score != 1.0 || scores[0].Criterion != "correctness" {
+		t.Errorf("got %+v", scores)
+	}
+}
+
 func TestJudgeScore_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model not loaded", http.StatusServiceUnavailable)
