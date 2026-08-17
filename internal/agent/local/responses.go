@@ -177,13 +177,18 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 		attribute.String("agent", role),
 		attribute.String("provider", "responses"),
 	)
-	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	// See the matching comment in streamCompletion (local.go): promptTokens here
+	// is the TOTAL input including cached tokens, not additive with cacheRead —
+	// normalize to fresh-only so it matches the convention every downstream
+	// consumer (session, obs, status bar, memory panel) already assumes.
+	freshPrompt := max(promptTokens-cacheRead, 0)
+	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
 	if a.onTokens != nil {
 		// cacheCreation is always 0: the Responses API, like Chat Completions,
 		// reports cache reads only. See input_tokens_details.cached_tokens
 		// (inferred from OpenAI's public Responses API docs — not live-verified
 		// against a Responses-API provider; safe because it's ignored when absent).
-		a.onTokens(a.model, role, promptTokens, completionTokens, cacheRead, 0)
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
 	}
 
 	if det.Format != ToolFormatUnknown {

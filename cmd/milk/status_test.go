@@ -18,7 +18,10 @@ import (
 
 func TestHeaderBar_ShowsCachePercentage(t *testing.T) {
 	sess := &session.Session{ID: "abcdef1234"}
-	// 300 read + 100 creation → 400 total, 75% hit rate.
+	// Hit rate is cacheRead / (prompt + cacheRead + cacheCreation), i.e. against
+	// TOTAL input tokens, not just cacheRead+cacheCreation: 300 / (1000+300+100)
+	// = 21.4% -> 21%. (Not 300/(300+100)=75%, which ignores the 1000 genuinely
+	// fresh prompt tokens and would overstate the hit rate.)
 	sess.AddTokensFull("test-model", "primary", 1000, 20, 300, 100)
 
 	m := &model{
@@ -30,8 +33,8 @@ func TestHeaderBar_ShowsCachePercentage(t *testing.T) {
 	}
 
 	bar := stripANSI(m.headerBar())
-	if !strings.Contains(bar, "cache:75%") {
-		t.Errorf("want headerBar to contain %q, got %q", "cache:75%", bar)
+	if !strings.Contains(bar, "cache:21%") {
+		t.Errorf("want headerBar to contain %q, got %q", "cache:21%", bar)
 	}
 }
 

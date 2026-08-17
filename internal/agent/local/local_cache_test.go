@@ -32,6 +32,10 @@ func sseServerWithUsage(t *testing.T, text, usageJSON string) *httptest.Server {
 // mimo-pro-local, both chat-completions streaming and non-streaming shapes),
 // the value reaches the onTokens callback as cacheRead, with cacheCreation
 // always 0 (OpenAI-style automatic caching reports no write/creation size).
+// prompt_tokens (619) is the TOTAL input including the 576 cached tokens, not
+// additive with them — onTokens must receive the fresh-only remainder (43),
+// matching the additive convention (prompt + cacheRead + cacheCreation ==
+// total input) every downstream consumer assumes.
 func TestOnTokens_CachedTokensReported(t *testing.T) {
 	srv := sseServerWithUsage(t, "hello",
 		`{"completion_tokens":17,"prompt_tokens":619,"prompt_tokens_details":{"cached_tokens":576}}`)
@@ -55,8 +59,8 @@ func TestOnTokens_CachedTokensReported(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("want onTokens called once, got %d", calls)
 	}
-	if gotPrompt != 619 || gotCompletion != 17 {
-		t.Errorf("want prompt=619 completion=17, got prompt=%d completion=%d", gotPrompt, gotCompletion)
+	if gotPrompt != 43 || gotCompletion != 17 {
+		t.Errorf("want prompt=43 (619 total - 576 cached) completion=17, got prompt=%d completion=%d", gotPrompt, gotCompletion)
 	}
 	if gotCacheRead != 576 {
 		t.Errorf("want cacheRead=576, got %d", gotCacheRead)

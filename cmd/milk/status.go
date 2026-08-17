@@ -34,8 +34,13 @@ func (m *model) headerBar() string {
 		totalCacheCreation += u.CacheCreation
 	}
 	sessLabel := fmt.Sprintf("sess:%s (total:↑%s↓%s)", sessID, formatTokenCount(totalPrompt), formatTokenCount(totalCompletion))
-	if cacheTotal := totalCacheRead + totalCacheCreation; cacheTotal > 0 {
-		hitPct := int(100 * float64(totalCacheRead) / float64(cacheTotal))
+	if cacheActivity := totalCacheRead + totalCacheCreation; cacheActivity > 0 {
+		// Denominator is total input tokens (fresh prompt + cacheRead +
+		// cacheCreation), not just cacheRead+cacheCreation — otherwise a provider
+		// that never reports cacheCreation (e.g. OpenAI-style automatic caching)
+		// would always show 100% whenever cacheRead > 0, regardless of how much
+		// genuinely-fresh input there was.
+		hitPct := int(100 * float64(totalCacheRead) / float64(totalPrompt+cacheActivity))
 		sessLabel += fmt.Sprintf(" cache:%d%%", hitPct)
 	}
 	const repoURL = "github.com/scoutme/milk"
@@ -231,9 +236,10 @@ func (m *model) statusTokens() string {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion)))
 	}
 	if role == "escalation" {
-		cacheTotal := m.escalationCacheRead + m.escalationCacheCreation
-		if cacheTotal > 0 {
-			hitPct := int(100 * float64(m.escalationCacheRead) / float64(cacheTotal))
+		// Same fresh-prompt-inclusive denominator as headerBar's cache:NN% — see
+		// the comment there for why cacheRead+cacheCreation alone is wrong.
+		if cacheActivity := m.escalationCacheRead + m.escalationCacheCreation; cacheActivity > 0 {
+			hitPct := int(100 * float64(m.escalationCacheRead) / float64(prompt+cacheActivity))
 			parts = append(parts, fmt.Sprintf("cache:%s/%s(%d%%)",
 				formatTokenCount(m.escalationCacheRead),
 				formatTokenCount(m.escalationCacheCreation),

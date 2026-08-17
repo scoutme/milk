@@ -205,12 +205,17 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s  %10s  %10s  %6s\n", "role", "model", "prompt", "completion", "total", "cache_read", "cache_wrt", "hit%")
 		fmt.Fprintln(&b, rule)
 	}
-	hitRate := func(read, creation int64) string {
-		total := read + creation
+	// hitRate is the fraction of TOTAL input tokens (fresh prompt + cacheRead +
+	// cacheCreation) served from cache. prompt must already be fresh-only (not
+	// inclusive of cacheRead) — every provider path normalizes to that
+	// convention before recording, so cacheRead/cacheCreation are additive with
+	// it, not a subset of it.
+	hitRate := func(prompt float64, read, creation int64) string {
+		total := prompt + float64(read+creation)
 		if total == 0 {
 			return "—"
 		}
-		return fmt.Sprintf("%.1f%%", 100*float64(read)/float64(total))
+		return fmt.Sprintf("%.1f%%", 100*float64(read)/total)
 	}
 	cacheRow := func(read, creation int64) (string, string) {
 		if read == 0 && creation == 0 {
@@ -221,7 +226,7 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 	footer := func(p, c float64, cacheRead, cacheCreation int64) {
 		cr, cw := cacheRow(cacheRead, cacheCreation)
 		fmt.Fprintln(&b, rule)
-		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", "total", p, c, p+c, cr, cw, hitRate(cacheRead, cacheCreation))
+		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", "total", p, c, p+c, cr, cw, hitRate(p, cacheRead, cacheCreation))
 	}
 	header("token usage (cumulative):")
 	var grandPrompt, grandCompletion float64
@@ -232,7 +237,7 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		grandCacheRead += r.cacheRead
 		grandCacheCreation += r.cacheCreation
 		cr, cw := cacheRow(r.cacheRead, r.cacheCreation)
-		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion, cr, cw, hitRate(r.cacheRead, r.cacheCreation))
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion, cr, cw, hitRate(r.prompt, r.cacheRead, r.cacheCreation))
 	}
 	footer(grandPrompt, grandCompletion, grandCacheRead, grandCacheCreation)
 	if len(sessEntries) > 0 {
@@ -241,7 +246,7 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		var sCacheRead, sCacheCreation int64
 		for _, e := range sessEntries {
 			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(e.CacheRead, e.CacheCreation))
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation))
 			sp += float64(e.Prompt)
 			sc += float64(e.Completion)
 			sCacheRead += e.CacheRead
@@ -256,7 +261,7 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		var pCacheRead, pCacheCreation int64
 		for _, e := range procEntries {
 			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(e.CacheRead, e.CacheCreation))
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation))
 			pp += float64(e.Prompt)
 			pc += float64(e.Completion)
 			pCacheRead += e.CacheRead

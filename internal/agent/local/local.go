@@ -1391,12 +1391,20 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		attribute.String("agent", role),
 		attribute.String("provider", "local"),
 	)
-	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	// OpenAI-compatible automatic caching (mirrored by providers such as MiMo)
+	// reports prompt_tokens as the TOTAL input including cached tokens — cacheRead
+	// is a subset of promptTokens, not additive to it. Every downstream consumer
+	// (session, obs, status bar, memory panel) assumes the Anthropic-style
+	// additive convention instead: prompt(fresh) + cacheRead + cacheCreation ==
+	// total input. Subtract here, once, so that invariant holds regardless of
+	// which provider produced the numbers.
+	freshPrompt := max(promptTokens-cacheRead, 0)
+	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
 	if a.onTokens != nil {
 		// cacheCreation is always 0 here: OpenAI-compatible automatic caching
 		// (mirrored by other providers such as MiMo) reports cache-read hits via
 		// prompt_tokens_details.cached_tokens but never a write/creation size.
-		a.onTokens(a.model, role, promptTokens, completionTokens, cacheRead, 0)
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
 	}
 
 	if det.Format != ToolFormatUnknown {
