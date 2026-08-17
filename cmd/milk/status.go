@@ -68,7 +68,16 @@ func (m *model) headerBar() string {
 // statusBar renders the one-line status bar.
 func (m *model) statusBar() string {
 	tokenStr := m.statusTokens()
-	left := fmt.Sprintf(" %s  %s%s", dim("role:")+dim(sessionRole(m.st.sess.State)), dim("agent:")+m.statusAgent(), tokenStr)
+	// When a permission prompt is active, avoid dim() — its ANSI reset (\033[0m)
+	// kills the yellow background that styleStatusBarPerm sets.
+	isPerm := m.pendingPerm != nil
+	rolePart := "role:" + sessionRole(m.st.sess.State)
+	agentPart := "agent:" + m.statusAgent()
+	if !isPerm {
+		rolePart = dim(rolePart)
+		agentPart = dim("agent:") + m.statusAgent()
+	}
+	left := fmt.Sprintf(" %s  %s%s", rolePart, agentPart, tokenStr)
 	right := ""
 	if m.updateInstalling {
 		pct := ""
@@ -79,7 +88,11 @@ func (m *model) statusBar() string {
 	} else if m.pendingUpdate != nil {
 		right += yellow("⬆ " + m.pendingUpdate.Tag + " available — /update install ")
 	}
-	right += dim(m.statusCwd() + " ")
+	if isPerm {
+		right += m.statusCwd() + " "
+	} else {
+		right += dim(m.statusCwd() + " ")
+	}
 	if m.credRefreshing {
 		left += dim(" [refreshing " + m.credLabel + " credentials…]")
 	} else if m.credStatus != "" {
@@ -194,7 +207,9 @@ func (m *model) statusAgent() string {
 		if lbl == "" {
 			lbl = "[allow?]"
 		}
-		return "? " + agent + " " + lbl
+		// Don't use dim() here — its ANSI reset kills the yellow background
+		// that styleStatusBarPerm sets.
+		return "? " + agentLabel(m.st) + " " + lbl
 	}
 	if m.busy {
 		frame := yellow(bold(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]))
