@@ -87,3 +87,76 @@ func TestHeaderBar_SubagentWorkflowTokens(t *testing.T) {
 		t.Errorf("want headerBar with cache:31%% (all roles combined), got %q", bar)
 	}
 }
+
+// TestStatusTokens_CacheWithCreation verifies the status bar displays
+// cache:read/creation(hit%) with non-zero creation tokens, proving the
+// full format works when the provider reports cache creation.
+func TestStatusTokens_CacheWithCreation(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy: false,
+		// Simulate a session where cache creation happened (e.g. first turn
+		// with Bedrock explicit caching, or a fresh system prompt being written
+		// to the prompt cache).
+		escalationPrompt:       1000,
+		escalationComp:         200,
+		escalationCacheRead:    500,
+		escalationCacheCreation: 100,
+		lastTokenRole:          "escalation",
+	}
+	m.st.activeFallbackTarget = "escalation"
+
+	bar := stripANSI(m.statusTokens())
+	// cache:500/100(25%) — 500 read, 100 creation, hit rate = 500/(1000+500+100) = 31%
+	// Actually: 500 / (1000 + 600) = 31.25% -> 31%
+	if !strings.Contains(bar, "cache:") {
+		t.Errorf("want cache segment, got %q", bar)
+	}
+	if !strings.Contains(bar, "/") {
+		t.Errorf("want read/creation format with '/', got %q", bar)
+	}
+	if !strings.Contains(bar, "500") {
+		t.Errorf("want cache read 500 in display, got %q", bar)
+	}
+	if !strings.Contains(bar, "100") {
+		t.Errorf("want cache creation 100 in display, got %q", bar)
+	}
+}
+
+// TestStatusTokens_CacheZeroCreation verifies the status bar displays
+// cache:read(hit%) without the /creation part when creation is zero
+// (the common case with Claude Code CLI which uses implicit caching).
+func TestStatusTokens_CacheZeroCreation(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy: false,
+		// Claude Code CLI: system prompt cached on turn 1, subsequent turns
+		// only read from cache. Creation is always 0.
+		escalationPrompt:       2000,
+		escalationComp:         300,
+		escalationCacheRead:    800,
+		escalationCacheCreation: 0,
+		lastTokenRole:          "escalation",
+	}
+	m.st.activeFallbackTarget = "escalation"
+
+	bar := stripANSI(m.statusTokens())
+	// cache:800(28%) — no /0 since creation is zero
+	if !strings.Contains(bar, "cache:") {
+		t.Errorf("want cache segment, got %q", bar)
+	}
+	if strings.Contains(bar, "/") {
+		t.Errorf("want no / when creation is zero, got %q", bar)
+	}
+	if !strings.Contains(bar, "800") {
+		t.Errorf("want cache read 800 in display, got %q", bar)
+	}
+}

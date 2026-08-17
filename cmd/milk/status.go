@@ -240,10 +240,16 @@ func (m *model) statusTokens() string {
 		// the comment there for why cacheRead+cacheCreation alone is wrong.
 		if cacheActivity := m.escalationCacheRead + m.escalationCacheCreation; cacheActivity > 0 {
 			hitPct := int(100 * float64(m.escalationCacheRead) / float64(prompt+cacheActivity))
-			parts = append(parts, fmt.Sprintf("cache:%s/%s(%d%%)",
-				formatTokenCount(m.escalationCacheRead),
-				formatTokenCount(m.escalationCacheCreation),
-				hitPct))
+			if m.escalationCacheCreation > 0 {
+				parts = append(parts, fmt.Sprintf("cache:%s/%s(%d%%)",
+					formatTokenCount(m.escalationCacheRead),
+					formatTokenCount(m.escalationCacheCreation),
+					hitPct))
+			} else {
+				parts = append(parts, fmt.Sprintf("cache:%s(%d%%)",
+					formatTokenCount(m.escalationCacheRead),
+					hitPct))
+			}
 		}
 	}
 	return "  " + dim(strings.Join(parts, "  "))
