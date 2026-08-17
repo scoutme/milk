@@ -13,6 +13,7 @@ milk is a terminal AI assistant that routes each prompt between a fast primary a
 - **Persistent memory** — a Percept store survives across sessions; key facts are reinforced, decay, and promote to long-term memory over time (NREM consolidation)
 - **Built-in tools** — the primary agent has bash, file read/write/edit, grep, find, HTTP GET, session access, and memory tools without any extra configuration
 - **Streaming TUI** — bubbletea terminal UI with a scrollable transcript, live memory panel, status bar, and input history
+- **Loop detection** — monitors agent output for repeating patterns; warns in the status bar and auto-interrupts when the agent gets stuck looping (configurable, works with all providers)
 - **Aider and smolagents** — plug in aider-chat or smolagents as either the primary or escalation agent
 - **Evaluation harness** — run the same scenarios against different agents (or against the Claude Code CLI directly) and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side (`milk eval`)
 

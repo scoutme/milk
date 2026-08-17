@@ -932,6 +932,61 @@ milk relays tokens to stdout as they arrive.
 
 ---
 
+## Loop Detection
+
+milk monitors agent output for signs of looping — when an LLM gets stuck repeating the same phrase, tool call, or response pattern. This prevents runaway token consumption when the user doesn't notice and interrupt manually.
+
+### Signals
+
+| Signal | Scope | What it catches | Default threshold |
+|---|---|---|---|
+| `chunk_repetition` | Intra-turn | Same text repeating in streaming output | 3 occurrences in 50-chunk window |
+| `response_repetition` | Cross-turn | Identical/near-identical responses across turns | 3 consecutive similar responses |
+| `token_velocity` | Cross-turn | Rapid token consumption without progress | 50k tokens in 30s window |
+| `tool_call_echo` | Cross-turn | Same tool+args in consecutive turns | 3 consecutive turns |
+| `silent_burn` | Per-turn | High input tokens, near-zero output | 20k input tokens |
+| `turn_flood` | Session | Excessive turns without user input | 10 consecutive non-user turns |
+
+### How it works
+
+**Intra-turn** (the primary use case): every streaming chunk passes through `FeedChunk()`, which maintains a ring buffer of the last 50 chunks. When the same text appears 3+ times, the signal fires at confidence 0.9 and the turn is auto-interrupted via `cancelTurn()`. This catches the common case where an agent repeats a phrase or tool call forever within a single turn.
+
+**Cross-turn**: after each turn completes, `Feed()` checks response similarity (trigram Jaccard), token velocity, tool call patterns, and turn count. These catch patterns across consecutive turns.
+
+### TUI behavior
+
+- **Status bar**: shows `⚠ loop — auto-interrupting` when a high-confidence signal fires, or `⚠ <signal>` for medium-confidence warnings
+- **Transcript**: logs `[⚠ loop detected: <signal> (confidence N%)]` for high-confidence signals
+- **User turn**: resets all warnings and the turn-flood counter
+
+### Configuration
+
+```json
+{
+  "loop_detection": {
+    "enabled": true,
+    "chunk_repetition_threshold": 3,
+    "chunk_window_size": 50,
+    "max_consecutive_similar_responses": 3,
+    "response_similarity_threshold": 0.85,
+    "token_velocity_window_seconds": 30,
+    "token_velocity_threshold": 50000,
+    "max_silent_burn_tokens": 20000,
+    "max_consecutive_turns_without_user": 10,
+    "tool_echo_threshold": 3,
+    "auto_interrupt": false
+  }
+}
+```
+
+Default: detection ON, auto-interrupt OFF (warn only). Set `auto_interrupt: true` for unattended sessions where the user wants the agent to stop looping automatically.
+
+### Provider compatibility
+
+Loop detection works universally for all providers — local inference servers, Claude Code CLI, Bedrock, aider, smolagents, and any Bearer-token backend. The intra-turn chunk monitor sits at the TUI layer, so it catches loops regardless of which agent is running.
+
+---
+
 ## Backlog
 
 - Planning mode (offline, no LLM execution)
