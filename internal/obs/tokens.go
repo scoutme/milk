@@ -116,11 +116,40 @@ func SessionTokensByRole(role string) (prompt, completion int64) {
 	return
 }
 
+// SessionTokensByRolePrefix sums prompt and completion tokens for all roles
+// matching the prefix (exact or colon-separated sub-roles). E.g. prefix
+// "escalation" matches "escalation", "escalation:subagent", "escalation:workflow".
+func SessionTokensByRolePrefix(prefix string) (prompt, completion int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == prefix || strings.HasPrefix(e.Agent, prefix+":") {
+			prompt += e.Prompt
+			completion += e.Completion
+		}
+	}
+	return
+}
+
 func SessionCacheByRole(role string) (cacheRead, cacheCreation int64) {
 	sessionAccumulator.mu.Lock()
 	defer sessionAccumulator.mu.Unlock()
 	for _, e := range sessionAccumulator.entries {
 		if e.Agent == role {
+			cacheRead += e.CacheRead
+			cacheCreation += e.CacheCreation
+		}
+	}
+	return
+}
+
+// SessionCacheByRolePrefix sums cache tokens for all roles matching the prefix
+// (exact or colon-separated sub-roles). Mirrors SessionTokensByRolePrefix.
+func SessionCacheByRolePrefix(prefix string) (cacheRead, cacheCreation int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == prefix || strings.HasPrefix(e.Agent, prefix+":") {
 			cacheRead += e.CacheRead
 			cacheCreation += e.CacheCreation
 		}

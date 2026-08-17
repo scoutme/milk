@@ -706,8 +706,8 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	obs.IncrementTurnCount()
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
-	newEscPrompt, newEscComp := obs.SessionTokensByRole("escalation")
-	newEscCacheRead, newEscCacheCreation := obs.SessionCacheByRole("escalation")
+	newEscPrompt, newEscComp := obs.SessionTokensByRolePrefix("escalation")
+	newEscCacheRead, newEscCacheCreation := obs.SessionCacheByRolePrefix("escalation")
 	// Compute per-role per-turn deltas from the accumulators.
 	m.lastTurnPrompt["escalation"] = newEscPrompt - m.escalationPrompt
 	m.lastTurnCompletion["escalation"] = newEscComp - m.escalationComp
