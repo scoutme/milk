@@ -1,5 +1,7 @@
 # Eval Harness — Implementation Spec
 
+> **Historical planning doc.** Written before the harness was built; the CLI entry point it describes (`eval/cmd/milk-eval/`) was later merged into `milk eval` as a subcommand of the main binary. For current usage — commands, scenario format, adapters and their per-adapter options, judging, reports — see [docs/eval.md](eval.md). Kept as a record of the original design, not maintained in sync with the implementation.
+
 ## Module and package layout
 
 ```

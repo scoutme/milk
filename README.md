@@ -14,6 +14,7 @@ milk is a terminal AI assistant that routes each prompt between a fast primary a
 - **Built-in tools** — the primary agent has bash, file read/write/edit, grep, find, HTTP GET, session access, and memory tools without any extra configuration
 - **Streaming TUI** — bubbletea terminal UI with a scrollable transcript, live memory panel, status bar, and input history
 - **Aider and smolagents** — plug in aider-chat or smolagents as either the primary or escalation agent
+- **Evaluation harness** — run the same scenarios against different agents (or against the Claude Code CLI directly) and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side (`milk eval`)
 
 ## Backends
 
@@ -55,6 +56,19 @@ milk exports OpenTelemetry signals to JSONL files under `~/.milk/otel/`. The CLI
 
 These commands are additive and do not require an external observability backend.
 
+## Evaluation
+
+`milk eval` runs the same task scenarios against whichever agents you've configured — compare your primary agent against your escalation agent, two different local models, or `milk-tui` against the raw `claude` CLI — and reports LLM-judged quality, token/cache usage, and latency side-by-side.
+
+```sh
+milk eval --list                                        # available adapters
+milk eval run --agents claude-code,milk-tui              # compare on every scenario
+milk eval run --agents "milk-tui[--agent,mimo-local]"    # pin a specific configured agent for this run
+milk eval report --results eval/results                 # re-print the last report
+```
+
+See [docs/eval.md](docs/eval.md) for scenario format, per-adapter options, and judge configuration.
+
 ## Prerequisites
 
 - Go 1.21+ (build from source only; pre-built binaries available)
@@ -62,4 +76,4 @@ These commands are additive and do not require an external observability backend
 - `aider-chat` pip package — only if using the `aider-cli` provider
 - `smolagents[litellm]` pip package — only if using the `subprocess`/smolagent provider
 
-For a reference local setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific configuration see [docs/providers.md](docs/providers.md).
+For a reference local setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific configuration see [docs/providers.md](docs/providers.md). For evaluating and comparing agents see [docs/eval.md](docs/eval.md).
