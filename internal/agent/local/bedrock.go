@@ -111,6 +111,12 @@ type bedrockMetadataEvent struct {
 	Usage struct {
 		InputTokens  int64 `json:"inputTokens"`
 		OutputTokens int64 `json:"outputTokens"`
+		// CacheReadInputTokens/CacheWriteInputTokens are populated only when the
+		// request included explicit cachePoint blocks (not sent by milk yet —
+		// this is response-parsing only, per AWS's Converse API TokenUsage shape:
+		// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_TokenUsage.html
+		CacheReadInputTokens  int64 `json:"cacheReadInputTokens,omitempty"`
+		CacheWriteInputTokens int64 `json:"cacheWriteInputTokens,omitempty"`
 	} `json:"usage"`
 }
 
@@ -329,7 +335,11 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 				role := agentRoleForMetrics(a.escalationName)
 				obs.RecordTokens(ctx, a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
 				if a.onTokens != nil {
-					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+					// cacheRead/cacheCreation are 0 today since milk never sends
+					// an explicit cachePoint block yet (that's a separate,
+					// request-side sprint) — parsing them here is forward
+					// compatible and a no-op until that lands.
+					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.CacheReadInputTokens, ev.Usage.CacheWriteInputTokens)
 				}
 			}
 

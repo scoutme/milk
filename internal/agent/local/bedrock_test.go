@@ -2,10 +2,12 @@ package local
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -269,6 +271,109 @@ func TestInferenceURL_CustomChatPath(t *testing.T) {
 	want := "https://proxy.example.com/chat/completions"
 	if got := a.inferenceURL(); got != want {
 		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// --- bedrockStreamCompletion metadata usage / cache tokens ---
+
+// bedrockConverseStreamServer returns a test server that serves a converse-stream
+// response consisting of the given AWS Event Stream frames concatenated, using
+// the same frame/header encoding as readBedrockEvent's own round-trip test.
+func bedrockConverseStreamServer(t *testing.T, frames ...[]byte) *httptest.Server {
+	t.Helper()
+	var body []byte
+	for _, f := range frames {
+		body = append(body, f...)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body) //nolint:errcheck
+	}))
+}
+
+func bedrockMetadataFrame(usageJSON string) []byte {
+	headers := buildStringHeader(":event-type", "metadata")
+	return buildBedrockEventFrame(headers, []byte(`{"usage":`+usageJSON+`}`))
+}
+
+func bedrockMessageStopFrame() []byte {
+	headers := buildStringHeader(":event-type", "messageStop")
+	return buildBedrockEventFrame(headers, []byte(`{"stopReason":"end_turn"}`))
+}
+
+// TestBedrockStreamCompletion_CacheTokensReported verifies that when the
+// converse-stream metadata event's usage object includes cacheReadInputTokens
+// and cacheWriteInputTokens (as documented by AWS's Converse API TokenUsage
+// shape: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_TokenUsage.html,
+// retrieved 2026-08-17), those values reach onTokens as cacheRead/cacheCreation.
+func TestBedrockStreamCompletion_CacheTokensReported(t *testing.T) {
+	srv := bedrockConverseStreamServer(t,
+		bedrockMetadataFrame(`{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":80,"cacheWriteInputTokens":20}`),
+		bedrockMessageStopFrame(),
+	)
+	defer srv.Close()
+
+	var gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation int64
+	var calls int
+	a := &Agent{
+		baseURL: srv.URL,
+		model:   "test-model",
+		client:  srv.Client(),
+	}
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		calls++
+		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
+	}
+
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("want onTokens called once, got %d", calls)
+	}
+	if gotPrompt != 100 || gotCompletion != 50 {
+		t.Errorf("want prompt=100 completion=50, got prompt=%d completion=%d", gotPrompt, gotCompletion)
+	}
+	if gotCacheRead != 80 {
+		t.Errorf("want cacheRead=80, got %d", gotCacheRead)
+	}
+	if gotCacheCreation != 20 {
+		t.Errorf("want cacheCreation=20, got %d", gotCacheCreation)
+	}
+}
+
+// TestBedrockStreamCompletion_NoCacheFields_RegressionGuard verifies that
+// when the metadata event's usage object has no cache fields at all (today's
+// real-world case, since milk never sends an explicit cachePoint block yet),
+// cacheRead and cacheCreation are both reported as 0 with no parse error.
+func TestBedrockStreamCompletion_NoCacheFields_RegressionGuard(t *testing.T) {
+	srv := bedrockConverseStreamServer(t,
+		bedrockMetadataFrame(`{"inputTokens":100,"outputTokens":50}`),
+		bedrockMessageStopFrame(),
+	)
+	defer srv.Close()
+
+	var gotCacheRead, gotCacheCreation int64
+	var calls int
+	a := &Agent{
+		baseURL: srv.URL,
+		model:   "test-model",
+		client:  srv.Client(),
+	}
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		calls++
+		gotCacheRead, gotCacheCreation = cacheRead, cacheCreation
+	}
+
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("want onTokens called once, got %d", calls)
+	}
+	if gotCacheRead != 0 || gotCacheCreation != 0 {
+		t.Errorf("want cacheRead=0 cacheCreation=0 when cache fields are absent, got cacheRead=%d cacheCreation=%d", gotCacheRead, gotCacheCreation)
 	}
 }
 
