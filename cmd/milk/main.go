@@ -274,8 +274,8 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 		la.WithOtelDir(od)
 	}
 	la.WithLogContext(cfg.Otel.LogContext)
-	la.WithOnTokens(func(model, role string, prompt, completion int64) {
-		sess.AddTokens(model, role, prompt, completion)
+	la.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 	})
 	if lp, err := local.OpenPermStore(cwd); err == nil {
 		la.WithPermissions(lp, nil)
@@ -336,8 +336,8 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 				la.WithOtelDir(od)
 			}
 			la.WithLogContext(cfg.Otel.LogContext)
-			la.WithOnTokens(func(model, role string, prompt, completion int64) {
-				sess.AddTokens(model, role, prompt, completion)
+			la.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+				sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 			})
 			la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 			if lp, err := local.OpenPermStore(cwd); err == nil {

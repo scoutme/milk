@@ -308,6 +308,32 @@ milk --new --primary "say hi in one word"
 
 Expected: response from Haiku (or whichever model you configured).
 
+### Prompt caching (`prompt_caching`) — ⚠️ experimental, not live-tested
+
+> **Experimental.** This was implemented and unit-tested against AWS's documented Converse API
+> contract, but has **not** been exercised against a real Bedrock endpoint — no Bedrock agent was
+> available during development. The request-side gating (never sends `cachePoint` unless you opt in)
+> is verified; the actual behavior of a live Bedrock account/model/region combination is not. Enable it
+> in a non-critical setup first, and please report back if it works — or doesn't.
+>
+> Contrast with local-agent implicit caching for OpenAI-compatible providers (e.g. Xiaomi MiMo) — that
+> path *has* been live-verified end to end and needs no config flag at all.
+
+Set `"prompt_caching": true` on a `provider: "bedrock"` agent entry to opt into AWS Bedrock's explicit
+prompt caching. When enabled, milk appends a `{"cachePoint": {"type": "default"}}` block to the end of
+the Converse API `system` array, marking the system-prompt prefix as reusable across turns.
+
+This is off by default and must be opted in explicitly: sending a `cachePoint` block to a model or
+region that doesn't support prompt caching is a hard API error, not a graceful no-op. Only enable it
+for models/regions you've confirmed support Bedrock prompt caching.
+
+milk currently caches only the system-prompt prefix — it does not insert `cachePoint` blocks into
+per-message content, so repeated tool results or conversation history are not cached.
+
+Cache-hit stats appear in the same `cache:NN%` display already used for the Claude CLI escalation
+agent (and, for OpenAI-compatible providers with automatic caching, the local agent) — there is no
+separate UI surface for Bedrock's explicit caching.
+
 ### Troubleshooting
 
 | Error | Cause | Fix |
@@ -630,6 +656,7 @@ Expected: streamed response with step/observation progress visible in the TUI.
 | `aws_secret` | string | `AWS_SECRET_ACCESS_KEY` env | AWS secret access key (Bedrock only) |
 | `aws_token` | string | `AWS_SESSION_TOKEN` env | AWS session token for temporary credentials (Bedrock only) |
 | `aws_service` | string | `bedrock` | Override the SigV4 service name (Bedrock only) |
+| `prompt_caching` | bool | false | **Experimental, not live-tested** — see [Prompt caching](#prompt-caching-prompt_caching--️-experimental-not-live-tested). Append an explicit `cachePoint` block to the end of the Converse API system array (Bedrock only). Opt-in: sending `cachePoint` to a model/region that doesn't support prompt caching is a hard API error. |
 
 ### Claude CLI `agents` entry fields (`provider: "claude-cli"`)
 

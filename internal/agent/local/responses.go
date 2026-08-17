@@ -55,8 +55,11 @@ type responsesOutputItem struct {
 
 type responsesUsageBody struct {
 	Usage *struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
+		InputTokens        int64 `json:"input_tokens"`
+		OutputTokens       int64 `json:"output_tokens"`
+		InputTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"input_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -163,7 +166,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, err := a.scanResponsesSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanResponsesSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -174,9 +177,18 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 		attribute.String("agent", role),
 		attribute.String("provider", "responses"),
 	)
-	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	// See the matching comment in streamCompletion (local.go): promptTokens here
+	// is the TOTAL input including cached tokens, not additive with cacheRead —
+	// normalize to fresh-only so it matches the convention every downstream
+	// consumer (session, obs, status bar, memory panel) already assumes.
+	freshPrompt := max(promptTokens-cacheRead, 0)
+	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
 	if a.onTokens != nil {
-		a.onTokens(a.model, role, promptTokens, completionTokens)
+		// cacheCreation is always 0: the Responses API, like Chat Completions,
+		// reports cache reads only. See input_tokens_details.cached_tokens
+		// (inferred from OpenAI's public Responses API docs — not live-verified
+		// against a Responses-API provider; safe because it's ignored when absent).
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
 	}
 
 	if det.Format != ToolFormatUnknown {
@@ -193,9 +205,9 @@ func (a *Agent) scanResponsesSSE(
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, int64, int64, error) {
+) ([]toolCall, int64, int64, int64, error) {
 	dbg := a.debugLog
-	var promptTokens, completionTokens int64
+	var promptTokens, completionTokens, cacheRead int64
 	for scanner.Scan() {
 		line := scanner.Text()
 		if dbg != nil {
@@ -236,13 +248,16 @@ func (a *Agent) scanResponsesSSE(
 			if ev.Response != nil && ev.Response.Usage != nil {
 				promptTokens = ev.Response.Usage.InputTokens
 				completionTokens = ev.Response.Usage.OutputTokens
+				if ev.Response.Usage.InputTokensDetails != nil {
+					cacheRead = ev.Response.Usage.InputTokensDetails.CachedTokens
+				}
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
-	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
 }
 
 // responsesClassify classifies a prompt using the Responses API (non-streaming).

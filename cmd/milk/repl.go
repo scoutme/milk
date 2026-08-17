@@ -1308,8 +1308,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 				ist := m.st
-				newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-					ist.sess.AddTokens(model, role, prompt, completion)
+				newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+					ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 				})
 				newAgent = attachMCPToolSet(m.ctx, m.st.cfg, activeLocalAgentConfig(m.st.cfg).Name, newAgent)
 				m.agents.local = newAgent
@@ -2500,13 +2500,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Wire token persistence callbacks now that st is available; closures reference
 	// st.sess so they always write to the current session even after /new.
 	if localAgent != nil {
-		localAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-			st.sess.AddTokens(model, role, prompt, completion)
+		localAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 		})
 	}
 	if escalationLocalAgent != nil {
-		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-			st.sess.AddTokens(model, role, prompt, completion)
+		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 		})
 	}
 

@@ -154,7 +154,7 @@ func TestScanResponsesSSE_TextDelta(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 	var out strings.Builder
-	tcs, prompt, completion, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out)
+	tcs, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestScanResponsesSSE_FunctionCallAssembled(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	tcs, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	tcs, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,12 +201,59 @@ func TestScanResponsesSSE_UsageFromResponseCompleted(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	_, prompt, completion, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	_, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if prompt != 42 || completion != 7 {
 		t.Errorf("want prompt=42 completion=7, got prompt=%d completion=%d", prompt, completion)
+	}
+}
+
+// TestScanResponsesSSE_CachedTokensFromInputTokensDetails verifies that
+// input_tokens_details.cached_tokens on the response.completed event is
+// parsed into the cacheRead return value. This mirrors OpenAI's public
+// Responses API docs — not live-verified against a Responses-API provider,
+// but safe because the field is simply absent (and ignored) on providers that
+// don't report it.
+func TestScanResponsesSSE_CachedTokensFromInputTokensDetails(t *testing.T) {
+	scanner := makeSSEScanner(
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":619,"output_tokens":17,"input_tokens_details":{"cached_tokens":576}}}}`,
+		`data: [DONE]`,
+	)
+	a := &Agent{}
+	det := NewStreamDetector(ToolFormatUnknown)
+	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prompt != 619 || completion != 17 {
+		t.Errorf("want prompt=619 completion=17, got prompt=%d completion=%d", prompt, completion)
+	}
+	if cacheRead != 576 {
+		t.Errorf("want cacheRead=576, got %d", cacheRead)
+	}
+}
+
+// TestScanResponsesSSE_NoInputTokensDetails_RegressionGuard verifies that
+// when input_tokens_details is absent, cacheRead is 0 and no parse error
+// occurs.
+func TestScanResponsesSSE_NoInputTokensDetails_RegressionGuard(t *testing.T) {
+	scanner := makeSSEScanner(
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":42,"output_tokens":7}}}`,
+		`data: [DONE]`,
+	)
+	a := &Agent{}
+	det := NewStreamDetector(ToolFormatUnknown)
+	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prompt != 42 || completion != 7 {
+		t.Errorf("want prompt=42 completion=7, got prompt=%d completion=%d", prompt, completion)
+	}
+	if cacheRead != 0 {
+		t.Errorf("want cacheRead=0 when input_tokens_details absent, got %d", cacheRead)
 	}
 }
 
@@ -219,7 +266,7 @@ func TestScanResponsesSSE_SkipsBadJSON(t *testing.T) {
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
-	_, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
 	if err != nil {
 		t.Fatalf("bad JSON line must be skipped, got error: %v", err)
 	}

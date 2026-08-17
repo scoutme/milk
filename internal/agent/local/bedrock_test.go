@@ -2,10 +2,12 @@ package local
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -254,6 +256,117 @@ func init() {
 	_ = struct{}{}
 }
 
+// --- appendSystemCachePoint ---
+
+func TestAppendSystemCachePoint_EmptySystemNoOp(t *testing.T) {
+	got := appendSystemCachePoint(nil)
+	if len(got) != 0 {
+		t.Errorf("want no-op on empty system, got %+v", got)
+	}
+}
+
+func TestAppendSystemCachePoint_AppendsAfterExistingText(t *testing.T) {
+	system := []bedrockSystem{{Text: "You are helpful."}, {Text: "Be concise."}}
+	got := appendSystemCachePoint(system)
+	if len(got) != 3 {
+		t.Fatalf("want 3 entries, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "You are helpful." || got[1].Text != "Be concise." {
+		t.Errorf("prior system entries must be unchanged and precede the cachePoint: %+v", got)
+	}
+	last := got[2]
+	if last.CachePoint == nil {
+		t.Fatalf("last entry must be a cachePoint block, got %+v", last)
+	}
+	if last.Text != "" {
+		t.Errorf("cachePoint entry must not also carry text, got %q", last.Text)
+	}
+	if last.CachePoint.Type != "default" {
+		t.Errorf("want cachePoint type=default, got %q", last.CachePoint.Type)
+	}
+}
+
+// --- bedrockStreamCompletion request-side cachePoint gating ---
+
+// bedrockCapturingServer records the raw request body sent by
+// bedrockStreamCompletion and replies with a minimal valid converse-stream
+// response (messageStop only — no metadata needed for these request-shape
+// assertions).
+func bedrockCapturingServer(t *testing.T, capturedBody *[]byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		*capturedBody = b
+		w.Write(bedrockMessageStopFrame()) //nolint:errcheck
+	}))
+}
+
+// TestBedrockStreamCompletion_PromptCachingFalse_RequestUnchanged pins that
+// the default (flag absent) case sends byte-for-byte the same request body
+// as before this sprint — no cachePoint block anywhere.
+func TestBedrockStreamCompletion_PromptCachingFalse_RequestUnchanged(t *testing.T) {
+	var body []byte
+	srv := bedrockCapturingServer(t, &body)
+	defer srv.Close()
+
+	a := &Agent{baseURL: srv.URL, model: "test-model", client: srv.Client()}
+	msgs := []Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "hi"},
+	}
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want, err := json.Marshal(bedrockRequest{
+		Messages: []bedrockMessage{{Role: "user", Content: []bedrockContentBlock{{Text: "hi"}}}},
+		System:   []bedrockSystem{{Text: "You are helpful."}},
+	})
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	if string(body) != string(want) {
+		t.Errorf("promptCaching=false must send byte-for-byte the same request as before this sprint\nwant: %s\ngot:  %s", want, body)
+	}
+}
+
+// TestBedrockStreamCompletion_PromptCachingTrue_AppendsCachePoint verifies
+// that when the agent-level flag is set, the marshalled system array has the
+// cachePoint block as its last element, with prior system text unchanged and
+// preceding it.
+func TestBedrockStreamCompletion_PromptCachingTrue_AppendsCachePoint(t *testing.T) {
+	var body []byte
+	srv := bedrockCapturingServer(t, &body)
+	defer srv.Close()
+
+	a := &Agent{baseURL: srv.URL, model: "test-model", client: srv.Client(), promptCaching: true}
+	msgs := []Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "hi"},
+	}
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got bedrockRequest
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("request body not valid JSON: %v", err)
+	}
+	if len(got.System) != 2 {
+		t.Fatalf("want 2 system entries (text + cachePoint), got %d: %+v", len(got.System), got.System)
+	}
+	if got.System[0].Text != "You are helpful." {
+		t.Errorf("prior system text must be unchanged, got %+v", got.System[0])
+	}
+	last := got.System[1]
+	if last.CachePoint == nil || last.CachePoint.Type != "default" {
+		t.Fatalf("last system entry must be the cachePoint block, got %+v", last)
+	}
+	if last.Text != "" {
+		t.Errorf("cachePoint entry must not carry text, got %q", last.Text)
+	}
+}
+
 // --- inferenceURL ---
 
 func TestInferenceURL_Default(t *testing.T) {
@@ -269,6 +382,109 @@ func TestInferenceURL_CustomChatPath(t *testing.T) {
 	want := "https://proxy.example.com/chat/completions"
 	if got := a.inferenceURL(); got != want {
 		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// --- bedrockStreamCompletion metadata usage / cache tokens ---
+
+// bedrockConverseStreamServer returns a test server that serves a converse-stream
+// response consisting of the given AWS Event Stream frames concatenated, using
+// the same frame/header encoding as readBedrockEvent's own round-trip test.
+func bedrockConverseStreamServer(t *testing.T, frames ...[]byte) *httptest.Server {
+	t.Helper()
+	var body []byte
+	for _, f := range frames {
+		body = append(body, f...)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body) //nolint:errcheck
+	}))
+}
+
+func bedrockMetadataFrame(usageJSON string) []byte {
+	headers := buildStringHeader(":event-type", "metadata")
+	return buildBedrockEventFrame(headers, []byte(`{"usage":`+usageJSON+`}`))
+}
+
+func bedrockMessageStopFrame() []byte {
+	headers := buildStringHeader(":event-type", "messageStop")
+	return buildBedrockEventFrame(headers, []byte(`{"stopReason":"end_turn"}`))
+}
+
+// TestBedrockStreamCompletion_CacheTokensReported verifies that when the
+// converse-stream metadata event's usage object includes cacheReadInputTokens
+// and cacheWriteInputTokens (as documented by AWS's Converse API TokenUsage
+// shape: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_TokenUsage.html,
+// retrieved 2026-08-17), those values reach onTokens as cacheRead/cacheCreation.
+func TestBedrockStreamCompletion_CacheTokensReported(t *testing.T) {
+	srv := bedrockConverseStreamServer(t,
+		bedrockMetadataFrame(`{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":80,"cacheWriteInputTokens":20}`),
+		bedrockMessageStopFrame(),
+	)
+	defer srv.Close()
+
+	var gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation int64
+	var calls int
+	a := &Agent{
+		baseURL: srv.URL,
+		model:   "test-model",
+		client:  srv.Client(),
+	}
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		calls++
+		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
+	}
+
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("want onTokens called once, got %d", calls)
+	}
+	if gotPrompt != 100 || gotCompletion != 50 {
+		t.Errorf("want prompt=100 completion=50, got prompt=%d completion=%d", gotPrompt, gotCompletion)
+	}
+	if gotCacheRead != 80 {
+		t.Errorf("want cacheRead=80, got %d", gotCacheRead)
+	}
+	if gotCacheCreation != 20 {
+		t.Errorf("want cacheCreation=20, got %d", gotCacheCreation)
+	}
+}
+
+// TestBedrockStreamCompletion_NoCacheFields_RegressionGuard verifies that
+// when the metadata event's usage object has no cache fields at all (today's
+// real-world case, since milk never sends an explicit cachePoint block yet),
+// cacheRead and cacheCreation are both reported as 0 with no parse error.
+func TestBedrockStreamCompletion_NoCacheFields_RegressionGuard(t *testing.T) {
+	srv := bedrockConverseStreamServer(t,
+		bedrockMetadataFrame(`{"inputTokens":100,"outputTokens":50}`),
+		bedrockMessageStopFrame(),
+	)
+	defer srv.Close()
+
+	var gotCacheRead, gotCacheCreation int64
+	var calls int
+	a := &Agent{
+		baseURL: srv.URL,
+		model:   "test-model",
+		client:  srv.Client(),
+	}
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		calls++
+		gotCacheRead, gotCacheCreation = cacheRead, cacheCreation
+	}
+
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("want onTokens called once, got %d", calls)
+	}
+	if gotCacheRead != 0 || gotCacheCreation != 0 {
+		t.Errorf("want cacheRead=0 cacheCreation=0 when cache fields are absent, got cacheRead=%d cacheCreation=%d", gotCacheRead, gotCacheCreation)
 	}
 }
 

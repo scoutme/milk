@@ -138,8 +138,11 @@ type streamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
+		PromptTokens        int64 `json:"prompt_tokens"`
+		CompletionTokens    int64 `json:"completion_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -195,9 +198,11 @@ type Agent struct {
 	memCfg           MemConfig
 	logContext       bool // when true, log full request payload at DEBUG level
 	// onTokens is an optional callback fired after each inference call with real
-	// token counts. Used to persist usage into the session without coupling the
-	// agent to the session package.
-	onTokens func(model, role string, prompt, completion int64)
+	// token counts, including cache-read/cache-creation counts when the provider
+	// reports them. Used to persist usage into the session without coupling the
+	// agent to the session package. Parameter order mirrors
+	// session.AddTokensFull so callers can pass through 1:1.
+	onTokens func(model, role string, prompt, completion, cacheRead, cacheCreation int64)
 	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
 	// including lines that are skipped or fail JSON parsing.
 	debugLog io.Writer
@@ -235,6 +240,10 @@ type Agent struct {
 	// systemPromptTier selects the verbosity level of the system prompt.
 	// Valid values: "minimal", "standard" (default), "full". Empty = "standard".
 	systemPromptTier string
+	// promptCaching enables AWS Bedrock's explicit cachePoint prompt caching
+	// (AgentConfig.PromptCaching). Only meaningful when useBedrockNative is
+	// true; ignored otherwise. EXPERIMENTAL — see AgentConfig.PromptCaching.
+	promptCaching bool
 }
 
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
@@ -468,6 +477,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			sigv4:            sv4,
 			limits:           ac.Limits,
 			systemPromptTier: ac.SystemPromptTier,
+			promptCaching:    ac.PromptCaching,
 		}
 	case "", "local":
 		// plain transport; extra headers may still apply
@@ -565,8 +575,8 @@ func (a *Agent) WithOnOpenFile(fn func(path string) error) *Agent {
 }
 
 // WithOnTokens registers a callback invoked after each inference call with the
-// model name, agent role, and real prompt/completion token counts.
-func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion int64)) *Agent {
+// model name, agent role, and real prompt/completion/cache token counts.
+func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion, cacheRead, cacheCreation int64)) *Agent {
 	a.onTokens = fn
 	return a
 }
@@ -1371,7 +1381,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -1381,9 +1391,20 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		attribute.String("agent", role),
 		attribute.String("provider", "local"),
 	)
-	obs.RecordTokens(ctx, a.model, role, promptTokens, completionTokens)
+	// OpenAI-compatible automatic caching (mirrored by providers such as MiMo)
+	// reports prompt_tokens as the TOTAL input including cached tokens — cacheRead
+	// is a subset of promptTokens, not additive to it. Every downstream consumer
+	// (session, obs, status bar, memory panel) assumes the Anthropic-style
+	// additive convention instead: prompt(fresh) + cacheRead + cacheCreation ==
+	// total input. Subtract here, once, so that invariant holds regardless of
+	// which provider produced the numbers.
+	freshPrompt := max(promptTokens-cacheRead, 0)
+	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
 	if a.onTokens != nil {
-		a.onTokens(a.model, role, promptTokens, completionTokens)
+		// cacheCreation is always 0 here: OpenAI-compatible automatic caching
+		// (mirrored by other providers such as MiMo) reports cache-read hits via
+		// prompt_tokens_details.cached_tokens but never a write/creation size.
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
 	}
 
 	if det.Format != ToolFormatUnknown {
@@ -1435,16 +1456,20 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 
 // scanSSE reads SSE lines from the scanner, feeding content tokens through the
 // detector and accumulating native tool-call deltas in partialTools.
-// Returns the collected tool calls and any token usage reported by the server.
+// Returns the collected tool calls and any token usage reported by the server,
+// including cache-read tokens from the optional
+// usage.prompt_tokens_details.cached_tokens field (OpenAI's automatic prompt
+// caching, mirrored by other OpenAI-compatible providers). cacheRead is 0 when
+// the field is absent, matching every provider that doesn't report it.
 func (a *Agent) scanSSE(
 	scanner *bufio.Scanner,
 	det *StreamDetector,
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, int64, int64, error) {
+) ([]toolCall, int64, int64, int64, error) {
 	dbg := a.debugLog
-	var promptTokens, completionTokens int64
+	var promptTokens, completionTokens, cacheRead int64
 	for scanner.Scan() {
 		line := scanner.Text()
 		if dbg != nil {
@@ -1470,6 +1495,9 @@ func (a *Agent) scanSSE(
 		if chunk.Usage != nil {
 			promptTokens = chunk.Usage.PromptTokens
 			completionTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.PromptTokensDetails != nil {
+				cacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.ReasoningContent != "" && a.onThinking != nil {
@@ -1480,9 +1508,9 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
-	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {
