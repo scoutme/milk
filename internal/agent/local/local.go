@@ -242,7 +242,7 @@ type Agent struct {
 	systemPromptTier string
 	// promptCaching enables AWS Bedrock's explicit cachePoint prompt caching
 	// (AgentConfig.PromptCaching). Only meaningful when useBedrockNative is
-	// true; ignored otherwise.
+	// true; ignored otherwise. EXPERIMENTAL — see AgentConfig.PromptCaching.
 	promptCaching bool
 }
 

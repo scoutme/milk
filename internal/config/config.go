@@ -130,6 +130,10 @@ type AgentConfig struct {
 	// is appended to the end of the Converse API system array. Opt-in and off by
 	// default because sending a cachePoint block to a model or region that
 	// doesn't support prompt caching is a hard API error, not a graceful no-op.
+	//
+	// EXPERIMENTAL: implemented and unit-tested against AWS's documented
+	// Converse API contract, but not exercised against a real Bedrock endpoint
+	// (no Bedrock agent was available during development). See docs/providers.md.
 	PromptCaching bool `json:"prompt_caching,omitempty"`
 
 	// RunCmd is an optional shell command that starts the inference server when
