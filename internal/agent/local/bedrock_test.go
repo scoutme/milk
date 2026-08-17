@@ -256,6 +256,117 @@ func init() {
 	_ = struct{}{}
 }
 
+// --- appendSystemCachePoint ---
+
+func TestAppendSystemCachePoint_EmptySystemNoOp(t *testing.T) {
+	got := appendSystemCachePoint(nil)
+	if len(got) != 0 {
+		t.Errorf("want no-op on empty system, got %+v", got)
+	}
+}
+
+func TestAppendSystemCachePoint_AppendsAfterExistingText(t *testing.T) {
+	system := []bedrockSystem{{Text: "You are helpful."}, {Text: "Be concise."}}
+	got := appendSystemCachePoint(system)
+	if len(got) != 3 {
+		t.Fatalf("want 3 entries, got %d: %+v", len(got), got)
+	}
+	if got[0].Text != "You are helpful." || got[1].Text != "Be concise." {
+		t.Errorf("prior system entries must be unchanged and precede the cachePoint: %+v", got)
+	}
+	last := got[2]
+	if last.CachePoint == nil {
+		t.Fatalf("last entry must be a cachePoint block, got %+v", last)
+	}
+	if last.Text != "" {
+		t.Errorf("cachePoint entry must not also carry text, got %q", last.Text)
+	}
+	if last.CachePoint.Type != "default" {
+		t.Errorf("want cachePoint type=default, got %q", last.CachePoint.Type)
+	}
+}
+
+// --- bedrockStreamCompletion request-side cachePoint gating ---
+
+// bedrockCapturingServer records the raw request body sent by
+// bedrockStreamCompletion and replies with a minimal valid converse-stream
+// response (messageStop only — no metadata needed for these request-shape
+// assertions).
+func bedrockCapturingServer(t *testing.T, capturedBody *[]byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		*capturedBody = b
+		w.Write(bedrockMessageStopFrame()) //nolint:errcheck
+	}))
+}
+
+// TestBedrockStreamCompletion_PromptCachingFalse_RequestUnchanged pins that
+// the default (flag absent) case sends byte-for-byte the same request body
+// as before this sprint — no cachePoint block anywhere.
+func TestBedrockStreamCompletion_PromptCachingFalse_RequestUnchanged(t *testing.T) {
+	var body []byte
+	srv := bedrockCapturingServer(t, &body)
+	defer srv.Close()
+
+	a := &Agent{baseURL: srv.URL, model: "test-model", client: srv.Client()}
+	msgs := []Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "hi"},
+	}
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want, err := json.Marshal(bedrockRequest{
+		Messages: []bedrockMessage{{Role: "user", Content: []bedrockContentBlock{{Text: "hi"}}}},
+		System:   []bedrockSystem{{Text: "You are helpful."}},
+	})
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	if string(body) != string(want) {
+		t.Errorf("promptCaching=false must send byte-for-byte the same request as before this sprint\nwant: %s\ngot:  %s", want, body)
+	}
+}
+
+// TestBedrockStreamCompletion_PromptCachingTrue_AppendsCachePoint verifies
+// that when the agent-level flag is set, the marshalled system array has the
+// cachePoint block as its last element, with prior system text unchanged and
+// preceding it.
+func TestBedrockStreamCompletion_PromptCachingTrue_AppendsCachePoint(t *testing.T) {
+	var body []byte
+	srv := bedrockCapturingServer(t, &body)
+	defer srv.Close()
+
+	a := &Agent{baseURL: srv.URL, model: "test-model", client: srv.Client(), promptCaching: true}
+	msgs := []Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "hi"},
+	}
+	if _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got bedrockRequest
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("request body not valid JSON: %v", err)
+	}
+	if len(got.System) != 2 {
+		t.Fatalf("want 2 system entries (text + cachePoint), got %d: %+v", len(got.System), got.System)
+	}
+	if got.System[0].Text != "You are helpful." {
+		t.Errorf("prior system text must be unchanged, got %+v", got.System[0])
+	}
+	last := got.System[1]
+	if last.CachePoint == nil || last.CachePoint.Type != "default" {
+		t.Fatalf("last system entry must be the cachePoint block, got %+v", last)
+	}
+	if last.Text != "" {
+		t.Errorf("cachePoint entry must not carry text, got %q", last.Text)
+	}
+}
+
 // --- inferenceURL ---
 
 func TestInferenceURL_Default(t *testing.T) {

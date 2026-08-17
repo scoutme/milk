@@ -126,7 +126,11 @@ func runPrimaryWithSession(
 		model = ac.Name
 	}
 	obs.RecordTokens(ctx, model, "primary", res.InputTokens, res.OutputTokens)
-	sess.AddTokensFull(model, "primary", res.InputTokens, res.OutputTokens, res.CacheCreate, res.CacheRead)
+	// AddTokensFull's signature is (prompt, completion, cacheRead, cacheCreation);
+	// this call previously passed CacheCreate/CacheRead swapped, predating the
+	// prompt-caching feature — fixed here since this sprint already touches this
+	// exact call site to verify cache-token flow end-to-end.
+	sess.AddTokensFull(model, "primary", res.InputTokens, res.OutputTokens, res.CacheRead, res.CacheCreate)
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens, "cost_usd", res.CostUSD)
 
 	// For local HTTP runners, text is only set when a real response came back.

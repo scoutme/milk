@@ -125,6 +125,12 @@ type AgentConfig struct {
 	// (AccessKeyId / SecretAccessKey / SessionToken) is used to refresh expired
 	// STS session tokens mid-request.
 	AWSRefreshCmd string `json:"aws_refresh_cmd,omitempty"`
+	// PromptCaching enables AWS Bedrock's explicit cachePoint prompt caching for
+	// Provider = "bedrock" only: an extra {"cachePoint":{"type":"default"}} block
+	// is appended to the end of the Converse API system array. Opt-in and off by
+	// default because sending a cachePoint block to a model or region that
+	// doesn't support prompt caching is a hard API error, not a graceful no-op.
+	PromptCaching bool `json:"prompt_caching,omitempty"`
 
 	// RunCmd is an optional shell command that starts the inference server when
 	// it is not already reachable. milk runs this command in the background on

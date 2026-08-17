@@ -272,8 +272,8 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 		})
 		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 		ist := m.st
-		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-			ist.sess.AddTokens(model, role, prompt, completion)
+		newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+			ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
@@ -1249,8 +1249,8 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		})
 		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 		ist := m.st
-		newAgent.WithOnTokens(func(model, role string, prompt, completion int64) {
-			ist.sess.AddTokens(model, role, prompt, completion)
+		newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+			ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 		})
 		m.agents.local = newAgent
 		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
@@ -1303,8 +1303,8 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 			}
 			newEsc.WithLogContext(m.st.cfg.Otel.LogContext)
 			ist := m.st
-			newEsc.WithOnTokens(func(model, role string, prompt, completion int64) {
-				ist.sess.AddTokens(model, role, prompt, completion)
+			newEsc.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+				ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 			})
 			m.agents.escalationLocal = newEsc
 			m.agents.escalationAvail = newEsc.Ping(m.ctx) == nil
