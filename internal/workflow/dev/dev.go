@@ -237,7 +237,8 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			switch verdict {
 			case workflow.VerdictGoodToGo:
 				if sprint == sprintCount {
-					_ = os.Remove(statePath)
+					st.Role = "done"
+					_ = workflow.SaveState(statePath, st)
 					return nil
 				}
 				// Advance to next sprint.
@@ -245,7 +246,8 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 
 			case workflow.VerdictSprintDone:
 				if sprint == sprintCount {
-					_ = os.Remove(statePath)
+					st.Role = "done"
+					_ = workflow.SaveState(statePath, st)
 					return nil
 				}
 				goto nextSprint
@@ -267,7 +269,8 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	nextSprint:
 	}
 
-	_ = os.Remove(statePath)
+	st.Role = "done"
+	_ = workflow.SaveState(statePath, st)
 	return nil
 }
 

@@ -494,6 +494,10 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
 		return m, nil
 	}
+	if st.Role == "done" {
+		m.appendTranscript(milkTag() + " workflow already completed — use /workflow clear to remove\n")
+		return m, nil
+	}
 
 	// Rebuild wizard state from the saved checkpoint.
 	// If AgentMap is absent (state file predates AgentMap support), enter the

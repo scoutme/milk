@@ -1258,12 +1258,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case workflowResumeCheckMsg:
-		if msg.state != nil && msg.state.Role != "done" {
+		if msg.state != nil {
 			st := msg.state
-			m.appendTranscript(fmt.Sprintf(
-				"%s workflow %s in progress (sprint %d pass %d) — /workflow resume to continue, or ignore\n",
-				milkTag(), st.WorkflowName, st.Sprint, st.Pass,
-			))
+			m.workflowState = st
+			m.workflowPanelOpen = true
+			if st.Role != "done" {
+				m.appendTranscript(fmt.Sprintf(
+					"%s workflow %s in progress (sprint %d pass %d) — /workflow resume to continue, or ignore\n",
+					milkTag(), st.WorkflowName, st.Sprint, st.Pass,
+				))
+			}
 			m.syncLayout()
 		}
 		return m, nil
