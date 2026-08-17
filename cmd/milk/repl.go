@@ -38,6 +38,7 @@ import (
 	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
+	"github.com/scoutme/milk/internal/loop"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 )
 
@@ -506,6 +507,11 @@ type model struct {
 	pendingWorkflowWizard *workflowWizardState
 	pendingWorkflowExtend *workflowExtendState
 
+	// loop detection
+	loopDetector   *loop.Detector
+	loopInterrupt  bool   // true when a high-confidence loop signal fired
+	loopWarning    string // non-empty when a medium-confidence signal fired
+
 	// injected dependencies
 	ctx    context.Context
 	st     *interactiveState
@@ -537,6 +543,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		lastUndoValue:       "\x00", // sentinel: never equals real textarea value, so first push always succeeds
 		lastTurnPrompt:      map[string]int64{"primary": 0, "escalation": 0},
 		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
+		loopDetector:        loop.New(st.cfg.LoopDetectionCfg()),
 	}
 }
 
@@ -718,6 +725,34 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.escalationCacheRead, m.escalationCacheCreation = newEscCacheRead, newEscCacheCreation
 	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
+
+	// Loop detection: feed turn summary and check for signals.
+	if m.loopDetector != nil {
+		turnText := ""
+		if hist := m.st.sess.History; len(hist) > 0 {
+			turnText = hist[len(hist)-1].Content
+		}
+		turnDelta := m.lastTurnPrompt[m.activeTokenRole()] + m.lastTurnCompletion[m.activeTokenRole()]
+		verdicts := m.loopDetector.Feed(loop.TurnSummary{
+			Text:         turnText,
+			InputTokens:  m.lastTurnPrompt[m.activeTokenRole()],
+			OutputTokens: m.lastTurnCompletion[m.activeTokenRole()],
+			Timestamp:    time.Now(),
+			IsUserTurn:   false,
+		})
+		for _, v := range verdicts {
+			if v.Confidence >= 0.8 {
+				m.appendTranscript(yellow(fmt.Sprintf("[⚠ loop detected: %s (confidence %.0f%%)]\n", v.Message, v.Confidence*100)))
+				if m.loopDetector != nil && v.ShouldInterrupt {
+					m.loopInterrupt = true
+				}
+			} else if v.Confidence >= 0.5 && m.loopWarning == "" {
+				m.loopWarning = fmt.Sprintf("⚠ %s", v.Message)
+			}
+		}
+		_ = turnDelta // used for future velocity display
+	}
+
 	m.appendTranscript("\n")
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
@@ -1135,6 +1170,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chunkMsg:
 		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscript(msg.text)
+		// Intra-turn loop detection: feed chunk and check for repetition.
+		if m.loopDetector != nil {
+			for _, v := range m.loopDetector.FeedChunk(msg.text) {
+				m.appendTranscript(yellow(fmt.Sprintf("\n[⚠ loop detected: %s (confidence %.0f%%)]\n", v.Message, v.Confidence*100)))
+				if v.ShouldInterrupt {
+					m.loopInterrupt = true
+					if m.cancelTurn != nil {
+						m.cancelTurn()
+					}
+				}
+			}
+		}
 		return m, nil
 
 	case thinkChunkMsg:
@@ -1886,6 +1933,17 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Feed user turn to loop detector (resets turn-flood streak).
+	if m.loopDetector != nil {
+		m.loopDetector.Feed(loop.TurnSummary{
+			Text:       input,
+			Timestamp:  time.Now(),
+			IsUserTurn: true,
+		})
+		m.loopInterrupt = false
+		m.loopWarning = ""
+	}
+
 	m.appendTranscript(label + colorizeTokens(input) + "\n")
 
 	// Append to both histories (deduped)
@@ -1930,6 +1988,11 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.currentTurnChars = 0
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
+	m.loopInterrupt = false
+	m.loopWarning = ""
+	if m.loopDetector != nil {
+		m.loopDetector.ResetTurn()
+	}
 
 	// Apply pending attachments.
 	// Text attachments: prepend context blocks to the agent prompt.
