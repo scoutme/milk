@@ -499,13 +499,18 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return toolResult{Error: "invalid arguments: " + err.Error()}.String(), false
 	}
 
+	cwd := ""
+	if sess != nil {
+		cwd = sess.CWD
+	}
+
 	switch name {
 	case "bash":
 		return runBash(ctx, args)
 	case "find_files":
-		return runFindFiles(ctx, args)
+		return runFindFiles(ctx, args, cwd)
 	case "grep":
-		return runGrep(ctx, args)
+		return runGrep(ctx, args, cwd)
 	case "read_file":
 		return runReadFile(args)
 	case "write_file":
@@ -938,9 +943,15 @@ func expandTilde(path string) string {
 	return home + path[1:]
 }
 
-func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
+func runFindFiles(ctx context.Context, args map[string]any, cwd string) (string, bool) {
 	path, _ := args["path"].(string)
 	path = expandTilde(path)
+	if path == "" {
+		path = "."
+	}
+	if !filepath.IsAbs(path) && cwd != "" {
+		path = filepath.Join(cwd, path)
+	}
 	pattern, _ := args["pattern"].(string)
 	cmd := exec.CommandContext(ctx, "find", path,
 		"-not", "-path", "*/.git/*",
@@ -962,10 +973,16 @@ func runFindFiles(ctx context.Context, args map[string]any) (string, bool) {
 	return toolResult{Output: stdout.String(), Error: stderr.String(), ExitCode: code}.String(), false
 }
 
-func runGrep(ctx context.Context, args map[string]any) (string, bool) {
+func runGrep(ctx context.Context, args map[string]any, cwd string) (string, bool) {
 	pattern, _ := args["pattern"].(string)
 	path, _ := args["path"].(string)
 	path = expandTilde(path)
+	if path == "" {
+		path = "."
+	}
+	if !filepath.IsAbs(path) && cwd != "" {
+		path = filepath.Join(cwd, path)
+	}
 	recursive, _ := args["recursive"].(bool)
 
 	// Always exclude hidden/binary directories and skip binary files.
