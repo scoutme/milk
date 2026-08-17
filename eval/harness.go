@@ -16,6 +16,12 @@ import (
 type Harness struct {
 	Adapters []AgentAdapter
 	Judge    *Judge
+
+	// progress reports phase transitions (starting an adapter, waiting on a
+	// turn, judging) to stderr. Nil until RunAll sets it up; runOne/RunScenario
+	// tolerate nil (progressReporter's methods no-op / fall back to a plain
+	// stderr line) so they still work when called directly, e.g. from tests.
+	progress *progressReporter
 }
 
 // NewHarness creates a Harness from adapter specs. The judge is created from
@@ -214,6 +220,7 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 	defer os.RemoveAll(workdir)
 
 	// 2. Start adapter.
+	h.progress.Setf("%s/%s: starting agent", scenario.Name, adapter.Name())
 	if err := adapter.Start(ctx, workdir); err != nil {
 		return AgentResult{}, fmt.Errorf("starting adapter: %w", err)
 	}
@@ -221,16 +228,18 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 
 	// 3. Run each turn.
 	var results []RunResult
-	for _, turn := range scenario.Turns {
+	for i, turn := range scenario.Turns {
+		h.progress.Setf("%s/%s: turn %d/%d — waiting for response", scenario.Name, adapter.Name(), i+1, len(scenario.Turns))
 		result, err := adapter.RunPrompt(ctx, turn.Prompt)
 		if err != nil {
 			result.Error = err
-			fmt.Fprintf(os.Stderr, "  ERROR: %s/%s turn failed: %v\n", scenario.Name, adapter.Name(), err)
+			h.progress.Logf("  ERROR: %s/%s turn failed: %v", scenario.Name, adapter.Name(), err)
 		}
 		results = append(results, result)
 	}
 
 	// 4. Judge scores.
+	h.progress.Setf("%s/%s: judging %d turn(s)", scenario.Name, adapter.Name(), len(results))
 	scores, err := h.Judge.Score(ctx, scenario, results)
 	var judgeError string
 	if err != nil {
@@ -242,7 +251,7 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 		// aggregate builders, which exclude JudgeError entries instead of letting
 		// a single unjudged scenario drag down every other scenario's average.
 		judgeError = err.Error()
-		fmt.Fprintf(os.Stderr, "warning: judging %s/%s: %v\n", scenario.Name, adapter.Name(), err)
+		h.progress.Logf("warning: judging %s/%s: %v", scenario.Name, adapter.Name(), err)
 	}
 
 	// 5. Compute weighted score. Skipped entirely on a judge error — scores may
@@ -327,12 +336,15 @@ func (h *Harness) RunAll(ctx context.Context, scenarioDir string, adapterNames [
 		return nil, fmt.Errorf("no adapters specified; available: %s", strings.Join(List(), ", "))
 	}
 
+	h.progress = newProgressReporter(os.Stderr)
+	defer h.progress.Stop()
+
 	var results []ScenarioResult
 	for _, scenario := range scenarios {
-		fmt.Fprintf(os.Stderr, "Running scenario: %s\n", scenario.Name)
+		h.progress.Logf("Running scenario: %s", scenario.Name)
 		sr, err := h.RunScenario(ctx, scenario)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ERROR: %v\n", err)
+			h.progress.Logf("  ERROR: %v", err)
 			continue
 		}
 		results = append(results, sr)

@@ -152,17 +152,20 @@ func evalJudgeCmd() *cobra.Command {
 			}
 
 			// Re-score each scenario result.
+			progress := newProgressReporter(os.Stderr)
+			defer progress.Stop()
 			for i, sr := range results {
 				scenario, ok := scenarioMap[sr.ScenarioName]
 				if !ok {
-					fmt.Fprintf(os.Stderr, "warning: scenario %q not found in %s, skipping\n", sr.ScenarioName, scenarioDir)
+					progress.Logf("warning: scenario %q not found in %s, skipping", sr.ScenarioName, scenarioDir)
 					continue
 				}
 
 				for agentName, ar := range sr.AgentResults {
+					progress.Setf("%s/%s: judging %d turn(s)", sr.ScenarioName, agentName, len(ar.RunResults))
 					scores, err := judge.Score(ctx, scenario, ar.RunResults)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "warning: scoring %s/%s: %v\n", sr.ScenarioName, agentName, err)
+						progress.Logf("warning: scoring %s/%s: %v", sr.ScenarioName, agentName, err)
 						continue
 					}
 					ar.Scores = scores
