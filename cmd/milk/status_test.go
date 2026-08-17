@@ -102,11 +102,11 @@ func TestStatusTokens_CacheWithCreation(t *testing.T) {
 		// Simulate a session where cache creation happened (e.g. first turn
 		// with Bedrock explicit caching, or a fresh system prompt being written
 		// to the prompt cache).
-		escalationPrompt:       1000,
-		escalationComp:         200,
-		escalationCacheRead:    500,
+		escalationPrompt:        1000,
+		escalationComp:          200,
+		escalationCacheRead:     500,
 		escalationCacheCreation: 100,
-		lastTokenRole:          "escalation",
+		lastTokenRole:           "escalation",
 	}
 	m.st.activeFallbackTarget = "escalation"
 
@@ -140,11 +140,11 @@ func TestStatusTokens_CacheZeroCreation(t *testing.T) {
 		busy: false,
 		// Claude Code CLI: system prompt cached on turn 1, subsequent turns
 		// only read from cache. Creation is always 0.
-		escalationPrompt:       2000,
-		escalationComp:         300,
-		escalationCacheRead:    800,
+		escalationPrompt:        2000,
+		escalationComp:          300,
+		escalationCacheRead:     800,
 		escalationCacheCreation: 0,
-		lastTokenRole:          "escalation",
+		lastTokenRole:           "escalation",
 	}
 	m.st.activeFallbackTarget = "escalation"
 
