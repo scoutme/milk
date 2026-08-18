@@ -250,7 +250,9 @@ func (m *model) statusTokens() string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("↑%s↓%s", formatTokenCount(prompt), formatTokenCount(completion)))
 	if m.busy {
-		parts = append(parts, fmt.Sprintf("↓~%s", formatTokenCount(int64(math.Round(float64(m.currentTurnChars)*0.25)))))
+		estimatedOut := int64(math.Round(float64(m.currentTurnChars) * 0.25))
+		estimatedIn := int64(math.Round(float64(m.currentTurnInputChars) * 0.25))
+		parts = append(parts, fmt.Sprintf("↑~%s↓~%s", formatTokenCount(estimatedIn), formatTokenCount(estimatedOut)))
 	} else if lastPrompt+lastCompletion > 0 {
 		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion)))
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/subprocess"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
@@ -38,7 +39,6 @@ import (
 	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
-	"github.com/scoutme/milk/internal/loop"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 )
 
@@ -460,6 +460,9 @@ type model struct {
 	// Live turn output: chars written during the current turn, used as a streaming proxy.
 	// Reset at turn start.
 	currentTurnChars int64
+	// currentTurnInputChars holds the input prompt char count for the current turn,
+	// used as a streaming proxy for estimated input tokens.
+	currentTurnInputChars int64
 	// lastTurnPrompt/Completion are per-role deltas from the last completed turn
 	// for each agent, captured at agentDoneMsg.
 	lastTurnPrompt     map[string]int64
@@ -508,9 +511,9 @@ type model struct {
 	pendingWorkflowExtend *workflowExtendState
 
 	// loop detection
-	loopDetector   *loop.Detector
-	loopInterrupt  bool   // true when a high-confidence loop signal fired
-	loopWarning    string // non-empty when a medium-confidence signal fired
+	loopDetector  *loop.Detector
+	loopInterrupt bool   // true when a high-confidence loop signal fired
+	loopWarning   string // non-empty when a medium-confidence signal fired
 
 	// injected dependencies
 	ctx    context.Context
@@ -725,6 +728,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.escalationCacheRead, m.escalationCacheCreation = newEscCacheRead, newEscCacheCreation
 	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
+	m.currentTurnInputChars = 0
 
 	// Loop detection: feed turn summary and check for signals.
 	if m.loopDetector != nil {
@@ -1255,6 +1259,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyHint = ""
 		obs.IncrementTurnCount()
 		m.currentTurnChars = 0
+		m.currentTurnInputChars = 0
 		m.workflowPanelOpen = true
 		if m.workflowState != nil {
 			m.workflowState.Role = "done"
@@ -1986,6 +1991,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
 	m.currentTurnChars = 0
+	m.currentTurnInputChars = 0
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
 	m.loopInterrupt = false
@@ -2082,6 +2088,9 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	if len(imageParts) > 0 && tuiAgents.local != nil {
 		tuiAgents.local.SetPendingImageParts(imageParts)
 	}
+
+	// Capture input chars for the live token estimate in the status bar.
+	m.currentTurnInputChars = int64(len(agentInput))
 
 	return m, tea.Batch(
 		spinnerTick(),

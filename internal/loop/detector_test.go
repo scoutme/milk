@@ -327,18 +327,18 @@ func TestMultipleSignals_FireTogether(t *testing.T) {
 	now := time.Now()
 	tool := "bash\x00loop"
 	d.Feed(TurnSummary{
-		Text:        "I will try again",
-		InputTokens: 10000,
+		Text:         "I will try again",
+		InputTokens:  10000,
 		OutputTokens: 5000,
-		ToolCalls:   []string{tool},
-		Timestamp:   now,
+		ToolCalls:    []string{tool},
+		Timestamp:    now,
 	})
 	verdicts := d.Feed(TurnSummary{
-		Text:        "I will try again",
-		InputTokens: 10000,
+		Text:         "I will try again",
+		InputTokens:  10000,
 		OutputTokens: 5000,
-		ToolCalls:   []string{tool},
-		Timestamp:   now,
+		ToolCalls:    []string{tool},
+		Timestamp:    now,
 	})
 	signals := map[Signal]bool{}
 	for _, v := range verdicts {

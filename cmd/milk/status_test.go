@@ -127,6 +127,58 @@ func TestStatusTokens_CacheWithCreation(t *testing.T) {
 	}
 }
 
+// TestStatusTokens_BusyShowsInputAndOutputTokens verifies that during streaming,
+// the status bar shows both estimated input and output tokens.
+func TestStatusTokens_BusyShowsInputAndOutputTokens(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                  true,
+		currentTurnInputChars: 800,  // ~200 tokens
+		currentTurnChars:      1200, // ~300 tokens
+		primaryPrompt:         100,
+		primaryCompletion:     50,
+	}
+	// Default role is primary (no sticky/force escalation)
+
+	bar := stripANSI(m.statusTokens())
+	// Should contain ↑~200 (input estimate) and ↓~300 (output estimate)
+	if !strings.Contains(bar, "↑~200") {
+		t.Errorf("want input estimate ↑~200 in status bar, got %q", bar)
+	}
+	if !strings.Contains(bar, "↓~300") {
+		t.Errorf("want output estimate ↓~300 in status bar, got %q", bar)
+	}
+}
+
+// TestStatusTokens_BusyZeroInputTokens verifies graceful display when
+// input chars are zero (edge case at turn start).
+func TestStatusTokens_BusyZeroInputTokens(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                  true,
+		currentTurnInputChars: 0,
+		currentTurnChars:      400,
+		primaryPrompt:         100,
+		primaryCompletion:     50,
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "↑~0") {
+		t.Errorf("want input estimate ↑~0, got %q", bar)
+	}
+	if !strings.Contains(bar, "↓~100") {
+		t.Errorf("want output estimate ↓~100, got %q", bar)
+	}
+}
+
 // TestStatusTokens_CacheZeroCreation verifies the status bar displays
 // cache:read(hit%) without the /creation part when creation is zero
 // (the common case with Claude Code CLI which uses implicit caching).
