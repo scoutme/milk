@@ -19,7 +19,7 @@ type Config struct {
 	ResponseSimilarityThreshold    float64 `json:"response_similarity_threshold"`     // default 0.85
 
 	// Token velocity: fire when tokens consumed in the window exceed threshold.
-	TokenVelocityWindow    time.Duration `json:"-"` // derived from seconds
+	TokenVelocityWindow    time.Duration `json:"-"`                             // derived from seconds
 	TokenVelocitySeconds   int           `json:"token_velocity_window_seconds"` // default 30
 	TokenVelocityThreshold int64         `json:"token_velocity_threshold"`      // default 50000
 
@@ -106,15 +106,15 @@ func (s Signal) String() string {
 
 // Verdict is emitted when a detection signal fires.
 type Verdict struct {
-	Signal           Signal
-	Confidence       float64 // 0.0–1.0
-	Message          string
-	ShouldInterrupt  bool // true when confidence is high enough for auto-interrupt
+	Signal          Signal
+	Confidence      float64 // 0.0–1.0
+	Message         string
+	ShouldInterrupt bool // true when confidence is high enough for auto-interrupt
 }
 
 // TurnSummary is the caller's description of one completed turn.
 type TurnSummary struct {
-	Text         string   // agent's response text
+	Text         string // agent's response text
 	InputTokens  int64
 	OutputTokens int64
 	ToolCalls    []string // opaque identifiers (e.g. "bash\x00ls -la"), empty if unknown
