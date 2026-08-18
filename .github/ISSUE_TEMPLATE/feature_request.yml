@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a new feature or improvement to milk
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or awkward today? Who does this affect?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? Sketch the behavior, config surface, or UI if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered, and why you didn't go with them
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Why this matters — what it unblocks, or what pain it removes
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core (routing, session, dispatch)
+        - agents/providers (local, claude-cli, bedrock, aider, smolagent)
+        - TUI
+        - memory
+        - observability
+        - eval harness
+        - docs
+        - other
+    validations:
+      required: false
