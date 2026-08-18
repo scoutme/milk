@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in milk isn't working as expected
+labels: ["bug", "triage"]
+body:
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, including the command or slash command used
+      placeholder: |
+        1. `milk` (or `task run`)
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Agent config
+      description: Relevant `~/.milk/config.json` agent entries (redact tokens/keys)
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Transcript / log output
+      description: Relevant transcript, `/otel` output, or terminal output
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: milk version / commit
+      description: Output of `milk --version`, or the commit hash you built from
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / terminal
+      description: e.g. macOS 14 / iTerm2, Ubuntu 22.04 / WSL2, Windows 11
+    validations:
+      required: true
