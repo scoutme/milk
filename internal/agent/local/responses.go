@@ -114,7 +114,7 @@ func convertToolsToResponsesFormat(tools []map[string]any) []map[string]any {
 }
 
 // responsesStreamCompletion sends a streaming request to the OpenAI Responses API.
-func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, error) {
+func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, error) {
 	req := responsesRequest{
 		Model:       a.model,
 		Input:       messagesToResponses(msgs),
@@ -125,7 +125,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
 	}
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body)
@@ -133,7 +133,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -145,7 +145,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, fmt.Errorf("inference server unreachable: %w", err)
+		return "", "", nil, false, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -156,7 +156,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -168,8 +168,12 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 
 	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanResponsesSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
 	}
+	// No tool calls and no content: a degenerate/empty completion. Flag it so
+	// Run() can fall back to a summary of this turn's tool activity instead
+	// of persisting (or discarding) a blank assistant message.
+	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && !det.InBlock() && det.RawBlock() == ""
 
 	role := agentRoleForMetrics(a.escalationName)
 	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
@@ -194,7 +198,8 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	if det.Format != ToolFormatUnknown {
 		a.detectedFormat = det.Format
 	}
-	return a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+	return text, fallbackRaw, tcs, emptyFallback, err
 }
 
 // scanResponsesSSE reads SSE lines from a Responses API stream, dispatching on
