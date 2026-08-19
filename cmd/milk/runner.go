@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -292,7 +293,23 @@ func (r *localRunner) Execute(
 			text = last.Content
 		}
 	}
-	return TurnResult{Text: text}, nil
+	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text)}, nil
+}
+
+// endsWithQuestion reports whether the last non-empty line of text ends with
+// '?'. Mirrors internal/agent/claude/stream.go's endsWithQuestion and
+// internal/agent/subprocess/parse.go's endsWithQ for local-agent turns, which
+// have no equivalent of their own.
+func endsWithQuestion(text string) bool {
+	last := strings.TrimRight(text, " \t\n\r")
+	if last == "" {
+		return false
+	}
+	if idx := strings.LastIndexByte(last, '\n'); idx >= 0 {
+		last = last[idx+1:]
+	}
+	last = strings.TrimSpace(last)
+	return len(last) > 0 && last[len(last)-1] == '?'
 }
 
 func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {

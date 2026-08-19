@@ -902,7 +902,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		maxIter = defaultMaxToolIterations
 	}
 	for i := 0; i < maxIter; i++ {
-		resp, fallbackRaw, toolCalls, err := a.streamCompletion(ctx, msgs, tools, out)
+		resp, fallbackRaw, toolCalls, emptyFallback, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
 			return msgs, err
 		}
@@ -910,6 +910,14 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		if len(toolCalls) == 0 {
 			// No tool calls: either a final text response, or the model emitting EOS
 			// after completing its tool loop (empty response). Both are terminal.
+			if emptyFallback {
+				// The model produced no final summary of its own. Fall back to a
+				// digest of this turn's tool calls and their results (msgs already
+				// holds the full trajectory) so the turn still persists to session
+				// history with something useful to resume from, instead of the
+				// blank/near-blank text streamCompletion returned.
+				resp = summarizeToolTrail(msgs, resp)
+			}
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}
@@ -1309,6 +1317,46 @@ func dimWrap(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// summarizeToolTrail builds a fallback assistant message for a turn that
+// ended without a real final response: a compact digest of the tool calls
+// and their results accumulated in msgs across the whole turn (all
+// iterations of Run's tool loop), followed by resp (any reasoning text
+// already folded in by streamCompletion) if non-empty. Returns resp
+// unchanged when the turn made no tool calls at all — a genuinely empty,
+// non-erroring response with nothing to summarize.
+func summarizeToolTrail(msgs []Message, resp string) string {
+	var trail strings.Builder
+	for _, m := range msgs {
+		switch {
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			for _, tc := range m.ToolCalls {
+				args := tc.Function.Arguments
+				if len(args) > 200 {
+					args = args[:200] + "…"
+				}
+				fmt.Fprintf(&trail, "- %s(%s)\n", tc.Function.Name, args)
+			}
+		case m.Role == "tool" && m.Content != "":
+			content := m.Content
+			if len(content) > 300 {
+				content = content[:300] + "…"
+			}
+			fmt.Fprintf(&trail, "  → %s\n", content)
+		}
+	}
+	if trail.Len() == 0 {
+		return resp
+	}
+	var b strings.Builder
+	b.WriteString("[turn ended without a final summary — tool activity this turn:]\n")
+	b.WriteString(trail.String())
+	if resp != "" {
+		b.WriteString("\n[reasoning at cutoff:]\n")
+		b.WriteString(resp)
+	}
+	return b.String()
+}
+
 // toolArgSummary extracts the most informative single argument value for display.
 // Returns the full string — truncation and dim-wrapping are done at the call site.
 
@@ -1324,7 +1372,7 @@ func toolArgSummary(args map[string]any) string {
 // streamCompletion sends a chat completion request and streams the response.
 // Routes to the Bedrock Converse streaming API when useBedrockNative is set;
 // otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
-func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, error) {
+func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, error) {
 	if a.useBedrockNative {
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
@@ -1345,7 +1393,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
 	}
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body)
@@ -1354,7 +1402,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -1366,7 +1414,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, fmt.Errorf("inference server unreachable: %w", err)
+		return "", "", nil, false, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -1377,7 +1425,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -1387,9 +1435,23 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, false, err
+	}
+	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && !det.InBlock() && det.RawBlock() == ""
+	if emptyFallback && (reasoningText != "" || finishReason == "length") {
+		obs.Warn("empty completion", "model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"reasoning_seen", reasoningText != "", "finish_reason", finishReason)
+		// The model streamed reasoning (or was cut off by a length limit) but
+		// produced no content and no tool call — a degenerate, non-erroring
+		// completion. Falling back to the reasoning text keeps it out of the
+		// void: emptyFallback (below) additionally tells Run() to attach a
+		// summary of this turn's tool activity, so a later turn (e.g.
+		// "resume") has the whole picture, not just this trailing thought.
+		if reasoningText != "" {
+			textBuf.WriteString(reasoningText)
+		}
 	}
 	role := agentRoleForMetrics(a.escalationName)
 	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
@@ -1416,7 +1478,8 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if det.Format != ToolFormatUnknown {
 		a.detectedFormat = det.Format
 	}
-	return a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+	return text, fallbackRaw, tcs, emptyFallback, err
 }
 
 // classifyStreamResult interprets what the stream produced and returns the
@@ -1473,9 +1536,11 @@ func (a *Agent) scanSSE(
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, int64, int64, int64, error) {
+) ([]toolCall, int64, int64, int64, string, string, error) {
 	dbg := a.debugLog
 	var promptTokens, completionTokens, cacheRead int64
+	var reasoningBuf strings.Builder
+	var finishReason string
 	for scanner.Scan() {
 		line := scanner.Text()
 		if dbg != nil {
@@ -1506,17 +1571,23 @@ func (a *Agent) scanSSE(
 			}
 		}
 		for _, choice := range chunk.Choices {
-			if choice.Delta.ReasoningContent != "" && a.onThinking != nil {
-				a.onThinking(choice.Delta.ReasoningContent)
+			if choice.Delta.ReasoningContent != "" {
+				reasoningBuf.WriteString(choice.Delta.ReasoningContent)
+				if a.onThinking != nil {
+					a.onThinking(choice.Delta.ReasoningContent)
+				}
 			}
 			processContentToken(choice.Delta.Content, det, textBuf, out)
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, 0, 0, "", "", err
 	}
-	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, reasoningBuf.String(), finishReason, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {

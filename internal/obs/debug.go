@@ -85,6 +85,13 @@ func Info(msg string, args ...any) {
 	}
 }
 
+// Warn emits a warn-level message to the milk log (no-op when disabled).
+func Warn(msg string, args ...any) {
+	if milkLogger != nil {
+		milkLogger.Warn(msg, args...)
+	}
+}
+
 // DebugCtx emits a debug-level message with context to the milk log.
 func DebugCtx(ctx context.Context, msg string, args ...any) {
 	if milkLogger != nil {
