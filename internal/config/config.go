@@ -617,11 +617,11 @@ type LoopDetectionConfig struct {
 	ResponseSimilarityThreshold *float64 `json:"response_similarity_threshold,omitempty"`
 
 	// TokenVelocityWindowSeconds is the sliding window (in seconds) for
-	// measuring token burn rate. Default: 30.
+	// measuring token burn rate. Default: 60.
 	TokenVelocityWindowSeconds int `json:"token_velocity_window_seconds,omitempty"`
 
 	// TokenVelocityThreshold is the total tokens (input+output) consumed
-	// within the window that triggers the velocity signal. Default: 50000.
+	// within the window that triggers the velocity signal. Default: 300000.
 	TokenVelocityThreshold *int64 `json:"token_velocity_threshold,omitempty"`
 
 	// MaxSilentBurnTokens is the input-token count above which a turn with
@@ -636,9 +636,8 @@ type LoopDetectionConfig struct {
 	// calls trigger the tool-echo signal. Default: 3.
 	ToolEchoThreshold int `json:"tool_echo_threshold,omitempty"`
 
-	// ChunkRepetitionThreshold is how many times the same chunk text must
-	// appear within the sliding window to trigger the intra-turn chunk
-	// repetition signal. Default: 3.
+	// ChunkRepetitionThreshold is how many consecutive identical chunks
+	// must appear to trigger the intra-turn chunk repetition signal. Default: 5.
 	ChunkRepetitionThreshold int `json:"chunk_repetition_threshold,omitempty"`
 
 	// ChunkWindowSize is the number of recent chunks kept in the sliding

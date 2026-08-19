@@ -9,7 +9,8 @@ import (
 	"github.com/scoutme/milk/internal/workflow"
 )
 
-const workflowPanelWidth = 30
+const workflowPanelWidth = 31        // total incl. 1 scrollbar column (used to size the main area)
+const workflowPanelContentWidth = 30 // border + padding + inner content, excl. scrollbar
 
 var styleWorkflowPanel = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
@@ -17,11 +18,10 @@ var styleWorkflowPanel = lipgloss.NewStyle().
 	BorderForeground(lipgloss.AdaptiveColor{Light: "#AAA", Dark: "#555"}).
 	PaddingLeft(1)
 
-// renderWorkflowPanel renders the workflow progress panel into exactly h lines.
-func (m *model) renderWorkflowPanel(h int) string {
-	st := m.workflowState
-	inner := workflowPanelWidth - 2 // left border + padding
-
+// buildWorkflowPanelLines returns the full (unwindowed, unpadded) content
+// lines for the workflow panel. Scrolling and highlighting both operate on
+// this slice before it is windowed down to the visible h rows.
+func buildWorkflowPanelLines(st *workflow.State, inner int) []string {
 	var lines []string
 	add := func(s string) { lines = append(lines, s) }
 
@@ -41,7 +41,11 @@ func (m *model) renderWorkflowPanel(h int) string {
 		}
 
 		// Current sprint / pass / role
-		add(truncatePanel(bold(st.WorkflowName)+"  sprint "+fmt.Sprintf("%d", st.Sprint), inner))
+		sprintLabel := fmt.Sprintf("%d", st.Sprint)
+		if st.TotalSprints > 0 {
+			sprintLabel = fmt.Sprintf("%d/%d", st.Sprint, st.TotalSprints)
+		}
+		add(truncatePanel(bold(st.WorkflowName)+"  sprint "+sprintLabel, inner))
 		add(dim(fmt.Sprintf("pass %d  role: %s", st.Pass, st.Role)))
 		add("")
 
@@ -58,13 +62,33 @@ func (m *model) renderWorkflowPanel(h int) string {
 		}
 	}
 
+	return lines
+}
+
+// renderWorkflowPanel renders the workflow progress panel into exactly h lines,
+// scrolled to m.workflowPanelOffset (clamped so it never scrolls past the last
+// screenful) and with any active panel-text selection highlighted.
+func (m *model) renderWorkflowPanel(h int) string {
+	inner := workflowPanelContentWidth - 2 // left border + padding
+
+	all := buildWorkflowPanelLines(m.workflowState, inner)
+	total := len(all)
+
+	maxOffset := max(total-h, 0)
+	if m.workflowPanelOffset > maxOffset {
+		m.workflowPanelOffset = maxOffset
+	}
+
+	if m.panelSelRegion == regionWorkflow {
+		all = applyPanelSelectionHighlight(all, m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+	}
+
 	// Pad or trim to exactly h lines.
+	lines := all[m.workflowPanelOffset:]
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
-	if len(lines) > h {
-		lines = lines[:h]
-	}
+	lines = lines[:h]
 
 	// Pre-pad each line to exactly inner cols so lipgloss does not re-wrap when
 	// the style is rendered — Width() on a bordered style triggers cellbuf.Wrap,
@@ -79,6 +103,33 @@ func (m *model) renderWorkflowPanel(h int) string {
 	}
 	content := strings.Join(rows, "\n")
 	return styleWorkflowPanel.Render(content)
+}
+
+// renderWorkflowPanelScrollbar returns a 1-column string of h lines: a dim │
+// track with a ▌ thumb when the panel content overflows, or a blank column
+// otherwise. Mirrors renderPanelScrollbar for the memory panel.
+func (m *model) renderWorkflowPanelScrollbar(h int) string {
+	inner := workflowPanelContentWidth - 2
+	total := len(buildWorkflowPanelLines(m.workflowState, inner))
+	needsBar := total > h
+
+	var rows []string
+	if !needsBar {
+		for range h {
+			rows = append(rows, " ")
+		}
+		return strings.Join(rows, "\n")
+	}
+
+	thumbTop, thumbBot := scrollThumb(h, total, m.workflowPanelOffset)
+	for i := range h {
+		if i >= thumbTop && i <= thumbBot {
+			rows = append(rows, dim("▌"))
+		} else {
+			rows = append(rows, dim("│"))
+		}
+	}
+	return strings.Join(rows, "\n")
 }
 
 // wordWrapPanel wraps s into lines of at most maxWidth visible characters.
@@ -105,21 +156,7 @@ func wordWrapPanel(s string, maxWidth int) []string {
 
 // workflowPanelLineCount returns the number of content lines the panel would occupy.
 func workflowPanelLineCount(st *workflow.State) int {
-	// title + blank
-	n := 2
-	if st == nil || st.WorkflowName == "" {
-		return n + 1 // "no active workflow"
-	}
-	inner := workflowPanelWidth - 2
-	if st.Task != "" {
-		n += len(wordWrapPanel(st.Task, inner)) + 1 // task lines + blank
-	}
-	n += 3 // workflow+sprint, pass+role, blank
-	n += len(st.VerdictHistory)
-	if st.Role != "" && st.Role != "done" {
-		n++ // in-progress arrow
-	}
-	return n
+	return len(buildWorkflowPanelLines(st, workflowPanelContentWidth-2))
 }
 
 func truncatePanel(s string, maxWidth int) string {

@@ -132,6 +132,20 @@ func (m *model) statusBar() string {
 			hint = fmt.Sprintf(" [%d chars selected — shift/ctrl+arrows or ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]", len([]rune(m.selText)))
 		}
 		left += yellow(hint)
+	} else if m.panelSelAnchorLine >= 0 && m.panelSelDragging {
+		var selStatus string
+		if m.panelSelText != "" {
+			selStatus = yellow(fmt.Sprintf(" [%d chars — ctrl+c / right-click to copy]", len([]rune(m.panelSelText))))
+		} else {
+			selStatus = yellow(" [selecting panel text — release to end]")
+		}
+		left += selStatus
+	} else if m.panelSelAnchorLine >= 0 {
+		hint := " [panel selection — ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]"
+		if m.panelSelText != "" {
+			hint = fmt.Sprintf(" [%d chars selected (panel) — ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]", len([]rune(m.panelSelText)))
+		}
+		left += yellow(hint)
 	}
 	// Truncate right (cwd) if it alone exceeds terminal width
 	{

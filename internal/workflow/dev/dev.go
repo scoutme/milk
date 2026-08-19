@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -109,6 +110,12 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			return fmt.Errorf("workflow: resume: cannot read plan file %s: %w", planPath, err)
 		}
 		designPlan = string(data)
+		// st starts as a fresh State above, which would otherwise drop the
+		// verdict history for every sprint/pass completed before the resume
+		// point — carry it forward so the workflow panel still shows them.
+		if prev, err := workflow.LoadState(statePath); err == nil && prev != nil {
+			st.VerdictHistory = prev.VerdictHistory
+		}
 		emitPrefix(send, "resumed from sprint "+fmt.Sprintf("%d", w.ResumeSprint))
 	} else {
 		st.Role = "designer"
@@ -118,10 +125,48 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			return fmt.Errorf("workflow: no runner for role 'designer'")
 		}
 		emitPrefix(send, "designer")
-		var err error
-		designPlan, err = workflow.Turn(ctx, designerRunner, designerPrompt(w.Task), send)
-		if err != nil {
-			return fmt.Errorf("workflow: designer: %w", err)
+
+		// Two-step designer flow: first ask questions, then finalize with answers.
+		if cfg.Send != nil && cfg.AnswersCh != nil {
+			// Step 1: Ask designer to identify ambiguities.
+			questionsOutput, err := workflow.Turn(ctx, designerRunner, designerQuestionsPrompt(w.Task), send)
+			if err != nil {
+				return fmt.Errorf("workflow: designer questions: %w", err)
+			}
+
+			if hasQuestions(questionsOutput) {
+				// Step 2: Send questions to TUI and wait for user answers.
+				cfg.Send(workflow.WorkflowQuestionsMsg{
+					Questions: questionsOutput,
+					AnswersCh: cfg.AnswersCh, // pass chan so TUI can send answers back
+				})
+				// Wait for user answers (or context cancellation).
+				var answers string
+				select {
+				case answers = <-cfg.AnswersCh:
+					// Continue with answers.
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+
+				// Step 3: Finalize plan with user's answers.
+				emitPrefix(send, "designer (finalizing)")
+				designPlan, err = workflow.Turn(ctx, designerRunner, designerFinalizePrompt(w.Task, questionsOutput, answers), send)
+				if err != nil {
+					return fmt.Errorf("workflow: designer finalize: %w", err)
+				}
+			} else {
+				// No questions — discard any preamble before the NO_QUESTIONS
+				// marker line and use the rest as the plan.
+				designPlan = stripNoQuestionsPreamble(questionsOutput)
+			}
+		} else {
+			// Legacy path: no disambiguation channels, single designer call.
+			var err error
+			designPlan, err = workflow.Turn(ctx, designerRunner, designerPrompt(w.Task), send)
+			if err != nil {
+				return fmt.Errorf("workflow: designer: %w", err)
+			}
 		}
 		if err := os.WriteFile(planPath, []byte(designPlan), 0o600); err != nil {
 			return fmt.Errorf("workflow: writing plan file: %w", err)
@@ -150,11 +195,22 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	if planMaxSprints > 0 && sprintCount > planMaxSprints {
 		sprintCount = planMaxSprints
 	}
+	// Recorded so the TUI can show "sprint X/Y" instead of just "sprint X" —
+	// lets the user judge overall progress, not just the current position.
+	st.TotalSprints = sprintCount
 
 	startSprint := 1
 	if w.ResumeSprint > 0 {
 		startSprint = w.ResumeSprint
 	}
+	// Backfill any sprint before the resume point that is missing from
+	// VerdictHistory, using its findings file as ground truth. This closes
+	// gaps left by a bug or crash that dropped history before it could be
+	// checkpointed (e.g. a stale/incorrect sprint count that ended the run
+	// early, or an interruption before a save) — the sprint history shown in
+	// the workflow panel should reflect everything that actually happened,
+	// not just what the last successful checkpoint recorded.
+	st.VerdictHistory = backfillVerdictHistory(st.VerdictHistory, stateDir, sess.ID, startSprint)
 	// resumeRole is the role to start from within the first resumed sprint/pass.
 	// Empty string means start from generator (normal case). "evaluator" means
 	// the generator already completed and we resume at the evaluator.
@@ -162,6 +218,12 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	if w.ResumeSprint > 0 {
 		resumeRole = w.ResumeRole
 	}
+	// isResumeOpeningTurn marks the single inner-loop iteration that resumes
+	// an existing run — skipGenerator below depends on the role/sprint/pass
+	// exactly as they were persisted before the resume, so that one turn must
+	// not be checkpointed over before it's evaluated. False for a fresh run
+	// (there is nothing to preserve) and for every turn after the first.
+	isResumeOpeningTurn := w.ResumeSprint > 0
 
 	// ── Sprint loop ───────────────────────────────────────────────────────────
 	for sprint := startSprint; sprint <= sprintCount; sprint++ {
@@ -172,6 +234,20 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 
 		for {
+			// Checkpoint before attempting this pass's generator (except the
+			// resume-opening turn, see isResumeOpeningTurn) so that if the
+			// generator fails outright — e.g. a transient network error that
+			// exhausts retries — the on-disk state already reflects this
+			// sprint/pass instead of whatever the previous sprint/pass last
+			// left behind. Without this, resuming after such a failure would
+			// re-target the last successfully-checkpointed (already-approved)
+			// sprint/pass rather than the one that actually needs retrying.
+			if !isResumeOpeningTurn {
+				st.Role = "generator"
+				_ = workflow.SaveState(statePath, st)
+			}
+			isResumeOpeningTurn = false
+
 			sprintPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.sprint%d.md", sess.ID, sprint))
 			findingsPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.findings%d.md", sess.ID, sprint))
 
@@ -276,10 +352,72 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-var sprintHeadingRE = regexp.MustCompile(`(?mi)^##\s+Sprint\s+\d+`)
+// backfillVerdictHistory ensures every sprint strictly before startSprint has
+// at least one entry in history, deriving a best-effort entry from that
+// sprint's findings file (ground truth for what the evaluator last decided)
+// when history has none for it. The exact pass count for a backfilled entry
+// is unrecoverable once its findings file has been overwritten by a later
+// pass — findingsN.md holds only the latest pass's content — so it is
+// recorded as pass 0 to mark it as reconstructed rather than recorded live.
+func backfillVerdictHistory(history []workflow.VerdictEntry, stateDir, sessionID string, startSprint int) []workflow.VerdictEntry {
+	have := make(map[int]bool, len(history))
+	for _, v := range history {
+		have[v.Sprint] = true
+	}
+	for sprint := 1; sprint < startSprint; sprint++ {
+		if have[sprint] {
+			continue
+		}
+		findingsPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.findings%d.md", sessionID, sprint))
+		data, err := os.ReadFile(findingsPath)
+		if err != nil {
+			continue
+		}
+		verdict := workflow.ParseVerdict(string(data))
+		if verdict == workflow.VerdictUnknown {
+			continue
+		}
+		history = append(history, workflow.VerdictEntry{Sprint: sprint, Pass: 0, Verdict: verdict.String()})
+	}
+	sort.Slice(history, func(i, j int) bool {
+		if history[i].Sprint != history[j].Sprint {
+			return history[i].Sprint < history[j].Sprint
+		}
+		return history[i].Pass < history[j].Pass
+	})
+	return history
+}
 
+// sprintHeadingRE matches "## Sprint N" headings (case-insensitive). The hash
+// count is flexible (2-6 "#") because designers sometimes nest sprints one
+// level deeper (e.g. "### Sprint N" under a "## Sprint Plan" heading) despite
+// planInstructions asking for exactly "##" — the parser should not silently
+// drop sprints just because the heading level didn't match instructions.
+var sprintHeadingRE = regexp.MustCompile(`(?mi)^#{2,6}\s+Sprint\s+(\d+)`)
+
+// countSprints returns the number of "## Sprint N" headings in the plan.
 func countSprints(plan string) int {
 	return len(sprintHeadingRE.FindAllString(plan, -1))
+}
+
+// parseSprintSection extracts the content under "## Sprint N" up to the next
+// "## Sprint" heading or end of file. Returns empty string if the sprint is not found.
+func parseSprintSection(plan string, sprint int) string {
+	matches := sprintHeadingRE.FindAllStringIndex(plan, -1)
+	target := fmt.Sprintf("Sprint %d", sprint)
+	for i, loc := range matches {
+		// Check if this heading matches the target sprint number.
+		heading := plan[loc[0]:loc[1]]
+		if !strings.Contains(strings.ToLower(heading), strings.ToLower(target)) {
+			continue
+		}
+		end := len(plan)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		return strings.TrimSpace(plan[loc[0]:end])
+	}
+	return ""
 }
 
 var (

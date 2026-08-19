@@ -34,4 +34,15 @@ type RunConfig struct {
 	Runners  map[string]TurnRunner // role name → resolved TurnRunner adapter
 	Send     func(tea.Msg)         // TUI message bus
 	StateDir string                // directory for state and artefact files
+
+	// Designer disambiguation: when set, the designer sends questions via
+	// cfg.Send and waits for user answers on AnswersCh before finalizing.
+	AnswersCh chan string
+}
+
+// WorkflowQuestionsMsg is sent to the TUI when the designer identifies
+// ambiguities that need user input before proceeding.
+type WorkflowQuestionsMsg struct {
+	Questions string        // raw designer output with ## Questions and ## Defaults
+	AnswersCh chan<- string // channel to send user answers back to the workflow goroutine
 }

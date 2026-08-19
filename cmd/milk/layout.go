@@ -31,22 +31,30 @@ func (m *model) mainWidth() int {
 	if m.panelTasks {
 		w -= tasksPanelWidth
 	}
-	if m.workflowPanelOpen {
-		memW := 0
-		if m.panelMemory {
-			memW = memoryPanelWidth
-		}
-		if m.panelTasks {
-			memW += tasksPanelWidth
-		}
-		if m.width >= memW+workflowPanelWidth+40 {
-			w -= workflowPanelWidth
-		}
+	if m.workflowPanelVisible() {
+		w -= workflowPanelWidth
 	}
 	if w < 20 {
 		w = 20
 	}
 	return w
+}
+
+// workflowPanelVisible reports whether the workflow panel is open and the
+// terminal is wide enough to render it alongside a usable main area (minimum
+// 40 cols for the transcript) and any other open panels.
+func (m *model) workflowPanelVisible() bool {
+	if !m.workflowPanelOpen {
+		return false
+	}
+	memW := 0
+	if m.panelMemory {
+		memW = memoryPanelWidth
+	}
+	if m.panelTasks {
+		memW += tasksPanelWidth
+	}
+	return m.width >= memW+workflowPanelWidth+40
 }
 
 // vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.
@@ -73,6 +81,16 @@ func (m *model) syncLayout() {
 	}
 	if m.vp.Height != vpH {
 		m.vp.Height = vpH
+	}
+	// The textarea is rendered as content inside the viewport (see
+	// setViewportContent), so it must wrap at the same width the viewport
+	// itself uses (vw), not mainWidth() — otherwise input lines overflow the
+	// viewport's own column budget by exactly the scrollbar column reserved
+	// by vpWidth(). This also re-syncs the width whenever a panel opens or
+	// closes, even at call sites that only call syncLayout and not
+	// refreshPrompt (e.g. auto-opening the workflow panel).
+	if m.ta.Width() != vw {
+		m.ta.SetWidth(vw)
 	}
 	m.setViewportContent()
 	if atBottom {
@@ -200,18 +218,10 @@ func (m model) View() string {
 		tpanel := m.renderTasksPanel(vpH)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel)
 	}
-	if m.workflowPanelOpen {
-		// Suppress the workflow panel when the terminal is too narrow to render it
-		// alongside a usable main area (minimum 40 cols for the transcript).
-		memW := 0
-		if m.panelMemory {
-			memW = memoryPanelWidth
-		}
-		tooNarrow := m.width < memW+workflowPanelWidth+40
-		if !tooNarrow {
-			wpanel := m.renderWorkflowPanel(vpH)
-			mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, wpanel)
-		}
+	if m.workflowPanelVisible() {
+		wpanel := m.renderWorkflowPanel(vpH)
+		wbar := m.renderWorkflowPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, wpanel, wbar)
 	}
 	if len(m.tabHints) > 0 {
 		return m.headerBar() + "\n" + mainArea + "\n" + strings.Join(m.tabHints, "\n") + "\n" + m.statusBar()

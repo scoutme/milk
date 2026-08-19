@@ -198,3 +198,41 @@ func TestIsRepeatedPrompt_SkipFirst_ZeroIsIdentical(t *testing.T) {
 		t.Error("want true: immediate repeat with skip=0 should fire")
 	}
 }
+
+// Tests for the [user to <agent>] prefix stripping (session-to-unified-messages format).
+
+func TestIsRepeatedPrompt_UserToAgentPrefix_DetectsRepeat(t *testing.T) {
+	// sessionToUnifiedMessages wraps user turns with "[user to <agent>]".
+	// isRepeatedPrompt must strip this prefix so raw prompts still match.
+	prefixed := "[user to mimo-local] " + longPrompt
+	history := []Message{
+		{Role: "user", Content: prefixed},
+		{Role: "assistant", Content: "done"},
+	}
+	if !isRepeatedPrompt(history, longPrompt, 0) {
+		t.Error("want true: [user to X] prefix must be stripped for comparison")
+	}
+}
+
+func TestIsRepeatedPrompt_UserToAgentPrefix_CaseInsensitive(t *testing.T) {
+	history := []Message{
+		{Role: "user", Content: "[user to Claude] Write  a Unit Test For The Auth Module"},
+		{Role: "assistant", Content: "done"},
+	}
+	if !isRepeatedPrompt(history, longPrompt, 0) {
+		t.Error("want true: prefix stripping + case/space normalization")
+	}
+}
+
+func TestIsRepeatedPrompt_PrefixedHistory_SkipFirst(t *testing.T) {
+	// Prefixed turns in skip window must be excluded correctly.
+	history := []Message{
+		{Role: "user", Content: "[user to agent] " + longPrompt}, // skipped
+		{Role: "assistant", Content: "old"},
+		{Role: "user", Content: "[user to agent] " + longPrompt}, // counted
+		{Role: "assistant", Content: "new"},
+	}
+	if !isRepeatedPrompt(history, longPrompt, 1) {
+		t.Error("want true: post-baseline prefixed match should fire")
+	}
+}
