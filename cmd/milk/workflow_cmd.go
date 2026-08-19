@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -418,18 +419,23 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	answersCh := make(chan string, 1)
+
 	wf := wfdev.New(w.task, 0)
 	runCfg := workflow.RunConfig{
-		Session:  sess,
-		Runners:  runners,
-		Send:     send,
-		StateDir: stateDir,
+		Session:   sess,
+		Runners:   runners,
+		Send:      send,
+		StateDir:  stateDir,
+		AnswersCh: answersCh,
 	}
 
 	// Show panel immediately and mark busy so the TUI blocks normal input.
 	m.workflowPanelOpen = true
 	m.busy = true
 	m.spinnerFrame = 0
+	m.lastWorkflowActivity = time.Now()
+	m.workflowTimeoutWarned = false
 	m.workflowState = &workflow.State{
 		WorkflowName: "dev",
 		Sprint:       1,
@@ -445,6 +451,7 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 	m.cancelTurn = cancel
 	return m, tea.Batch(
 		spinnerTick(),
+		workflowIdleCheck(),
 		func() tea.Msg {
 			defer cancel()
 			err := wf.Run(ctx, runCfg)
@@ -574,17 +581,22 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 		return m, nil
 	}
 
+	answersCh := make(chan string, 1)
+
 	wf := wfdev.NewResume(w.task, maxPasses, sprint, pass, role)
 	runCfg := workflow.RunConfig{
-		Session:  sess,
-		Runners:  runners,
-		Send:     send,
-		StateDir: stateDir,
+		Session:   sess,
+		Runners:   runners,
+		Send:      send,
+		StateDir:  stateDir,
+		AnswersCh: answersCh,
 	}
 
 	m.workflowPanelOpen = true
 	m.busy = true
 	m.spinnerFrame = 0
+	m.lastWorkflowActivity = time.Now()
+	m.workflowTimeoutWarned = false
 	m.workflowState = &workflow.State{
 		WorkflowName: "dev",
 		Task:         w.task,
@@ -601,6 +613,7 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 	m.cancelTurn = cancel
 	return m, tea.Batch(
 		spinnerTick(),
+		workflowIdleCheck(),
 		func() tea.Msg {
 			defer cancel()
 			err := wf.Run(ctx, runCfg)

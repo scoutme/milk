@@ -54,6 +54,10 @@ func (m *model) renderMemoryPanel(h int) string {
 		m.panelOffset = maxOffset
 	}
 
+	if m.panelSelRegion == regionMemory {
+		all = applyPanelSelectionHighlight(all, m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+	}
+
 	// Slice the visible window.
 	lines := all[m.panelOffset:]
 	for len(lines) < h {

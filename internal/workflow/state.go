@@ -18,6 +18,11 @@ type State struct {
 	Role           string            `json:"role"`
 	VerdictHistory []VerdictEntry    `json:"verdict_history"`
 	AgentMap       map[string]string `json:"agent_map"` // role → resolved agent name
+	// TotalSprints is the sprint count derived from the designer's plan, once
+	// known. 0 means not yet known (e.g. still in the designer role) or a
+	// state file saved before this field existed — callers should fall back
+	// to showing just Sprint in that case, not "sprint N/0".
+	TotalSprints int `json:"total_sprints,omitempty"`
 }
 
 // VerdictEntry records the evaluator's verdict for one sprint/pass pair.

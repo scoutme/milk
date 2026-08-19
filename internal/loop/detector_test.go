@@ -96,7 +96,7 @@ func TestResponseRepetition_BreaksOnDifferent(t *testing.T) {
 
 func TestTokenVelocity_NoFireBelowThreshold(t *testing.T) {
 	cfg := testConfig()
-	cfg.TokenVelocityThreshold = 50000
+	cfg.TokenVelocityThreshold = 300000
 	d := New(cfg)
 	now := time.Now()
 	d.Feed(TurnSummary{InputTokens: 1000, OutputTokens: 500, Timestamp: now})
@@ -120,6 +120,9 @@ func TestTokenVelocity_FiresAboveThreshold(t *testing.T) {
 	for _, v := range verdicts {
 		if v.Signal == SignalTokenVelocity {
 			found = true
+			if v.ShouldInterrupt {
+				t.Error("token velocity should never auto-interrupt (warn only)")
+			}
 		}
 	}
 	if !found {
@@ -139,6 +142,28 @@ func TestTokenVelocity_IgnoresOldTurns(t *testing.T) {
 	for _, v := range verdicts {
 		if v.Signal == SignalTokenVelocity {
 			t.Error("should ignore turns outside the velocity window")
+		}
+	}
+}
+
+func TestTokenVelocity_NeverInterruptsEvenAtHighConfidence(t *testing.T) {
+	cfg := testConfig()
+	cfg.TokenVelocityThreshold = 1000
+	d := New(cfg)
+	now := time.Now()
+	// Way above threshold — should still warn-only
+	for i := 0; i < 5; i++ {
+		d.Feed(TurnSummary{InputTokens: 50000, OutputTokens: 50000, Timestamp: now})
+	}
+	verdicts := d.Feed(TurnSummary{InputTokens: 50000, OutputTokens: 50000, Timestamp: now})
+	for _, v := range verdicts {
+		if v.Signal == SignalTokenVelocity {
+			if v.ShouldInterrupt {
+				t.Error("token velocity must never auto-interrupt, even at high confidence")
+			}
+			if v.Confidence < 0.8 {
+				t.Errorf("expected high confidence for large burn, got %f", v.Confidence)
+			}
 		}
 	}
 }
@@ -357,14 +382,14 @@ func TestMultipleSignals_FireTogether(t *testing.T) {
 
 // ── Chunk Repetition (intra-turn) ────────────────────────────────────────────
 
-func TestChunkRepetition_FiresAfterThreshold(t *testing.T) {
+func TestChunkRepetition_FiresAfterConsecutiveRepeats(t *testing.T) {
 	cfg := testConfig()
-	cfg.ChunkRepetitionThreshold = 3
-	cfg.ChunkWindowSize = 50
+	cfg.ChunkRepetitionThreshold = 5
 	d := New(cfg)
 	chunk := "I will now run the same command again to verify the output"
-	d.FeedChunk(chunk)
-	d.FeedChunk(chunk)
+	for i := 0; i < 4; i++ {
+		d.FeedChunk(chunk)
+	}
 	verdicts := d.FeedChunk(chunk)
 	found := false
 	for _, v := range verdicts {
@@ -379,13 +404,13 @@ func TestChunkRepetition_FiresAfterThreshold(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected SignalChunkRepetition after 3 identical chunks")
+		t.Error("expected SignalChunkRepetition after 5 consecutive identical chunks")
 	}
 }
 
 func TestChunkRepetition_NoFireForDifferentChunks(t *testing.T) {
 	cfg := testConfig()
-	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionThreshold = 5
 	d := New(cfg)
 	d.FeedChunk("first chunk of output from the agent")
 	d.FeedChunk("second chunk with different content here")
@@ -393,6 +418,44 @@ func TestChunkRepetition_NoFireForDifferentChunks(t *testing.T) {
 	for _, v := range verdicts {
 		if v.Signal == SignalChunkRepetition {
 			t.Error("should not fire for different chunks")
+		}
+	}
+}
+
+func TestChunkRepetition_NoFireForScatteredRepeats(t *testing.T) {
+	// The key test: same chunk appears 3 times but NOT consecutively.
+	// This should NOT fire — it's normal for multi-file reads to share
+	// common phrases like "Let me read" across different contexts.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	d := New(cfg)
+	d.FeedChunk("Let me read the config file first")               // 1st occurrence
+	d.FeedChunk("Found 3 sections in the config")                  // different
+	d.FeedChunk("Now let me read the tools implementation")        // different
+	d.FeedChunk("The tools file defines runBash and runGrep")      // different
+	d.FeedChunk("Let me read the status bar code")                 // 2nd occurrence (different text)
+	d.FeedChunk("The status bar uses dim() for styling")           // different
+	d.FeedChunk("Let me read the header implementation")           // 3rd occurrence (different text)
+	verdicts := d.FeedChunk("The header calls styleStatusBarPerm") // 4th
+	for _, v := range verdicts {
+		if v.Signal == SignalChunkRepetition {
+			t.Error("should not fire for non-consecutive repeats across different contexts")
+		}
+	}
+}
+
+func TestChunkRepetition_NoFireForConsecutiveShortPrefixes(t *testing.T) {
+	// Different chunks that share a common prefix but are NOT the same text.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	d := New(cfg)
+	d.FeedChunk("Let me check the config.go file for defaults")
+	d.FeedChunk("Let me check the tools.go file for the dispatch")
+	d.FeedChunk("Let me check the repl.go file for the handler")
+	verdicts := d.FeedChunk("Let me check the status.go file for formatting")
+	for _, v := range verdicts {
+		if v.Signal == SignalChunkRepetition {
+			t.Error("should not fire — chunks share a prefix but are different text")
 		}
 	}
 }
@@ -449,6 +512,43 @@ func TestChunkRepetition_FiresOnce(t *testing.T) {
 		if v.Signal == SignalChunkRepetition {
 			t.Error("should not re-fire within the same turn")
 		}
+	}
+}
+
+func TestChunkRepetition_ConsecutiveCounterResetsOnDifferent(t *testing.T) {
+	// 4 identical chunks, then 1 different, then 2 more identical.
+	// Should NOT fire — the streak was broken.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	d := New(cfg)
+	chunk := "this is a long enough phrase to not be trimmed away"
+	d.FeedChunk(chunk)
+	d.FeedChunk(chunk)
+	d.FeedChunk(chunk)
+	verdicts := d.FeedChunk("something completely different breaks the streak here")
+	for _, v := range verdicts {
+		if v.Signal == SignalChunkRepetition {
+			t.Error("should not fire — consecutive streak was broken by different chunk")
+		}
+	}
+	// Now continue with the same chunk — only 2 in a row since the break.
+	d.FeedChunk(chunk)
+	verdicts = d.FeedChunk(chunk)
+	for _, v := range verdicts {
+		if v.Signal == SignalChunkRepetition {
+			t.Error("should not fire — only 2 consecutive since streak break")
+		}
+	}
+	// One more to make 3 consecutive — should fire.
+	verdicts = d.FeedChunk(chunk)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalChunkRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected chunk repetition after 3 consecutive (post-break)")
 	}
 }
 

@@ -19,9 +19,10 @@ type Config struct {
 	ResponseSimilarityThreshold    float64 `json:"response_similarity_threshold"`     // default 0.85
 
 	// Token velocity: fire when tokens consumed in the window exceed threshold.
+	// Warn-only — never auto-interrupts. High token consumption is normal for active work.
 	TokenVelocityWindow    time.Duration `json:"-"`                             // derived from seconds
-	TokenVelocitySeconds   int           `json:"token_velocity_window_seconds"` // default 30
-	TokenVelocityThreshold int64         `json:"token_velocity_threshold"`      // default 50000
+	TokenVelocitySeconds   int           `json:"token_velocity_window_seconds"` // default 60
+	TokenVelocityThreshold int64         `json:"token_velocity_threshold"`      // default 300000
 
 	// Silent burn: fire when input tokens are high but output is near-zero.
 	MaxSilentBurnTokens int64 `json:"max_silent_burn_tokens"` // default 20000
@@ -33,12 +34,12 @@ type Config struct {
 	ToolEchoThreshold int `json:"tool_echo_threshold"` // default 3
 
 	// Chunk repetition (intra-turn): fire when the same chunk text appears
-	// N+ times within a sliding window of recent chunks. Catches the case
-	// where an agent repeats the same phrase/tool-call forever within a turn.
-	ChunkRepetitionThreshold int `json:"chunk_repetition_threshold"` // default 3
+	// N+ times consecutively within a sliding window of recent chunks.
+	ChunkRepetitionThreshold int `json:"chunk_repetition_threshold"` // default 5
 	ChunkWindowSize          int `json:"chunk_window_size"`          // default 50
 
 	// Auto-interrupt: when true, high-confidence signals cancel the turn.
+	// Token velocity never auto-interrupts regardless of this setting.
 	AutoInterrupt bool `json:"auto_interrupt"`
 }
 
@@ -50,11 +51,11 @@ func (c *Config) defaults() {
 		c.ResponseSimilarityThreshold = 0.85
 	}
 	if c.TokenVelocitySeconds <= 0 {
-		c.TokenVelocitySeconds = 30
+		c.TokenVelocitySeconds = 60
 	}
 	c.TokenVelocityWindow = time.Duration(c.TokenVelocitySeconds) * time.Second
 	if c.TokenVelocityThreshold <= 0 {
-		c.TokenVelocityThreshold = 50000
+		c.TokenVelocityThreshold = 300000
 	}
 	if c.MaxSilentBurnTokens <= 0 {
 		c.MaxSilentBurnTokens = 20000
@@ -66,7 +67,7 @@ func (c *Config) defaults() {
 		c.ToolEchoThreshold = 3
 	}
 	if c.ChunkRepetitionThreshold <= 0 {
-		c.ChunkRepetitionThreshold = 3
+		c.ChunkRepetitionThreshold = 5
 	}
 	if c.ChunkWindowSize <= 0 {
 		c.ChunkWindowSize = 50
@@ -129,10 +130,12 @@ type Detector struct {
 	history []TurnSummary
 
 	// Intra-turn chunk buffer for detecting within-turn repetition.
-	chunkBuf   []string // ring buffer of recent chunk texts
-	chunkIdx   int      // next write position in chunkBuf
-	chunkCount int      // total chunks seen in this turn (capped at len(chunkBuf))
-	firedChunk bool     // true once SignalChunkRepetition fired this turn (don't re-fire)
+	chunkBuf      []string // ring buffer of recent chunk texts
+	chunkIdx      int      // next write position in chunkBuf
+	chunkCount    int      // total chunks seen in this turn (capped at len(chunkBuf))
+	firedChunk    bool     // true once SignalChunkRepetition fired this turn (don't re-fire)
+	consecRepeat  int      // count of consecutive same-text chunks at tail of buffer
+	lastChunkText string   // text of the most recent chunk (for consecutive detection)
 }
 
 // New creates a Detector with the given config. Call Config.defaults() first.
@@ -182,6 +185,8 @@ func (d *Detector) Reset() {
 	d.chunkIdx = 0
 	d.chunkCount = 0
 	d.firedChunk = false
+	d.consecRepeat = 0
+	d.lastChunkText = ""
 	d.mu.Unlock()
 }
 
@@ -192,12 +197,18 @@ func (d *Detector) ResetTurn() {
 	d.chunkIdx = 0
 	d.chunkCount = 0
 	d.firedChunk = false
+	d.consecRepeat = 0
+	d.lastChunkText = ""
 	d.mu.Unlock()
 }
 
 // FeedChunk records a streaming chunk within the current turn and returns
 // any triggered verdicts. This is the primary intra-turn loop detector —
 // call it for every chunkMsg the TUI receives.
+//
+// Detection requires N *consecutive* identical chunks (not just N occurrences
+// in the window), which avoids false positives when the agent reads multiple
+// files and common short phrases appear across different contexts.
 func (d *Detector) FeedChunk(text string) []Verdict {
 	if !d.cfg.Enabled {
 		return nil
@@ -223,36 +234,29 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 		d.chunkCount++
 	}
 
+	// Track consecutive repeats — reset fired flag when the streak breaks
+	// so a new identical streak later in the turn can fire again.
+	if trimmed == d.lastChunkText {
+		d.consecRepeat++
+	} else {
+		d.consecRepeat = 1
+		d.lastChunkText = trimmed
+		d.firedChunk = false
+	}
+
 	// Don't re-fire within the same turn.
 	if d.firedChunk {
 		return nil
 	}
 
-	// Count occurrences of each chunk in the buffer.
-	if d.chunkCount < d.cfg.ChunkRepetitionThreshold {
-		return nil // not enough data yet
-	}
-
-	counts := map[string]int{}
-	maxCount := 0
-	var mostRepeated string
-	for i := 0; i < d.chunkCount; i++ {
-		c := d.chunkBuf[i]
-		counts[c]++
-		if counts[c] > maxCount {
-			maxCount = counts[c]
-			mostRepeated = c
-		}
-	}
-
-	if maxCount < d.cfg.ChunkRepetitionThreshold {
+	if d.consecRepeat < d.cfg.ChunkRepetitionThreshold {
 		return nil
 	}
 
 	d.firedChunk = true
 
 	// Truncate the repeated text for the message (max 60 runes).
-	display := mostRepeated
+	display := trimmed
 	runes := []rune(display)
 	if len(runes) > 60 {
 		display = string(runes[:60]) + "…"
@@ -261,7 +265,7 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 	return []Verdict{{
 		Signal:          SignalChunkRepetition,
 		Confidence:      0.9,
-		Message:         fmt.Sprintf("chunk repeating %d×: %q", maxCount, display),
+		Message:         fmt.Sprintf("chunk repeating %d×: %q", d.consecRepeat, display),
 		ShouldInterrupt: true,
 	}}
 }
@@ -324,11 +328,13 @@ func (d *Detector) checkTokenVelocity() *Verdict {
 		confidence = 0.9
 	}
 
+	// Token velocity is warn-only — high consumption is normal for active work.
+	// Only auto-interrupt when the agent is clearly stuck (other signals).
 	return &Verdict{
 		Signal:          SignalTokenVelocity,
 		Confidence:      confidence,
 		Message:         "high token burn rate",
-		ShouldInterrupt: confidence >= 0.8,
+		ShouldInterrupt: false,
 	}
 }
 

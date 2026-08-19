@@ -807,6 +807,8 @@ func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns i
 	// Collect the last repetitionWindow user messages, most-recent last.
 	// skipFirstUserTurns allows the caller to exclude history prior to a
 	// /primary switch so those turns don't count toward the repetition window.
+	// Strip the "[user to <agent>]" prefix that sessionToUnifiedMessages adds
+	// so that raw prompts can be matched against history entries.
 	var userMsgs []string
 	skipped := 0
 	for _, m := range history {
@@ -815,7 +817,11 @@ func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns i
 				skipped++
 				continue
 			}
-			userMsgs = append(userMsgs, normalizePrompt(m.Content))
+			raw := m.Content
+			if i := strings.Index(raw, "] "); i > 0 && strings.HasPrefix(raw, "[user to ") {
+				raw = raw[i+2:]
+			}
+			userMsgs = append(userMsgs, normalizePrompt(raw))
 		}
 	}
 	if len(userMsgs) > repetitionWindow {

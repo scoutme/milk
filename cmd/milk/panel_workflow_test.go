@@ -170,3 +170,38 @@ func TestWorkflowPanelLineCount_DoneVsActive(t *testing.T) {
 			workflowPanelLineCount(active), workflowPanelLineCount(done))
 	}
 }
+
+// ── sprint X/Y label ──────────────────────────────────────────────────────────
+
+// sprintLine returns the "workflow  sprint ..." line from a rendered panel,
+// i.e. the 3rd line (title, blank, then this one).
+func sprintLine(t *testing.T, st *workflow.State) string {
+	t.Helper()
+	lines := buildWorkflowPanelLines(st, workflowPanelContentWidth-2)
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines, got %d: %v", len(lines), lines)
+	}
+	return stripANSI(lines[2])
+}
+
+func TestBuildWorkflowPanelLines_SprintShowsTotalWhenKnown(t *testing.T) {
+	st := &workflow.State{WorkflowName: "dev", Sprint: 2, TotalSprints: 5, Role: "generator"}
+	got := sprintLine(t, st)
+	if !strings.Contains(got, "sprint 2/5") {
+		t.Errorf("expected sprint line to contain %q, got %q", "sprint 2/5", got)
+	}
+}
+
+func TestBuildWorkflowPanelLines_SprintFallsBackWithoutTotal(t *testing.T) {
+	// TotalSprints == 0 covers both a state file saved before this field
+	// existed and the designer role, before the sprint count is known —
+	// neither should render as "sprint N/0".
+	st := &workflow.State{WorkflowName: "dev", Sprint: 1, Role: "designer"}
+	got := sprintLine(t, st)
+	if strings.Contains(got, "/0") {
+		t.Errorf("must never render an unknown total as /0, got %q", got)
+	}
+	if !strings.Contains(got, "sprint 1") {
+		t.Errorf("expected sprint line to contain %q, got %q", "sprint 1", got)
+	}
+}

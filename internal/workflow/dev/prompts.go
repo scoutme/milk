@@ -3,17 +3,14 @@ package dev
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
-func designerPrompt(task string) string {
-	return fmt.Sprintf(`You are the designer for this development task.
-
-Task: %s
-
-Produce a detailed spec and sprint plan. Structure your response as follows:
-
-## Spec
+// planInstructions is the shared spec/limits/sprint-plan format instructions,
+// embedded by every designer prompt variant that must produce (or may need to
+// produce, in the NO_QUESTIONS case) the actual plan the rest of the workflow parses.
+const planInstructions = `## Spec
 A precise description of what needs to be built, including acceptance criteria.
 
 ## Limits
@@ -37,7 +34,99 @@ For each sprint list the concrete deliverables: files to create or modify, tests
 testing instructions for a human reviewer.
 
 Keep the number of sprints to the minimum needed. If the task fits in one sprint, use one.
-`, task)
+`
+
+func designerPrompt(task string) string {
+	return fmt.Sprintf(`You are the designer for this development task.
+
+Task: %s
+
+Produce a detailed spec and sprint plan. Structure your response as follows:
+
+%s`, task, planInstructions)
+}
+
+// designerQuestionsPrompt asks the designer to identify ambiguities in the task
+// before producing the full plan. When there are no ambiguities worth asking
+// about, the designer must skip straight to the full plan in the same response
+// (there is no separate finalize call in that case — dev.go parses everything
+// after the "NO_QUESTIONS" line as the plan).
+func designerQuestionsPrompt(task string) string {
+	return fmt.Sprintf(`You are the designer for this development task.
+
+Task: %s
+
+Before producing a full plan, identify any ambiguities or missing information that would
+affect the design. Focus on:
+- Technology choices (language, framework, libraries)
+- Architecture decisions (monolith vs modules, API design, data model)
+- Scope boundaries (what's in vs out)
+- Non-functional requirements (performance, security, deployment)
+
+If the task has ambiguities worth asking about, respond with ONLY the questions, structured as:
+
+## Questions
+- Q1: <question>
+- Q2: <question>
+...
+
+## Defaults
+If the user doesn't answer, use these defaults:
+- Q1: <default answer>
+- Q2: <default answer>
+...
+
+Keep the number of questions to the minimum needed. Prefer reasonable defaults over asking.
+
+Otherwise — if the task is already clear enough to design without asking — skip the questions
+entirely. Respond with "NO_QUESTIONS" on its own line, immediately followed by the full spec
+and sprint plan in this format:
+
+%s`, task, planInstructions)
+}
+
+// designerFinalizePrompt asks the designer to produce the full plan incorporating
+// the user's answers to disambiguation questions.
+func designerFinalizePrompt(task, questions, answers string) string {
+	return fmt.Sprintf(`You are the designer for this development task.
+
+Task: %s
+
+You previously identified these ambiguities:
+%s
+
+The user provided these answers:
+%s
+
+Now produce the full detailed spec and sprint plan incorporating the user's choices.
+
+%s`, task, questions, answers, planInstructions)
+}
+
+// noQuestionsLineRE matches a standalone "NO_QUESTIONS" marker line,
+// case-insensitive, ignoring leading/trailing spaces/tabs on that line. It is
+// anchored to a whole line rather than the very start of the response
+// because designers sometimes prepend a short reasoning preamble before their
+// concluding marker and plan, despite being asked to lead with it — treating
+// that as "has questions" incorrectly halts the workflow for user input.
+var noQuestionsLineRE = regexp.MustCompile(`(?mi)^[ \t]*NO_QUESTIONS[ \t]*$`)
+
+// hasQuestions returns true if the designer response contains structured questions
+// (i.e., no standalone "NO_QUESTIONS" marker line found anywhere in the response).
+func hasQuestions(response string) bool {
+	return !noQuestionsLineRE.MatchString(response)
+}
+
+// stripNoQuestionsPreamble returns the plan text following a standalone
+// NO_QUESTIONS marker line, discarding anything before it (e.g. a reasoning
+// preamble the designer wrote before concluding there were no questions).
+// Falls back to the trimmed response unchanged if no marker line is found.
+func stripNoQuestionsPreamble(response string) string {
+	loc := noQuestionsLineRE.FindStringIndex(response)
+	if loc == nil {
+		return strings.TrimSpace(response)
+	}
+	return strings.TrimSpace(response[loc[1]:])
 }
 
 func generatorPrompt(planPath string, sprint, pass int, findingsPath string) string {
@@ -50,8 +139,15 @@ func generatorPrompt(planPath string, sprint, pass int, findingsPath string) str
 	}
 	fmt.Fprintf(&sb, ".\n\n")
 
+	// Send only the current sprint section, not the full plan.
 	if plan != "" {
-		fmt.Fprintf(&sb, "## Plan\n%s\n\n", plan)
+		sprintSection := parseSprintSection(plan, sprint)
+		if sprintSection != "" {
+			fmt.Fprintf(&sb, "## Current sprint\n%s\n\n", sprintSection)
+		} else {
+			// Fallback: sprint not found in plan, send the full plan.
+			fmt.Fprintf(&sb, "## Plan\n%s\n\n", plan)
+		}
 	}
 
 	if pass > 1 && findingsPath != "" {
@@ -78,8 +174,14 @@ func evaluatorPrompt(planPath string, sprintOutputPath string, sprint, pass, max
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You are the evaluator. Review Sprint %d (pass %d of %d).\n\n", sprint, pass, maxPasses)
 
+	// Send only the current sprint section, not the full plan.
 	if plan != "" {
-		fmt.Fprintf(&sb, "## Plan\n%s\n\n", plan)
+		sprintSection := parseSprintSection(plan, sprint)
+		if sprintSection != "" {
+			fmt.Fprintf(&sb, "## Current sprint\n%s\n\n", sprintSection)
+		} else {
+			fmt.Fprintf(&sb, "## Plan\n%s\n\n", plan)
+		}
 	}
 	if sprintOutput != "" {
 		fmt.Fprintf(&sb, "## Generator output\n%s\n\n", sprintOutput)

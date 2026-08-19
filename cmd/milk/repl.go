@@ -103,6 +103,14 @@ type turnTimeoutWarningMsg struct{ agentName string }
 
 type spinnerTickMsg struct{}
 
+// workflowIdleCheckMsg is sent periodically while a workflow is running. It
+// checks whether the current role's turn has exceeded that agent's configured
+// turn timeout since the last streamed activity, and warns once per idle
+// stretch — the workflow equivalent of turnTimeoutWarningMsg, needed because a
+// workflow's overall run spans many turns rather than the single turn a
+// one-shot timer could cover.
+type workflowIdleCheckMsg struct{}
+
 // copyFeedbackClearMsg clears the transient copy confirmation in the status bar.
 type copyFeedbackClearMsg struct{}
 
@@ -402,12 +410,24 @@ type model struct {
 	promptWidth int
 
 	// click-to-select state (content-space coordinates; -1 = none)
-	selAnchorLine  int
-	selAnchorCol   int
-	selEndLine     int
-	selEndCol      int
-	selDragging    bool   // true once the mouse has moved after the initial press
-	selText        string // plain text of the selected range (populated after release)
+	selAnchorLine int
+	selAnchorCol  int
+	selEndLine    int
+	selEndCol     int
+	selDragging   bool   // true once the mouse has moved after the initial press
+	selText       string // plain text of the selected range (populated after release)
+
+	// click-to-select state for the memory/workflow side panels (panel-local
+	// coordinates; -1 = none). Kept separate from the transcript selection above
+	// so a click in one region never bleeds into the other's highlight.
+	panelSelRegion     panelRegion
+	panelSelAnchorLine int
+	panelSelAnchorCol  int
+	panelSelEndLine    int
+	panelSelEndCol     int
+	panelSelDragging   bool
+	panelSelText       string
+
 	copyFeedback   string // transient "[copied N chars]" shown in status bar
 	busyHint       string // transient "agent is responding" shown in status bar
 	credRefreshing bool   // true while any background credential refresh is running
@@ -506,9 +526,20 @@ type model struct {
 
 	// workflow panel
 	workflowPanelOpen     bool
+	workflowPanelOffset   int
 	workflowState         *workflow.State
 	pendingWorkflowWizard *workflowWizardState
 	pendingWorkflowExtend *workflowExtendState
+
+	// designer disambiguation
+	pendingWorkflowQuestions string        // raw questions from designer (non-nil while collecting answers)
+	workflowAnswersCh        chan<- string // channel to send user answers back to workflow goroutine
+
+	// workflow idle watchdog: mirrors the turnTimeoutWarningMsg mechanism used by
+	// normal turns, but reset on every workflow role transition/streamed chunk
+	// rather than a single one-shot timer, since a workflow runs many turns.
+	lastWorkflowActivity  time.Time
+	workflowTimeoutWarned bool
 
 	// loop detection
 	loopDetector  *loop.Detector
@@ -541,6 +572,9 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		panelMemory:         true,
 		selAnchorLine:       -1,
 		selEndLine:          -1,
+		panelSelRegion:      regionNone,
+		panelSelAnchorLine:  -1,
+		panelSelEndLine:     -1,
 		taSelAnchor:         -1,
 		taSelEnd:            -1,
 		lastUndoValue:       "\x00", // sentinel: never equals real textarea value, so first push always succeeds
@@ -572,7 +606,10 @@ func (m *model) refreshPrompt() {
 		return ""
 	})
 	if m.width > 0 {
-		m.ta.SetWidth(m.mainWidth())
+		// Match syncLayout's width: the textarea renders as content inside the
+		// transcript viewport, whose width is vpWidth() (mainWidth() minus the
+		// scrollbar column), not mainWidth() itself.
+		m.ta.SetWidth(m.vpWidth())
 	}
 }
 
@@ -791,55 +828,51 @@ func isEOFOrClosed(err error) bool {
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
-	inPanel := m.panelMemory && ev.X >= m.mainWidth()
+	region, regionX := m.regionAt(ev.X)
 	switch ev.Button {
 	case tea.MouseButtonWheelUp:
-		if inPanel {
+		switch region {
+		case regionMemory:
 			if m.panelOffset > 0 {
 				m.panelOffset--
 			}
-		} else {
+		case regionTasks:
+			if m.tasksOffset > 0 {
+				m.tasksOffset--
+			}
+		case regionWorkflow:
+			if m.workflowPanelOffset > 0 {
+				m.workflowPanelOffset--
+			}
+		default:
 			m.vp.ScrollUp(3)
 		}
 	case tea.MouseButtonWheelDown:
-		if inPanel {
-			m.panelOffset++
-		} else {
+		h := m.viewportHeight()
+		switch region {
+		case regionMemory:
+			if m.panelOffset < m.panelMaxOffset(regionMemory, h) {
+				m.panelOffset++
+			}
+		case regionTasks:
+			if m.tasksOffset < m.panelMaxOffset(regionTasks, h) {
+				m.tasksOffset++
+			}
+		case regionWorkflow:
+			if m.workflowPanelOffset < m.panelMaxOffset(regionWorkflow, h) {
+				m.workflowPanelOffset++
+			}
+		default:
 			m.vp.ScrollDown(3)
 		}
 	case tea.MouseButtonLeft:
-		if inPanel && ev.Action == tea.MouseActionPress {
-			const panelRowStart = 2 // same header offset as the main viewport
-			panelLine := m.panelOffset + (ev.Y - panelRowStart)
-			ids := buildPanelLineIDs(m.mem, m.currentSessionBricks())
-			if panelLine >= 0 && panelLine < len(ids) {
-				id := ids[panelLine]
-				if id != "" {
-					now := time.Now()
-					if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-						// Double-click: print brick or percept details to transcript.
-						bricks := m.currentSessionBricks()
-						var result string
-						if content := brickContent(id, bricks); content != "" {
-							result = milkTag() + " [" + id + "]\n" + content
-						} else {
-							result = execMemoryShow("#"+id[:min(6, len(id))], m.st)
-						}
-						m.appendTranscript(result + "\n")
-						m.vp.GotoBottom()
-						m.lastPanelClickID = ""
-					} else {
-						m.lastPanelClickID = id
-						m.lastPanelClickTime = now
-					}
-				}
-			}
-			break
+		if region == regionMemory || region == regionWorkflow {
+			return m.handlePanelMouse(region, regionX, ev)
 		}
 		// Only handle events inside the viewport area (rows 2..height-2).
 		const vpRowStart = 2
 		vpRowEnd := m.height - 2
-		if ev.Y < vpRowStart || ev.Y >= vpRowEnd || inPanel {
+		if ev.Y < vpRowStart || ev.Y >= vpRowEnd || region != regionNone {
 			break
 		}
 		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
@@ -854,6 +887,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.setViewportContent()
 				break
 			}
+			m.clearPanelSelection()
 			m.selAnchorLine = contentLine
 			m.selAnchorCol = ev.X
 			m.selEndLine = -1
@@ -889,12 +923,21 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.selText = m.selectionText()
 				m.setViewportContent()
 			}
-			// Transcript selection takes priority; then keyboard input selection.
+			if m.panelSelText == "" && m.panelSelAnchorLine >= 0 && m.panelSelDragging {
+				m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+			}
+			// Transcript selection takes priority; then panel selection; then keyboard input selection.
 			if m.selText != "" {
 				copyToClipboard(m.selText)
 				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.selText)))
 				m.clearSelection()
 				m.setViewportContent()
+				return m, copyFeedbackClearCmd()
+			}
+			if m.panelSelText != "" {
+				copyToClipboard(m.panelSelText)
+				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.panelSelText)))
+				m.clearPanelSelection()
 				return m, copyFeedbackClearCmd()
 			}
 			if t := m.taSelText(); t != "" {
@@ -1244,12 +1287,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.workflowState = &st
 		}
 		m.workflowPanelOpen = true
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
 		m.syncLayout()
 		return m, nil
 
 	case workflow.WorkflowChunkMsg:
 		m.currentTurnChars += int64(len(msg.Text))
 		m.appendTranscript(msg.Text)
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
+		m.syncLayout()
+		return m, nil
+
+	case workflowIdleCheckMsg:
+		if !m.busy || m.workflowState == nil {
+			return m, nil // workflow finished or was cancelled — stop rescheduling
+		}
+		if !m.workflowTimeoutWarned {
+			agentName := m.workflowState.AgentMap[m.workflowState.Role]
+			if agentCfg, ok := findAgentByName(m.st.cfg, agentName); ok {
+				timeout := m.st.cfg.AgentTurnTimeout(agentCfg)
+				if timeout > 0 && time.Since(m.lastWorkflowActivity) >= timeout {
+					m.workflowTimeoutWarned = true
+					m.appendTranscript(dim(fmt.Sprintf("[%s (%s) is taking longer than expected — still waiting; Ctrl+C to interrupt]", agentName, m.workflowState.Role)) + "\n")
+					m.syncLayout()
+				}
+			}
+		}
+		return m, workflowIdleCheck()
+
+	case workflow.WorkflowQuestionsMsg:
+		// Designer identified ambiguities — present questions to user.
+		// Unblock input so the user can type answers. The workflow goroutine
+		// is blocked on cfg.AnswersCh; we forward that exact channel here so
+		// the user's reply reaches it.
+		m.pendingWorkflowQuestions = msg.Questions
+		m.workflowAnswersCh = msg.AnswersCh // use the workflow goroutine's channel
+		m.busy = false                      // allow user input
+		m.busyHint = ""
+		if m.workflowState != nil {
+			// Distinguish "waiting on you" from "still generating" in the panel —
+			// otherwise it keeps showing "role: designer" throughout the pause too.
+			m.workflowState.Role = "waiting for your answers"
+		}
+		m.appendTranscript("\n" + milkTag() + " Designer has questions:\n")
+		m.appendTranscript(msg.Questions + "\n\n")
+		m.appendTranscript(milkTag() + " Please provide your answers (or press Enter to use defaults):\n")
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 
@@ -1556,6 +1641,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selAnchorLine >= 0 {
 			m.clearSelection()
 			m.setViewportContent()
+			return m, nil
+		}
+		if m.panelSelAnchorLine >= 0 {
+			m.clearPanelSelection()
 			return m, nil
 		}
 	case "ctrl+c":
@@ -1880,6 +1969,12 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.setViewportContent()
 		return m, copyFeedbackClearCmd()
 	}
+	if m.panelSelText != "" {
+		copyToClipboard(m.panelSelText)
+		m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.panelSelText)))
+		m.clearPanelSelection()
+		return m, copyFeedbackClearCmd()
+	}
 	if t := m.taSelText(); t != "" {
 		copyToClipboard(t)
 		m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(t)))
@@ -1900,6 +1995,19 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.tabSubcmdMode = false
 		m.tabHints = nil
 		m.tabHintsBase = nil
+		m.syncLayout()
+		return m, nil
+	}
+	// If designer questions are pending, Ctrl+C cancels the workflow.
+	if m.pendingWorkflowQuestions != "" {
+		m.pendingWorkflowQuestions = ""
+		m.workflowAnswersCh = nil
+		if m.cancelTurn != nil {
+			m.cancelTurn()
+			m.cancelTurn = nil
+		}
+		m.appendTranscript("\n" + milkTag() + " workflow cancelled\n")
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	}
@@ -1927,6 +2035,30 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	m.syncLayout()
 	m.histIdx = -1
 	m.saved = ""
+
+	// If we're collecting designer disambiguation answers, send them to the workflow.
+	if m.pendingWorkflowQuestions != "" {
+		m.appendTranscript(promptLabel(m.st) + input + "\n")
+		if m.workflowAnswersCh != nil {
+			m.workflowAnswersCh <- input
+			close(m.workflowAnswersCh)
+			m.workflowAnswersCh = nil
+		}
+		m.pendingWorkflowQuestions = ""
+		// Re-lock input while the designer finalizes the plan.
+		m.busy = true
+		m.spinnerFrame = 0
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
+		if m.workflowState != nil {
+			// Keep Role as the canonical "designer" (matches AgentMap's key) so
+			// the idle watchdog can still resolve the agent's turn timeout.
+			m.workflowState.Role = "designer"
+		}
+		m.appendTranscript(milkTag() + " Answers submitted. Designer finalizing plan...\n")
+		m.syncLayout()
+		return m, tea.Batch(spinnerTick(), workflowIdleCheck())
+	}
 
 	return m.submitInput(input, promptLabel(m.st))
 }
@@ -2205,6 +2337,16 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 func memoryPollTick() tea.Cmd {
 	return tea.Tick(memoryPollInterval, func(time.Time) tea.Msg {
 		return memoryRefreshMsg{}
+	})
+}
+
+// workflowIdleCheckInterval is how often the workflow idle watchdog checks
+// elapsed time against the current role's agent turn timeout.
+const workflowIdleCheckInterval = 15 * time.Second
+
+func workflowIdleCheck() tea.Cmd {
+	return tea.Tick(workflowIdleCheckInterval, func(time.Time) tea.Msg {
+		return workflowIdleCheckMsg{}
 	})
 }
 
