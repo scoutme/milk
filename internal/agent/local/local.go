@@ -933,6 +933,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			}
 		}
 		if allSeen {
+			if resp == "" {
+				// The model is stuck repeating a tool call it already made, and
+				// gave no text alongside the repeat. Without this fallback the
+				// turn would end with a blank assistant message — no error, no
+				// summary, nothing for the user or a later "resume" to go on.
+				obs.Warn("loop detected: repeated tool call with empty response",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
+				resp = summarizeToolTrail(msgs, resp)
+			}
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}
@@ -1439,16 +1448,28 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if err != nil {
 		return "", "", nil, false, err
 	}
-	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && !det.InBlock() && det.RawBlock() == ""
-	if emptyFallback && (reasoningText != "" || finishReason == "length") {
+	// det.RawBlock() == "" already implies there is no usable block content
+	// regardless of whether the detector is still formally InBlock() — a
+	// block that opened (e.g. saw "<tool_call>") and never received any body
+	// before the stream ended is exactly as empty as never opening one: this
+	// is the last chunk of a finished HTTP response, so nothing more is
+	// coming to complete it. Excluding InBlock() here used to let such a
+	// truncated open-delimiter-only response skip both the WARN below and
+	// Run()'s summarizeToolTrail fallback, silently committing an empty
+	// assistant turn to session history with no trace of what happened.
+	danglingToolFragment := len(toolCalls) == 0 && len(partialTools) > 0
+	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && det.RawBlock() == ""
+	if emptyFallback && (reasoningText != "" || finishReason == "length" || det.InBlock() || danglingToolFragment) {
 		obs.Warn("empty completion", "model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-			"reasoning_seen", reasoningText != "", "finish_reason", finishReason)
-		// The model streamed reasoning (or was cut off by a length limit) but
-		// produced no content and no tool call — a degenerate, non-erroring
-		// completion. Falling back to the reasoning text keeps it out of the
-		// void: emptyFallback (below) additionally tells Run() to attach a
-		// summary of this turn's tool activity, so a later turn (e.g.
-		// "resume") has the whole picture, not just this trailing thought.
+			"reasoning_seen", reasoningText != "", "finish_reason", finishReason,
+			"unclosed_block", det.InBlock(), "dangling_tool_fragment", danglingToolFragment)
+		// The model streamed reasoning (or was cut off by a length limit, or
+		// left a tool-call block/fragment unfinished) but produced no content
+		// and no usable tool call — a degenerate, non-erroring completion.
+		// Falling back to the reasoning text keeps it out of the void:
+		// emptyFallback (below) additionally tells Run() to attach a summary
+		// of this turn's tool activity, so a later turn (e.g. "resume") has
+		// the whole picture, not just this trailing thought.
 		if reasoningText != "" {
 			textBuf.WriteString(reasoningText)
 		}
