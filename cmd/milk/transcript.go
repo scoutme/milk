@@ -129,12 +129,10 @@ func (m *model) wrappedTranscript() string {
 			newText := ansi.Wrap(expandTabsForWrap(raw[m.colorizeTransLen:]), vw, "")
 			// Close any open ANSI sequence from the cache before appending raw
 			// text, so a trailing dim/color from e.g. a tool hint line doesn't
-			// bleed into the next chunk of streamed content. stripDanglingEscape
-			// guards against a cache snapshot that ends mid-escape (an ESC '['
-			// run with no terminating 'm' yet) — appending ansiReset directly
-			// after such a fragment would splice a reset into the middle of it
-			// instead of after a complete sequence, surfacing as literal garbage.
-			base := stripDanglingEscape(m.colorizeCached)
+			// bleed into the next chunk of streamed content. The cache boundary
+			// itself never lands mid-escape (see the full-recolor branch below),
+			// so it always ends either with ansiReset or with plain text.
+			base := m.colorizeCached
 			if !strings.HasSuffix(base, ansiReset) {
 				base += ansiReset
 			}
@@ -147,30 +145,55 @@ func (m *model) wrappedTranscript() string {
 	// multi-line constructs like tables are detected on intact rows, then
 	// word-wrap the colorized output. Wrapping before colorization would break
 	// long table rows mid-cell, preventing table detection entirely.
+	//
+	// Content streams into the transcript byte-by-byte (internal/tags.TagWriter/
+	// PerceptWriter must scan one byte at a time to detect tags across chunk
+	// boundaries), so raw can genuinely end with an incomplete ANSI escape — a
+	// lone ESC, or "ESC[" with no terminating 'm' yet — even for text a caller
+	// wrote as one complete string. Clip the cached boundary to just before any
+	// such dangling escape so colorizeCached/colorizeTransLen never commit to a
+	// cut point mid-sequence; the incomplete tail stays in the "new" region,
+	// where newSuffixHasANSI keeps forcing a full re-colorize until it resolves.
+	effLen := txLen
+	if idx := danglingEscapeStart(raw); idx >= 0 {
+		effLen = idx
+	}
 	m.colorizeForce = false
 	m.colorizeLinesSeen = 0
-	colorized := colorizeTranscriptWrapped(raw, m.colorizeMode)
+	colorized := colorizeTranscriptWrapped(raw[:effLen], m.colorizeMode)
 	wrapped := ansi.Wrap(expandTabsForWrap(colorized), vw, "")
 
 	// Update cache.
 	m.colorizeCached = wrapped
-	m.colorizeTransLen = txLen
+	m.colorizeTransLen = effLen
 	m.colorizeVPWidth = vw
 
-	return m.applySelectionHighlight(wrapped)
+	if effLen == txLen {
+		return m.applySelectionHighlight(wrapped)
+	}
+	newText := ansi.Wrap(expandTabsForWrap(raw[effLen:]), vw, "")
+	base := wrapped
+	if !strings.HasSuffix(base, ansiReset) {
+		base += ansiReset
+	}
+	return m.applySelectionHighlight(base + newText)
 }
 
-// stripDanglingEscape removes an incomplete trailing ANSI escape sequence (an
-// ESC '[' run with no terminating 'm' yet) from the end of s, if present.
-func stripDanglingEscape(s string) string {
+// danglingEscapeStart returns the byte offset of an incomplete trailing ANSI
+// escape sequence at the end of s — either a lone ESC with nothing after it
+// yet, or an "ESC[" run with no terminating 'm' yet — or -1 if s ends cleanly.
+func danglingEscapeStart(s string) int {
 	idx := strings.LastIndexByte(s, 0x1B)
-	if idx == -1 || idx+1 >= len(s) || s[idx+1] != '[' {
-		return s
+	if idx == -1 {
+		return -1
+	}
+	if idx+1 >= len(s) || s[idx+1] != '[' {
+		return idx
 	}
 	if strings.IndexByte(s[idx:], 'm') == -1 {
-		return s[:idx]
+		return idx
 	}
-	return s
+	return -1
 }
 
 // transcriptPlainLines returns the transcript lines stripped of ANSI, using the
