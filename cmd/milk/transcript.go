@@ -115,15 +115,26 @@ func (m *model) wrappedTranscript() string {
 		m.colorizeLinesSeen += newLines
 	}
 
-	if !m.colorizeForce && !vpChanged && m.colorizeCached != "" && m.colorizeLinesSeen < colorizeLineThresh {
+	// Pre-colored content (e.g. a tool diff or dim-wrapped hint) written straight
+	// into the transcript carries its own raw ANSI, so re-wrapping just the new
+	// suffix here — independent from the cached prefix — risks a boundary that
+	// doesn't line up with the caller's escape runs. Force a full re-colorize in
+	// that case instead of trusting the fast path.
+	newSuffixHasANSI := txGrew > 0 && strings.IndexByte(raw[m.colorizeTransLen:], 0x1B) >= 0
+
+	if !m.colorizeForce && !vpChanged && !newSuffixHasANSI && m.colorizeCached != "" && m.colorizeLinesSeen < colorizeLineThresh {
 		// Return cached result — append plain-wrapped new text as a fast suffix
 		// so the user sees new content immediately even without re-colorizing.
 		if txGrew > 0 {
 			newText := ansi.Wrap(expandTabsForWrap(raw[m.colorizeTransLen:]), vw, "")
 			// Close any open ANSI sequence from the cache before appending raw
 			// text, so a trailing dim/color from e.g. a tool hint line doesn't
-			// bleed into the next chunk of streamed content.
-			base := m.colorizeCached
+			// bleed into the next chunk of streamed content. stripDanglingEscape
+			// guards against a cache snapshot that ends mid-escape (an ESC '['
+			// run with no terminating 'm' yet) — appending ansiReset directly
+			// after such a fragment would splice a reset into the middle of it
+			// instead of after a complete sequence, surfacing as literal garbage.
+			base := stripDanglingEscape(m.colorizeCached)
 			if !strings.HasSuffix(base, ansiReset) {
 				base += ansiReset
 			}
@@ -147,6 +158,19 @@ func (m *model) wrappedTranscript() string {
 	m.colorizeVPWidth = vw
 
 	return m.applySelectionHighlight(wrapped)
+}
+
+// stripDanglingEscape removes an incomplete trailing ANSI escape sequence (an
+// ESC '[' run with no terminating 'm' yet) from the end of s, if present.
+func stripDanglingEscape(s string) string {
+	idx := strings.LastIndexByte(s, 0x1B)
+	if idx == -1 || idx+1 >= len(s) || s[idx+1] != '[' {
+		return s
+	}
+	if strings.IndexByte(s[idx:], 'm') == -1 {
+		return s[:idx]
+	}
+	return s
 }
 
 // transcriptPlainLines returns the transcript lines stripped of ANSI, using the
