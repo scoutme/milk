@@ -20,9 +20,14 @@ const colorizeLineThresh = 8
 // appendTranscript adds text to both transcript variants and refreshes the viewport.
 // Sticky-bottom: only auto-scrolls when already at the bottom.
 func (m *model) appendTranscript(text string) {
-	// If regular content follows thinking, ensure both variants end with a newline
-	// so the final content starts on its own line rather than the last thinking row.
+	// If regular content follows thinking, close the open dim escape (opened once
+	// in appendThinking, not per-chunk, so it must be closed explicitly here) and
+	// ensure both variants end with a newline so the final content starts on its
+	// own line rather than the last thinking row.
 	if m.thinkingActiveInTurn {
+		if isTTY {
+			m.transcript.WriteString(ansiReset)
+		}
 		if s := m.transcript.String(); len(s) > 0 && s[len(s)-1] != '\n' {
 			m.transcript.WriteByte('\n')
 		}
@@ -47,12 +52,20 @@ func (m *model) appendTranscript(text string) {
 // appendThinking adds thinking/reasoning text to the full transcript (dim-styled)
 // and a single "[thinking…]" placeholder to transcriptNoThink (only on the first
 // chunk of a new thinking block, to avoid repeated placeholders per token).
+//
+// The dim escape is opened once per block (not re-wrapped per chunk) and closed
+// in appendTranscript when regular content follows: back-to-back self-terminated
+// \x1b[2m...\x1b[0m pairs from per-chunk wrapping could otherwise land right at
+// a line-wrap boundary and leave a stray, orphaned "m" terminator visible.
 func (m *model) appendThinking(text string) {
-	m.transcript.WriteString(dim(text))
 	if !m.thinkingActiveInTurn {
+		if isTTY {
+			m.transcript.WriteString(ansiDim)
+		}
 		m.transcriptNoThink.WriteString(dim("[thinking… Ctrl+T to show]"))
 		m.thinkingActiveInTurn = true
 	}
+	m.transcript.WriteString(text)
 	if m.ready {
 		atBottom := m.vp.AtBottom()
 		m.setViewportContent()

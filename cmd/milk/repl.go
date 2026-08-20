@@ -826,6 +826,19 @@ func isEOFOrClosed(err error) bool {
 	return errors.Is(err, os.ErrClosed)
 }
 
+// setMouseDragMode switches the terminal's mouse-tracking level between the
+// at-rest mode (1000, X10 basic — reliable wheel-scroll reporting) and the
+// drag mode (1002, button-motion — needed to receive MouseActionMotion events
+// for live selection-highlight updates). Call with true on drag start and
+// false on drag end; safe to call redundantly.
+func setMouseDragMode(dragging bool) {
+	if dragging {
+		os.Stdout.WriteString("\x1b[?1000l\x1b[?1002h") //nolint:errcheck
+	} else {
+		os.Stdout.WriteString("\x1b[?1002l\x1b[?1000h") //nolint:errcheck
+	}
+}
+
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
 	region, regionX := m.regionAt(ev.X)
@@ -885,6 +898,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.selDragging = true
 				m.selText = m.selectionText()
 				m.setViewportContent()
+				setMouseDragMode(true)
 				break
 			}
 			m.clearPanelSelection()
@@ -895,6 +909,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.selDragging = false
 			m.selText = ""
 			m.setViewportContent()
+			setMouseDragMode(true)
 		case tea.MouseActionMotion:
 			if m.selAnchorLine >= 0 {
 				m.selDragging = true
@@ -903,6 +918,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.setViewportContent()
 			}
 		case tea.MouseActionRelease:
+			setMouseDragMode(false)
 			if m.selAnchorLine >= 0 {
 				if contentLine == m.selAnchorLine && ev.X == m.selAnchorCol {
 					m.clearSelection()
@@ -917,6 +933,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseButtonRight:
 		if ev.Action == tea.MouseActionPress {
+			// A drag whose release was dropped can leave mouse mode stuck at 1002;
+			// any subsequent click reliably arrives, so reset it defensively here.
+			setMouseDragMode(false)
 			// Finalize any in-progress drag selection that lost its release event
 			// (release can be dropped when pointer drifts outside viewport bounds).
 			if m.selText == "" && m.selAnchorLine >= 0 && m.selDragging {
@@ -2890,12 +2909,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tn.StartPolling(ctx)
 	}
 
-	// Mode 1002+1006: button-motion + SGR extension.
-	// Reports drag coordinates while a button is held, enabling live selection
-	// highlight updates. Native terminal selection is replaced by app-managed selection.
-	os.Stdout.WriteString("\x1b[?1002h\x1b[?1006h") //nolint:errcheck
+	// Mode 1000+1006 at rest: X10 basic mouse tracking + SGR extension. Wheel
+	// scroll is reliably reported as tea.MouseMsg under 1000; some terminals
+	// fall back to arrow-key emulation for wheel scroll when button-motion
+	// mode (1002) is left enabled at rest instead. setMouseDragMode switches
+	// to 1002 only for the duration of an active drag, when motion events are
+	// actually needed for live selection-highlight updates.
+	os.Stdout.WriteString("\x1b[?1000h\x1b[?1006h") //nolint:errcheck
 	finalModel, err := p.Run()
-	os.Stdout.WriteString("\x1b[?1006l\x1b[?1002l") //nolint:errcheck
+	os.Stdout.WriteString("\x1b[?1006l\x1b[?1002l\x1b[?1000l") //nolint:errcheck
 
 	if fm, ok := finalModel.(model); ok {
 		if gp, err := globalHistoryPath(); err == nil {
