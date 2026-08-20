@@ -129,6 +129,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 			m.panelSelEndCol = col
 			m.panelSelDragging = true
 			m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+			setMouseDragMode(true)
 			break
 		}
 		m.clearSelection()
@@ -142,6 +143,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 		m.panelSelEndCol = 0
 		m.panelSelDragging = false
 		m.panelSelText = ""
+		setMouseDragMode(true)
 	case tea.MouseActionMotion:
 		if m.panelSelRegion == region && m.panelSelAnchorLine >= 0 {
 			m.panelSelDragging = true
@@ -149,6 +151,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 			m.panelSelEndCol = col
 		}
 	case tea.MouseActionRelease:
+		setMouseDragMode(false)
 		if m.panelSelRegion != region || m.panelSelAnchorLine < 0 {
 			break
 		}
