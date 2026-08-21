@@ -126,6 +126,37 @@ func serveSSE(w http.ResponseWriter, _ *http.Request, req chatRequest, rec *mock
 	}
 
 	var response string
+	if reasoning, ok := parseReasoningOnlyTrigger(input); ok {
+		// Stream the entire response through reasoning_content with an empty
+		// content channel, then finish_reason=stop — reproduces the case
+		// where a reasoning model puts its whole answer in the wrong field.
+		words := strings.Fields(reasoning)
+		for i, word := range words {
+			text := word
+			if i < len(words)-1 {
+				text += " "
+			}
+			chunk := map[string]any{
+				"id":      id,
+				"object":  "chat.completion.chunk",
+				"model":   model,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"reasoning_content": text}, "finish_reason": nil}},
+			}
+			sendSSEChunk(w, flusher, chunk)
+		}
+		doneChunk := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"model":   model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		}
+		sendSSEChunk(w, flusher, doneChunk)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		_ = rec.WriteTurn(input, contextSummary, toolCalls, reasoning)
+		_ = rec.WriteMetrics((len(input) + len(contextSummary) + len(reasoning)) / 4)
+		return
+	}
 	if len(toolCalls) > 0 {
 		// Emit a tool-call delta for each parsed tool call.
 		for i, tc := range toolCalls {
@@ -257,6 +288,21 @@ func buildTextResponse(input, contextSummary string) string {
 		return fmt.Sprintf("response for: %s, context received: %s", input, contextSummary)
 	}
 	return fmt.Sprintf("response for: %s", input)
+}
+
+// parseReasoningOnlyTrigger extracts the payload from a "[reasoning-only:<text>]"
+// marker in the prompt, used to simulate a completion that streams its whole
+// answer through reasoning_content with an empty content channel.
+func parseReasoningOnlyTrigger(input string) (string, bool) {
+	_, rest, found := strings.Cut(input, "[reasoning-only:")
+	if !found {
+		return "", false
+	}
+	payload, _, found := strings.Cut(rest, "]")
+	if !found {
+		return "", false
+	}
+	return payload, true
 }
 
 func lastUserMessage(messages []map[string]any) string {

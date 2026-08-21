@@ -216,6 +216,13 @@ type Agent struct {
 	// onThinking is called on reasoning_content tokens from reasoning models
 	// (Qwen thinking, DeepSeek-R1, etc.). Mirrors the Claude CLI's onThinking.
 	onThinking func(string)
+	// onReasoningPromoted is called when a completion streamed its entire
+	// answer through reasoning_content with an empty content channel, and
+	// that reasoning text is promoted to become the turn's actual final
+	// answer (see streamCompletion's emptyFallback handling). The caller
+	// should discard any reasoning/thinking text already accumulated for
+	// this turn so it isn't also persisted as a duplicate of the answer.
+	onReasoningPromoted func()
 	// mcpToolSet holds connected MCP servers whose tools are exposed to this agent.
 	// Nil when no MCP servers are configured for this agent.
 	mcpToolSet mcpToolSet
@@ -595,6 +602,14 @@ func (a *Agent) WithOnToolUse(fn func(name, summary string)) *Agent {
 func (a *Agent) WithOnThinking(fn func(string)) *Agent {
 	copy := *a
 	copy.onThinking = fn
+	return &copy
+}
+
+// WithOnReasoningPromoted sets the callback fired when a turn's reasoning
+// text is promoted to become the final answer (see onReasoningPromoted).
+func (a *Agent) WithOnReasoningPromoted(fn func()) *Agent {
+	copy := *a
+	copy.onReasoningPromoted = fn
 	return &copy
 }
 
@@ -1471,7 +1486,15 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		// of this turn's tool activity, so a later turn (e.g. "resume") has
 		// the whole picture, not just this trailing thought.
 		if reasoningText != "" {
-			textBuf.WriteString(reasoningText)
+			// Route through the same content path used for real content
+			// deltas (writes to out, so it actually renders as the turn's
+			// answer instead of only ending up in the returned text) and
+			// tell the caller to drop the reasoning it already accumulated
+			// live for this turn — it's now the answer, not commentary on it.
+			processContentToken(reasoningText, det, &textBuf, out)
+			if a.onReasoningPromoted != nil {
+				a.onReasoningPromoted()
+			}
 		}
 	}
 	role := agentRoleForMetrics(a.escalationName)

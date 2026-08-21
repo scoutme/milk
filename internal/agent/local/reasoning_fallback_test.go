@@ -48,6 +48,45 @@ func TestRun_ReasoningOnlyCompletion_FallsBackToReasoningText(t *testing.T) {
 	}
 }
 
+// TestRun_ReasoningOnlyCompletion_RendersAsVisibleContentAndSignalsPromotion
+// verifies the fix for a real bug: when a completion streams its whole
+// answer through reasoning_content with an empty content channel, the
+// promoted text must actually be written to `out` (so it renders in the
+// transcript instead of leaving the chat view empty), and
+// onReasoningPromoted must fire so the caller can discard the reasoning it
+// already accumulated live for this turn instead of persisting a duplicate
+// of the answer as both Content and Thinking.
+func TestRun_ReasoningOnlyCompletion_RendersAsVisibleContentAndSignalsPromotion(t *testing.T) {
+	const reasoning = "Want me to proceed with setting up a Cloudflare Agent project in your workspace?"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":%q}}]}\n\n", reasoning)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var promoted atomic.Bool
+	agent := New(srv.URL, "test-model").WithOnReasoningPromoted(func() { promoted.Store(true) })
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "fetch cloudflare setup", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if last.Content != reasoning {
+		t.Fatalf("expected assistant content to fall back to reasoning text %q, got %q", reasoning, last.Content)
+	}
+	if !strings.Contains(out.String(), reasoning) {
+		t.Errorf("expected promoted reasoning text to be written to out (visible transcript), got %q", out.String())
+	}
+	if !promoted.Load() {
+		t.Error("expected onReasoningPromoted callback to fire")
+	}
+}
+
 // TestRun_ToolCallsThenEmptyCompletion_PreservesToolTrail verifies the
 // reported scenario: a turn makes real tool calls (edits, etc.) across
 // several loop iterations, then the final completion comes back empty

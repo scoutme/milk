@@ -84,6 +84,12 @@ type prefixChunkMsg struct{ text string }
 // separate from regular content so it can be shown or hidden independently.
 type thinkChunkMsg struct{ text string }
 
+// reasoningPromotedMsg signals that the current turn's already-streamed
+// reasoning text has been promoted (by the local agent) to become the
+// turn's actual final answer, so the accumulated thinking for this turn
+// should be discarded rather than persisted as a duplicate of the answer.
+type reasoningPromotedMsg struct{}
+
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
@@ -1256,6 +1262,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendThinking(msg.text)
 		return m, nil
 
+	case reasoningPromotedMsg:
+		m.currentTurnThinking.Reset()
+		return m, nil
+
 	case agentDoneMsg:
 		return m.handleAgentDone(msg)
 
@@ -2333,7 +2343,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnToolUse(localOnToolUse).
-			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) })
+			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
+			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
@@ -2343,7 +2354,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnToolUse(localOnToolUse).
-			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) })
+			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
+			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
