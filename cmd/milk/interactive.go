@@ -1263,7 +1263,8 @@ func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet)
 	case "reconnect":
 		return execMCPReconnect(rest, st, toolSets)
 	case "auth":
-		// /mcp auth is handled in handleMCPCmd (needs tea.ExecProcess for TUI suspend).
+		// /mcp auth is handled in handleMCPCmd (needs the bubbletea program
+		// handle to stream status updates back while it runs in the background).
 		return milkTag() + " usage: /mcp auth <server-name>  (run this in the TUI)"
 	default:
 		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign, reconnect, auth"

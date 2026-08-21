@@ -204,9 +204,15 @@ type oauthRequiredMsg struct {
 	authURL    string
 }
 
-// mcpAuthDoneMsg is sent after a /mcp auth interactive subprocess exits
-// successfully. serverName is the MCP server that was authorized.
-type mcpAuthDoneMsg struct{ serverName string }
+// mcpOAuthStartedMsg is sent once /mcp auth has discovered the authorization
+// URL for a server (after RFC 9728/8414 discovery and, if needed, RFC 7591
+// dynamic client registration), so the transcript can print it and the
+// browser open can be attempted. The terminal state (success/failure) is
+// reported separately via credRefreshReadyMsg.
+type mcpOAuthStartedMsg struct {
+	serverName string
+	authURL    string
+}
 
 // forgetState holds the pending /forget confirmation dialog.
 type forgetState struct {
@@ -1216,8 +1222,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 
-	case mcpAuthDoneMsg:
-		m.appendTranscript(fmt.Sprintf("%s OAuth authorization for MCP server %q completed — use /mcp reconnect to connect\n", milkTag(), msg.serverName))
+	case mcpOAuthStartedMsg:
+		notice := fmt.Sprintf("%s starting OAuth flow for MCP server %q\n%s authorization URL: %s\n%s opening your browser — if it doesn't open, paste the URL above into one\n",
+			milkTag(), msg.serverName, milkTag(), msg.authURL, milkTag())
+		m.appendTranscript(notice)
 		m.syncLayout()
 		return m, nil
 
@@ -1457,6 +1465,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case credRefreshReadyMsg:
 		m.credRefreshing = false
 		m.credLabel = msg.label
+		if serverName, isMCPOAuth := strings.CutPrefix(msg.label, "MCP OAuth: "); isMCPOAuth {
+			if msg.err != nil {
+				m.credStatus = msg.err.Error()
+				m.credOK = false
+				m.appendTranscript(fmt.Sprintf("%s OAuth authorization for MCP server %q failed: %v\n", milkTag(), serverName, msg.err))
+			} else {
+				m.credStatus = "ok"
+				m.credOK = true
+				m.appendTranscript(fmt.Sprintf("%s OAuth authorization for MCP server %q completed — run /mcp reconnect %s to connect\n", milkTag(), serverName, serverName))
+			}
+			m.syncLayout()
+			return m, nil
+		}
 		if msg.err != nil {
 			m.credStatus = msg.err.Error()
 			m.credOK = false

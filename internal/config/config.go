@@ -347,6 +347,23 @@ type MCPServerConfig struct {
 	// Takes precedence over APIKey when Auth == "token_cmd".
 	TokenCmd string `json:"token_cmd,omitempty"`
 
+	// ClientID is a pre-registered OAuth client ID. When set, dynamic client
+	// registration (RFC 7591) is skipped. Used with Auth == "oauth".
+	ClientID string `json:"oauth_client_id,omitempty"`
+
+	// ClientSecret is the pre-registered OAuth client secret, for confidential
+	// clients. Most MCP OAuth setups use public clients + PKCE and leave this
+	// empty. Used with Auth == "oauth".
+	ClientSecret string `json:"oauth_client_secret,omitempty"`
+
+	// Scopes overrides the OAuth scope(s) requested during authorization.
+	// When empty, milk requests no explicit scope parameter.
+	Scopes []string `json:"oauth_scopes,omitempty"`
+
+	// AuthTimeout bounds how long /mcp auth waits for the browser callback
+	// (e.g. "5m"). Default: 5 minutes.
+	AuthTimeout string `json:"oauth_auth_timeout,omitempty"`
+
 	// Timeout is the per-request timeout (e.g. "30s"). Default: 30s.
 	Timeout string `json:"timeout,omitempty"`
 
@@ -374,6 +391,11 @@ type MCPServerConfig struct {
 // Returns true when Enabled is nil (default on) or explicitly true.
 func (m MCPServerConfig) IsEnabled() bool {
 	return m.Enabled == nil || *m.Enabled
+}
+
+// IsOAuth reports whether this MCP server uses the native OAuth flow.
+func (m MCPServerConfig) IsOAuth() bool {
+	return strings.EqualFold(m.Auth, "oauth")
 }
 
 type Config struct {
@@ -1291,6 +1313,15 @@ func Dir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".milk"), nil
+}
+
+// MCPOAuthDir returns the directory for MCP OAuth token storage (~/.milk/mcp_oauth).
+func MCPOAuthDir() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "mcp_oauth"), nil
 }
 
 // OtelDir returns the directory for OTel signal files (~/.milk/otel).
