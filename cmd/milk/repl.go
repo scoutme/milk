@@ -1378,11 +1378,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.As(msg.Err, &exhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
 				// Offer to continue with doubled pass limit.
 				w := &workflowWizardState{
-					name:      m.workflowState.WorkflowName,
-					task:      m.workflowState.Task,
-					designer:  m.workflowState.AgentMap["designer"],
-					generator: m.workflowState.AgentMap["generator"],
-					evaluator: m.workflowState.AgentMap["evaluator"],
+					name:       m.workflowState.WorkflowName,
+					task:       m.workflowState.Task,
+					designer:   m.workflowState.AgentMap["designer"],
+					generator:  m.workflowState.AgentMap["generator"],
+					evaluator:  m.workflowState.AgentMap["evaluator"],
+					workflowID: m.workflowState.WorkflowID,
 				}
 				if w.designer == "" {
 					w.designer = workflow.AliasEscalation
@@ -2860,8 +2861,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if err != nil {
 				return workflowResumeCheckMsg{}
 			}
-			path := workflow.StatePath(stateDir, sessID)
-			st, err := workflow.LoadState(path)
+			id, ok, err := workflow.CurrentWorkflowID(stateDir, sessID)
+			if err != nil || !ok {
+				return workflowResumeCheckMsg{}
+			}
+			st, err := workflow.LoadState(workflow.StatePath(stateDir, sessID, id))
 			if err != nil || st == nil {
 				return workflowResumeCheckMsg{}
 			}

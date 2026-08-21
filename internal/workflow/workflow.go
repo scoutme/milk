@@ -30,10 +30,11 @@ type Workflow interface {
 
 // RunConfig carries everything a workflow stage needs from the outside.
 type RunConfig struct {
-	Session  *session.Session
-	Runners  map[string]TurnRunner // role name → resolved TurnRunner adapter
-	Send     func(tea.Msg)         // TUI message bus
-	StateDir string                // directory for state and artefact files
+	Session    *session.Session
+	Runners    map[string]TurnRunner // role name → resolved TurnRunner adapter
+	Send       func(tea.Msg)         // TUI message bus
+	StateDir   string                // directory for state and artefact files
+	WorkflowID int                   // disambiguates multiple workflow runs within one session; see workflow.NextWorkflowID
 
 	// Designer disambiguation: when set, the designer sends questions via
 	// cfg.Send and waits for user answers on AnswersCh before finalizing.

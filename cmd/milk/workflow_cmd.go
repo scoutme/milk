@@ -36,6 +36,7 @@ type workflowWizardState struct {
 	sprint          int    // checkpoint sprint (used when resuming/reconfiguring == true)
 	pass            int    // checkpoint pass (used when resuming/reconfiguring == true)
 	role            string // checkpoint role (used when resuming/reconfiguring == true)
+	workflowID      int    // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
 }
 
 type workflowWizardStep int
@@ -141,7 +142,7 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingWorkflowWizard = nil
-		return m.execWorkflowClear()
+		return m.execWorkflowClear(w.workflowID)
 
 	case wizardStepTask:
 		if input == "" {
@@ -236,33 +237,37 @@ func (m model) handleWorkflowClear() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow clear error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	path := workflow.StatePath(stateDir, sess.ID)
-	st, err := workflow.LoadState(path)
+	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow clear error: " + err.Error() + "\n")
 		return m, nil
 	}
-	if st == nil {
+	if !ok {
 		m.workflowState = nil
 		m.workflowPanelOpen = false
 		m.syncLayout()
 		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
 		return m, nil
 	}
+	path := workflow.StatePath(stateDir, sess.ID, id)
 	m.pendingWorkflowWizard = &workflowWizardState{
-		step:     wizardStepClearConfirm,
-		clearing: true,
+		step:       wizardStepClearConfirm,
+		clearing:   true,
+		workflowID: id,
 	}
 	m.appendTranscript(milkTag() + fmt.Sprintf(
-		" workflow clear — type \"clear\" to delete state file, anything else to cancel:\n  %s\n",
+		" workflow clear — type \"clear\" to rename the state file (won't delete plan/findings/sprint files), anything else to cancel:\n  %s\n",
 		path,
 	))
 	m.refreshPrompt()
 	return m, nil
 }
 
-// execWorkflowClear deletes the workflow state file for the current session.
-func (m model) execWorkflowClear() (tea.Model, tea.Cmd) {
+// execWorkflowClear renames the workflow state file for the current session
+// out of the way (adding a ".cleared" suffix) so /workflow clear does not
+// destroy a checkpoint the user might still want to inspect, and so the
+// workflow's ID stays reserved and is never reused by a later run.
+func (m model) execWorkflowClear(workflowID int) (tea.Model, tea.Cmd) {
 	sess := m.st.sess
 	if sess == nil {
 		m.appendTranscript(milkTag() + " workflow clear error: no active session\n")
@@ -273,8 +278,8 @@ func (m model) execWorkflowClear() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow clear error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	path := workflow.StatePath(stateDir, sess.ID)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	path := workflow.StatePath(stateDir, sess.ID, workflowID)
+	if err := os.Rename(path, path+".cleared"); err != nil && !os.IsNotExist(err) {
 		m.appendTranscript(milkTag() + " workflow clear error: " + err.Error() + "\n")
 		return m, nil
 	}
@@ -297,8 +302,16 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow reconfigure error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	path := workflow.StatePath(stateDir, sess.ID)
-	st, err := workflow.LoadState(path)
+	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
+		return m, nil
+	}
+	if !ok {
+		m.appendTranscript(milkTag() + " no saved workflow state for this session — start a workflow first\n")
+		return m, nil
+	}
+	st, err := workflow.LoadState(workflow.StatePath(stateDir, sess.ID, id))
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
 		return m, nil
@@ -321,6 +334,7 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 		sprint:        st.Sprint,
 		pass:          st.Pass,
 		role:          st.Role,
+		workflowID:    id,
 	}
 	m.pendingWorkflowWizard = w
 	m.appendTranscript(milkTag() + fmt.Sprintf(
@@ -341,7 +355,7 @@ func (m model) applyWorkflowReconfigure(w *workflowWizardState) (tea.Model, tea.
 		m.appendTranscript(milkTag() + " workflow reconfigure error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	path := workflow.StatePath(stateDir, sess.ID)
+	path := workflow.StatePath(stateDir, sess.ID, w.workflowID)
 	st, err := workflow.LoadState(path)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
@@ -406,6 +420,11 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
+	workflowID, err := workflow.NextWorkflowID(stateDir, sess.ID)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow error: cannot determine workflow ID: " + err.Error() + "\n")
+		return m, nil
+	}
 
 	// Build TUI-wired agents (permission handlers, tool-use hints, skip-permissions)
 	// so that workflow roles have the same tool access as normal turns.
@@ -423,11 +442,12 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 
 	wf := wfdev.New(w.task, 0)
 	runCfg := workflow.RunConfig{
-		Session:   sess,
-		Runners:   runners,
-		Send:      send,
-		StateDir:  stateDir,
-		AnswersCh: answersCh,
+		Session:    sess,
+		Runners:    runners,
+		Send:       send,
+		StateDir:   stateDir,
+		AnswersCh:  answersCh,
+		WorkflowID: workflowID,
 	}
 
 	// Show panel immediately and mark busy so the TUI blocks normal input.
@@ -442,6 +462,7 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		Pass:         1,
 		Role:         "starting",
 		AgentMap:     agentNames,
+		WorkflowID:   workflowID,
 	}
 	m.appendTranscript(milkTag() + fmt.Sprintf(" starting workflow dev (designer: %s  generator: %s  evaluator: %s)\n",
 		agentNames["designer"], agentNames["generator"], agentNames["evaluator"]))
@@ -491,8 +512,16 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow resume error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	path := workflow.StatePath(stateDir, sess.ID)
-	st, err := workflow.LoadState(path)
+	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
+		return m, nil
+	}
+	if !ok {
+		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
+		return m, nil
+	}
+	st, err := workflow.LoadState(workflow.StatePath(stateDir, sess.ID, id))
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
 		return m, nil
@@ -511,12 +540,13 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 	// agent wizard so the user can supply the roles before resuming.
 	if len(st.AgentMap) == 0 {
 		w := &workflowWizardState{
-			name:     st.WorkflowName,
-			task:     st.Task,
-			step:     wizardStepDesigner,
-			resuming: true,
-			sprint:   st.Sprint,
-			pass:     st.Pass,
+			name:       st.WorkflowName,
+			task:       st.Task,
+			step:       wizardStepDesigner,
+			resuming:   true,
+			sprint:     st.Sprint,
+			pass:       st.Pass,
+			workflowID: id,
 		}
 		m.pendingWorkflowWizard = w
 		m.appendTranscript(milkTag() + " workflow resume: agent map missing — please specify agents (blank = escalation):\n")
@@ -525,11 +555,12 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	w := &workflowWizardState{
-		name:      st.WorkflowName,
-		task:      st.Task,
-		designer:  st.AgentMap["designer"],
-		generator: st.AgentMap["generator"],
-		evaluator: st.AgentMap["evaluator"],
+		name:       st.WorkflowName,
+		task:       st.Task,
+		designer:   st.AgentMap["designer"],
+		generator:  st.AgentMap["generator"],
+		evaluator:  st.AgentMap["evaluator"],
+		workflowID: id,
 	}
 	if w.designer == "" {
 		w.designer = workflow.AliasEscalation
@@ -585,11 +616,12 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 
 	wf := wfdev.NewResume(w.task, maxPasses, sprint, pass, role)
 	runCfg := workflow.RunConfig{
-		Session:   sess,
-		Runners:   runners,
-		Send:      send,
-		StateDir:  stateDir,
-		AnswersCh: answersCh,
+		Session:    sess,
+		Runners:    runners,
+		Send:       send,
+		StateDir:   stateDir,
+		AnswersCh:  answersCh,
+		WorkflowID: w.workflowID,
 	}
 
 	m.workflowPanelOpen = true
@@ -604,6 +636,7 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 		Pass:         pass,
 		Role:         "generator",
 		AgentMap:     agentNames,
+		WorkflowID:   w.workflowID,
 	}
 	m.appendTranscript(milkTag() + fmt.Sprintf(" resuming workflow dev from sprint %d pass %d (designer: %s  generator: %s  evaluator: %s)\n",
 		sprint, pass, agentNames["designer"], agentNames["generator"], agentNames["evaluator"]))
