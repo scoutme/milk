@@ -1275,7 +1275,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Snapshot the VT screen and append cleaned output to the transcript.
 			out := m.ptySnapshot()
 			if out != "" {
-				m.appendTranscript(dim(out))
+				m.appendTranscript(dimLines(out))
 				m.currentTurnChars += int64(len(out))
 			}
 			_ = m.ptyPane.ptm.Close()

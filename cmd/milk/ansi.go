@@ -42,6 +42,33 @@ func bold(s string) string       { return colorize(s, ansiBold) }
 func boldYellow(s string) string { return colorize(s, "\033[1;33m") }
 func boldGold(s string) string   { return colorize(s, "\033[1;38;2;255;208;60m") }
 
+func dimLines(s string) string {
+	if !isTTY || s == "" {
+		return s
+	}
+	lines := strings.SplitAfter(s, "\n")
+	var out strings.Builder
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if strings.HasSuffix(line, "\n") {
+			body := strings.TrimSuffix(line, "\n")
+			if body != "" {
+				out.WriteString(ansiDim)
+				out.WriteString(body)
+				out.WriteString(ansiReset)
+			}
+			out.WriteByte('\n')
+			continue
+		}
+		out.WriteString(ansiDim)
+		out.WriteString(line)
+		out.WriteString(ansiReset)
+	}
+	return out.String()
+}
+
 // milkTag returns the dimmed [milk] system prefix.
 func milkTag() string { return dim("[milk]") }
 
