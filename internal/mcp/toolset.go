@@ -52,23 +52,38 @@ func (ts *ToolSet) Schemas(ctx context.Context) []map[string]any {
 // Dispatch routes a tool call (by prefixed name) to the appropriate MCP client
 // and returns the text result. Returns ("", false) when the name doesn't match
 // any known MCP tool, so the caller can fall through to built-in tools.
+//
+// When multiple configured server names share a prefix (e.g. "cloudflare" and
+// "cloudflare-bindings"), a tool name can match more than one client's prefix
+// — "mcp_cloudflare_bindings_workers_list" literally starts with the shorter
+// server's "mcp_cloudflare_" prefix too. The longest matching prefix (i.e. the
+// most specific server name) always wins, so the shorter server never steals
+// calls meant for a longer, more specific sibling.
 func (ts *ToolSet) Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool) {
+	var best *Client
+	var bestOrig string
+	bestPrefixLen := -1
 	for _, c := range ts.clients {
 		orig, ok := c.OriginalToolName(toolName)
 		if !ok {
 			continue
 		}
-		res, err := c.Call(ctx, orig, argsJSON)
-		if err != nil {
-			return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`, true
+		if prefixLen := len(toolName) - len(orig); prefixLen > bestPrefixLen {
+			best, bestOrig, bestPrefixLen = c, orig, prefixLen
 		}
-		text := res.Text()
-		if res.IsError {
-			return `{"error":` + jsonQuote(text) + `}`, true
-		}
-		return `{"output":` + jsonQuote(text) + `}`, true
 	}
-	return "", false
+	if best == nil {
+		return "", false
+	}
+	res, err := best.Call(ctx, bestOrig, argsJSON)
+	if err != nil {
+		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`, true
+	}
+	text := res.Text()
+	if res.IsError {
+		return `{"error":` + jsonQuote(text) + `}`, true
+	}
+	return `{"output":` + jsonQuote(text) + `}`, true
 }
 
 // Close closes all client sessions.
