@@ -820,11 +820,11 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 
 ## MCP servers with OAuth
 
-Some MCP servers require an OAuth authorization flow before they can be used. The `claude` CLI handles the OAuth dance interactively, but milk runs Claude as a non-interactive subprocess (`--print --output-format stream-json`), so the flow cannot complete automatically.
+milk has native OAuth 2.0 support for MCP servers — it discovers the server's OAuth metadata, registers itself as a client, and runs the Authorization Code + PKCE flow itself. No `claude` CLI involvement, no manual app registration for spec-compliant servers.
 
 ### Setup
 
-1. Add the MCP server to `~/.milk/config.json` with `"auth": "oauth"`:
+Add the MCP server to `~/.milk/config.json` with `"auth": "oauth"`:
 
 ```json
 {
@@ -838,29 +838,38 @@ Some MCP servers require an OAuth authorization flow before they can be used. Th
 }
 ```
 
-2. Assign the server to your escalation agent:
+That's enough for any server implementing the MCP spec's OAuth discovery (RFC 9728 protected-resource metadata, RFC 8414 authorization-server metadata) and dynamic client registration (RFC 7591). For servers that require a pre-registered app instead of dynamic registration, add:
 
+```json
+{
+  "name": "my-server",
+  "url": "https://mcp.example.com",
+  "auth": "oauth",
+  "oauth_client_id": "...",
+  "oauth_client_secret": "...",
+  "oauth_scopes": ["read", "write"]
+}
 ```
-/mcp assign my-server for claude
-```
+
+`oauth_auth_timeout` (default `"5m"`) bounds how long `/mcp auth` waits for you to complete the browser flow.
 
 ### Authorizing
 
-The first time Claude tries to use the server, milk will detect the OAuth error in the subprocess stderr and print a notice:
-
-```
-[milk] MCP OAuth authorization required
-[milk] authorization URL: https://auth.example.com/oauth/...
-[milk] run /mcp auth <server-name> to authorize
-```
-
-Run the authorization command — this suspends the TUI and launches an interactive Claude subprocess to complete the OAuth dance:
+The first time an agent tries to use the server, milk detects the OAuth error and prints a notice pointing at `/mcp auth <server-name>`. Run it:
 
 ```
 /mcp auth my-server
 ```
 
-Complete the flow in the terminal (open the URL in your browser if prompted). After you finish, press Enter and the TUI resumes. Then reconnect:
+The TUI stays interactive while this runs — milk discovers the server's OAuth endpoints, registers a client if needed, starts a local callback listener, and prints the authorization URL to the transcript:
+
+```
+[milk] starting OAuth flow for MCP server "my-server"
+[milk] authorization URL: https://auth.example.com/authorize?...
+[milk] opening your browser — if it doesn't open, paste the URL above into one
+```
+
+milk tries to open your browser automatically; if that fails (e.g. over SSH), open the printed URL yourself. Once you approve access, the status bar shows `MCP OAuth: my-server` while waiting, then `ok` or a failure reason. On success, reconnect:
 
 ```
 /mcp reconnect my-server
@@ -868,9 +877,9 @@ Complete the flow in the terminal (open the URL in your browser if prompted). Af
 
 ### Notes
 
-- OAuth state (tokens, refresh tokens) is stored by the Claude CLI, not by milk. Milk does not read or write OAuth credentials.
-- If the token expires, run `/mcp auth <name>` again to re-authorize.
-- The `"oauth"` auth value passes config validation without warnings. Other milk auth options (`"bearer"`, `"token_cmd"`) are for static or command-generated tokens, not browser-based flows.
+- Tokens are stored by milk at `~/.milk/mcp_oauth/<server-name>.json` (not by the Claude CLI or any external tool).
+- Refresh is automatic: milk refreshes the access token proactively before it expires, and reactively on a 401 response, using the stored refresh token. You don't need to re-run `/mcp auth` unless the refresh token itself is revoked or missing — milk will tell you when that's the case.
+- Locking is per-process, not cross-process — running two milk instances against the same OAuth-protected server concurrently isn't coordinated beyond what the disk-backed token file naturally serializes.
 
 ---
 

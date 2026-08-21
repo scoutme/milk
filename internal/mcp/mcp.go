@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/obs"
 )
 
@@ -471,18 +472,7 @@ func (c *Client) roundtrip(ctx context.Context, method string, params any) (json
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream, application/json")
-	if c.sessionID != "" {
-		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
-	}
-	c.applyAuth(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doHTTP(ctx, body)
 	if err != nil {
 		return nil, err
 	}
@@ -525,18 +515,7 @@ func (c *Client) notify(ctx context.Context, method string, params any) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream, application/json")
-	if c.sessionID != "" {
-		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
-	}
-	c.applyAuth(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doHTTP(ctx, body)
 	if err != nil {
 		return err
 	}
@@ -595,8 +574,11 @@ func (c *Client) readSSEResult(r io.Reader, id int64) (json.RawMessage, error) {
 	return nil, fmt.Errorf("SSE stream ended without response for id %d", id)
 }
 
-// applyAuth sets the Authorization header according to the configured auth method.
-func (c *Client) applyAuth(req *http.Request) {
+// applyAuth sets the Authorization header according to the configured auth
+// method. For "oauth" this is best-effort: on failure (no token yet, or a
+// refresh failed) it leaves the header unset and lets the request 401,
+// which doHTTP handles by retrying once after a reactive refresh.
+func (c *Client) applyAuth(ctx context.Context, req *http.Request) {
 	switch strings.ToLower(c.cfg.Auth) {
 	case "bearer":
 		if c.cfg.APIKey != "" {
@@ -606,7 +588,52 @@ func (c *Client) applyAuth(req *http.Request) {
 		if c.cachedToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.cachedToken)
 		}
+	case "oauth":
+		if tok, err := mcpauth.EnsureFresh(ctx, c.cfg.Name); err == nil && tok != nil {
+			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		}
 	}
+}
+
+// newHTTPRequest builds a POST request to the MCP endpoint with the standard
+// headers (content type, session ID, auth) attached.
+func (c *Client) newHTTPRequest(ctx context.Context, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream, application/json")
+	if c.sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", c.sessionID)
+	}
+	c.applyAuth(ctx, req)
+	return req, nil
+}
+
+// doHTTP sends body to the MCP endpoint. For OAuth-authenticated servers, a
+// 401 response triggers one reactive token refresh + retry before giving up.
+func (c *Client) doHTTP(ctx context.Context, body []byte) (*http.Response, error) {
+	req, err := c.newHTTPRequest(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized && strings.EqualFold(c.cfg.Auth, "oauth") {
+		resp.Body.Close()
+		if _, rerr := mcpauth.RefreshOnly(ctx, c.cfg.Name); rerr != nil {
+			return nil, fmt.Errorf("mcp %q: unauthorized: %w", c.cfg.Name, rerr)
+		}
+		retryReq, err := c.newHTTPRequest(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		return c.httpClient.Do(retryReq)
+	}
+	return resp, nil
 }
 
 // resolveToken executes TokenCmd and stores the trimmed stdout as cachedToken.
@@ -775,7 +802,7 @@ func (c *Client) Close(ctx context.Context) {
 	}
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Session-Id", sid)
-	c.applyAuth(req)
+	c.applyAuth(ctx, req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return

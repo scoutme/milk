@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
@@ -590,10 +591,12 @@ func validateMCPAuthArgs(serverName string, cfg config.Config) (idx int, errMsg 
 }
 
 // handleMCPAuth implements `/mcp auth <server-name>`.
-// It suspends the TUI and launches an interactive `claude` subprocess with the
-// named MCP server's config loaded. Claude CLI will initiate the OAuth
-// authorization flow when it first attempts to connect to the server.
-// After the user completes authorization and exits, the TUI restores.
+// It runs milk's native OAuth flow (RFC 9728/8414 discovery, RFC 7591 dynamic
+// client registration, PKCE Authorization Code) in the background: the TUI
+// stays interactive while a local loopback listener waits for the browser
+// redirect. The authorization URL is printed to the transcript (and a
+// best-effort browser-open is attempted) as soon as it's known; the status
+// bar shows "MCP OAuth: <server>" while waiting, then ok/failed on completion.
 func (m model) handleMCPAuth(serverName string) (model, tea.Cmd) {
 	idx, errStr := validateMCPAuthArgs(serverName, m.st.cfg)
 	if errStr != "" {
@@ -601,57 +604,24 @@ func (m model) handleMCPAuth(serverName string) (model, tea.Cmd) {
 		return m, nil
 	}
 	serverName = strings.TrimSpace(serverName)
-
-	// Resolve the claude binary path from the escalation agent config.
-	cliAC := cliAgentConfig(m.st.cfg)
-	bin := cliAC.Bin
-	if bin == "" {
-		bin = "claude"
-	}
-
-	// Write a temporary --mcp-config file containing only this server so that
-	// Claude CLI connects to it and triggers the OAuth flow interactively.
 	server := m.st.cfg.MCPServers[idx]
-	mcpCfg := map[string]any{
-		"mcpServers": map[string]any{
-			server.Name: map[string]any{
-				"type": "http",
-				"url":  server.URL,
+
+	m.credRefreshing = true
+	m.credLabel = "MCP OAuth: " + serverName
+
+	prog := m.st.program
+	ctx := m.ctx
+	go func() {
+		opts := mcpauth.Options{
+			OnAuthURL: func(authURL string) {
+				prog.Send(mcpOAuthStartedMsg{serverName: serverName, authURL: authURL})
 			},
-		},
-	}
-	cfgData, err := json.Marshal(mcpCfg)
-	if err != nil {
-		m.appendTranscript(fmt.Sprintf("%s error preparing MCP config: %v\n", milkTag(), err))
-		return m, nil
-	}
-	tmpFile, err := os.CreateTemp("", "milk-mcp-auth-*.json")
-	if err != nil {
-		m.appendTranscript(fmt.Sprintf("%s error creating temp file: %v\n", milkTag(), err))
-		return m, nil
-	}
-	if _, err := tmpFile.Write(cfgData); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		m.appendTranscript(fmt.Sprintf("%s error writing MCP config: %v\n", milkTag(), err))
-		return m, nil
-	}
-	tmpFile.Close()
-	tmpPath := tmpFile.Name()
-
-	m.appendTranscript(fmt.Sprintf("%s starting OAuth flow for MCP server %q\n%s Claude will connect to the server and prompt you to authorize — follow the instructions below\n", milkTag(), serverName, milkTag()))
-
-	// Launch claude interactively with the single-server MCP config.
-	// Claude CLI will attempt to connect to the OAuth server and open the
-	// browser-based authorization flow. The user completes the flow and exits.
-	cmd := exec.Command(bin, "--mcp-config", tmpPath)
-	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		os.Remove(tmpPath) //nolint:errcheck
-		if err != nil {
-			return errMsg{err: fmt.Errorf("mcp auth for %q exited with error: %w", serverName, err)}
 		}
-		return mcpAuthDoneMsg{serverName: serverName}
-	})
+		err := mcpauth.Authorize(ctx, server, opts)
+		prog.Send(credRefreshReadyMsg{label: "MCP OAuth: " + serverName, err: err})
+	}()
+
+	return m, nil
 }
 
 // handleAgentCmd handles `/agent [list|switch <name>|add [key=val ...]]`.
