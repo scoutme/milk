@@ -600,7 +600,7 @@ func TestDevWorkflow_ResumePreservesVerdictHistory(t *testing.T) {
 
 	// Simulate a prior run that finished sprint 1 (one refinement pass, then
 	// good_to_go) and was then resumed for sprint 2.
-	statePath := workflow.StatePath(dir, sess.ID)
+	statePath := workflow.StatePath(dir, sess.ID, 0)
 	priorState := &workflow.State{
 		WorkflowName: "dev",
 		Sprint:       1,
@@ -667,7 +667,7 @@ func TestBackfillVerdictHistory_UsesFindingsFileForMissingSprint(t *testing.T) {
 		{Sprint: 2, Pass: 3, Verdict: "good_to_go"}, // sprint 2 already has an entry — must not be touched
 	}
 
-	got := backfillVerdictHistory(history, dir, sessionID, 4)
+	got := backfillVerdictHistory(history, dir, sessionID, 0, 4)
 
 	if len(got) != 2 {
 		t.Fatalf("VerdictHistory = %+v, want 2 entries (backfilled sprint 1 + existing sprint 2)", got)
@@ -686,7 +686,7 @@ func TestBackfillVerdictHistory_NoOpWhenHistoryAlreadyComplete(t *testing.T) {
 		{Sprint: 1, Pass: 1, Verdict: "good_to_go"},
 		{Sprint: 2, Pass: 1, Verdict: "good_to_go"},
 	}
-	got := backfillVerdictHistory(history, dir, "unused-session", 3)
+	got := backfillVerdictHistory(history, dir, "unused-session", 0, 3)
 	if len(got) != 2 {
 		t.Errorf("expected no changes when every sprint already has an entry, got %+v", got)
 	}
@@ -719,7 +719,7 @@ func TestDevWorkflow_ResumeBackfillsMissingSprintHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	statePath := workflow.StatePath(dir, sess.ID)
+	statePath := workflow.StatePath(dir, sess.ID, 0)
 	priorState := &workflow.State{
 		WorkflowName: "dev",
 		Sprint:       2,
@@ -806,7 +806,7 @@ func TestDevWorkflow_ChecksPointsSprintBeforeGeneratorRuns(t *testing.T) {
 		t.Fatalf("Run error = %v, want to wrap %v", err, generatorFailure)
 	}
 
-	statePath := workflow.StatePath(dir, sess.ID)
+	statePath := workflow.StatePath(dir, sess.ID, 0)
 	final, loadErr := workflow.LoadState(statePath)
 	if loadErr != nil || final == nil {
 		t.Fatalf("failed to load state after failure: %v", loadErr)

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -23,6 +24,12 @@ type State struct {
 	// state file saved before this field existed — callers should fall back
 	// to showing just Sprint in that case, not "sprint N/0".
 	TotalSprints int `json:"total_sprints,omitempty"`
+	// WorkflowID identifies which of this session's workflow runs this state
+	// belongs to (see NextWorkflowID/CurrentWorkflowID); 0 for the session's
+	// first workflow, including every state file saved before this field
+	// existed. Carried in-memory so a run can be rebuilt (e.g. the
+	// passes-exhausted "continue?" prompt) without re-resolving the ID.
+	WorkflowID int `json:"workflow_id,omitempty"`
 }
 
 // VerdictEntry records the evaluator's verdict for one sprint/pass pair.
@@ -32,9 +39,37 @@ type VerdictEntry struct {
 	Verdict string `json:"verdict"`
 }
 
+// workflowFileName builds a workflow artefact filename for the given session
+// and workflow ID. workflowID 0 is the original, single-workflow-per-session
+// naming scheme (no ID segment) — this keeps every pre-existing on-disk file
+// working unchanged; only the second and later workflow runs in a session
+// (workflowID >= 1) get a ".<id>." segment, so they never collide with an
+// earlier run's files.
+func workflowFileName(sessionID string, workflowID int, suffix string) string {
+	if workflowID == 0 {
+		return sessionID + ".workflow." + suffix
+	}
+	return fmt.Sprintf("%s.workflow.%d.%s", sessionID, workflowID, suffix)
+}
+
 // StatePath returns the canonical path for a session's workflow state file.
-func StatePath(stateDir, sessionID string) string {
-	return filepath.Join(stateDir, sessionID+".workflow.json")
+func StatePath(stateDir, sessionID string, workflowID int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, "json"))
+}
+
+// PlanPath returns the canonical path for a workflow's designer plan file.
+func PlanPath(stateDir, sessionID string, workflowID int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, "plan.md"))
+}
+
+// SprintPath returns the canonical path for a sprint's generator output file.
+func SprintPath(stateDir, sessionID string, workflowID, sprint int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, fmt.Sprintf("sprint%d.md", sprint)))
+}
+
+// FindingsPath returns the canonical path for a sprint's evaluator findings file.
+func FindingsPath(stateDir, sessionID string, workflowID, sprint int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, fmt.Sprintf("findings%d.md", sprint)))
 }
 
 // LoadState reads and deserialises a State from path.

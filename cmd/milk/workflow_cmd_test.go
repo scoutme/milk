@@ -245,7 +245,7 @@ func TestAdvanceWorkflowWizard_ClearCorrectInputProceeds(t *testing.T) {
 // TestWorkflowStateRoundTrip verifies that Task survives a save/load cycle.
 func TestWorkflowStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	path := workflow.StatePath(dir, "test-session")
+	path := workflow.StatePath(dir, "test-session", 0)
 
 	original := &workflow.State{
 		WorkflowName: "dev",
@@ -277,7 +277,7 @@ func TestWorkflowStateRoundTrip(t *testing.T) {
 // field load cleanly with Task == "".
 func TestWorkflowStateTaskOmitEmpty(t *testing.T) {
 	dir := t.TempDir()
-	path := workflow.StatePath(dir, "legacy-session")
+	path := workflow.StatePath(dir, "legacy-session", 0)
 
 	legacy := []byte(`{"workflow_name":"dev","sprint":1,"pass":1,"role":"designer"}`)
 	if err := os.WriteFile(path, legacy, 0o600); err != nil {
@@ -315,7 +315,7 @@ func TestReconfigureWizardStepsFlow(t *testing.T) {
 		Role:         "evaluator",
 		AgentMap:     map[string]string{"designer": "old-d", "generator": "old-g", "evaluator": "old-e"},
 	}
-	statePath := workflow.StatePath(dir, sessID)
+	statePath := workflow.StatePath(dir, sessID, 0)
 	if err := workflow.SaveState(statePath, original); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
@@ -521,8 +521,10 @@ func TestWorkflowCmdVariants(t *testing.T) {
 func TestLaunchWorkflow_SetsCancelTurn(t *testing.T) {
 	m := testModel()
 	m.ctx = context.Background()
-	// Zero-value interactiveState: cfg is empty, ActiveAgent().Name == "".
-	m.st = &interactiveState{}
+	// Zero-value interactiveState (cfg is empty, ActiveAgent().Name == "") but
+	// with a real session, since launchWorkflow resolves a workflow ID from
+	// sess.ID before ever reaching the async goroutine.
+	m.st = &interactiveState{sess: &session.Session{ID: "test-launch-workflow-session"}}
 	// da.primary and da.escalation are nil, so both primaryName and escalationName
 	// are "". AliasPrimary resolves to cfg.ActiveAgent().Name == "" as well,
 	// so buildWorkflowRunners takes the matching-primary-name branch (no error).

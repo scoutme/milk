@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -82,8 +81,9 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	send := cfg.Send
 	stateDir := cfg.StateDir
 
-	planPath := filepath.Join(stateDir, sess.ID+".workflow.plan.md")
-	statePath := workflow.StatePath(stateDir, sess.ID)
+	wfID := cfg.WorkflowID
+	planPath := workflow.PlanPath(stateDir, sess.ID, wfID)
+	statePath := workflow.StatePath(stateDir, sess.ID, wfID)
 
 	st := &workflow.State{
 		WorkflowName: "dev",
@@ -92,6 +92,7 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		Pass:         1,
 		Role:         "designer",
 		AgentMap:     agentMapFromRunners(cfg.Runners),
+		WorkflowID:   wfID,
 	}
 
 	sendProgress := func() {
@@ -210,7 +211,7 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	// early, or an interruption before a save) — the sprint history shown in
 	// the workflow panel should reflect everything that actually happened,
 	// not just what the last successful checkpoint recorded.
-	st.VerdictHistory = backfillVerdictHistory(st.VerdictHistory, stateDir, sess.ID, startSprint)
+	st.VerdictHistory = backfillVerdictHistory(st.VerdictHistory, stateDir, sess.ID, wfID, startSprint)
 	// resumeRole is the role to start from within the first resumed sprint/pass.
 	// Empty string means start from generator (normal case). "evaluator" means
 	// the generator already completed and we resume at the evaluator.
@@ -248,8 +249,8 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			}
 			isResumeOpeningTurn = false
 
-			sprintPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.sprint%d.md", sess.ID, sprint))
-			findingsPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.findings%d.md", sess.ID, sprint))
+			sprintPath := workflow.SprintPath(stateDir, sess.ID, wfID, sprint)
+			findingsPath := workflow.FindingsPath(stateDir, sess.ID, wfID, sprint)
 
 			// Skip generator when resuming at the evaluator for this sprint/pass.
 			skipGenerator := resumeRole == "evaluator" &&
@@ -359,7 +360,7 @@ func (w *DevWorkflow) Run(ctx context.Context, cfg workflow.RunConfig) error {
 // is unrecoverable once its findings file has been overwritten by a later
 // pass — findingsN.md holds only the latest pass's content — so it is
 // recorded as pass 0 to mark it as reconstructed rather than recorded live.
-func backfillVerdictHistory(history []workflow.VerdictEntry, stateDir, sessionID string, startSprint int) []workflow.VerdictEntry {
+func backfillVerdictHistory(history []workflow.VerdictEntry, stateDir, sessionID string, workflowID, startSprint int) []workflow.VerdictEntry {
 	have := make(map[int]bool, len(history))
 	for _, v := range history {
 		have[v.Sprint] = true
@@ -368,7 +369,7 @@ func backfillVerdictHistory(history []workflow.VerdictEntry, stateDir, sessionID
 		if have[sprint] {
 			continue
 		}
-		findingsPath := filepath.Join(stateDir, fmt.Sprintf("%s.workflow.findings%d.md", sessionID, sprint))
+		findingsPath := workflow.FindingsPath(stateDir, sessionID, workflowID, sprint)
 		data, err := os.ReadFile(findingsPath)
 		if err != nil {
 			continue
