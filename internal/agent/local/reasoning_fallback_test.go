@@ -133,3 +133,41 @@ func TestRun_ToolCallsThenEmptyCompletion_PreservesToolTrail(t *testing.T) {
 		t.Errorf("expected fallback content to also keep the reasoning text, got %q", last.Content)
 	}
 }
+
+// TestRun_MaxToolIterationsExceeded_PreservesToolTrail verifies that when the
+// model keeps making (distinct) tool calls every iteration and never emits a
+// final response, exhausting MaxToolIterations does not end the turn in a
+// bare error. Before this fix, Run returned only an error and the caller
+// (cmd/milk/runner.go) discards updatedHistory whenever err != nil, so the
+// whole tool trail — not just the summary — was silently lost.
+func TestRun_MaxToolIterationsExceeded_PreservesToolTrail(t *testing.T) {
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		n := calls.Add(1)
+		fmt.Fprintf(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc%d","function":{"name":"read_file","arguments":"{\"path\":\"/nonexistent/file%d.css\"}"}}]}}]}`+"\n\n", n, n)
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 3})
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "keep going", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if last.Role != "assistant" {
+		t.Fatalf("expected last message role=assistant, got %q", last.Role)
+	}
+	if !strings.Contains(last.Content, "read_file") {
+		t.Errorf("expected fallback content to mention the tool calls made this turn, got %q", last.Content)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("expected exactly MaxToolIterations (3) completion calls, got %d", calls.Load())
+	}
+}
