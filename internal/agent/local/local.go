@@ -641,7 +641,8 @@ const systemPromptShared = `Rules:
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - To find files by name or pattern (e.g. "*_test.go", "*.md", "Makefile") use find_files — never use grep for this. Use grep only to search inside file contents.
 - list_dir shows only the top level of a directory; never conclude that files or subdirectories are absent based solely on a list_dir result. To check whether files of a given type exist anywhere in the project, use find_files with the working directory as root.
-- After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output.
+- After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output. Do not narrate or summarize between individual tool calls in a multi-step sequence — keep issuing tool calls silently until the task is done.
+- Once you have no more tool calls left to make for the current task, you MUST end the turn with a short text response for the user. Never let a turn end with only tool calls and no reply — always close out with at least a brief summary of what you did or found.
 **MANDATORY — memory tool actions**: The following require immediate tool calls with NO preamble or confirmation:
   - User asks about past context or preferences → call get_memory NOW before responding.
   - User states a preference, decision, or fact → call record_memory NOW.
@@ -971,7 +972,17 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
-	return msgs, fmt.Errorf("exceeded maximum tool iterations (%d)", maxIter)
+	// The model never stopped calling tools long enough to produce a final
+	// response. Same fallback as the other terminal paths above — synthesize a
+	// digest of the turn's tool activity instead of discarding the whole
+	// trajectory behind a bare error (the caller only keeps updatedHistory
+	// when err is nil, so returning an error here used to drop the tool
+	// trail entirely, not just the summary).
+	obs.Warn("exceeded maximum tool iterations", "model", a.model,
+		"agent", agentRoleForMetrics(a.escalationName), "max_iter", maxIter)
+	resp := summarizeToolTrail(msgs, "")
+	msgs = append(msgs, Message{Role: "assistant", Content: resp})
+	return msgs, nil
 }
 
 // toolNeedsPermission reports whether a tool requires user approval before execution.
