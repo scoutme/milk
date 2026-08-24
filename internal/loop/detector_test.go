@@ -552,6 +552,157 @@ func TestChunkRepetition_ConsecutiveCounterResetsOnDifferent(t *testing.T) {
 	}
 }
 
+// ── Reasoning Chunk Repetition (intra-turn) ──────────────────────────────────
+
+func TestReasoningChunkRepetition_FiresAfterConsecutiveRepeats(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkRepetitionThreshold = 5
+	d := New(cfg)
+	chunk := "hmm let me reconsider this approach once more carefully"
+	for i := 0; i < 4; i++ {
+		d.FeedReasoningChunk(chunk)
+	}
+	verdicts := d.FeedReasoningChunk(chunk)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkRepetition {
+			found = true
+			if !v.ShouldInterrupt {
+				t.Error("reasoning chunk repetition should auto-interrupt")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected SignalReasoningChunkRepetition after 5 consecutive identical reasoning chunks")
+	}
+}
+
+func TestReasoningChunkRepetition_NoFireForDifferentChunks(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkRepetitionThreshold = 5
+	d := New(cfg)
+	d.FeedReasoningChunk("first thought about the problem")
+	d.FeedReasoningChunk("second thought, a different angle")
+	verdicts := d.FeedReasoningChunk("third thought, yet another angle")
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkRepetition {
+			t.Error("should not fire for different reasoning chunks")
+		}
+	}
+}
+
+func TestReasoningChunkRepetition_DefaultIsHigherThanChunkRepetition(t *testing.T) {
+	cfg := testConfig()
+	if cfg.ReasoningChunkRepetitionThreshold <= cfg.ChunkRepetitionThreshold {
+		t.Errorf("expected reasoning threshold (%d) > chunk threshold (%d)",
+			cfg.ReasoningChunkRepetitionThreshold, cfg.ChunkRepetitionThreshold)
+	}
+}
+
+func TestReasoningChunkRepetition_IndependentFromOutputChunks(t *testing.T) {
+	// Feeding the same text to FeedChunk and FeedReasoningChunk should track
+	// independent buffers/streaks — one firing must not affect the other.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ReasoningChunkRepetitionThreshold = 3
+	d := New(cfg)
+	text := "the same phrase fed to both channels for this test"
+	d.FeedChunk(text)
+	d.FeedChunk(text)
+	verdicts := d.FeedReasoningChunk(text)
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkRepetition {
+			t.Error("reasoning buffer should not have accumulated the output-channel feeds")
+		}
+	}
+}
+
+func TestReasoningChunkRepetition_ResetTurnClearsBuffer(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkRepetitionThreshold = 3
+	d := New(cfg)
+	chunk := "repeating reasoning phrase that should trigger detection"
+	d.FeedReasoningChunk(chunk)
+	d.FeedReasoningChunk(chunk)
+	d.FeedReasoningChunk(chunk) // fires in first turn
+	d.ResetTurn()
+	d.FeedReasoningChunk(chunk)
+	d.FeedReasoningChunk(chunk)
+	verdicts := d.FeedReasoningChunk(chunk)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ResetTurn should allow reasoning detection again in the new turn")
+	}
+}
+
+// ── Reasoning Repetition (cross-turn) ────────────────────────────────────────
+
+func TestReasoningRepetition_NoFireBelowThreshold(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningMaxConsecutiveSimilarResponses = 6
+	d := New(cfg)
+	now := time.Now()
+	reasoning := "I should look at the config file to understand defaults"
+	for range 4 {
+		d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
+	}
+	verdicts := d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningRepetition {
+			t.Error("should not fire below the reasoning repetition threshold")
+		}
+	}
+}
+
+func TestReasoningRepetition_FiresAtThreshold(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningMaxConsecutiveSimilarResponses = 3
+	d := New(cfg)
+	now := time.Now()
+	reasoning := "I should reconsider this approach and try again from scratch"
+	d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
+	d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
+	verdicts := d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected SignalReasoningRepetition after N identical reasoning turns")
+	}
+}
+
+func TestReasoningRepetition_NoFireWithoutReasoningText(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningMaxConsecutiveSimilarResponses = 3
+	d := New(cfg)
+	now := time.Now()
+	// Non-reasoning turns (e.g. a non-thinking model) must not spuriously fire.
+	d.Feed(TurnSummary{Text: "final answer one", Timestamp: now})
+	d.Feed(TurnSummary{Text: "final answer two", Timestamp: now})
+	verdicts := d.Feed(TurnSummary{Text: "final answer three", Timestamp: now})
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningRepetition {
+			t.Error("should not fire when turns carry no reasoning text")
+		}
+	}
+}
+
+func TestReasoningRepetition_DefaultIsHigherThanResponseRepetition(t *testing.T) {
+	cfg := testConfig()
+	if cfg.ReasoningMaxConsecutiveSimilarResponses <= cfg.MaxConsecutiveSimilarResponses {
+		t.Errorf("expected reasoning threshold (%d) > response threshold (%d)",
+			cfg.ReasoningMaxConsecutiveSimilarResponses, cfg.MaxConsecutiveSimilarResponses)
+	}
+}
+
 func TestChunkRepetition_WrappingRingBuffer(t *testing.T) {
 	cfg := testConfig()
 	cfg.ChunkRepetitionThreshold = 3

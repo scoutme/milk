@@ -38,6 +38,17 @@ type Config struct {
 	ChunkRepetitionThreshold int `json:"chunk_repetition_threshold"` // default 5
 	ChunkWindowSize          int `json:"chunk_window_size"`          // default 50
 
+	// Reasoning chunk repetition (intra-turn): same as ChunkRepetitionThreshold
+	// but applied to thinking/reasoning stream chunks, not final output. Higher
+	// default threshold — reasoning naturally repeats phrases more than final
+	// answers do, so it needs more slack before it's treated as a stuck loop.
+	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold"` // default 10
+
+	// Reasoning response repetition (cross-turn): same as
+	// MaxConsecutiveSimilarResponses but applied to accumulated reasoning text
+	// per turn. Higher default threshold for the same reason as above.
+	ReasoningMaxConsecutiveSimilarResponses int `json:"reasoning_max_consecutive_similar_responses"` // default 6
+
 	// Auto-interrupt: when true, high-confidence signals cancel the turn.
 	// Token velocity never auto-interrupts regardless of this setting.
 	AutoInterrupt bool `json:"auto_interrupt"`
@@ -72,6 +83,12 @@ func (c *Config) defaults() {
 	if c.ChunkWindowSize <= 0 {
 		c.ChunkWindowSize = 50
 	}
+	if c.ReasoningChunkRepetitionThreshold <= 0 {
+		c.ReasoningChunkRepetitionThreshold = c.ChunkRepetitionThreshold * 2
+	}
+	if c.ReasoningMaxConsecutiveSimilarResponses <= 0 {
+		c.ReasoningMaxConsecutiveSimilarResponses = c.MaxConsecutiveSimilarResponses * 2
+	}
 }
 
 // Signal identifies which detection rule fired.
@@ -83,7 +100,9 @@ const (
 	SignalToolCallEcho
 	SignalSilentBurn
 	SignalTurnFlood
-	SignalChunkRepetition // intra-turn: same chunk text repeating
+	SignalChunkRepetition          // intra-turn: same chunk text repeating
+	SignalReasoningChunkRepetition // intra-turn: same reasoning/thinking chunk text repeating
+	SignalReasoningRepetition      // cross-turn: reasoning text repeating across turns
 )
 
 func (s Signal) String() string {
@@ -100,6 +119,10 @@ func (s Signal) String() string {
 		return "turn_flood"
 	case SignalChunkRepetition:
 		return "chunk_repetition"
+	case SignalReasoningChunkRepetition:
+		return "reasoning_chunk_repetition"
+	case SignalReasoningRepetition:
+		return "reasoning_repetition"
 	default:
 		return "unknown"
 	}
@@ -115,12 +138,13 @@ type Verdict struct {
 
 // TurnSummary is the caller's description of one completed turn.
 type TurnSummary struct {
-	Text         string // agent's response text
-	InputTokens  int64
-	OutputTokens int64
-	ToolCalls    []string // opaque identifiers (e.g. "bash\x00ls -la"), empty if unknown
-	Timestamp    time.Time
-	IsUserTurn   bool // true when the user sent input (not an auto-resume)
+	Text          string // agent's response text
+	ReasoningText string // agent's accumulated thinking/reasoning text for the turn, empty if none
+	InputTokens   int64
+	OutputTokens  int64
+	ToolCalls     []string // opaque identifiers (e.g. "bash\x00ls -la"), empty if unknown
+	Timestamp     time.Time
+	IsUserTurn    bool // true when the user sent input (not an auto-resume)
 }
 
 // Detector accumulates turn history and emits Verdicts when signals fire.
@@ -136,6 +160,16 @@ type Detector struct {
 	firedChunk    bool     // true once SignalChunkRepetition fired this turn (don't re-fire)
 	consecRepeat  int      // count of consecutive same-text chunks at tail of buffer
 	lastChunkText string   // text of the most recent chunk (for consecutive detection)
+
+	// Intra-turn reasoning chunk buffer — same shape as the chunk buffer above,
+	// but fed from thinking/reasoning stream chunks and checked against a
+	// separate (higher) threshold.
+	reasonBuf           []string
+	reasonIdx           int
+	reasonCount         int
+	firedReasonChunk    bool
+	consecReasonRepeat  int
+	lastReasonChunkText string
 }
 
 // New creates a Detector with the given config. Call Config.defaults() first.
@@ -159,6 +193,9 @@ func (d *Detector) Feed(turn TurnSummary) []Verdict {
 	var verdicts []Verdict
 
 	if v := d.checkResponseRepetition(); v != nil {
+		verdicts = append(verdicts, *v)
+	}
+	if v := d.checkReasoningRepetition(); v != nil {
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkTokenVelocity(); v != nil {
@@ -187,10 +224,16 @@ func (d *Detector) Reset() {
 	d.firedChunk = false
 	d.consecRepeat = 0
 	d.lastChunkText = ""
+	d.reasonBuf = nil
+	d.reasonIdx = 0
+	d.reasonCount = 0
+	d.firedReasonChunk = false
+	d.consecReasonRepeat = 0
+	d.lastReasonChunkText = ""
 	d.mu.Unlock()
 }
 
-// ResetTurn clears the intra-turn chunk buffer. Call this when a new turn starts.
+// ResetTurn clears the intra-turn chunk buffers. Call this when a new turn starts.
 func (d *Detector) ResetTurn() {
 	d.mu.Lock()
 	d.chunkBuf = nil
@@ -199,6 +242,12 @@ func (d *Detector) ResetTurn() {
 	d.firedChunk = false
 	d.consecRepeat = 0
 	d.lastChunkText = ""
+	d.reasonBuf = nil
+	d.reasonIdx = 0
+	d.reasonCount = 0
+	d.firedReasonChunk = false
+	d.consecReasonRepeat = 0
+	d.lastReasonChunkText = ""
 	d.mu.Unlock()
 }
 
@@ -270,6 +319,64 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 	}}
 }
 
+// FeedReasoningChunk is the reasoning/thinking-stream counterpart to FeedChunk.
+// It mirrors the same consecutive-repeat detection but against a separate
+// buffer and a separate (higher) threshold, since reasoning text repeats
+// phrases more often than final output without necessarily being stuck.
+func (d *Detector) FeedReasoningChunk(text string) []Verdict {
+	if !d.cfg.Enabled {
+		return nil
+	}
+	trimmed := strings.TrimSpace(text)
+	if len([]rune(trimmed)) < 5 {
+		return nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.reasonBuf == nil {
+		d.reasonBuf = make([]string, d.cfg.ChunkWindowSize)
+	}
+
+	d.reasonBuf[d.reasonIdx] = trimmed
+	d.reasonIdx = (d.reasonIdx + 1) % len(d.reasonBuf)
+	if d.reasonCount < len(d.reasonBuf) {
+		d.reasonCount++
+	}
+
+	if trimmed == d.lastReasonChunkText {
+		d.consecReasonRepeat++
+	} else {
+		d.consecReasonRepeat = 1
+		d.lastReasonChunkText = trimmed
+		d.firedReasonChunk = false
+	}
+
+	if d.firedReasonChunk {
+		return nil
+	}
+
+	if d.consecReasonRepeat < d.cfg.ReasoningChunkRepetitionThreshold {
+		return nil
+	}
+
+	d.firedReasonChunk = true
+
+	display := trimmed
+	runes := []rune(display)
+	if len(runes) > 60 {
+		display = string(runes[:60]) + "…"
+	}
+
+	return []Verdict{{
+		Signal:          SignalReasoningChunkRepetition,
+		Confidence:      0.9,
+		Message:         fmt.Sprintf("reasoning repeating %d×: %q", d.consecReasonRepeat, display),
+		ShouldInterrupt: true,
+	}}
+}
+
 // ── Signal: Response Repetition ──────────────────────────────────────────────
 
 func (d *Detector) checkResponseRepetition() *Verdict {
@@ -296,6 +403,49 @@ func (d *Detector) checkResponseRepetition() *Verdict {
 		Signal:          SignalResponseRepetition,
 		Confidence:      confidence,
 		Message:         "agent repeating similar responses",
+		ShouldInterrupt: confidence >= 0.8,
+	}
+}
+
+// ── Signal: Reasoning Repetition ─────────────────────────────────────────────
+
+// checkReasoningRepetition is the cross-turn counterpart to
+// checkResponseRepetition, applied to accumulated reasoning/thinking text
+// instead of final output. It requires more consecutive similar turns
+// (ReasoningMaxConsecutiveSimilarResponses) and reports lower confidence,
+// since reasoning naturally revisits similar phrasing across turns without
+// the agent being stuck.
+func (d *Detector) checkReasoningRepetition() *Verdict {
+	n := d.cfg.ReasoningMaxConsecutiveSimilarResponses
+	if len(d.history) < n {
+		return nil
+	}
+
+	recent := d.history[len(d.history)-n:]
+
+	// All turns must have reasoning text — skip turns/models with none.
+	for _, t := range recent {
+		if strings.TrimSpace(t.ReasoningText) == "" {
+			return nil
+		}
+	}
+
+	for i := 1; i < len(recent); i++ {
+		sim := trigramSimilarity(recent[0].ReasoningText, recent[i].ReasoningText)
+		if sim < d.cfg.ResponseSimilarityThreshold {
+			return nil // not all similar
+		}
+	}
+
+	confidence := 0.6 + 0.05*float64(n-6) // 6 turns=0.6, 7=0.65, 8+=0.7...
+	if confidence > 0.85 {
+		confidence = 0.85
+	}
+
+	return &Verdict{
+		Signal:          SignalReasoningRepetition,
+		Confidence:      confidence,
+		Message:         "agent repeating similar reasoning",
 		ShouldInterrupt: confidence >= 0.8,
 	}
 }

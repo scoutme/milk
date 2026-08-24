@@ -782,16 +782,19 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	// Loop detection: feed turn summary and check for signals.
 	if m.loopDetector != nil {
 		turnText := ""
+		reasoningText := ""
 		if hist := m.st.sess.History; len(hist) > 0 {
 			turnText = hist[len(hist)-1].Content
+			reasoningText = hist[len(hist)-1].Thinking
 		}
 		turnDelta := m.lastTurnPrompt[m.activeTokenRole()] + m.lastTurnCompletion[m.activeTokenRole()]
 		verdicts := m.loopDetector.Feed(loop.TurnSummary{
-			Text:         turnText,
-			InputTokens:  m.lastTurnPrompt[m.activeTokenRole()],
-			OutputTokens: m.lastTurnCompletion[m.activeTokenRole()],
-			Timestamp:    time.Now(),
-			IsUserTurn:   false,
+			Text:          turnText,
+			ReasoningText: reasoningText,
+			InputTokens:   m.lastTurnPrompt[m.activeTokenRole()],
+			OutputTokens:  m.lastTurnCompletion[m.activeTokenRole()],
+			Timestamp:     time.Now(),
+			IsUserTurn:    false,
 		})
 		for _, v := range verdicts {
 			if v.Confidence >= 0.8 {
@@ -1268,6 +1271,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentTurnChars += int64(len(msg.text))
 		m.currentTurnThinking.WriteString(msg.text)
 		m.appendThinking(msg.text)
+		// Intra-turn loop detection: reasoning chunks get their own (higher)
+		// repetition threshold — see internal/loop.
+		if m.loopDetector != nil {
+			for _, v := range m.loopDetector.FeedReasoningChunk(msg.text) {
+				m.appendTranscript(yellow(fmt.Sprintf("\n[⚠ loop detected: %s (confidence %.0f%%)]\n", v.Message, v.Confidence*100)))
+				if v.ShouldInterrupt {
+					m.loopInterrupt = true
+					if m.cancelTurn != nil {
+						m.cancelTurn()
+					}
+				}
+			}
+		}
 		return m, nil
 
 	case reasoningPromotedMsg:
