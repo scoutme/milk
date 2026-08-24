@@ -29,6 +29,19 @@ func TestDefinition_Validate_AgentTurnMissingRoleOrPrompt(t *testing.T) {
 	}
 }
 
+func TestDefinition_Validate_RunUnlessFieldsMustBePaired(t *testing.T) {
+	cases := []Stage{
+		{ID: "a", Kind: StageKindAgentTurn, Role: "r", Prompt: "p", RunUnlessMarkerIn: "x"},
+		{ID: "a", Kind: StageKindAgentTurn, Role: "r", Prompt: "p", RunUnlessContains: "x"},
+	}
+	for _, s := range cases {
+		d := Definition{Name: "x", Stages: []Stage{s}}
+		if err := d.Validate(); err == nil {
+			t.Errorf("expected error for one-sided run_unless_* on stage %+v", s)
+		}
+	}
+}
+
 func TestDefinition_Validate_LoopNeedsOverOrMaxIterations(t *testing.T) {
 	d := Definition{Name: "x", Stages: []Stage{{
 		ID: "loop1", Kind: StageKindLoop,

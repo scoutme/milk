@@ -60,6 +60,14 @@ type Stage struct {
 	SkipUserCheckpointMarker string                 `yaml:"skip_user_checkpoint_marker,omitempty" json:"skip_user_checkpoint_marker,omitempty"`
 	OnAnswerPrompt           string                 `yaml:"on_answer_prompt,omitempty" json:"on_answer_prompt,omitempty"`
 	Verdict                  map[string]VerdictRule `yaml:"verdict,omitempty" json:"verdict,omitempty"`
+	// RunUnlessMarkerIn/RunUnlessContains: an agent_turn stage this pair is
+	// set on is skipped entirely (no runner call, no SaveAs) when
+	// Vars[RunUnlessMarkerIn] contains a standalone line equal to
+	// RunUnlessContains. Used for an optional stage gated on a prior stage's
+	// verdict-like output — e.g. swarm's final implementation pass, skipped
+	// when the final evaluation reports no issues.
+	RunUnlessMarkerIn string `yaml:"run_unless_marker_in,omitempty" json:"run_unless_marker_in,omitempty"`
+	RunUnlessContains string `yaml:"run_unless_contains,omitempty" json:"run_unless_contains,omitempty"`
 
 	// loop / parallel_group
 	// Over names the declared section label (e.g. "Sprint", parsed out of
@@ -138,6 +146,9 @@ func (s Stage) validate(defName string) error {
 		}
 		if s.Prompt == "" {
 			return fmt.Errorf("workflow definition %q: stage %q (agent_turn) missing prompt", defName, s.ID)
+		}
+		if (s.RunUnlessMarkerIn == "") != (s.RunUnlessContains == "") {
+			return fmt.Errorf("workflow definition %q: stage %q (agent_turn): run_unless_marker_in and run_unless_contains must be set together", defName, s.ID)
 		}
 	case StageKindUserCheckpoint:
 		if s.Prompt == "" {

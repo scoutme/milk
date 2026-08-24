@@ -1,0 +1,190 @@
+# swarm — designer breaks the task into independent (or dependency-ordered)
+# items, a worker+evaluator retry loop runs per item concurrently, a final
+# evaluator checks the combined result, and an optional last implementation
+# pass fixes cross-item integration issues.
+#
+# See internal/workflow/definitions/dev.yaml's header for what's generally
+# deferred (checkpoint/resume, on-disk artifact files). Additionally here:
+# per-item worker retries are bounded by a static max_iterations rather than
+# a plan-declared value (swarm's items don't each declare their own limits
+# the way dev/pair's sprints do) -- revisit once real usage shows whether
+# that's worth adding.
+
+vars:
+  plan_instructions: |
+    ## Spec
+    A precise description of what needs to be built, including acceptance criteria.
+
+    ## Item Plan
+    Break the work into independent units of work. Use one section per item, each headed
+    exactly as "## Item N" (e.g. "## Item 1"). If an item can only be done after another
+    item finishes (e.g. it needs files that item creates), declare that with
+    "## Item N (depends_on: M)" or "## Item N (depends_on: M, K)" for multiple dependencies.
+    Items with no depends_on run concurrently with each other; a dependent item only starts
+    once everything it depends on has finished.
+
+    For each item, describe the concrete deliverable and its acceptance criteria in enough
+    detail that a worker can implement it without further clarification, and an evaluator can
+    check it in isolation from the other items.
+
+    Keep the number of items to the minimum needed -- do not split work into more items than
+    there are genuinely independent (or dependency-ordered) units of work.
+
+name: swarm
+roles: [designer, worker, evaluator, implementer]
+
+stages:
+  - id: designer
+    kind: agent_turn
+    role: designer
+    save_as: plan
+    skip_user_checkpoint_marker: "NO_QUESTIONS"
+    prompt: |
+      You are the designer for this development task.
+
+      Task: {{.task}}
+
+      Before producing a full plan, identify any ambiguities or missing information that would
+      affect the design, and in particular how the work should be split into independent items.
+
+      If the task has ambiguities worth asking about, respond with ONLY the questions, structured as:
+
+      ## Questions
+      - Q1: <question>
+      - Q2: <question>
+      ...
+
+      ## Defaults
+      If the user doesn't answer, use these defaults:
+      - Q1: <default answer>
+      - Q2: <default answer>
+      ...
+
+      Keep the number of questions to the minimum needed. Prefer reasonable defaults over asking.
+
+      Otherwise -- if the task is already clear enough to design without asking -- skip the
+      questions entirely. Respond with "NO_QUESTIONS" on its own line, immediately followed by
+      the full spec and item plan in this format:
+
+      {{.plan_instructions}}
+    on_answer_prompt: |
+      You are the designer for this development task.
+
+      Task: {{.task}}
+
+      You previously identified these ambiguities:
+      {{.designer_questions}}
+
+      The user provided these answers:
+      {{.designer_answer}}
+
+      Now produce the full detailed spec and item plan incorporating the user's choices.
+
+      {{.plan_instructions}}
+
+  - id: worker_fanout
+    kind: parallel_group
+    over: Item
+    from: plan
+    max_concurrency: 4
+    save_as: worker_results
+    body:
+      - id: worker_pass_loop
+        kind: loop
+        max_iterations: 3
+        iteration_var: pass
+        body:
+          - id: worker
+            kind: agent_turn
+            role: worker
+            save_as: worker_output
+            prompt: |
+              You are a worker. Implement Item {{.item}}{{if gt .pass 1}} (pass {{.pass}} -- refine based on evaluator findings){{end}}.
+
+              ## Item
+              {{.item_section}}
+
+              {{if and (gt .pass 1) .worker_findings}}## Evaluator findings from previous pass
+              {{.worker_findings}}
+
+              {{end -}}
+              Implement this item's deliverables as described above.
+              Use your tools (read_file, write_file, edit_file, bash, etc.) to read, create, and modify files.
+              After completing all tool use, write a plain-text summary of what you did: which files were
+              created or modified, what each change does, and which acceptance criteria it satisfies.
+              This written summary is mandatory -- the evaluator reads it to assess the item.
+
+          - id: worker_eval
+            kind: agent_turn
+            role: evaluator
+            save_as: worker_findings
+            prompt: |
+              You are the evaluator. Review Item {{.item}} (pass {{.pass}}).
+
+              ## Item
+              {{.item_section}}
+
+              {{if .worker_output}}## Worker output
+              {{.worker_output}}
+
+              {{else}}## Worker output
+              (empty -- the worker produced no written summary)
+
+              NOTE: The worker may have used tools to modify files directly without producing a
+              written summary. Use your read_file and bash tools to inspect the codebase and
+              determine whether the item's deliverables were actually implemented.
+
+              {{end -}}
+              Review the item's deliverables against its acceptance criteria.
+              Use your tools to read relevant source files and verify the implementation when needed.
+
+              Write a findings section describing what is correct and what needs improvement.
+
+              End your response with exactly ONE of these verdict lines:
+              - good_to_go
+              - needs_refinement
+
+              Use "good_to_go" when all acceptance criteria are met, or this is the final pass and
+              remaining issues are minor or impractical to resolve in one more iteration.
+              Use "needs_refinement" only when there are fixable issues AND passes remain.
+
+              IMPORTANT: if this is the final pass (pass {{.pass}} = 3), do NOT return
+              "needs_refinement" -- use "good_to_go" instead, since no further refinement will occur.
+            verdict:
+              good_to_go: {action: break}
+              needs_refinement: {action: retry}
+              unknown: {action: retry, warn: true}
+
+  - id: final_evaluation
+    kind: agent_turn
+    role: evaluator
+    save_as: final_findings
+    prompt: |
+      You are the final evaluator. Every item below was implemented independently and in
+      parallel where possible. Review the combined result for cross-item integration issues,
+      consistency problems, and any gaps that only become visible once everything is combined.
+
+      {{range .worker_results}}## Item {{.Index}} -- {{.Status}}
+      {{.Output}}
+
+      {{end -}}
+      Use your tools to read the actual codebase and verify integration across items, not just
+      what each item's own summary claims.
+
+      If everything integrates cleanly and no further changes are needed, respond with
+      "NO_ISSUES" on its own line and nothing else. Otherwise, describe the integration issues
+      found -- these will be handed to a single implementer for a final fix pass.
+
+  - id: final_implementation
+    kind: agent_turn
+    role: implementer
+    run_unless_marker_in: final_findings
+    run_unless_contains: "NO_ISSUES"
+    prompt: |
+      You are the implementer doing a final integration pass. The final evaluator found these
+      cross-item issues after all items were implemented independently:
+
+      {{.final_findings}}
+
+      Use your tools to read the codebase, fix the issues described, and write a plain-text
+      summary of what you changed.

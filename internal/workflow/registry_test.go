@@ -32,6 +32,32 @@ func TestLoadRegistry_BuiltinDev(t *testing.T) {
 	}
 }
 
+func TestLoadRegistry_BuiltinPair(t *testing.T) {
+	withTempMilkHome(t)
+	reg, errs := LoadRegistry()
+	if len(errs) != 0 {
+		t.Fatalf("LoadRegistry errors: %v", errs)
+	}
+	def, ok := reg.Lookup("pair")
+	if !ok {
+		t.Fatal("expected built-in \"pair\" definition to be registered")
+	}
+	if def.Name != "pair" {
+		t.Errorf("Name = %q, want %q", def.Name, "pair")
+	}
+}
+
+func TestLoadRegistry_BuiltinSwarm(t *testing.T) {
+	withTempMilkHome(t)
+	reg, errs := LoadRegistry()
+	if len(errs) != 0 {
+		t.Fatalf("LoadRegistry errors: %v", errs)
+	}
+	if _, ok := reg.Lookup("swarm"); !ok {
+		t.Fatal("expected built-in \"swarm\" definition to be registered")
+	}
+}
+
 func TestLoadRegistry_UserOverride(t *testing.T) {
 	home := withTempMilkHome(t)
 	dir := filepath.Join(home, ".milk", "workflows")

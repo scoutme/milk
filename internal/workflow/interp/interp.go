@@ -130,6 +130,13 @@ var markerLineRE = func(marker string) *regexp.Regexp {
 }
 
 func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
+	if s.RunUnlessContains != "" {
+		gate, _ := ec.vars[s.RunUnlessMarkerIn].(string)
+		if markerLineRE(s.RunUnlessContains).FindStringIndex(gate) != nil {
+			return "", nil
+		}
+	}
+
 	runner, ok := ec.cfg.Runners[s.Role]
 	if !ok {
 		return "", fmt.Errorf("workflow: no runner for role %q (stage %q)", s.Role, s.ID)
@@ -297,11 +304,15 @@ func execBoundedLoop(ec *execContext, s workflow.Stage) error {
 }
 
 // execParallelGroup runs Body once per declared section named by Over,
-// concurrently (bounded by MaxConcurrency), giving each a private copy of
-// Vars — concurrent writers to a shared map would race, and each item's
-// intermediate SaveAs values (e.g. a per-item "sprint_output") are
-// meaningless to its siblings. One item's error does not cancel the others;
-// results aggregate into Vars[SaveAs] as []ItemResult.
+// concurrently within each dependency wave (bounded by MaxConcurrency) and
+// giving each a private copy of Vars — concurrent writers to a shared map
+// would race, and each item's intermediate SaveAs values (e.g. a per-item
+// "worker_output") are meaningless to its siblings. Items with a DependsOn
+// declaration only start once every dependency's wave has finished (see
+// computeWaves); a dependency cycle is reported as an error rather than
+// deadlocking. One item's error does not cancel the others in its wave or
+// abort later waves; results aggregate into Vars[SaveAs] as []ItemResult, in
+// declaration order regardless of wave grouping.
 func execParallelGroup(ec *execContext, s workflow.Stage) error {
 	doc, _ := ec.vars[s.From].(string)
 	decls := ParseDeclarations(doc)
@@ -309,46 +320,102 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 	if len(sections) == 0 {
 		return nil
 	}
+	waves, err := computeWaves(sections)
+	if err != nil {
+		return fmt.Errorf("workflow: stage %q: %w", s.ID, err)
+	}
 	maxConcurrency := s.MaxConcurrency
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
 	label := strings.ToLower(s.Over)
 	results := make([]ItemResult, len(sections))
-	sem := make(chan struct{}, maxConcurrency)
-	var wg sync.WaitGroup
+	posByIndex := make(map[int]int, len(sections))
 	for i, sec := range sections {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, sec Section) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			itemVars := make(map[string]any, len(ec.vars)+2)
-			maps.Copy(itemVars, ec.vars)
-			itemVars[label] = sec.Index
-			itemVars[label+"_section"] = sec.Body
-
-			itemEC := &execContext{ctx: ec.ctx, cfg: ec.cfg, vars: itemVars}
-			outcome, err := executeStages(itemEC, s.Body)
-			r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
-			if lastSaveAs := lastSaveAsOf(s.Body); lastSaveAs != "" {
-				if out, ok := itemVars[lastSaveAs].(string); ok {
-					r.Output = out
-				}
-			}
-			if err != nil {
-				r.Status = "error"
-				r.Err = err.Error()
-			}
-			results[i] = r
-		}(i, sec)
+		posByIndex[sec.Index] = i
 	}
-	wg.Wait()
+
+	for _, wave := range waves {
+		sem := make(chan struct{}, maxConcurrency)
+		var wg sync.WaitGroup
+		for _, sec := range wave {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(sec Section) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				itemVars := make(map[string]any, len(ec.vars)+2)
+				maps.Copy(itemVars, ec.vars)
+				itemVars[label] = sec.Index
+				itemVars[label+"_section"] = sec.Body
+
+				itemEC := &execContext{ctx: ec.ctx, cfg: ec.cfg, vars: itemVars}
+				outcome, err := executeStages(itemEC, s.Body)
+				r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
+				if lastSaveAs := lastSaveAsOf(s.Body); lastSaveAs != "" {
+					if out, ok := itemVars[lastSaveAs].(string); ok {
+						r.Output = out
+					}
+				}
+				if err != nil {
+					r.Status = "error"
+					r.Err = err.Error()
+				}
+				results[posByIndex[sec.Index]] = r
+			}(sec)
+		}
+		wg.Wait()
+	}
 	if s.SaveAs != "" {
 		ec.vars[s.SaveAs] = results
 	}
 	return nil
+}
+
+// computeWaves groups sections into dependency waves: wave 0 holds every
+// section with no DependsOn, wave 1 holds sections whose dependencies are
+// all satisfied by wave 0, and so on. Sections within a wave have no
+// dependency relationship to each other and can run concurrently; a wave
+// only starts once every earlier wave has fully finished. Returns an error
+// if a dependency cycle (or a reference to a nonexistent index) prevents any
+// section from ever becoming ready.
+func computeWaves(sections []Section) ([][]Section, error) {
+	resolved := make(map[int]bool, len(sections))
+	remaining := make([]Section, len(sections))
+	copy(remaining, sections)
+
+	var waves [][]Section
+	for len(remaining) > 0 {
+		var wave, next []Section
+		for _, sec := range remaining {
+			ready := true
+			for _, dep := range sec.DependsOn {
+				if !resolved[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				wave = append(wave, sec)
+			} else {
+				next = append(next, sec)
+			}
+		}
+		if len(wave) == 0 {
+			stuck := make([]int, len(next))
+			for i, sec := range next {
+				stuck[i] = sec.Index
+			}
+			return nil, fmt.Errorf("unresolvable dependency cycle (or reference to a missing item) among items: %v", stuck)
+		}
+		for _, sec := range wave {
+			resolved[sec.Index] = true
+		}
+		waves = append(waves, wave)
+		remaining = next
+	}
+	return waves, nil
 }
 
 func lastSaveAsOf(body []workflow.Stage) string {

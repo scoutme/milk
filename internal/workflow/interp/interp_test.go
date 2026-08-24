@@ -97,6 +97,42 @@ func TestExecAgentTurn_MissingRunner(t *testing.T) {
 	}
 }
 
+func TestExecAgentTurn_RunUnlessMarkerSkipsStage(t *testing.T) {
+	gated := &fakeRunner{name: "g", responses: []string{"NO_ISSUES", "should not be called"}}
+	def := workflow.Definition{Name: "t", Stages: []workflow.Stage{
+		{ID: "check", Kind: workflow.StageKindAgentTurn, Role: "g", Prompt: "check", SaveAs: "check_out"},
+		{
+			ID: "maybe", Kind: workflow.StageKindAgentTurn, Role: "g", Prompt: "fix it",
+			RunUnlessMarkerIn: "check_out", RunUnlessContains: "NO_ISSUES",
+		},
+	}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"g": gated})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gated.callCount() != 1 {
+		t.Errorf("expected the gated stage to be skipped, got %d calls", gated.callCount())
+	}
+}
+
+func TestExecAgentTurn_RunUnlessMarkerRunsWhenAbsent(t *testing.T) {
+	gated := &fakeRunner{name: "g", responses: []string{"some issues found", "fixed"}}
+	def := workflow.Definition{Name: "t", Stages: []workflow.Stage{
+		{ID: "check", Kind: workflow.StageKindAgentTurn, Role: "g", Prompt: "check", SaveAs: "check_out"},
+		{
+			ID: "maybe", Kind: workflow.StageKindAgentTurn, Role: "g", Prompt: "fix it",
+			RunUnlessMarkerIn: "check_out", RunUnlessContains: "NO_ISSUES",
+		},
+	}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"g": gated})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gated.callCount() != 2 {
+		t.Errorf("expected the gated stage to run, got %d calls", gated.callCount())
+	}
+}
+
 func TestExecLoop_BoundedRetryThenBreak(t *testing.T) {
 	evaluator := &fakeRunner{name: "eval", responses: []string{
 		"findings\nneeds_refinement",
@@ -382,6 +418,120 @@ func TestExecParallelGroup_MaxConcurrencyBound(t *testing.T) {
 	if peak < 2 {
 		t.Errorf("peak concurrency = %d, want == 2 (should actually run in parallel)", peak)
 	}
+}
+
+func TestComputeWaves_LinearChain(t *testing.T) {
+	sections := []Section{
+		{Index: 1},
+		{Index: 2, DependsOn: []int{1}},
+		{Index: 3, DependsOn: []int{2}},
+	}
+	waves, err := computeWaves(sections)
+	if err != nil {
+		t.Fatalf("computeWaves: %v", err)
+	}
+	if len(waves) != 3 {
+		t.Fatalf("got %d waves, want 3 (strict chain)", len(waves))
+	}
+	for i, wave := range waves {
+		if len(wave) != 1 || wave[0].Index != i+1 {
+			t.Errorf("wave %d = %v, want [{Index: %d}]", i, wave, i+1)
+		}
+	}
+}
+
+func TestComputeWaves_IndependentItemsShareAWave(t *testing.T) {
+	sections := []Section{
+		{Index: 1},
+		{Index: 2},
+		{Index: 3, DependsOn: []int{1, 2}},
+	}
+	waves, err := computeWaves(sections)
+	if err != nil {
+		t.Fatalf("computeWaves: %v", err)
+	}
+	if len(waves) != 2 {
+		t.Fatalf("got %d waves, want 2", len(waves))
+	}
+	if len(waves[0]) != 2 {
+		t.Errorf("wave 0 = %v, want both independent items", waves[0])
+	}
+	if len(waves[1]) != 1 || waves[1][0].Index != 3 {
+		t.Errorf("wave 1 = %v, want just item 3", waves[1])
+	}
+}
+
+func TestComputeWaves_CycleReturnsError(t *testing.T) {
+	sections := []Section{
+		{Index: 1, DependsOn: []int{2}},
+		{Index: 2, DependsOn: []int{1}},
+	}
+	if _, err := computeWaves(sections); err == nil {
+		t.Error("expected an error for a dependency cycle")
+	}
+}
+
+func TestExecParallelGroup_DependentItemWaitsForItsDependency(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+	record := func(evt string) {
+		mu.Lock()
+		events = append(events, evt)
+		mu.Unlock()
+	}
+	worker := &recordingRunner{record: record, delay: 10 * time.Millisecond}
+	def := workflow.Definition{
+		Name: "t",
+		Stages: []workflow.Stage{
+			{ID: "plan_stage", Kind: workflow.StageKindAgentTurn, Role: "planner", Prompt: "plan", SaveAs: "plan"},
+			{
+				ID: "fanout", Kind: workflow.StageKindParallelGroup, Over: "Item", From: "plan", MaxConcurrency: 4,
+				Body: []workflow.Stage{{ID: "work", Kind: workflow.StageKindAgentTurn, Role: "w", Prompt: "do {{.item}}"}},
+			},
+		},
+	}
+	planner := &fakeRunner{name: "planner", responses: []string{
+		"## Item 1\nfirst\n\n## Item 2 (depends_on: 1)\nsecond, needs first\n",
+	}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"planner": planner, "w": worker})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 4 {
+		t.Fatalf("events = %v, want 4 start/end markers", events)
+	}
+	// Item 1 must fully finish (start AND end) before item 2 starts.
+	item1EndIdx, item2StartIdx := -1, -1
+	for i, e := range events {
+		if e == "end:1" {
+			item1EndIdx = i
+		}
+		if e == "start:2" {
+			item2StartIdx = i
+		}
+	}
+	if item1EndIdx == -1 || item2StartIdx == -1 || item2StartIdx < item1EndIdx {
+		t.Errorf("events = %v, want item 1 to fully finish before item 2 starts", events)
+	}
+}
+
+// recordingRunner records "start:<prompt-derived id>" / "end:<id>" via
+// record, sleeping delay in between so tests can observe overlap (or its
+// absence, for a dependency-respecting wave).
+type recordingRunner struct {
+	record func(string)
+	delay  time.Duration
+}
+
+func (r *recordingRunner) Name() string { return "w" }
+func (r *recordingRunner) Run(_ context.Context, prompt string, _ io.Writer) (string, error) {
+	id := prompt[len(prompt)-1:] // prompts end in the item index digit
+	r.record("start:" + id)
+	time.Sleep(r.delay)
+	r.record("end:" + id)
+	return "ok", nil
 }
 
 func TestExecParallelGroup_OneItemErrorDoesNotAbortSiblings(t *testing.T) {

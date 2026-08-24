@@ -1,0 +1,197 @@
+# pair — designer -> generator/evaluator sprint loop, with the evaluator
+# pausing to ask the user for input before deciding a verdict.
+#
+# Same shape as dev.yaml (see its header comment for what's deferred) with
+# one addition: after producing findings, the evaluator's decision is
+# deferred until the user has had a chance to add context or instructions
+# (user_checkpoint), which the decision turn then incorporates.
+
+vars:
+  plan_instructions: |
+    ## Spec
+    A precise description of what needs to be built, including acceptance criteria.
+
+    ## Limits
+    Declare the execution limits for this workflow on two lines, exactly as shown:
+      max_passes: <N>
+      max_sprints: <N>
+
+    max_passes is the maximum number of generator->evaluator iterations allowed per sprint
+    before the workflow halts with an error. Set it based on task complexity:
+      1-2 for trivial tasks (a single small file or function)
+      3-5 for moderate tasks (a feature, a small module)
+      6-10 for complex tasks (a full game, a multi-file system, many interacting components)
+    Err on the side of more passes -- running out of passes halts the workflow with an error.
+
+    max_sprints is a safety cap on the total number of sprints. It must equal or exceed the
+    number of ## Sprint N sections you define below. Use it to prevent runaway loops.
+
+    ## Sprint Plan
+    Use one section per sprint, each headed exactly as "## Sprint N" (e.g. "## Sprint 1").
+    For each sprint list the concrete deliverables: files to create or modify, tests to write,
+    testing instructions for a human reviewer.
+
+    Keep the number of sprints to the minimum needed. If the task fits in one sprint, use one.
+
+name: pair
+roles: [designer, generator, evaluator]
+
+stages:
+  - id: designer
+    kind: agent_turn
+    role: designer
+    save_as: plan
+    skip_user_checkpoint_marker: "NO_QUESTIONS"
+    prompt: |
+      You are the designer for this development task.
+
+      Task: {{.task}}
+
+      Before producing a full plan, identify any ambiguities or missing information that would
+      affect the design. Focus on:
+      - Technology choices (language, framework, libraries)
+      - Architecture decisions (monolith vs modules, API design, data model)
+      - Scope boundaries (what's in vs out)
+      - Non-functional requirements (performance, security, deployment)
+
+      If the task has ambiguities worth asking about, respond with ONLY the questions, structured as:
+
+      ## Questions
+      - Q1: <question>
+      - Q2: <question>
+      ...
+
+      ## Defaults
+      If the user doesn't answer, use these defaults:
+      - Q1: <default answer>
+      - Q2: <default answer>
+      ...
+
+      Keep the number of questions to the minimum needed. Prefer reasonable defaults over asking.
+
+      Otherwise -- if the task is already clear enough to design without asking -- skip the
+      questions entirely. Respond with "NO_QUESTIONS" on its own line, immediately followed by
+      the full spec and sprint plan in this format:
+
+      {{.plan_instructions}}
+    on_answer_prompt: |
+      You are the designer for this development task.
+
+      Task: {{.task}}
+
+      You previously identified these ambiguities:
+      {{.designer_questions}}
+
+      The user provided these answers:
+      {{.designer_answer}}
+
+      Now produce the full detailed spec and sprint plan incorporating the user's choices.
+
+      {{.plan_instructions}}
+
+  - id: sprint_loop
+    kind: loop
+    over: Sprint
+    from: plan
+    body:
+      - id: pass_loop
+        kind: loop
+        from: plan
+        max_iterations_from: max_passes
+        iteration_var: pass
+        body:
+          - id: generator
+            kind: agent_turn
+            role: generator
+            save_as: sprint_output
+            prompt: |
+              You are the generator. Execute Sprint {{.sprint}}{{if gt .pass 1}} (pass {{.pass}} -- refine based on evaluator findings){{end}}.
+
+              {{if .sprint_section}}## Current sprint
+              {{.sprint_section}}
+
+              {{else if .plan}}## Plan
+              {{.plan}}
+
+              {{end -}}
+              {{if and (gt .pass 1) .findings}}## Evaluator findings from previous pass
+              {{.findings}}
+
+              {{end -}}
+              Implement all deliverables for Sprint {{.sprint}} as described in the plan.
+              Use your tools (read_file, write_file, edit_file, bash, etc.) to read, create, and modify files.
+              After completing all tool use, write a plain-text summary of what you did: which files were
+              created or modified, what each change does, and which acceptance criteria it satisfies.
+              This written summary is mandatory -- the evaluator reads it to assess the sprint.
+
+          - id: evaluator
+            kind: agent_turn
+            role: evaluator
+            save_as: findings
+            prompt: |
+              You are the evaluator. Review Sprint {{.sprint}} (pass {{.pass}} of {{.max_passes}}).
+
+              {{if .sprint_section}}## Current sprint
+              {{.sprint_section}}
+
+              {{else if .plan}}## Plan
+              {{.plan}}
+
+              {{end -}}
+              {{if .sprint_output}}## Generator output
+              {{.sprint_output}}
+
+              {{else}}## Generator output
+              (empty -- the generator produced no written summary)
+
+              NOTE: The generator may have used tools to modify files directly without producing a
+              written summary. Use your read_file and bash tools to inspect the codebase and
+              determine whether the sprint deliverables were actually implemented.
+
+              {{end -}}
+              Review the sprint deliverables against the Sprint {{.sprint}} acceptance criteria.
+              Use your tools to read relevant source files and verify the implementation when needed.
+
+              Write a findings section describing what is correct and what needs improvement.
+              Do NOT give a verdict yet -- the user will see your findings first and may add
+              context or instructions before you decide.
+
+          - id: user_review
+            kind: user_checkpoint
+            save_as: user_input
+            prompt: |
+              The evaluator reviewed Sprint {{.sprint}} (pass {{.pass}} of {{.max_passes}}) and found:
+
+              {{.findings}}
+
+              Add any context or instructions before the evaluator decides whether this sprint is
+              done, or just reply "continue" / "looks good" to proceed as-is.
+
+          - id: evaluator_decision
+            kind: agent_turn
+            role: evaluator
+            prompt: |
+              You are the evaluator. You previously reviewed Sprint {{.sprint}} (pass {{.pass}} of {{.max_passes}}) and found:
+
+              {{.findings}}
+
+              The user responded:
+              {{.user_input}}
+
+              Incorporate the user's input -- they may have simply said to continue -- and now decide.
+
+              End your response with exactly ONE of these verdict lines:
+              - good_to_go
+              - needs_refinement
+              - sprint_done
+
+              Use "good_to_go" when all acceptance criteria are met.
+              Use "needs_refinement" when there are fixable issues AND passes remain (you are on pass {{.pass}} of {{.max_passes}}).
+              Use "sprint_done" when the sprint deliverables are substantially complete, OR when this is the last pass and remaining issues are minor or impractical to resolve in one more iteration.
+
+              IMPORTANT: if this is the final pass (pass {{.pass}} = max {{.max_passes}}), do NOT return "needs_refinement" -- use "sprint_done" instead, since no further refinement will occur.
+            verdict:
+              good_to_go: {action: break}
+              sprint_done: {action: break}
+              needs_refinement: {action: retry}
+              unknown: {action: retry, warn: true}
