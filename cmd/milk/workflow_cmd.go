@@ -11,9 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
+	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
 // workflowWizardState tracks multi-step wizard input for /workflow.
@@ -37,6 +39,20 @@ type workflowWizardState struct {
 	pass            int    // checkpoint pass (used when resuming/reconfiguring == true)
 	role            string // checkpoint role (used when resuming/reconfiguring == true)
 	workflowID      int    // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
+
+	// Generic (registry-driven, non-"dev") workflow fields. dev keeps using the
+	// designer/generator/evaluator fields above and the wfdev-specific launch
+	// path; any other name registered in workflow.LoadRegistry() (e.g. "pair",
+	// "swarm", or a user-defined workflow) drives an arbitrary role list
+	// through these fields and launches via internal/workflow/interp instead.
+	// Checkpoint/resume is not yet implemented for this path — see interp's
+	// package doc — so /workflow resume/reconfigure/clear remain dev-only in
+	// practice; the interpreter never writes a state file, so those commands
+	// correctly report "no saved workflow state" for a generic run.
+	def        workflow.Definition // resolved definition; zero value unused when name == "dev"
+	roles      []string            // def.Roles, in wizard-ask order
+	roleValues map[string]string   // role name -> agent specifier, filled in as the wizard progresses
+	roleIdx    int                 // index into roles for the role currently being asked
 }
 
 type workflowWizardStep int
@@ -49,6 +65,7 @@ const (
 	wizardStepGeneratorPrompt                           // optional — behaviour prompt for generator
 	wizardStepEvaluatorPrompt                           // optional — behaviour prompt for evaluator
 	wizardStepClearConfirm                              // ask user to type "clear" to confirm
+	wizardStepGenericRole                               // ask for the role at roles[roleIdx] (non-"dev" workflows)
 	wizardStepDone
 )
 
@@ -56,9 +73,14 @@ const (
 func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(args)
 
+	reg, regErrs := workflow.LoadRegistry()
+	for _, e := range regErrs {
+		obs.Info("workflow.registry.load_error", "error", e.Error())
+	}
+
 	if len(parts) == 0 {
 		// List available workflows.
-		m.appendTranscript(milkTag() + " available workflows:\n  dev — designer → generator → evaluator loop\n\nUsage:\n  /workflow dev [task] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
+		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow resume       — resume workflow from last checkpoint (dev only)\n  /workflow reconfigure  — reassign agent roles without losing saved state (dev only)\n  /workflow clear        — delete saved state for this session (dev only)\n")
 		return m, nil
 	}
 
@@ -73,8 +95,12 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 		return m.handleWorkflowReconfigure()
 	}
 	if name != "dev" {
-		m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: dev, resume, reconfigure, clear\n", name))
-		return m, nil
+		def, ok := reg.Lookup(name)
+		if !ok {
+			m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: %s, resume, reconfigure, clear\n", name, strings.Join(reg.Names(), ", ")))
+			return m, nil
+		}
+		return m.handleGenericWorkflowCmd(name, def, parts[1:])
 	}
 
 	// Parse optional flags.
@@ -127,6 +153,68 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	return m.launchWorkflow(wizard)
 }
 
+// handleGenericWorkflowCmd dispatches /workflow <name> [args...] for any
+// registered definition other than "dev" (e.g. "pair", "swarm", or a
+// user-defined workflow in ~/.milk/workflows/). Parses the same
+// task/--<role> flag syntax as the dev path, then drives an agent wizard
+// over def.Roles (an arbitrary list, unlike dev's fixed designer/generator/
+// evaluator triple) before launching via internal/workflow/interp.
+func (m model) handleGenericWorkflowCmd(name string, def workflow.Definition, rest []string) (tea.Model, tea.Cmd) {
+	remaining, flags, flagErr := parseWorkflowFlags(rest)
+	if flagErr != nil {
+		m.appendTranscript(milkTag() + " workflow error: " + flagErr.Error() + "\n")
+		return m, nil
+	}
+	task := strings.Join(remaining, " ")
+
+	wizard := &workflowWizardState{
+		name:       name,
+		task:       task,
+		def:        def,
+		roles:      def.Roles,
+		roleValues: map[string]string{},
+	}
+	for _, role := range def.Roles {
+		if v, ok := flags[role]; ok {
+			wizard.roleValues[role] = v
+		}
+	}
+
+	if wizard.task == "" {
+		wizard.step = wizardStepTask
+		m.pendingWorkflowWizard = wizard
+		m.appendTranscript(milkTag() + fmt.Sprintf(" workflow %s — enter task description:\n", name))
+		m.refreshPrompt()
+		return m, nil
+	}
+	return m.advanceToNextGenericRoleOrLaunch(wizard)
+}
+
+// advanceToNextGenericRoleOrLaunch finds the first role in w.roles not yet in
+// w.roleValues and prompts for it, or launches the workflow once every role
+// has a value.
+func (m model) advanceToNextGenericRoleOrLaunch(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	for i, role := range w.roles {
+		if _, ok := w.roleValues[role]; ok {
+			continue
+		}
+		w.roleIdx = i
+		w.step = wizardStepGenericRole
+		m.pendingWorkflowWizard = w
+		m.appendTranscript(milkTag() + genericWorkflowAgentPrompt(w.name, role))
+		m.refreshPrompt()
+		return m, nil
+	}
+	m.pendingWorkflowWizard = nil
+	return m.launchGenericWorkflow(w)
+}
+
+// genericWorkflowAgentPrompt returns the wizard prompt line for a role in a
+// non-"dev" workflow.
+func genericWorkflowAgentPrompt(workflowName, role string) string {
+	return fmt.Sprintf(" workflow %s — %s agent (blank = escalation):\n", workflowName, role)
+}
+
 // advanceWorkflowWizard handles a user input while a workflow wizard is active.
 // Each call records the answer for the current step, then either asks the next
 // question or launches the workflow when all fields are collected.
@@ -151,11 +239,23 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		w.task = input
+		if len(w.roles) > 0 { // generic (non-"dev") workflow — arbitrary role list
+			return m.advanceToNextGenericRoleOrLaunch(w)
+		}
 		w.step = wizardStepDesigner
 		m.pendingWorkflowWizard = w
 		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
 		m.refreshPrompt()
 		return m, nil
+
+	case wizardStepGenericRole:
+		role := w.roles[w.roleIdx]
+		val := input
+		if val == "" {
+			val = workflow.AliasEscalation
+		}
+		w.roleValues[role] = val
+		return m.advanceToNextGenericRoleOrLaunch(w)
 
 	case wizardStepDesigner:
 		w.designer = workflowAgentInputWithDefault(input, w.designer, w.reconfiguring)
@@ -479,6 +579,95 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 			return wfdev.WorkflowDoneMsg{Err: err}
 		},
 	)
+}
+
+// launchGenericWorkflow resolves agents, builds runners, and starts the
+// interpreter-driven workflow goroutine for any registered definition other
+// than "dev". Mirrors launchWorkflow's TUI wiring (panel, spinner, busy
+// state, cancellation) but has no on-disk checkpoint/resume support yet —
+// see internal/workflow/interp's package doc — so w.workflowState is shown
+// once at start and not updated stage-by-stage the way dev's
+// wfdev.WorkflowProgressMsg does; it next changes on completion.
+func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	cfg := m.st.cfg
+	sess := m.st.sess
+	send := func(msg tea.Msg) { m.st.program.Send(msg) }
+
+	agentNames, err := workflow.ResolveAgentNames(w.roleValues, cfg)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	stateDir, err := session.Dir()
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow error: cannot determine state dir: " + err.Error() + "\n")
+		return m, nil
+	}
+	workflowID, err := workflow.NextWorkflowID(stateDir, sess.ID)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow error: cannot determine workflow ID: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	m.st.toolFutures = map[string]chan string{}
+	ir0 := &tuiInputReader{send: send}
+	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
+
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	answersCh := make(chan string, 1)
+
+	r := interp.New(w.def, w.task)
+	runCfg := workflow.RunConfig{
+		Session:    sess,
+		Runners:    runners,
+		Send:       send,
+		StateDir:   stateDir,
+		AnswersCh:  answersCh,
+		WorkflowID: workflowID,
+	}
+
+	m.workflowPanelOpen = true
+	m.busy = true
+	m.spinnerFrame = 0
+	m.lastWorkflowActivity = time.Now()
+	m.workflowTimeoutWarned = false
+	m.workflowState = &workflow.State{
+		WorkflowName: w.def.Name,
+		Task:         w.task,
+		Role:         "starting",
+		AgentMap:     agentNames,
+		WorkflowID:   workflowID,
+	}
+	m.appendTranscript(milkTag() + fmt.Sprintf(" starting workflow %s (%s)\n", w.def.Name, formatGenericAgentNames(w.roles, agentNames)))
+	m.syncLayout()
+
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancelTurn = cancel
+	return m, tea.Batch(
+		spinnerTick(),
+		workflowIdleCheck(),
+		func() tea.Msg {
+			defer cancel()
+			err := r.Run(ctx, runCfg)
+			return wfdev.WorkflowDoneMsg{Err: err}
+		},
+	)
+}
+
+// formatGenericAgentNames renders "role1: name1  role2: name2  ..." in roles
+// order, for the "starting workflow" transcript line.
+func formatGenericAgentNames(roles []string, agentNames map[string]string) string {
+	parts := make([]string, len(roles))
+	for i, role := range roles {
+		parts[i] = fmt.Sprintf("%s: %s", role, agentNames[role])
+	}
+	return strings.Join(parts, "  ")
 }
 
 // handleWorkflowWizardKey handles keypresses while the workflow wizard is active.

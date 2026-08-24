@@ -545,3 +545,127 @@ func TestLaunchWorkflow_SetsCancelTurn(t *testing.T) {
 		t.Error("expected cancelTurn to be non-nil after launchWorkflow; was the workflow goroutine launched?")
 	}
 }
+
+// ── Generic (registry-driven, non-"dev") workflows ────────────────────────────
+
+// sandboxMilkHome points config.Dir() (and so workflow.LoadRegistry's user
+// override lookup) at a temp dir, so these tests only ever see the built-in
+// dev/pair/swarm definitions regardless of what's in the real machine's
+// ~/.milk/workflows.
+func sandboxMilkHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+func TestHandleWorkflowCmd_NoArgsListsAllRegisteredNames(t *testing.T) {
+	sandboxMilkHome(t)
+	m := testModel()
+	newM, _ := m.handleWorkflowCmd("")
+	nm := newM.(model)
+	out := nm.transcript.String()
+	for _, want := range []string{"dev", "pair", "swarm"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q listed in %q", want, out)
+		}
+	}
+}
+
+func TestHandleWorkflowCmd_UnknownWorkflowName(t *testing.T) {
+	sandboxMilkHome(t)
+	m := testModel()
+	newM, _ := m.handleWorkflowCmd("bogus some task")
+	nm := newM.(model)
+	if !strings.Contains(nm.transcript.String(), "unknown workflow") {
+		t.Errorf("expected an unknown-workflow error, got %q", nm.transcript.String())
+	}
+}
+
+// TestHandleGenericWorkflowCmd_TaskThenRoleWizardFlow verifies /workflow pair
+// (no task, no role flags) drives the task step then one wizardStepGenericRole
+// step per role in pair's declared order, and clears the wizard once every
+// role has an answer (launchGenericWorkflow is invoked, which will error in
+// this test due to no live config — same pattern as the dev wizard test).
+func TestHandleGenericWorkflowCmd_TaskThenRoleWizardFlow(t *testing.T) {
+	sandboxMilkHome(t)
+	m := testModel()
+	m.ctx = context.Background()
+	// A real session is required: unlike the dev-wizard test's "myagent" (an
+	// unresolvable name that makes launchWorkflow fail before touching
+	// sess.ID), every role here answers blank, which resolves successfully
+	// to the built-in claude-cli default — so launchGenericWorkflow proceeds
+	// far enough to need a real session.
+	m.st = &interactiveState{sess: &session.Session{ID: "test-generic-wizard-session"}}
+
+	m1, _ := m.handleWorkflowCmd("pair")
+	nm1 := m1.(model)
+	if nm1.pendingWorkflowWizard == nil || nm1.pendingWorkflowWizard.step != wizardStepTask {
+		t.Fatalf("expected wizardStepTask pending, got %+v", nm1.pendingWorkflowWizard)
+	}
+	if nm1.pendingWorkflowWizard.def.Name != "pair" {
+		t.Errorf("def.Name = %q, want %q", nm1.pendingWorkflowWizard.def.Name, "pair")
+	}
+
+	m2, _ := nm1.advanceWorkflowWizard("build a thing")
+	nm2 := m2.(model)
+	w2 := nm2.pendingWorkflowWizard
+	if w2 == nil || w2.step != wizardStepGenericRole {
+		t.Fatalf("after task: want wizardStepGenericRole, got %+v", w2)
+	}
+	if len(w2.roles) == 0 {
+		t.Fatal("expected roles to be populated from the definition")
+	}
+	if w2.roleIdx != 0 {
+		t.Errorf("roleIdx = %d, want 0 (first role)", w2.roleIdx)
+	}
+
+	// Answer every declared role in turn; blank defaults to AliasEscalation.
+	cur := nm2
+	for range w2.roles {
+		mN, _ := cur.advanceWorkflowWizard("")
+		cur = mN.(model)
+	}
+	if cur.pendingWorkflowWizard != nil {
+		t.Errorf("expected wizard cleared after all %d roles answered, still pending at step=%d",
+			len(w2.roles), cur.pendingWorkflowWizard.step)
+	}
+}
+
+func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
+	sandboxMilkHome(t)
+	reg, errs := workflow.LoadRegistry()
+	if len(errs) != 0 {
+		t.Fatalf("LoadRegistry errors: %v", errs)
+	}
+	def, ok := reg.Lookup("swarm")
+	if !ok {
+		t.Fatal("expected built-in \"swarm\" definition")
+	}
+
+	m := testModel()
+	m.ctx = context.Background()
+	m.st = &interactiveState{sess: &session.Session{ID: "test-launch-generic-workflow-session"}}
+
+	roleValues := make(map[string]string, len(def.Roles))
+	for _, role := range def.Roles {
+		roleValues[role] = workflow.AliasPrimary
+	}
+	wizard := &workflowWizardState{
+		name:       "swarm",
+		task:       "build several things",
+		def:        def,
+		roles:      def.Roles,
+		roleValues: roleValues,
+	}
+
+	newM, _ := m.launchGenericWorkflow(wizard)
+	nm := newM.(model)
+
+	if nm.cancelTurn == nil {
+		t.Error("expected cancelTurn to be non-nil after launchGenericWorkflow; was the workflow goroutine launched?")
+	}
+	if nm.workflowState == nil || nm.workflowState.WorkflowName != "swarm" {
+		t.Errorf("workflowState = %+v, want WorkflowName %q", nm.workflowState, "swarm")
+	}
+}
