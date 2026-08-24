@@ -731,13 +731,13 @@ If a server does not respond within the timeout at startup, milk logs a warning 
 
 When a startup connection times out or fails, milk defers the live connection rather than aborting the session. On the first tool call targeting the server, milk retries the connection automatically. If reconnect succeeds the call proceeds normally; if it fails the tool returns an error result to the agent. Each lazy reconnect attempt is recorded as an `mcp.lazy_reconnect` span in `~/.milk/otel/traces.jsonl`.
 
-#### `--mcp-config` generation (`claude-cli` and `aider-cli` agents)
+#### `--mcp-config` generation (`claude-cli` agent only)
 
-For `claude-cli` and `aider-cli` agents, milk translates the applicable `mcp_servers` entries into a JSON config file and passes it via the `--mcp-config` flag. milk acts as an MCP proxy: each server entry is re-exported as a stdio-transport entry pointing back to milk's internal MCP proxy process, so Claude Code and aider see MCP tools natively without requiring direct network access to the upstream server.
+For `claude-cli` agents, milk translates the applicable `mcp_servers` entries directly into a JSON config file and passes it via the `--mcp-config` flag: HTTP-transport servers become `{"type":"http","url":"...","headers":{...}}` entries (the `Authorization` header, when configured, resolved via `internal/mcpauth.ResolveHeader` — the same resolution path used by the local/primary agent), stdio-transport servers become `{"type":"stdio","command":"...","args":[...]}` entries. The `claude` CLI subprocess connects to each server directly; milk does not proxy the connection.
 
-#### Context injection (`subprocess` agents)
+#### Context injection (`aider-cli` and `subprocess` agents)
 
-For `subprocess` agents (smolagents and compatible adapters), MCP tool schemas are serialised and injected into the agent's context files alongside the built-in tool descriptions. The subprocess agent sees MCP tools as additional callable functions in its context.
+`aider-cli` and `subprocess` agents (smolagents and compatible adapters) do not receive a generated MCP config file. Instead, MCP tool schemas are serialised into a text block (`internal/escalation.BuildMCPContextBlock`) and injected into the agent's context alongside the built-in tool descriptions, naming each available tool and its description. This is informational only, not a wired function-calling path: the block explicitly tells the agent it cannot call these tools directly, and milk has no mechanism today to parse a subprocess/aider agent's output back into an actual MCP tool call. `aider` itself has no native MCP client (as of writing, upstream support is still an open, unmerged feature request), so this is the best available fallback for that provider. `smolagents` (the Python library `milk-smolagent` wraps) does have a native MCP client (`MCPClient`/`ToolCollection.from_mcp`, supporting both stdio and Streamable HTTP transports) that milk's smolagent script does not currently use — wiring milk's configured `mcp_servers` into it would give the smolagent provider real, functional MCP tool execution instead of descriptive text only. Tracked as a possible follow-up; not yet scheduled.
 
 #### OTel observability
 
