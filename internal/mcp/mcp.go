@@ -109,7 +109,9 @@ type Client struct {
 	connectTimeout time.Duration // hint for startup callers; see ConnectTimeout()
 
 	// tokenOnce caches a dynamic Bearer token resolved from TokenCmd.
-	tokenOnce   sync.Once
+	tokenOnce sync.Once
+	// cachedToken holds the resolved Authorization header value (e.g. "Bearer
+	// <token>") for "token_cmd" auth, resolved once at Connect time.
 	cachedToken string
 
 	// stdio transport fields — non-nil only when Transport == "stdio".
@@ -175,7 +177,7 @@ func (c *Client) Connect(ctx context.Context) (retErr error) {
 
 	// Resolve dynamic token upfront so it's available for all requests.
 	if strings.ToLower(c.cfg.Auth) == "token_cmd" && c.cfg.TokenCmd != "" {
-		if err := c.resolveToken(); err != nil {
+		if err := c.resolveToken(ctx); err != nil {
 			return fmt.Errorf("mcp %q: token_cmd failed: %w", c.cfg.Name, err)
 		}
 	}
@@ -575,22 +577,21 @@ func (c *Client) readSSEResult(r io.Reader, id int64) (json.RawMessage, error) {
 }
 
 // applyAuth sets the Authorization header according to the configured auth
-// method. For "oauth" this is best-effort: on failure (no token yet, or a
-// refresh failed) it leaves the header unset and lets the request 401,
-// which doHTTP handles by retrying once after a reactive refresh.
+// method, via the resolver shared with the escalation (claude-cli) agent's
+// MCP config generation (internal/mcpauth.ResolveHeader). For "oauth" this
+// is best-effort: on failure (no token yet, or a refresh failed) it leaves
+// the header unset and lets the request 401, which doHTTP handles by
+// retrying once after a reactive refresh. "token_cmd" uses the token cached
+// at Connect time rather than re-resolving per request.
 func (c *Client) applyAuth(ctx context.Context, req *http.Request) {
 	switch strings.ToLower(c.cfg.Auth) {
-	case "bearer":
-		if c.cfg.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-		}
 	case "token_cmd":
 		if c.cachedToken != "" {
-			req.Header.Set("Authorization", "Bearer "+c.cachedToken)
+			req.Header.Set("Authorization", c.cachedToken)
 		}
-	case "oauth":
-		if tok, err := mcpauth.EnsureFresh(ctx, c.cfg.Name); err == nil && tok != nil {
-			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	default:
+		if header, err := mcpauth.ResolveHeader(ctx, c.cfg); err == nil && header != "" {
+			req.Header.Set("Authorization", header)
 		}
 	}
 }
@@ -636,13 +637,15 @@ func (c *Client) doHTTP(ctx context.Context, body []byte) (*http.Response, error
 	return resp, nil
 }
 
-// resolveToken executes TokenCmd and stores the trimmed stdout as cachedToken.
-func (c *Client) resolveToken() error {
-	out, err := exec.Command("sh", "-c", c.cfg.TokenCmd).Output()
+// resolveToken runs TokenCmd via the shared resolver and caches the resulting
+// Authorization header value for the lifetime of the connection, avoiding a
+// re-exec on every request.
+func (c *Client) resolveToken(ctx context.Context) error {
+	header, err := mcpauth.ResolveHeader(ctx, c.cfg)
 	if err != nil {
 		return err
 	}
-	c.cachedToken = strings.TrimSpace(string(out))
+	c.cachedToken = header
 	return nil
 }
 

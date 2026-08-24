@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/obs"
 )
 
@@ -349,7 +350,7 @@ func readFileOrEmpty(path string) []byte {
 // HTTP servers: {"type":"http","url":"...","headers":{...}}
 // Stdio servers: {"type":"stdio","command":"...","args":[...]}
 // The caller must invoke the returned cleanup func when the subprocess exits.
-func writeMCPConfigFile(servers []config.MCPServerConfig) (string, func(), error) {
+func writeMCPConfigFile(ctx context.Context, servers []config.MCPServerConfig) (string, func(), error) {
 	type httpEntry struct {
 		Type    string            `json:"type"`
 		URL     string            `json:"url"`
@@ -367,8 +368,13 @@ func writeMCPConfigFile(servers []config.MCPServerConfig) (string, func(), error
 			continue
 		}
 		entry := httpEntry{Type: "http", URL: s.URL}
-		if strings.ToLower(s.Auth) == "bearer" && s.APIKey != "" {
-			entry.Headers = map[string]string{"Authorization": "Bearer " + s.APIKey}
+		// Resolved via the resolver shared with the local/primary agent
+		// (internal/mcpauth.ResolveHeader) so a server needs authorizing
+		// only once regardless of which agent uses it. Best-effort: a
+		// failed resolve (e.g. not yet authorized for oauth) leaves the
+		// server unauthenticated rather than failing the whole turn.
+		if header, err := mcpauth.ResolveHeader(ctx, s); err == nil && header != "" {
+			entry.Headers = map[string]string{"Authorization": header}
 		}
 		entries[s.Name] = entry
 	}
@@ -418,7 +424,7 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 		}
 	}
 	if len(a.mcpServers) > 0 {
-		if mcpFile, mcpCleanup, err := writeMCPConfigFile(a.mcpServers); err == nil {
+		if mcpFile, mcpCleanup, err := writeMCPConfigFile(ctx, a.mcpServers); err == nil {
 			defer mcpCleanup()
 			prefix = append(prefix, "--mcp-config", mcpFile)
 			if a.logContext {
