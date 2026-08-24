@@ -820,7 +820,9 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 
 ## MCP servers with OAuth
 
-milk has native OAuth 2.0 support for MCP servers — it discovers the server's OAuth metadata, registers itself as a client, and runs the Authorization Code + PKCE flow itself. No `claude` CLI involvement, no manual app registration for spec-compliant servers.
+milk has native OAuth 2.0 support for MCP servers — it discovers the server's OAuth metadata, registers itself as a client, and runs the Authorization Code + PKCE flow itself. No manual app registration for spec-compliant servers.
+
+The resolved token is shared across every agent, not just the local/primary agent: if a server is assigned to the escalation (claude-cli) agent's `mcp_servers` too, the same token is forwarded into the `--mcp-config` file generated for that turn. One `/mcp auth <server>` covers both agents — no separate claude-cli-side authorization step.
 
 ### Setup
 
@@ -878,8 +880,9 @@ milk tries to open your browser automatically; if that fails (e.g. over SSH), op
 ### Notes
 
 - Tokens are stored by milk at `~/.milk/mcp_oauth/<server-name>.json` (not by the Claude CLI or any external tool).
-- Refresh is automatic: milk refreshes the access token proactively before it expires, and reactively on a 401 response, using the stored refresh token. You don't need to re-run `/mcp auth` unless the refresh token itself is revoked or missing — milk will tell you when that's the case.
+- Refresh is automatic: milk refreshes the access token proactively before it expires, and reactively on a 401 response, using the stored refresh token. You don't need to re-run `/mcp auth` unless the refresh token itself is revoked or missing — milk will tell you when that's the case. The escalation-agent path resolves the token fresh on every turn rather than reactively refreshing on 401 (it has no persistent connection to retry), so a near-expiry token is picked up automatically on the next escalation turn.
 - Locking is per-process, not cross-process — running two milk instances against the same OAuth-protected server concurrently isn't coordinated beyond what the disk-backed token file naturally serializes.
+- The same applies to `"auth": "token_cmd"` MCP servers (a shell command whose stdout is the Bearer token, set per-server in `mcp_servers`, distinct from an inference backend's own `token_cmd`) — resolved once and forwarded to both the local/primary and escalation agents. This previously silently failed to reach the escalation agent's `--mcp-config` at all.
 
 ---
 
