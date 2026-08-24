@@ -666,6 +666,16 @@ type LoopDetectionConfig struct {
 	// window for intra-turn repetition detection. Default: 50.
 	ChunkWindowSize int `json:"chunk_window_size,omitempty"`
 
+	// ReasoningChunkRepetitionThreshold is how many consecutive identical
+	// reasoning/thinking chunks must appear to trigger the intra-turn
+	// reasoning repetition signal. Default: 10 (2x ChunkRepetitionThreshold).
+	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold,omitempty"`
+
+	// ReasoningMaxConsecutiveSimilarResponses is how many consecutive
+	// near-identical reasoning texts trigger the cross-turn reasoning
+	// repetition signal. Default: 6 (2x MaxConsecutiveSimilarResponses).
+	ReasoningMaxConsecutiveSimilarResponses int `json:"reasoning_max_consecutive_similar_responses,omitempty"`
+
 	// AutoInterrupt causes high-confidence signals to cancel the running
 	// turn automatically. Default: false (warn only).
 	AutoInterrupt *bool `json:"auto_interrupt,omitempty"`
@@ -1627,6 +1637,12 @@ func (c Config) LoopDetectionCfg() loop.Config {
 		}
 		if ld.ChunkWindowSize > 0 {
 			cfg.ChunkWindowSize = ld.ChunkWindowSize
+		}
+		if ld.ReasoningChunkRepetitionThreshold > 0 {
+			cfg.ReasoningChunkRepetitionThreshold = ld.ReasoningChunkRepetitionThreshold
+		}
+		if ld.ReasoningMaxConsecutiveSimilarResponses > 0 {
+			cfg.ReasoningMaxConsecutiveSimilarResponses = ld.ReasoningMaxConsecutiveSimilarResponses
 		}
 		if ld.AutoInterrupt != nil {
 			cfg.AutoInterrupt = *ld.AutoInterrupt

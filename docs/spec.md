@@ -941,7 +941,9 @@ milk monitors agent output for signs of looping — when an LLM gets stuck repea
 | Signal | Scope | What it catches | Default threshold |
 |---|---|---|---|
 | `chunk_repetition` | Intra-turn | Same text repeating in streaming output | 3 occurrences in 50-chunk window |
+| `reasoning_chunk_repetition` | Intra-turn | Same text repeating in streaming reasoning/thinking output | 10 occurrences in 50-chunk window |
 | `response_repetition` | Cross-turn | Identical/near-identical responses across turns | 3 consecutive similar responses |
+| `reasoning_repetition` | Cross-turn | Identical/near-identical reasoning text across turns | 6 consecutive similar responses |
 | `token_velocity` | Cross-turn | Rapid token consumption without progress | 50k tokens in 30s window |
 | `tool_call_echo` | Cross-turn | Same tool+args in consecutive turns | 3 consecutive turns |
 | `silent_burn` | Per-turn | High input tokens, near-zero output | 20k input tokens |
@@ -967,8 +969,10 @@ milk monitors agent output for signs of looping — when an LLM gets stuck repea
     "enabled": true,
     "chunk_repetition_threshold": 3,
     "chunk_window_size": 50,
+    "reasoning_chunk_repetition_threshold": 10,
     "max_consecutive_similar_responses": 3,
     "response_similarity_threshold": 0.85,
+    "reasoning_max_consecutive_similar_responses": 6,
     "token_velocity_window_seconds": 30,
     "token_velocity_threshold": 50000,
     "max_silent_burn_tokens": 20000,
