@@ -47,3 +47,20 @@ type WorkflowQuestionsMsg struct {
 	Questions string        // raw designer output with ## Questions and ## Defaults
 	AnswersCh chan<- string // channel to send user answers back to the workflow goroutine
 }
+
+// ProgressMsg is sent to the TUI after each state transition by an
+// interpreter-driven run (internal/workflow/interp) — the generic
+// counterpart to dev.go's own wfdev.WorkflowProgressMsg (which carries a
+// full dev-shaped State instead, since dev.go's control flow is fixed-shape
+// enough to report as one). StagePath/Role fill the same panel display slot
+// dev.go's Sprint/Pass/Role do, just for an arbitrary stage tree: StagePath
+// is a human-readable breadcrumb of where execution currently is (e.g.
+// "sprint_loop[2] > pass_loop[1]"), Role is the role of the turn in flight,
+// if any (empty between turns, e.g. while a loop decides whether to continue).
+type ProgressMsg struct {
+	WorkflowName string
+	Task         string
+	WorkflowID   int
+	StagePath    string
+	Role         string
+}

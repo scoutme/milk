@@ -30,6 +30,17 @@ type State struct {
 	// existed. Carried in-memory so a run can be rebuilt (e.g. the
 	// passes-exhausted "continue?" prompt) without re-resolving the ID.
 	WorkflowID int `json:"workflow_id,omitempty"`
+	// StagePath is set (in-memory only — dev.go never persists it) by an
+	// interpreter-driven run's ProgressMsg instead of Sprint/Pass/
+	// TotalSprints/VerdictHistory, which stay zero/empty for those runs. See
+	// ProgressMsg's doc.
+	StagePath string `json:"-"`
+	// Generic marks a State populated by an interpreter-driven run (via
+	// ProgressMsg) rather than dev.go's own Sprint/Pass/TotalSprints/
+	// VerdictHistory reporting — panel rendering branches on this rather
+	// than on StagePath's emptiness, since a top-level (not-yet-nested-in-
+	// a-loop) stage has an empty StagePath too.
+	Generic bool `json:"-"`
 }
 
 // VerdictEntry records the evaluator's verdict for one sprint/pass pair.

@@ -23,42 +23,86 @@ var styleWorkflowPanel = lipgloss.NewStyle().
 // this slice before it is windowed down to the visible h rows.
 func buildWorkflowPanelLines(st *workflow.State, inner int) []string {
 	var lines []string
-	add := func(s string) { lines = append(lines, s) }
+	add := func(ss ...string) { lines = append(lines, ss...) }
 
 	// Title row (matches memory panel style)
 	add(stylePanelTitle.Render(truncatePanel(" workflow", inner)))
 	add("")
 
-	if st == nil || st.WorkflowName == "" {
+	switch {
+	case st == nil || st.WorkflowName == "":
 		add(dim("no active workflow"))
-	} else {
-		// Task description — word-wrap across multiple lines if needed
-		if st.Task != "" {
-			for _, line := range wordWrapPanel(st.Task, inner) {
-				add(dim(line))
-			}
-			add("")
-		}
+	case st.Generic:
+		add(buildGenericWorkflowPanelLines(st, inner)...)
+	default:
+		add(buildDevWorkflowPanelLines(st, inner)...)
+	}
 
-		// Current sprint / pass / role
-		sprintLabel := fmt.Sprintf("%d", st.Sprint)
-		if st.TotalSprints > 0 {
-			sprintLabel = fmt.Sprintf("%d/%d", st.Sprint, st.TotalSprints)
+	return lines
+}
+
+// buildDevWorkflowPanelLines renders dev.go's own Sprint/Pass/TotalSprints/
+// VerdictHistory progress reporting (wfdev.WorkflowProgressMsg).
+func buildDevWorkflowPanelLines(st *workflow.State, inner int) []string {
+	var lines []string
+	add := func(s string) { lines = append(lines, s) }
+
+	// Task description — word-wrap across multiple lines if needed
+	if st.Task != "" {
+		for _, line := range wordWrapPanel(st.Task, inner) {
+			add(dim(line))
 		}
-		add(truncatePanel(bold(st.WorkflowName)+"  sprint "+sprintLabel, inner))
-		add(dim(fmt.Sprintf("pass %d  role: %s", st.Pass, st.Role)))
 		add("")
+	}
 
-		// Verdict history
-		for _, v := range st.VerdictHistory {
-			icon := "✓"
-			if v.Verdict == "needs_refinement" || v.Verdict == "unknown" {
-				icon = "·"
-			}
-			add(truncatePanel(dim(fmt.Sprintf("  %s s%d p%d → %s", icon, v.Sprint, v.Pass, v.Verdict)), inner))
+	// Current sprint / pass / role
+	sprintLabel := fmt.Sprintf("%d", st.Sprint)
+	if st.TotalSprints > 0 {
+		sprintLabel = fmt.Sprintf("%d/%d", st.Sprint, st.TotalSprints)
+	}
+	add(truncatePanel(bold(st.WorkflowName)+"  sprint "+sprintLabel, inner))
+	add(dim(fmt.Sprintf("pass %d  role: %s", st.Pass, st.Role)))
+	add("")
+
+	// Verdict history
+	for _, v := range st.VerdictHistory {
+		icon := "✓"
+		if v.Verdict == "needs_refinement" || v.Verdict == "unknown" {
+			icon = "·"
 		}
-		if st.Role != "" && st.Role != "done" {
-			add(truncatePanel(dim(fmt.Sprintf("  → s%d p%d %s…", st.Sprint, st.Pass, st.Role)), inner))
+		add(truncatePanel(dim(fmt.Sprintf("  %s s%d p%d → %s", icon, v.Sprint, v.Pass, v.Verdict)), inner))
+	}
+	if st.Role != "" && st.Role != "done" {
+		add(truncatePanel(dim(fmt.Sprintf("  → s%d p%d %s…", st.Sprint, st.Pass, st.Role)), inner))
+	}
+
+	return lines
+}
+
+// buildGenericWorkflowPanelLines renders an interpreter-driven run's
+// progress (workflow.ProgressMsg): StagePath instead of Sprint/Pass, no
+// verdict history (the checkpoint's trace is the record of what happened,
+// not surfaced in this panel).
+func buildGenericWorkflowPanelLines(st *workflow.State, inner int) []string {
+	var lines []string
+	add := func(s string) { lines = append(lines, s) }
+
+	if st.Task != "" {
+		for _, line := range wordWrapPanel(st.Task, inner) {
+			add(dim(line))
+		}
+		add("")
+	}
+
+	add(truncatePanel(bold(st.WorkflowName), inner))
+	if st.Role != "" {
+		add(dim("role: " + st.Role))
+	}
+	add("")
+
+	if st.StagePath != "" {
+		for _, line := range wordWrapPanel(st.StagePath, inner) {
+			add(truncatePanel(dim("  "+line), inner))
 		}
 	}
 

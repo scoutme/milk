@@ -613,6 +613,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 		Role:         "starting",
 		AgentMap:     agentNames,
 		WorkflowID:   workflowID,
+		Generic:      true,
 	}
 	verb := "starting"
 	if w.resuming {

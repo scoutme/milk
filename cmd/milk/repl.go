@@ -1355,6 +1355,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastWorkflowActivity = time.Now()
 		m.workflowTimeoutWarned = false
 		m.syncLayout()
+
+	case workflow.ProgressMsg:
+		// Generic (interpreter-driven) counterpart to wfdev.WorkflowProgressMsg
+		// above. Update fields in place rather than replacing m.workflowState
+		// wholesale, so AgentMap (set once at launch) survives every
+		// subsequent progress update.
+		if m.workflowState == nil {
+			m.workflowState = &workflow.State{}
+		}
+		m.workflowState.WorkflowName = msg.WorkflowName
+		m.workflowState.Task = msg.Task
+		m.workflowState.WorkflowID = msg.WorkflowID
+		m.workflowState.Role = msg.Role
+		m.workflowState.StagePath = msg.StagePath
+		m.workflowState.Generic = true
+		m.workflowPanelOpen = true
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
+		m.syncLayout()
 		return m, nil
 
 	case workflow.WorkflowChunkMsg:

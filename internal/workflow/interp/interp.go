@@ -137,7 +137,7 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides}
+	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides, defName: r.Def.Name}
 	if r.checkpointPath != "" {
 		liveTrace := append([]TraceEntry{}, trace...)
 		ec.onLeafComplete = func(e TraceEntry) {
@@ -184,6 +184,38 @@ type execContext struct {
 	// maxIterOverrides forces a named "loop" stage's max_iterations bound;
 	// see Runner.WithMaxIterationsOverride.
 	maxIterOverrides map[string]int
+
+	// defName and path back workflow.ProgressMsg reporting (see
+	// reportProgress): defName is the Definition's own name (set once, in
+	// Run); path is a breadcrumb of stage IDs (with iteration/item index
+	// where applicable) from the root down to wherever live execution
+	// currently is — pushed on entering a loop iteration or parallel_group
+	// item, popped on leaving. Not meaningful (and not maintained) inside a
+	// parallel_group's per-item execContext copies — see execParallelGroup.
+	defName string
+	path    []string
+}
+
+// pushPath/popPath maintain the breadcrumb reportProgress reports.
+func (ec *execContext) pushPath(seg string) { ec.path = append(ec.path, seg) }
+func (ec *execContext) popPath()            { ec.path = ec.path[:len(ec.path)-1] }
+
+// reportProgress sends a workflow.ProgressMsg reflecting the current
+// breadcrumb and the role about to run (or "" if none — e.g. a
+// user_checkpoint pause, or a parallel_group announcing its own start).
+// No-op if the caller supplied no Send func.
+func (ec *execContext) reportProgress(role string) {
+	if ec.cfg.Send == nil {
+		return
+	}
+	task, _ := ec.vars["task"].(string)
+	ec.cfg.Send(workflow.ProgressMsg{
+		WorkflowName: ec.defName,
+		Task:         task,
+		WorkflowID:   ec.cfg.WorkflowID,
+		StagePath:    strings.Join(ec.path, " > "),
+		Role:         role,
+	})
 }
 
 // nextReplay returns the next unconsumed trace entry, if any.
@@ -280,6 +312,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("workflow: no runner for role %q (stage %q)", s.Role, s.ID)
 	}
+	ec.reportProgress(s.Role)
 
 	prompt, err := renderTemplate(s.ID+".prompt", s.Prompt, ec.vars)
 	if err != nil {
@@ -364,6 +397,7 @@ func execUserCheckpoint(ec *execContext, s workflow.Stage) error {
 	if ec.cfg.Send == nil || ec.cfg.AnswersCh == nil {
 		return fmt.Errorf("workflow: stage %q (user_checkpoint): no interactive channel available", s.ID)
 	}
+	ec.reportProgress("") // WorkflowQuestionsMsg's handler sets its own "waiting" role text
 	prompt, err := renderTemplate(s.ID+".prompt", s.Prompt, ec.vars)
 	if err != nil {
 		return fmt.Errorf("workflow: stage %q: %w", s.ID, err)
@@ -405,7 +439,10 @@ func execOverLoop(ec *execContext, s workflow.Stage) error {
 	for _, sec := range sections {
 		ec.vars[label] = sec.Index
 		ec.vars[label+"_section"] = sec.Body
-		if _, err := executeStages(ec, s.Body); err != nil {
+		ec.pushPath(fmt.Sprintf("%s[%d]", s.ID, sec.Index))
+		_, err := executeStages(ec, s.Body)
+		ec.popPath()
+		if err != nil {
 			return err
 		}
 	}
@@ -439,7 +476,9 @@ func execBoundedLoop(ec *execContext, s workflow.Stage) error {
 		if s.IterationVar != "" {
 			ec.vars[s.IterationVar] = iter
 		}
+		ec.pushPath(fmt.Sprintf("%s[%d]", s.ID, iter))
 		outcome, err := executeStages(ec, s.Body)
+		ec.popPath()
 		if err != nil {
 			return err
 		}
@@ -483,6 +522,9 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 	if err != nil {
 		return fmt.Errorf("workflow: stage %q: %w", s.ID, err)
 	}
+	ec.pushPath(fmt.Sprintf("%s (%d items)", s.ID, len(sections)))
+	ec.reportProgress("")
+	defer ec.popPath()
 	maxConcurrency := s.MaxConcurrency
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
@@ -509,7 +551,10 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 				itemVars[label] = sec.Index
 				itemVars[label+"_section"] = sec.Body
 
-				itemEC := &execContext{ctx: ec.ctx, cfg: ec.cfg, vars: itemVars}
+				itemEC := &execContext{
+					ctx: ec.ctx, cfg: ec.cfg, vars: itemVars, defName: ec.defName,
+					path: []string{fmt.Sprintf("%s %s[%d]", s.ID, label, sec.Index)},
+				}
 				outcome, err := executeStages(itemEC, s.Body)
 				r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
 				if lastSaveAs := lastSaveAsOf(s.Body); lastSaveAs != "" {
