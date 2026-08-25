@@ -77,12 +77,12 @@ func TestNextWorkflowID_UnrelatedSessionIgnored(t *testing.T) {
 
 func TestCurrentWorkflowID_NoFilesNotOK(t *testing.T) {
 	dir := t.TempDir()
-	_, ok, err := workflow.CurrentWorkflowID(dir, "sess-1")
+	_, kind, err := workflow.CurrentWorkflowID(dir, "sess-1")
 	if err != nil {
 		t.Fatalf("CurrentWorkflowID: %v", err)
 	}
-	if ok {
-		t.Error("expected ok=false for a session with no workflow files")
+	if kind != workflow.WorkflowKindNone {
+		t.Errorf("expected WorkflowKindNone for a session with no workflow files, got %v", kind)
 	}
 }
 
@@ -91,12 +91,12 @@ func TestCurrentWorkflowID_LegacyLiveFile(t *testing.T) {
 	sessionID := "sess-1"
 	writeFile(t, dir, sessionID+".workflow.json", "{}")
 
-	id, ok, err := workflow.CurrentWorkflowID(dir, sessionID)
+	id, kind, err := workflow.CurrentWorkflowID(dir, sessionID)
 	if err != nil {
 		t.Fatalf("CurrentWorkflowID: %v", err)
 	}
-	if !ok || id != 0 {
-		t.Errorf("id=%d ok=%v, want id=0 ok=true", id, ok)
+	if kind != workflow.WorkflowKindDev || id != 0 {
+		t.Errorf("id=%d kind=%v, want id=0 kind=Dev", id, kind)
 	}
 }
 
@@ -107,12 +107,12 @@ func TestCurrentWorkflowID_PicksHighestLiveOverCleared(t *testing.T) {
 	writeFile(t, dir, sessionID+".workflow.json.cleared", "{}")
 	writeFile(t, dir, sessionID+".workflow.1.json", "{}")
 
-	id, ok, err := workflow.CurrentWorkflowID(dir, sessionID)
+	id, kind, err := workflow.CurrentWorkflowID(dir, sessionID)
 	if err != nil {
 		t.Fatalf("CurrentWorkflowID: %v", err)
 	}
-	if !ok || id != 1 {
-		t.Errorf("id=%d ok=%v, want id=1 ok=true", id, ok)
+	if kind != workflow.WorkflowKindDev || id != 1 {
+		t.Errorf("id=%d kind=%v, want id=1 kind=Dev", id, kind)
 	}
 }
 
@@ -122,12 +122,55 @@ func TestCurrentWorkflowID_AllClearedNotOK(t *testing.T) {
 	writeFile(t, dir, sessionID+".workflow.json.cleared", "{}")
 	writeFile(t, dir, sessionID+".workflow.1.json.cleared", "{}")
 
-	_, ok, err := workflow.CurrentWorkflowID(dir, sessionID)
+	_, kind, err := workflow.CurrentWorkflowID(dir, sessionID)
 	if err != nil {
 		t.Fatalf("CurrentWorkflowID: %v", err)
 	}
-	if ok {
-		t.Error("expected ok=false when every workflow for this session has been cleared")
+	if kind != workflow.WorkflowKindNone {
+		t.Errorf("expected WorkflowKindNone when every workflow for this session has been cleared, got %v", kind)
+	}
+}
+
+func TestCurrentWorkflowID_InterpCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "sess-1"
+	writeFile(t, dir, sessionID+".workflow.interp.json", "{}")
+
+	id, kind, err := workflow.CurrentWorkflowID(dir, sessionID)
+	if err != nil {
+		t.Fatalf("CurrentWorkflowID: %v", err)
+	}
+	if kind != workflow.WorkflowKindInterp || id != 0 {
+		t.Errorf("id=%d kind=%v, want id=0 kind=Interp", id, kind)
+	}
+}
+
+// TestNextWorkflowID_DevAndInterpShareIDSpace verifies a dev workflow and a
+// later interp-driven workflow in the same session never collide on the
+// same ID — InterpCheckpointPath reuses StatePath's naming scheme
+// specifically so sessionWorkflowIDs (which NextWorkflowID is built on)
+// accounts for both kinds.
+func TestNextWorkflowID_DevAndInterpShareIDSpace(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "sess-1"
+	writeFile(t, dir, sessionID+".workflow.json", "{}") // dev, ID 0
+
+	next, err := workflow.NextWorkflowID(dir, sessionID)
+	if err != nil {
+		t.Fatalf("NextWorkflowID: %v", err)
+	}
+	if next != 1 {
+		t.Fatalf("NextWorkflowID after a dev workflow = %d, want 1", next)
+	}
+
+	writeFile(t, dir, sessionID+".workflow.1.interp.json", "{}") // interp, ID 1
+
+	next2, err := workflow.NextWorkflowID(dir, sessionID)
+	if err != nil {
+		t.Fatalf("NextWorkflowID: %v", err)
+	}
+	if next2 != 2 {
+		t.Errorf("NextWorkflowID after a dev workflow (ID 0) + an interp workflow (ID 1) = %d, want 2", next2)
 	}
 }
 

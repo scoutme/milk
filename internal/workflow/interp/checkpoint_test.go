@@ -42,6 +42,26 @@ func TestCheckpoint_FreshRunPersistsTraceAndMarksDone(t *testing.T) {
 	}
 }
 
+func TestCheckpoint_AgentMapPersistedForResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cp.json")
+	a := &fakeRunner{name: "a", responses: []string{"a-result"}}
+	b := &fakeRunner{name: "b", responses: []string{"unused"}, errs: []error{errors.New("blip")}}
+	agentMap := map[string]string{"a": "claude", "b": "escalation"}
+
+	r := New(twoStageDef(), "task").WithCheckpoint(path).WithAgentMap(agentMap)
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"a": a, "b": b})); err == nil {
+		t.Fatal("expected the run to fail at stage b")
+	}
+
+	cp, err := LoadCheckpoint(path)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint: %v", err)
+	}
+	if cp == nil || cp.AgentMap["a"] != "claude" || cp.AgentMap["b"] != "escalation" {
+		t.Errorf("checkpoint AgentMap = %+v, want %+v", cp.AgentMap, agentMap)
+	}
+}
+
 func TestCheckpoint_ResumeSkipsCompletedLeavesAndRestoresVars(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cp.json")
 

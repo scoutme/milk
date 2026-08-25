@@ -37,6 +37,10 @@ type Checkpoint struct {
 	DefinitionName string       `json:"definition_name"`
 	Task           string       `json:"task"`
 	Trace          []TraceEntry `json:"trace"`
+	// AgentMap records role -> resolved agent name, so a resume can rebuild
+	// the same TurnRunners without re-asking a role-selection wizard. Set via
+	// Runner.WithAgentMap before the first Run call that should persist it.
+	AgentMap map[string]string `json:"agent_map,omitempty"`
 	// Done marks a checkpoint whose run reached the end of the Definition
 	// successfully. LoadCheckpointForResume ignores a Done checkpoint (there
 	// is nothing left to resume) rather than replaying it as a no-op.

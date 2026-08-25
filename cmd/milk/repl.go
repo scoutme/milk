@@ -40,6 +40,7 @@ import (
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
+	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
 const agentTimeout = 10 * time.Minute
@@ -161,7 +162,14 @@ type updateAvailableMsg struct{ release *updater.Release }
 
 // workflowResumeCheckMsg is sent at startup when a saved workflow state file
 // was found for the current session. The TUI prints a one-line resume offer.
-type workflowResumeCheckMsg struct{ state *workflow.State }
+type workflowResumeCheckMsg struct {
+	state *workflow.State
+	// genericName/genericTask are set instead of state for an unfinished
+	// interpreter-driven (non-"dev") checkpoint — it has no sprint/pass to
+	// report, just a name and task.
+	genericName string
+	genericTask string
+}
 
 // updateProgressMsg carries download progress during /update install.
 type updateProgressMsg struct{ done, total int64 }
@@ -1459,6 +1467,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					milkTag(), st.WorkflowName, st.Sprint, st.Pass,
 				))
 			}
+			m.syncLayout()
+		} else if msg.genericName != "" {
+			m.workflowState = &workflow.State{WorkflowName: msg.genericName, Task: msg.genericTask, Role: "interrupted"}
+			m.workflowPanelOpen = true
+			m.appendTranscript(fmt.Sprintf(
+				"%s workflow %s in progress (%s) — /workflow resume to continue, or ignore\n",
+				milkTag(), msg.genericName, msg.genericTask,
+			))
 			m.syncLayout()
 		}
 		return m, nil
@@ -2910,9 +2926,16 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if err != nil {
 				return workflowResumeCheckMsg{}
 			}
-			id, ok, err := workflow.CurrentWorkflowID(stateDir, sessID)
-			if err != nil || !ok {
+			id, kind, err := workflow.CurrentWorkflowID(stateDir, sessID)
+			if err != nil || kind == workflow.WorkflowKindNone {
 				return workflowResumeCheckMsg{}
+			}
+			if kind == workflow.WorkflowKindInterp {
+				cp, err := interp.LoadCheckpoint(workflow.InterpCheckpointPath(stateDir, sessID, id))
+				if err != nil || cp == nil || cp.Done {
+					return workflowResumeCheckMsg{}
+				}
+				return workflowResumeCheckMsg{genericName: cp.DefinitionName, genericTask: cp.Task}
 			}
 			st, err := workflow.LoadState(workflow.StatePath(stateDir, sessID, id))
 			if err != nil || st == nil {

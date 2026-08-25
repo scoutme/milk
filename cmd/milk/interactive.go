@@ -198,9 +198,9 @@ const interactiveHelp = `
   /workflow dev [<task>] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]
   /workflow pair [<task>] [--<role> <agent> ...]   generator/evaluator loop with a user checkpoint before each verdict
   /workflow swarm [<task>] [--<role> <agent> ...]  independent/dependency-ordered items run concurrently, then a final pass
-  /workflow resume                   resume workflow from last checkpoint (dev only)
+  /workflow resume                   resume workflow from last checkpoint
   /workflow reconfigure              reassign agent roles for current workflow (preserves state; dev only)
-  /workflow clear                    delete saved workflow state for this session (dev only)
+  /workflow clear                    delete saved workflow state for this session
 
 ── Direct bash ───────────────────────────────────────────────────────────
   /bash list             list the auto-allow prefixes (no confirmation prompt)

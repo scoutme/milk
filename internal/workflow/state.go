@@ -72,6 +72,15 @@ func FindingsPath(stateDir, sessionID string, workflowID, sprint int) string {
 	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, fmt.Sprintf("findings%d.md", sprint)))
 }
 
+// InterpCheckpointPath returns the canonical path for an interpreter-driven
+// workflow's checkpoint file (see internal/workflow/interp.Runner.WithCheckpoint).
+// Uses the same "<sessionID>.workflow.<id>." naming scheme as StatePath so
+// NextWorkflowID/sessionWorkflowIDs already account for it — an interp-driven
+// run and a dev run in the same session never collide on the same ID.
+func InterpCheckpointPath(stateDir, sessionID string, workflowID int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, "interp.json"))
+}
+
 // LoadState reads and deserialises a State from path.
 // Returns (nil, nil) if the file does not exist.
 func LoadState(path string) (*State, error) {

@@ -63,7 +63,8 @@ type ItemResult struct {
 type Runner struct {
 	Def            workflow.Definition
 	Task           string
-	checkpointPath string // "" = no checkpointing; see WithCheckpoint
+	checkpointPath string            // "" = no checkpointing; see WithCheckpoint
+	agentMap       map[string]string // see WithAgentMap
 }
 
 // New constructs a Runner for def, seeded with the initial task/prompt.
@@ -80,6 +81,16 @@ func New(def workflow.Definition, task string) *Runner {
 func (r *Runner) WithCheckpoint(path string) *Runner {
 	c := *r
 	c.checkpointPath = path
+	return &c
+}
+
+// WithAgentMap attaches role -> resolved agent name, persisted into every
+// checkpoint written from this point on so a later resume can rebuild the
+// same TurnRunners without re-asking a role-selection wizard. No effect
+// unless WithCheckpoint is also used.
+func (r *Runner) WithAgentMap(m map[string]string) *Runner {
+	c := *r
+	c.agentMap = m
 	return &c
 }
 
@@ -118,7 +129,7 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 			// on the next crash, not a failed turn — the run itself already
 			// succeeded and should not be undone by a disk-write hiccup.
 			_ = SaveCheckpoint(r.checkpointPath, &Checkpoint{
-				DefinitionName: r.Def.Name, Task: r.Task, Trace: liveTrace,
+				DefinitionName: r.Def.Name, Task: r.Task, Trace: liveTrace, AgentMap: r.agentMap,
 			})
 		}
 	}
@@ -127,7 +138,7 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	if err == nil && r.checkpointPath != "" {
 		final, loadErr := LoadCheckpoint(r.checkpointPath)
 		if loadErr != nil || final == nil {
-			final = &Checkpoint{DefinitionName: r.Def.Name, Task: r.Task}
+			final = &Checkpoint{DefinitionName: r.Def.Name, Task: r.Task, AgentMap: r.agentMap}
 		}
 		final.Done = true
 		_ = SaveCheckpoint(r.checkpointPath, final)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
+	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
 // ── parseWorkflowFlags ────────────────────────────────────────────────────────
@@ -667,5 +668,140 @@ func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
 	}
 	if nm.workflowState == nil || nm.workflowState.WorkflowName != "swarm" {
 		t.Errorf("workflowState = %+v, want WorkflowName %q", nm.workflowState, "swarm")
+	}
+}
+
+// ── Generic (interpreter-driven) resume/clear/reconfigure ────────────────────
+
+func stateDirForTest(t *testing.T) string {
+	t.Helper()
+	dir, err := session.Dir()
+	if err != nil {
+		t.Fatalf("session.Dir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	return dir
+}
+
+func TestHandleWorkflowResume_InterpKind_LoadsCheckpointAndLaunches(t *testing.T) {
+	sandboxMilkHome(t)
+	sessID := "test-resume-session"
+	stateDir := stateDirForTest(t)
+	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{
+		DefinitionName: "pair",
+		Task:           "build a thing",
+		AgentMap:       map[string]string{"designer": "primary", "generator": "primary", "evaluator": "primary"},
+		Trace:          []interp.TraceEntry{{StageID: "designer", SaveAs: "plan", Value: "the plan"}},
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	m := testModel()
+	m.ctx = context.Background()
+	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
+
+	newM, _ := m.handleWorkflowResume()
+	nm := newM.(model)
+	if nm.cancelTurn == nil {
+		t.Fatal("expected cancelTurn to be set — was the resumed workflow launched?")
+	}
+	if !strings.Contains(nm.transcript.String(), "resuming workflow pair") {
+		t.Errorf("transcript = %q, expected a \"resuming workflow pair\" line", nm.transcript.String())
+	}
+	if nm.workflowState == nil || nm.workflowState.WorkflowName != "pair" || nm.workflowState.Task != "build a thing" {
+		t.Errorf("workflowState = %+v, want WorkflowName=pair Task=%q", nm.workflowState, "build a thing")
+	}
+}
+
+func TestHandleWorkflowResume_InterpKind_DoneCheckpointReportsCompleted(t *testing.T) {
+	sandboxMilkHome(t)
+	sessID := "test-resume-done-session"
+	stateDir := stateDirForTest(t)
+	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{DefinitionName: "pair", Task: "x", Done: true}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	m := testModel()
+	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
+	newM, _ := m.handleWorkflowResume()
+	nm := newM.(model)
+	if nm.cancelTurn != nil {
+		t.Error("expected no launch for an already-completed checkpoint")
+	}
+	if !strings.Contains(nm.transcript.String(), "already completed") {
+		t.Errorf("transcript = %q, expected an already-completed message", nm.transcript.String())
+	}
+}
+
+func TestHandleWorkflowResume_InterpKind_UnregisteredDefinitionErrors(t *testing.T) {
+	sandboxMilkHome(t)
+	sessID := "test-resume-unregistered-session"
+	stateDir := stateDirForTest(t)
+	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{DefinitionName: "no-such-workflow", Task: "x"}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	m := testModel()
+	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
+	newM, _ := m.handleWorkflowResume()
+	nm := newM.(model)
+	if nm.cancelTurn != nil {
+		t.Error("expected no launch when the checkpoint's definition is no longer registered")
+	}
+	if !strings.Contains(nm.transcript.String(), "no longer registered") {
+		t.Errorf("transcript = %q, expected a \"no longer registered\" error", nm.transcript.String())
+	}
+}
+
+func TestHandleWorkflowClear_InterpKind_RenamesCheckpointFile(t *testing.T) {
+	sandboxMilkHome(t)
+	sessID := "test-clear-session"
+	stateDir := stateDirForTest(t)
+	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{DefinitionName: "swarm", Task: "x"}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	m := testModel()
+	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
+	m1, _ := m.handleWorkflowClear()
+	nm1 := m1.(model)
+	if nm1.pendingWorkflowWizard == nil || nm1.pendingWorkflowWizard.kind != workflow.WorkflowKindInterp {
+		t.Fatalf("expected a pending clear-confirm wizard with kind=Interp, got %+v", nm1.pendingWorkflowWizard)
+	}
+
+	m2, _ := nm1.advanceWorkflowWizard("clear")
+	nm2 := m2.(model)
+	if !strings.Contains(nm2.transcript.String(), "workflow state cleared") {
+		t.Errorf("transcript = %q, expected confirmation of clearing", nm2.transcript.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected the original checkpoint file to be gone (renamed), stat err = %v", err)
+	}
+	if _, err := os.Stat(path + ".cleared"); err != nil {
+		t.Errorf("expected a %s.cleared file, stat err = %v", path, err)
+	}
+}
+
+func TestHandleWorkflowReconfigure_InterpKind_PrintsNotSupported(t *testing.T) {
+	sandboxMilkHome(t)
+	sessID := "test-reconfigure-session"
+	stateDir := stateDirForTest(t)
+	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{DefinitionName: "swarm", Task: "x"}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	m := testModel()
+	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
+	newM, _ := m.handleWorkflowReconfigure()
+	nm := newM.(model)
+	if !strings.Contains(nm.transcript.String(), "not yet supported") {
+		t.Errorf("transcript = %q, expected a not-yet-supported message", nm.transcript.String())
 	}
 }
