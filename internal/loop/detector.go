@@ -44,6 +44,15 @@ type Config struct {
 	// answers do, so it needs more slack before it's treated as a stuck loop.
 	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold"` // default 10
 
+	// Scattered chunk repetition (intra-turn): fires when the same chunk text
+	// recurs ChunkRepetitionThreshold+ times within the window WITHOUT requiring
+	// adjacency (unlike the consecutive check above). Only chunks at or above
+	// this length (in runes) are eligible — short common phrases ("Let me read
+	// the config file") legitimately recur across unrelated contexts and must
+	// not trigger; a full clause/sentence recurring verbatim with other content
+	// between occurrences is a much stronger stuck-loop signal.
+	ChunkRepetitionMinScatteredLength int `json:"chunk_repetition_min_scattered_length"` // default 40
+
 	// Reasoning response repetition (cross-turn): same as
 	// MaxConsecutiveSimilarResponses but applied to accumulated reasoning text
 	// per turn. Higher default threshold for the same reason as above.
@@ -86,6 +95,9 @@ func (c *Config) defaults() {
 	if c.ReasoningChunkRepetitionThreshold <= 0 {
 		c.ReasoningChunkRepetitionThreshold = c.ChunkRepetitionThreshold * 2
 	}
+	if c.ChunkRepetitionMinScatteredLength <= 0 {
+		c.ChunkRepetitionMinScatteredLength = 40
+	}
 	if c.ReasoningMaxConsecutiveSimilarResponses <= 0 {
 		c.ReasoningMaxConsecutiveSimilarResponses = c.MaxConsecutiveSimilarResponses * 2
 	}
@@ -100,9 +112,11 @@ const (
 	SignalToolCallEcho
 	SignalSilentBurn
 	SignalTurnFlood
-	SignalChunkRepetition          // intra-turn: same chunk text repeating
-	SignalReasoningChunkRepetition // intra-turn: same reasoning/thinking chunk text repeating
-	SignalReasoningRepetition      // cross-turn: reasoning text repeating across turns
+	SignalChunkRepetition                   // intra-turn: same chunk text repeating
+	SignalReasoningChunkRepetition          // intra-turn: same reasoning/thinking chunk text repeating
+	SignalReasoningRepetition               // cross-turn: reasoning text repeating across turns
+	SignalScatteredChunkRepetition          // intra-turn: same long chunk text recurring without adjacency
+	SignalScatteredReasoningChunkRepetition // intra-turn: same long reasoning chunk text recurring without adjacency
 )
 
 func (s Signal) String() string {
@@ -123,6 +137,10 @@ func (s Signal) String() string {
 		return "reasoning_chunk_repetition"
 	case SignalReasoningRepetition:
 		return "reasoning_repetition"
+	case SignalScatteredChunkRepetition:
+		return "scattered_chunk_repetition"
+	case SignalScatteredReasoningChunkRepetition:
+		return "scattered_reasoning_chunk_repetition"
 	default:
 		return "unknown"
 	}
@@ -153,23 +171,68 @@ type Detector struct {
 	cfg     Config
 	history []TurnSummary
 
-	// Intra-turn chunk buffer for detecting within-turn repetition.
-	chunkBuf      []string // ring buffer of recent chunk texts
-	chunkIdx      int      // next write position in chunkBuf
-	chunkCount    int      // total chunks seen in this turn (capped at len(chunkBuf))
-	firedChunk    bool     // true once SignalChunkRepetition fired this turn (don't re-fire)
-	consecRepeat  int      // count of consecutive same-text chunks at tail of buffer
-	lastChunkText string   // text of the most recent chunk (for consecutive detection)
+	// Intra-turn consecutive-repeat tracking (same chunk text back-to-back,
+	// nothing else in between).
+	firedChunk    bool   // true once SignalChunkRepetition fired for the current streak text
+	consecRepeat  int    // count of consecutive same-text chunks
+	lastChunkText string // text of the most recent chunk (for consecutive detection)
 
-	// Intra-turn reasoning chunk buffer — same shape as the chunk buffer above,
-	// but fed from thinking/reasoning stream chunks and checked against a
-	// separate (higher) threshold.
-	reasonBuf           []string
-	reasonIdx           int
-	reasonCount         int
+	// Intra-turn scattered-repeat tracking (same long chunk text recurring
+	// within the window, adjacency not required — see chunkScatter docs).
+	chunkScatter scatterState
+
+	// Reasoning counterparts — same shape as the chunk fields above, fed from
+	// thinking/reasoning stream chunks and checked against separate (higher)
+	// thresholds.
 	firedReasonChunk    bool
 	consecReasonRepeat  int
 	lastReasonChunkText string
+	reasonScatter       scatterState
+}
+
+// scatterState tracks exact-match occurrence counts of chunk texts within a
+// sliding window, independent of adjacency. Unlike the consecutive-repeat
+// counters, this lets a long phrase/sentence that recurs with other content
+// in between still be recognized as a loop signal.
+type scatterState struct {
+	buf   []string // ring buffer of recent eligible (long-enough) chunk texts
+	idx   int      // next write position in buf
+	occur map[string]int
+	fired map[string]bool // texts that already produced a verdict this turn
+}
+
+// feed records a chunk in the window (evicting the oldest entry's count as
+// it wraps) and returns the resulting occurrence count for text.
+func (s *scatterState) feed(windowSize int, text string) int {
+	if s.buf == nil {
+		s.buf = make([]string, windowSize)
+		s.occur = make(map[string]int)
+	}
+	if old := s.buf[s.idx]; old != "" {
+		s.occur[old]--
+		if s.occur[old] <= 0 {
+			delete(s.occur, old)
+		}
+	}
+	s.buf[s.idx] = text
+	s.idx = (s.idx + 1) % len(s.buf)
+	s.occur[text]++
+	return s.occur[text]
+}
+
+func (s *scatterState) alreadyFired(text string) bool {
+	return s.fired[text]
+}
+
+func (s *scatterState) markFired(text string) {
+	if s.fired == nil {
+		s.fired = make(map[string]bool)
+	}
+	s.fired[text] = true
+}
+
+func (s *scatterState) reset() {
+	*s = scatterState{}
 }
 
 // New creates a Detector with the given config. Call Config.defaults() first.
@@ -218,46 +281,52 @@ func (d *Detector) Feed(turn TurnSummary) []Verdict {
 func (d *Detector) Reset() {
 	d.mu.Lock()
 	d.history = d.history[:0]
-	d.chunkBuf = nil
-	d.chunkIdx = 0
-	d.chunkCount = 0
 	d.firedChunk = false
 	d.consecRepeat = 0
 	d.lastChunkText = ""
-	d.reasonBuf = nil
-	d.reasonIdx = 0
-	d.reasonCount = 0
+	d.chunkScatter.reset()
 	d.firedReasonChunk = false
 	d.consecReasonRepeat = 0
 	d.lastReasonChunkText = ""
+	d.reasonScatter.reset()
 	d.mu.Unlock()
 }
 
 // ResetTurn clears the intra-turn chunk buffers. Call this when a new turn starts.
 func (d *Detector) ResetTurn() {
 	d.mu.Lock()
-	d.chunkBuf = nil
-	d.chunkIdx = 0
-	d.chunkCount = 0
 	d.firedChunk = false
 	d.consecRepeat = 0
 	d.lastChunkText = ""
-	d.reasonBuf = nil
-	d.reasonIdx = 0
-	d.reasonCount = 0
+	d.chunkScatter.reset()
 	d.firedReasonChunk = false
 	d.consecReasonRepeat = 0
 	d.lastReasonChunkText = ""
+	d.reasonScatter.reset()
 	d.mu.Unlock()
+}
+
+// truncateForDisplay caps text at 60 runes for verdict messages.
+func truncateForDisplay(text string) string {
+	runes := []rune(text)
+	if len(runes) > 60 {
+		return string(runes[:60]) + "…"
+	}
+	return text
 }
 
 // FeedChunk records a streaming chunk within the current turn and returns
 // any triggered verdicts. This is the primary intra-turn loop detector —
 // call it for every chunkMsg the TUI receives.
 //
-// Detection requires N *consecutive* identical chunks (not just N occurrences
-// in the window), which avoids false positives when the agent reads multiple
-// files and common short phrases appear across different contexts.
+// Two independent checks run:
+//   - Consecutive: N identical chunks back-to-back with nothing else in
+//     between. Avoids false positives when the agent reads multiple files
+//     and common short phrases appear across different contexts.
+//   - Scattered: the same chunk recurs N+ times within the window without
+//     requiring adjacency, but only for chunks at or above
+//     ChunkRepetitionMinScatteredLength runes — long enough that recurrence
+//     is a real signal rather than boilerplate ("Let me read...").
 func (d *Detector) FeedChunk(text string) []Verdict {
 	if !d.cfg.Enabled {
 		return nil
@@ -271,17 +340,7 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Lazily allocate the ring buffer.
-	if d.chunkBuf == nil {
-		d.chunkBuf = make([]string, d.cfg.ChunkWindowSize)
-	}
-
-	// Write into the ring buffer.
-	d.chunkBuf[d.chunkIdx] = trimmed
-	d.chunkIdx = (d.chunkIdx + 1) % len(d.chunkBuf)
-	if d.chunkCount < len(d.chunkBuf) {
-		d.chunkCount++
-	}
+	var verdicts []Verdict
 
 	// Track consecutive repeats — reset fired flag when the streak breaks
 	// so a new identical streak later in the turn can fire again.
@@ -292,36 +351,35 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 		d.lastChunkText = trimmed
 		d.firedChunk = false
 	}
-
-	// Don't re-fire within the same turn.
-	if d.firedChunk {
-		return nil
+	if !d.firedChunk && d.consecRepeat >= d.cfg.ChunkRepetitionThreshold {
+		d.firedChunk = true
+		verdicts = append(verdicts, Verdict{
+			Signal:          SignalChunkRepetition,
+			Confidence:      0.9,
+			Message:         fmt.Sprintf("chunk repeating %d×: %q", d.consecRepeat, truncateForDisplay(trimmed)),
+			ShouldInterrupt: true,
+		})
 	}
 
-	if d.consecRepeat < d.cfg.ChunkRepetitionThreshold {
-		return nil
+	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
+		count := d.chunkScatter.feed(d.cfg.ChunkWindowSize, trimmed)
+		if count >= d.cfg.ChunkRepetitionThreshold && !d.chunkScatter.alreadyFired(trimmed) {
+			d.chunkScatter.markFired(trimmed)
+			verdicts = append(verdicts, Verdict{
+				Signal:          SignalScatteredChunkRepetition,
+				Confidence:      0.85,
+				Message:         fmt.Sprintf("phrase recurring %d× in recent output: %q", count, truncateForDisplay(trimmed)),
+				ShouldInterrupt: true,
+			})
+		}
 	}
 
-	d.firedChunk = true
-
-	// Truncate the repeated text for the message (max 60 runes).
-	display := trimmed
-	runes := []rune(display)
-	if len(runes) > 60 {
-		display = string(runes[:60]) + "…"
-	}
-
-	return []Verdict{{
-		Signal:          SignalChunkRepetition,
-		Confidence:      0.9,
-		Message:         fmt.Sprintf("chunk repeating %d×: %q", d.consecRepeat, display),
-		ShouldInterrupt: true,
-	}}
+	return verdicts
 }
 
 // FeedReasoningChunk is the reasoning/thinking-stream counterpart to FeedChunk.
-// It mirrors the same consecutive-repeat detection but against a separate
-// buffer and a separate (higher) threshold, since reasoning text repeats
+// It mirrors the same consecutive + scattered detection but against separate
+// buffers and separate (higher) thresholds, since reasoning text repeats
 // phrases more often than final output without necessarily being stuck.
 func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 	if !d.cfg.Enabled {
@@ -335,15 +393,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.reasonBuf == nil {
-		d.reasonBuf = make([]string, d.cfg.ChunkWindowSize)
-	}
-
-	d.reasonBuf[d.reasonIdx] = trimmed
-	d.reasonIdx = (d.reasonIdx + 1) % len(d.reasonBuf)
-	if d.reasonCount < len(d.reasonBuf) {
-		d.reasonCount++
-	}
+	var verdicts []Verdict
 
 	if trimmed == d.lastReasonChunkText {
 		d.consecReasonRepeat++
@@ -352,29 +402,30 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 		d.lastReasonChunkText = trimmed
 		d.firedReasonChunk = false
 	}
-
-	if d.firedReasonChunk {
-		return nil
+	if !d.firedReasonChunk && d.consecReasonRepeat >= d.cfg.ReasoningChunkRepetitionThreshold {
+		d.firedReasonChunk = true
+		verdicts = append(verdicts, Verdict{
+			Signal:          SignalReasoningChunkRepetition,
+			Confidence:      0.9,
+			Message:         fmt.Sprintf("reasoning repeating %d×: %q", d.consecReasonRepeat, truncateForDisplay(trimmed)),
+			ShouldInterrupt: true,
+		})
 	}
 
-	if d.consecReasonRepeat < d.cfg.ReasoningChunkRepetitionThreshold {
-		return nil
+	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
+		count := d.reasonScatter.feed(d.cfg.ChunkWindowSize, trimmed)
+		if count >= d.cfg.ReasoningChunkRepetitionThreshold && !d.reasonScatter.alreadyFired(trimmed) {
+			d.reasonScatter.markFired(trimmed)
+			verdicts = append(verdicts, Verdict{
+				Signal:          SignalScatteredReasoningChunkRepetition,
+				Confidence:      0.8,
+				Message:         fmt.Sprintf("reasoning phrase recurring %d×: %q", count, truncateForDisplay(trimmed)),
+				ShouldInterrupt: true,
+			})
+		}
 	}
 
-	d.firedReasonChunk = true
-
-	display := trimmed
-	runes := []rune(display)
-	if len(runes) > 60 {
-		display = string(runes[:60]) + "…"
-	}
-
-	return []Verdict{{
-		Signal:          SignalReasoningChunkRepetition,
-		Confidence:      0.9,
-		Message:         fmt.Sprintf("reasoning repeating %d×: %q", d.consecReasonRepeat, display),
-		ShouldInterrupt: true,
-	}}
+	return verdicts
 }
 
 // ── Signal: Response Repetition ──────────────────────────────────────────────

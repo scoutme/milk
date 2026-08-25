@@ -671,6 +671,11 @@ type LoopDetectionConfig struct {
 	// reasoning repetition signal. Default: 10 (2x ChunkRepetitionThreshold).
 	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold,omitempty"`
 
+	// ChunkRepetitionMinScatteredLength is the minimum chunk length (runes)
+	// eligible for scattered-repeat detection: the same long chunk recurring
+	// within the window without requiring adjacency. Default: 40.
+	ChunkRepetitionMinScatteredLength int `json:"chunk_repetition_min_scattered_length,omitempty"`
+
 	// ReasoningMaxConsecutiveSimilarResponses is how many consecutive
 	// near-identical reasoning texts trigger the cross-turn reasoning
 	// repetition signal. Default: 6 (2x MaxConsecutiveSimilarResponses).
@@ -1640,6 +1645,9 @@ func (c Config) LoopDetectionCfg() loop.Config {
 		}
 		if ld.ReasoningChunkRepetitionThreshold > 0 {
 			cfg.ReasoningChunkRepetitionThreshold = ld.ReasoningChunkRepetitionThreshold
+		}
+		if ld.ChunkRepetitionMinScatteredLength > 0 {
+			cfg.ChunkRepetitionMinScatteredLength = ld.ChunkRepetitionMinScatteredLength
 		}
 		if ld.ReasoningMaxConsecutiveSimilarResponses > 0 {
 			cfg.ReasoningMaxConsecutiveSimilarResponses = ld.ReasoningMaxConsecutiveSimilarResponses

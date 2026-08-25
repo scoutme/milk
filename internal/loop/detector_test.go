@@ -703,6 +703,184 @@ func TestReasoningRepetition_DefaultIsHigherThanResponseRepetition(t *testing.T)
 	}
 }
 
+// ── Scattered Chunk Repetition (intra-turn, non-adjacent) ───────────────────
+
+func TestScatteredChunkRepetition_FiresOnLongPhraseWithGaps(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phrase := "I need to check the DNS records again to be sure"
+	d.FeedChunk(phrase)
+	d.FeedChunk("some unrelated content in between the repeats")
+	d.FeedChunk(phrase)
+	d.FeedChunk("more unrelated content here as well")
+	verdicts := d.FeedChunk(phrase)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			found = true
+			if !v.ShouldInterrupt {
+				t.Error("scattered chunk repetition should auto-interrupt")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected SignalScatteredChunkRepetition after 3 non-adjacent identical long chunks")
+	}
+}
+
+func TestScatteredChunkRepetition_NoFireForShortPhraseWithGaps(t *testing.T) {
+	// Below ChunkRepetitionMinScatteredLength — must not fire even with
+	// enough non-adjacent repeats, since short phrases recur legitimately.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 40
+	d := New(cfg)
+	phrase := "Let me read the file"
+	d.FeedChunk(phrase)
+	d.FeedChunk("totally different content here")
+	d.FeedChunk(phrase)
+	d.FeedChunk("more different content here")
+	verdicts := d.FeedChunk(phrase)
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			t.Error("should not fire for short phrases below the min scattered length")
+		}
+	}
+}
+
+func TestScatteredChunkRepetition_NoFireBelowThreshold(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 4
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phrase := "I need to check the DNS records again to be sure"
+	d.FeedChunk(phrase)
+	d.FeedChunk("some unrelated content in between the repeats")
+	verdicts := d.FeedChunk(phrase)
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			t.Error("should not fire below the occurrence threshold")
+		}
+	}
+}
+
+func TestScatteredChunkRepetition_FiresOnce(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phrase := "I need to check the DNS records again to be sure"
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	d.FeedChunk(phrase) // fires here
+	verdicts := d.FeedChunk(phrase)
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			t.Error("should not re-fire for the same text within the same turn")
+		}
+	}
+}
+
+func TestScatteredChunkRepetition_DistinctTextsBothFire(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phraseA := "I need to check the DNS records again to be sure"
+	phraseB := "The Cloudflare tunnel configuration looks correct"
+	d.FeedChunk(phraseA)
+	d.FeedChunk(phraseB)
+	d.FeedChunk(phraseA)
+	d.FeedChunk(phraseB)
+	d.FeedChunk(phraseA) // phraseA fires here
+	verdicts := d.FeedChunk(phraseB)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected phraseB to independently fire scattered repetition")
+	}
+}
+
+func TestScatteredChunkRepetition_ResetTurnClearsState(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phrase := "I need to check the DNS records again to be sure"
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	d.FeedChunk(phrase) // fires
+	d.ResetTurn()
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	d.FeedChunk(phrase)
+	d.FeedChunk("filler")
+	verdicts := d.FeedChunk(phrase)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ResetTurn should allow scattered detection again in the new turn")
+	}
+}
+
+func TestScatteredChunkRepetition_EvictsOldEntriesFromWindow(t *testing.T) {
+	// Small window: once the repeated phrase's earlier occurrences are
+	// overwritten by unrelated content, the count must drop accordingly.
+	cfg := testConfig()
+	cfg.ChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	cfg.ChunkWindowSize = 4
+	d := New(cfg)
+	phrase := "I need to check the DNS records again to be sure"
+	d.FeedChunk(phrase)                                               // slot 0
+	d.FeedChunk("filler one two three four five six seven eight")     // slot 1
+	d.FeedChunk(phrase)                                               // slot 2 — count 2
+	d.FeedChunk("filler nine ten eleven twelve thirteen fourteen")    // slot 3 — wraps next write to slot 0
+	d.FeedChunk("filler fifteen sixteen seventeen eighteen nineteen") // slot 0 — evicts first phrase occurrence, count back to 1
+	verdicts := d.FeedChunk(phrase)                                   // slot 1 — count 2, still below threshold 3
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredChunkRepetition {
+			t.Error("should not fire — window eviction dropped the count below threshold")
+		}
+	}
+}
+
+func TestReasoningScatteredChunkRepetition_FiresWithGaps(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkRepetitionThreshold = 3
+	cfg.ChunkRepetitionMinScatteredLength = 20
+	d := New(cfg)
+	phrase := "hmm let me reconsider this approach once more carefully"
+	d.FeedReasoningChunk(phrase)
+	d.FeedReasoningChunk("a different thought entirely about the problem")
+	d.FeedReasoningChunk(phrase)
+	d.FeedReasoningChunk("another different thought about the problem")
+	verdicts := d.FeedReasoningChunk(phrase)
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalScatteredReasoningChunkRepetition {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected SignalScatteredReasoningChunkRepetition after 3 non-adjacent identical long reasoning chunks")
+	}
+}
+
 func TestChunkRepetition_WrappingRingBuffer(t *testing.T) {
 	cfg := testConfig()
 	cfg.ChunkRepetitionThreshold = 3
