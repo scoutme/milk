@@ -4,15 +4,22 @@
 // flow, so new workflow shapes (see workflow.Definition's four stage kinds)
 // can be added as YAML/JSON rather than as a new Go package.
 //
-// Deliberately deferred in this first cut, pending a parity pass against
-// dev.go (see the design discussion on GitHub issue #117):
-//   - Checkpoint/resume. Runner.Run does not read or write workflow.State —
-//     an interrupted run cannot be resumed. dev.go remains the
-//     resume-capable implementation until this lands.
+// Checkpoint/resume (see checkpoint.go) persists a flat, positionally-replayed
+// trace of completed leaf stages — see TraceEntry's doc for why that's
+// sufficient without recording loop iteration numbers. Runner.WithCheckpoint
+// opts a run into it; without it, Run behaves exactly as before (nothing
+// written, nothing read).
+//
+// Still deliberately deferred, pending a parity pass against dev.go (see the
+// design discussion on GitHub issue #117):
+//   - cmd/milk wiring for /workflow resume against an interpreter-driven
+//     run — dev.go remains the only resume-capable path reachable from the
+//     TUI until that lands; this package's checkpoint mechanism is complete
+//     and tested but not yet called from cmd/milk.
 //   - On-disk plan/sprint/findings artifact files (workflow.PlanPath et
-//     al.) — the interpreter keeps every stage's output in memory (Vars)
-//     and never round-trips through disk, since nothing here reads them
-//     back. Needed once resume is added.
+//     al.) in dev.go's specific layout — this package's checkpoint already
+//     persists every stage's output (via the trace), just not in that
+//     per-artifact-file shape.
 //   - A CLI-supplied max-iterations override taking precedence over a
 //     plan-declared value (dev.go's MaxPassesOverride).
 //   - dev.go's git-diff fallback when a generator's tool calls produce no
@@ -54,8 +61,9 @@ type ItemResult struct {
 
 // Runner adapts a workflow.Definition to the workflow.Workflow interface.
 type Runner struct {
-	Def  workflow.Definition
-	Task string
+	Def            workflow.Definition
+	Task           string
+	checkpointPath string // "" = no checkpointing; see WithCheckpoint
 }
 
 // New constructs a Runner for def, seeded with the initial task/prompt.
@@ -63,10 +71,23 @@ func New(def workflow.Definition, task string) *Runner {
 	return &Runner{Def: def, Task: task}
 }
 
+// WithCheckpoint returns a copy of r that persists a checkpoint to path as
+// the run progresses (see checkpoint.go), and resumes from it instead of
+// starting fresh if path already holds an unfinished, matching checkpoint
+// (same definition name and task). Safe to call unconditionally — a fresh
+// run with no existing file at path just starts normally and begins
+// checkpointing from its first completed stage.
+func (r *Runner) WithCheckpoint(path string) *Runner {
+	c := *r
+	c.checkpointPath = path
+	return &c
+}
+
 func (r *Runner) Name() string { return r.Def.Name }
 
-// Run executes every top-level stage in order. See the package doc for what
-// is intentionally not yet implemented (checkpoint/resume).
+// Run executes every top-level stage in order, resuming from r.checkpointPath
+// when WithCheckpoint was used and a matching unfinished checkpoint exists
+// there. See the package doc for what checkpoint/resume does not yet cover.
 func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	vars := make(map[string]any, len(r.Def.Vars)+1)
 	for k, v := range r.Def.Vars {
@@ -78,8 +99,39 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 	// needing a "Task N" declared-section vocabulary should pick a
 	// non-colliding label, e.g. "Item".
 	vars["task"] = r.Task
-	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars}
+
+	var trace []TraceEntry
+	if r.checkpointPath != "" {
+		var err error
+		trace, err = loadResumableTrace(r.checkpointPath, r.Def.Name, r.Task)
+		if err != nil {
+			return err
+		}
+	}
+
+	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace}
+	if r.checkpointPath != "" {
+		liveTrace := append([]TraceEntry{}, trace...)
+		ec.onLeafComplete = func(e TraceEntry) {
+			liveTrace = append(liveTrace, e)
+			// Best-effort: a failed write here surfaces as a lost checkpoint
+			// on the next crash, not a failed turn — the run itself already
+			// succeeded and should not be undone by a disk-write hiccup.
+			_ = SaveCheckpoint(r.checkpointPath, &Checkpoint{
+				DefinitionName: r.Def.Name, Task: r.Task, Trace: liveTrace,
+			})
+		}
+	}
+
 	_, err := executeStages(ec, r.Def.Stages)
+	if err == nil && r.checkpointPath != "" {
+		final, loadErr := LoadCheckpoint(r.checkpointPath)
+		if loadErr != nil || final == nil {
+			final = &Checkpoint{DefinitionName: r.Def.Name, Task: r.Task}
+		}
+		final.Done = true
+		_ = SaveCheckpoint(r.checkpointPath, final)
+	}
 	return err
 }
 
@@ -91,6 +143,56 @@ type execContext struct {
 	ctx  context.Context
 	cfg  workflow.RunConfig
 	vars map[string]any
+
+	// replay holds trace entries loaded from an existing checkpoint, still
+	// to be consumed positionally (see TraceEntry's doc); nil/exhausted once
+	// live execution takes over. onLeafComplete, when checkpointing is
+	// enabled, is called after each newly-completed leaf stage (not each
+	// replayed one — those are already on disk).
+	replay         []TraceEntry
+	replayIdx      int
+	onLeafComplete func(TraceEntry)
+}
+
+// nextReplay returns the next unconsumed trace entry, if any.
+func (ec *execContext) nextReplay() (TraceEntry, bool) {
+	if ec.replayIdx >= len(ec.replay) {
+		return TraceEntry{}, false
+	}
+	e := ec.replay[ec.replayIdx]
+	ec.replayIdx++
+	return e, true
+}
+
+// tryReplay checks whether the next unconsumed trace entry belongs to s. If
+// so, it restores the value it recorded (SaveAs) and returns (outcome, true,
+// nil) without any live work. ok is false when there is nothing left to
+// replay — the caller should proceed with live execution. A non-nil err
+// means the next entry exists but names a different stage: the Definition
+// was very likely edited since this checkpoint was written, so resuming
+// positionally is no longer trustworthy.
+func tryReplay(ec *execContext, s workflow.Stage) (outcome string, ok bool, err error) {
+	entry, has := ec.nextReplay()
+	if !has {
+		return "", false, nil
+	}
+	if entry.StageID != s.ID {
+		return "", true, fmt.Errorf(
+			"workflow: checkpoint mismatch: expected stage %q to complete next, found %q — was the workflow definition edited since this checkpoint was saved?",
+			entry.StageID, s.ID)
+	}
+	if entry.SaveAs != "" {
+		ec.vars[entry.SaveAs] = entry.Value
+	}
+	return entry.Outcome, true, nil
+}
+
+// recordLeaf reports a newly (live-)completed leaf stage to the checkpoint,
+// if one is configured. No-op when checkpointing is disabled.
+func (ec *execContext) recordLeaf(e TraceEntry) {
+	if ec.onLeafComplete != nil {
+		ec.onLeafComplete(e)
+	}
 }
 
 // executeStages runs stages in order, returning the last verdict-bearing
@@ -130,9 +232,14 @@ var markerLineRE = func(marker string) *regexp.Regexp {
 }
 
 func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
+	if outcome, ok, err := tryReplay(ec, s); ok {
+		return outcome, err
+	}
+
 	if s.RunUnlessContains != "" {
 		gate, _ := ec.vars[s.RunUnlessMarkerIn].(string)
 		if markerLineRE(s.RunUnlessContains).FindStringIndex(gate) != nil {
+			ec.recordLeaf(TraceEntry{StageID: s.ID})
 			return "", nil
 		}
 	}
@@ -163,6 +270,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	}
 
 	if len(s.Verdict) == 0 {
+		ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: out})
 		return "", nil
 	}
 	v := workflow.ParseVerdict(out)
@@ -174,6 +282,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 		ec.cfg.Send(workflow.WorkflowChunkMsg{Text: fmt.Sprintf(
 			"\n[warning: unexpected verdict %q at stage %q, treating as %q]\n", v.String(), s.ID, rule.Action)})
 	}
+	ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: out, Outcome: rule.Action})
 	return rule.Action, nil
 }
 
@@ -213,6 +322,10 @@ func resolveUserCheckpointDance(ec *execContext, s workflow.Stage, runner workfl
 }
 
 func execUserCheckpoint(ec *execContext, s workflow.Stage) error {
+	if _, ok, err := tryReplay(ec, s); ok {
+		return err
+	}
+
 	if ec.cfg.Send == nil || ec.cfg.AnswersCh == nil {
 		return fmt.Errorf("workflow: stage %q (user_checkpoint): no interactive channel available", s.ID)
 	}
@@ -226,6 +339,7 @@ func execUserCheckpoint(ec *execContext, s workflow.Stage) error {
 		if s.SaveAs != "" {
 			ec.vars[s.SaveAs] = answer
 		}
+		ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: answer})
 		return nil
 	case <-ec.ctx.Done():
 		return ec.ctx.Err()
@@ -314,10 +428,15 @@ func execBoundedLoop(ec *execContext, s workflow.Stage) error {
 // abort later waves; results aggregate into Vars[SaveAs] as []ItemResult, in
 // declaration order regardless of wave grouping.
 func execParallelGroup(ec *execContext, s workflow.Stage) error {
+	if _, ok, err := tryReplay(ec, s); ok {
+		return err
+	}
+
 	doc, _ := ec.vars[s.From].(string)
 	decls := ParseDeclarations(doc)
 	sections := decls.SectionsFor(s.Over)
 	if len(sections) == 0 {
+		ec.recordLeaf(TraceEntry{StageID: s.ID})
 		return nil
 	}
 	waves, err := computeWaves(sections)
@@ -370,6 +489,7 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 	if s.SaveAs != "" {
 		ec.vars[s.SaveAs] = results
 	}
+	ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: results})
 	return nil
 }
 
