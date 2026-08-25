@@ -53,6 +53,11 @@ type workflowWizardState struct {
 	roleValues   map[string]string   // answers collected so far this wizard pass, role -> agent specifier
 	roleDefaults map[string]string   // current agent per role when reconfiguring (shown as the "blank = keep X" default); nil for a fresh launch
 	roleIdx      int                 // index into roles for the role currently being asked
+	// maxIterOverrideStageID/N: when set, launchGenericWorkflow applies
+	// interp.Runner.WithMaxIterationsOverride — used by the "continue with
+	// doubled passes?" recovery flow after a genericWorkflowExtendState.
+	maxIterOverrideStageID string
+	maxIterOverrideN       int
 }
 
 type workflowWizardStep int
@@ -740,6 +745,9 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 
 	checkpointPath := workflow.InterpCheckpointPath(stateDir, sess.ID, workflowID)
 	r := interp.New(w.def, w.task).WithCheckpoint(checkpointPath).WithAgentMap(agentNames)
+	if w.maxIterOverrideStageID != "" {
+		r = r.WithMaxIterationsOverride(w.maxIterOverrideStageID, w.maxIterOverrideN)
+	}
 	runCfg := workflow.RunConfig{
 		Session:    sess,
 		Runners:    runners,
@@ -1042,6 +1050,40 @@ func (m model) handleWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		m.appendTranscript("n\n" + milkTag() + fmt.Sprintf(" workflow halted after %d passes\n", ext.maxPasses))
 		m.pendingWorkflowExtend = nil
+		m.refreshPrompt()
+		return m, nil
+	}
+	return m, nil
+}
+
+// genericWorkflowExtendState holds context for the "N iterations exhausted —
+// continue?" prompt for an interpreter-driven (non-"dev") workflow — the
+// generic counterpart to workflowExtendState above.
+type genericWorkflowExtendState struct {
+	wizard        *workflowWizardState
+	stageID       string
+	maxIterations int // current (exhausted) limit; resume will double it
+}
+
+// handleGenericWorkflowExtendKey handles keypresses while a generic extend
+// prompt is pending. y/Enter doubles the exhausted stage's iteration limit
+// and resumes; n/Ctrl+C/Esc dismisses with an error message.
+func (m model) handleGenericWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ext := m.pendingGenericWorkflowExtend
+	switch msg.String() {
+	case "y", "Y", "enter", "ctrl+m":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("y\n")
+		m.pendingGenericWorkflowExtend = nil
+		ext.wizard.maxIterOverrideStageID = ext.stageID
+		ext.wizard.maxIterOverrideN = ext.maxIterations * 2
+		return m.launchGenericWorkflow(ext.wizard)
+	case "n", "N", "ctrl+c", "esc":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("n\n" + milkTag() + fmt.Sprintf(" workflow halted after %d iterations\n", ext.maxIterations))
+		m.pendingGenericWorkflowExtend = nil
 		m.refreshPrompt()
 		return m, nil
 	}

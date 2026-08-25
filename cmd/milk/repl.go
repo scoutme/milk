@@ -545,11 +545,12 @@ type model struct {
 	updateTotal    int64
 
 	// workflow panel
-	workflowPanelOpen     bool
-	workflowPanelOffset   int
-	workflowState         *workflow.State
-	pendingWorkflowWizard *workflowWizardState
-	pendingWorkflowExtend *workflowExtendState
+	workflowPanelOpen            bool
+	workflowPanelOffset          int
+	workflowState                *workflow.State
+	pendingWorkflowWizard        *workflowWizardState
+	pendingWorkflowExtend        *workflowExtendState
+	pendingGenericWorkflowExtend *genericWorkflowExtendState
 
 	// designer disambiguation
 	pendingWorkflowQuestions string        // raw questions from designer (non-nil while collecting answers)
@@ -1184,6 +1185,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingWorkflowExtend != nil {
 			return m.handleWorkflowExtendKey(msg)
 		}
+		if m.pendingGenericWorkflowExtend != nil {
+			return m.handleGenericWorkflowExtendKey(msg)
+		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
 		}
@@ -1445,6 +1449,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"%s workflow: sprint %d exhausted %d passes — continue with %d passes? [y/n] ",
 					milkTag(), exhausted.Sprint, exhausted.MaxPasses, exhausted.MaxPasses*2,
 				))
+			} else if genericExhausted := (*interp.ExhaustedError)(nil); errors.As(msg.Err, &genericExhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
+				// Offer to continue with a doubled iteration limit — the
+				// generic counterpart to the dev-specific branch above.
+				reg, regErrs := workflow.LoadRegistry()
+				for _, e := range regErrs {
+					obs.Info("workflow.registry.load_error", "error", e.Error())
+				}
+				def, defOK := reg.Lookup(m.workflowState.WorkflowName)
+				if defOK {
+					w := &workflowWizardState{
+						name:       m.workflowState.WorkflowName,
+						task:       m.workflowState.Task,
+						def:        def,
+						roles:      def.Roles,
+						roleValues: m.workflowState.AgentMap,
+						resuming:   true,
+						workflowID: m.workflowState.WorkflowID,
+					}
+					m.pendingGenericWorkflowExtend = &genericWorkflowExtendState{
+						wizard: w, stageID: genericExhausted.StageID, maxIterations: genericExhausted.MaxIterations,
+					}
+					m.appendTranscript(fmt.Sprintf(
+						"%s workflow: stage %q exceeded %d iterations — continue with %d? [y/n] ",
+						milkTag(), genericExhausted.StageID, genericExhausted.MaxIterations, genericExhausted.MaxIterations*2,
+					))
+				} else {
+					m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+				}
 			} else {
 				m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
 			}

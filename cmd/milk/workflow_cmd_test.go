@@ -6,9 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
+	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
@@ -856,5 +860,84 @@ func TestHandleWorkflowReconfigure_InterpKind_WalksRolesAndApplies(t *testing.T)
 	}
 	if cp.AgentMap["worker"] != "new-worker" {
 		t.Errorf("worker = %q, want reassigned to %q", cp.AgentMap["worker"], "new-worker")
+	}
+}
+
+// ── Generic "continue with doubled passes?" exhaustion flow ──────────────────
+
+func TestWorkflowDoneMsg_GenericExhaustion_OffersContinue(t *testing.T) {
+	sandboxMilkHome(t)
+	m := testModel()
+	m.workflowState = &workflow.State{
+		WorkflowName: "pair",
+		Task:         "build a thing",
+		AgentMap:     map[string]string{"designer": "claude", "generator": "claude", "evaluator": "claude"},
+		WorkflowID:   0,
+	}
+	newM, _ := m.Update(wfdev.WorkflowDoneMsg{Err: &interp.ExhaustedError{StageID: "pass_loop", MaxIterations: 3}})
+	nm := newM.(model)
+
+	if nm.pendingGenericWorkflowExtend == nil {
+		t.Fatal("expected pendingGenericWorkflowExtend to be set")
+	}
+	if nm.pendingGenericWorkflowExtend.stageID != "pass_loop" || nm.pendingGenericWorkflowExtend.maxIterations != 3 {
+		t.Errorf("extend state = %+v, want stageID=pass_loop maxIterations=3", nm.pendingGenericWorkflowExtend)
+	}
+	if !strings.Contains(nm.transcript.String(), "continue with 6?") {
+		t.Errorf("transcript = %q, expected a doubled-iterations prompt", nm.transcript.String())
+	}
+	if nm.pendingGenericWorkflowExtend.wizard.def.Name != "pair" {
+		t.Errorf("wizard.def.Name = %q, want %q", nm.pendingGenericWorkflowExtend.wizard.def.Name, "pair")
+	}
+}
+
+func TestHandleGenericWorkflowExtendKey_Yes_RelaunchesWithOverride(t *testing.T) {
+	sandboxMilkHome(t)
+	reg, errs := workflow.LoadRegistry()
+	if len(errs) != 0 {
+		t.Fatalf("LoadRegistry errors: %v", errs)
+	}
+	def, _ := reg.Lookup("pair")
+
+	m := testModel()
+	m.ctx = context.Background()
+	m.ta = textarea.New()
+	m.st = &interactiveState{sess: &session.Session{ID: "test-extend-session"}}
+	m.pendingGenericWorkflowExtend = &genericWorkflowExtendState{
+		wizard: &workflowWizardState{
+			name: "pair", task: "x", def: def, roles: def.Roles,
+			roleValues: map[string]string{"designer": workflow.AliasPrimary, "generator": workflow.AliasPrimary, "evaluator": workflow.AliasPrimary},
+			resuming:   true,
+			workflowID: 0,
+		},
+		stageID:       "pass_loop",
+		maxIterations: 3,
+	}
+
+	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	nm := newM.(model)
+	if nm.pendingGenericWorkflowExtend != nil {
+		t.Error("expected pendingGenericWorkflowExtend to be cleared")
+	}
+	if nm.cancelTurn == nil {
+		t.Error("expected cancelTurn to be set — was the workflow relaunched?")
+	}
+}
+
+func TestHandleGenericWorkflowExtendKey_No_Halts(t *testing.T) {
+	m := testModel()
+	m.ta = textarea.New()
+	m.pendingGenericWorkflowExtend = &genericWorkflowExtendState{
+		wizard:        &workflowWizardState{name: "pair"},
+		stageID:       "pass_loop",
+		maxIterations: 3,
+	}
+	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	nm := newM.(model)
+	if nm.pendingGenericWorkflowExtend != nil {
+		t.Error("expected pendingGenericWorkflowExtend to be cleared")
+	}
+	if !strings.Contains(nm.transcript.String(), "halted after 3 iterations") {
+		t.Errorf("transcript = %q, expected a halted message", nm.transcript.String())
 	}
 }
