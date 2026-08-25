@@ -21,32 +21,34 @@ import (
 // fresh launch — "dev" included — goes through the generic (roles/
 // roleValues/roleDefaults) fields below via handleGenericWorkflowCmd. The
 // designer/generator/evaluator fields and their fixed wizard steps
-// (wizardStepDesigner/Generator/Evaluator/*Prompt) survive only to resume or
+// (wizardStepDesigner/Generator/Evaluator) survive only to resume or
 // reconfigure a pre-existing dev.go-format checkpoint (workflow.State,
 // predating this migration, or one missing AgentMap) — see
 // handleWorkflowResume/handleWorkflowReconfigure's dev-specific branches.
+//
+// There is deliberately no inline behaviour-prompt-override step (dev.go's
+// wizard used to have one, applied as a session-local AgentConfig.Prompt
+// override) — a task description, and the plan the designer produces from
+// it, can already carry any specific behaviour request into the generator/
+// evaluator prompts naturally; a separate runtime override mechanism was
+// redundant with that, and didn't fit the generic (arbitrary-role)
+// definitions at all. A persistent AgentConfig.Prompt in ~/.milk/config.json
+// remains the way to give an agent a standing behaviour override.
 type workflowWizardState struct {
-	name      string // workflow name (e.g. "dev")
-	task      string
-	designer  string
-	generator string
-	evaluator string
-	// generatorPrompt and evaluatorPrompt hold optional inline behaviour prompts
-	// for the generator and evaluator roles, collected by the fixed-triple wizard
-	// steps above but no longer applied anywhere (their only consumer,
-	// launchWorkflow's fresh-launch path, was retired along with it).
-	generatorPrompt string
-	evaluatorPrompt string
-	promptAsked     bool // true once the behaviour-prompt steps have been shown
-	step            workflowWizardStep
-	clearing        bool                  // true when this wizard is a /workflow clear confirmation
-	resuming        bool                  // true when completing the wizard should resume rather than start fresh
-	reconfiguring   bool                  // true when completing the wizard should update state agent map only
-	sprint          int                   // checkpoint sprint (used when resuming/reconfiguring == true)
-	pass            int                   // checkpoint pass (used when resuming/reconfiguring == true)
-	role            string                // checkpoint role (used when resuming/reconfiguring == true)
-	workflowID      int                   // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
-	kind            workflow.WorkflowKind // dev vs. interp-driven; used by the clear-confirmation path
+	name          string // workflow name (e.g. "dev")
+	task          string
+	designer      string
+	generator     string
+	evaluator     string
+	step          workflowWizardStep
+	clearing      bool                  // true when this wizard is a /workflow clear confirmation
+	resuming      bool                  // true when completing the wizard should resume rather than start fresh
+	reconfiguring bool                  // true when completing the wizard should update state agent map only
+	sprint        int                   // checkpoint sprint (used when resuming/reconfiguring == true)
+	pass          int                   // checkpoint pass (used when resuming/reconfiguring == true)
+	role          string                // checkpoint role (used when resuming/reconfiguring == true)
+	workflowID    int                   // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
+	kind          workflow.WorkflowKind // dev vs. interp-driven; used by the clear-confirmation path
 
 	// Generic (registry-driven) workflow fields — every definition, including
 	// the built-in "dev", launches through these via internal/workflow/interp.
@@ -67,14 +69,12 @@ type workflowWizardState struct {
 type workflowWizardStep int
 
 const (
-	wizardStepTask            workflowWizardStep = iota // ask for task description
-	wizardStepDesigner                                  // ask for designer agent
-	wizardStepGenerator                                 // ask for generator agent
-	wizardStepEvaluator                                 // ask for evaluator agent
-	wizardStepGeneratorPrompt                           // optional — behaviour prompt for generator
-	wizardStepEvaluatorPrompt                           // optional — behaviour prompt for evaluator
-	wizardStepClearConfirm                              // ask user to type "clear" to confirm
-	wizardStepGenericRole                               // ask for the role at roles[roleIdx] (non-"dev" workflows)
+	wizardStepTask         workflowWizardStep = iota // ask for task description
+	wizardStepDesigner                               // ask for designer agent
+	wizardStepGenerator                              // ask for generator agent
+	wizardStepEvaluator                              // ask for evaluator agent
+	wizardStepClearConfirm                           // ask user to type "clear" to confirm
+	wizardStepGenericRole                            // ask for the role at roles[roleIdx] (non-"dev" workflows)
 	wizardStepDone
 )
 
@@ -89,7 +89,7 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 
 	if len(parts) == 0 {
 		// List available workflows.
-		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state (dev only)\n  /workflow clear        — delete saved state for this session\n")
+		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
 		return m, nil
 	}
 
@@ -119,11 +119,11 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 }
 
 // handleGenericWorkflowCmd dispatches /workflow <name> [args...] for any
-// registered definition other than "dev" (e.g. "pair", "swarm", or a
-// user-defined workflow in ~/.milk/workflows/). Parses the same
-// task/--<role> flag syntax as the dev path, then drives an agent wizard
-// over def.Roles (an arbitrary list, unlike dev's fixed designer/generator/
-// evaluator triple) before launching via internal/workflow/interp.
+// registered definition, including the built-in "dev" (e.g. "pair", "swarm",
+// or a user-defined workflow in ~/.milk/workflows/). Drives an agent wizard
+// over def.Roles (an arbitrary list — dev's designer/generator/evaluator
+// triple is just what dev.yaml happens to declare, not special-cased here)
+// before launching via internal/workflow/interp.
 func (m model) handleGenericWorkflowCmd(name string, def workflow.Definition, rest []string) (tea.Model, tea.Cmd) {
 	remaining, flags, flagErr := parseWorkflowFlags(rest)
 	if flagErr != nil {
@@ -255,33 +255,6 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 
 	case wizardStepEvaluator:
 		w.evaluator = workflowAgentInputWithDefault(input, w.evaluator, w.reconfiguring)
-		// After evaluator: inject behaviour-prompt steps before completing.
-		if !w.promptAsked && !w.reconfiguring {
-			w.step = wizardStepGeneratorPrompt
-			m.pendingWorkflowWizard = w
-			m.appendTranscript(milkTag() + workflowBehaviourPrompt("generator"))
-			m.refreshPrompt()
-			return m, nil
-		}
-		w.step = wizardStepDone
-
-		// Record the fully-assembled command in history so the user can
-		// recall and re-run it without stepping through the wizard again.
-		full := "/workflow dev " + w.task
-		m.sessionHistory = appendDeduped(m.sessionHistory, full, maxPersistedHistory)
-		m.globalHistory = appendDeduped(m.globalHistory, full, maxPersistedHistory)
-
-	case wizardStepGeneratorPrompt:
-		w.generatorPrompt = input // blank = no override
-		w.step = wizardStepEvaluatorPrompt
-		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowBehaviourPrompt("evaluator"))
-		m.refreshPrompt()
-		return m, nil
-
-	case wizardStepEvaluatorPrompt:
-		w.evaluatorPrompt = input // blank = no override
-		w.promptAsked = true
 		w.step = wizardStepDone
 
 		// Record the fully-assembled command in history so the user can
@@ -965,11 +938,6 @@ func (m model) handleGenericWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cm
 // workflowAgentPrompt returns the wizard prompt line for an agent role.
 func workflowAgentPrompt(role string) string {
 	return fmt.Sprintf(" workflow dev — %s agent (blank = escalation):\n", role)
-}
-
-// workflowBehaviourPrompt returns the wizard prompt for the optional behaviour step.
-func workflowBehaviourPrompt(role string) string {
-	return fmt.Sprintf(" workflow dev — %s behaviour prompt (optional — inline text or file=<path>, enter to skip):\n", role)
 }
 
 // workflowAgentReconfigurePrompt returns the wizard prompt for a reconfigure step,

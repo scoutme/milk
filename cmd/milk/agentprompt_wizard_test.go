@@ -82,30 +82,11 @@ func TestAddAgentWizard_SkipPromptLeavesEmpty(t *testing.T) {
 	}
 }
 
-// ── workflow behaviour prompt ─────────────────────────────────────────────────
-
-// TestWorkflowBehaviourPrompt_TextReturned verifies that workflowBehaviourPrompt
-// returns a non-empty string mentioning the role.
-func TestWorkflowBehaviourPrompt_TextReturned(t *testing.T) {
-	for _, role := range []string{"generator", "evaluator"} {
-		got := workflowBehaviourPrompt(role)
-		if got == "" {
-			t.Errorf("workflowBehaviourPrompt(%q) returned empty string", role)
-		}
-		if !strings.Contains(got, role) {
-			t.Errorf("workflowBehaviourPrompt(%q) = %q, does not contain role", role, got)
-		}
-	}
-}
-
-// Note: applyWorkflowBehaviourOverrides (previously tested here) was removed
-// along with dev.go's fresh-launch path (launchWorkflow) — it was the only
-// caller. The generic launch path (handleGenericWorkflowCmd/
-// launchGenericWorkflow) that dev now shares with every other workflow has
-// no equivalent inline behaviour-prompt-override wizard step yet; a
-// persistent AgentConfig.Prompt in ~/.milk/config.json is the workaround
-// until/unless that's generalized. workflowWizardState.generatorPrompt/
-// evaluatorPrompt are still collected by the resume-fallback and reconfigure
-// wizards (see wizardStepGeneratorPrompt/EvaluatorPrompt) but were already
-// unused there even before this change — only the now-removed fresh-launch
-// path ever applied them.
+// Note: applyWorkflowBehaviourOverrides and the inline behaviour-prompt wizard
+// steps it fed (previously tested here) were removed entirely, not just for
+// dev's retired fresh-launch path — they were already dead in every
+// remaining path (resume-fallback, reconfigure) even before that. See
+// workflowWizardState's doc for why: a task description (and the plan the
+// designer produces from it) can already carry a specific behaviour request
+// into the generator/evaluator prompts; a persistent AgentConfig.Prompt in
+// ~/.milk/config.json remains the way to give an agent a standing override.
