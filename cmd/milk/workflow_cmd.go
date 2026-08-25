@@ -10,7 +10,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
@@ -18,7 +17,14 @@ import (
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
-// workflowWizardState tracks multi-step wizard input for /workflow.
+// workflowWizardState tracks multi-step wizard input for /workflow. Every
+// fresh launch — "dev" included — goes through the generic (roles/
+// roleValues/roleDefaults) fields below via handleGenericWorkflowCmd. The
+// designer/generator/evaluator fields and their fixed wizard steps
+// (wizardStepDesigner/Generator/Evaluator/*Prompt) survive only to resume or
+// reconfigure a pre-existing dev.go-format checkpoint (workflow.State,
+// predating this migration, or one missing AgentMap) — see
+// handleWorkflowResume/handleWorkflowReconfigure's dev-specific branches.
 type workflowWizardState struct {
 	name      string // workflow name (e.g. "dev")
 	task      string
@@ -26,8 +32,9 @@ type workflowWizardState struct {
 	generator string
 	evaluator string
 	// generatorPrompt and evaluatorPrompt hold optional inline behaviour prompts
-	// for the generator and evaluator roles. Set during the wizard; applied as
-	// AgentConfig.Prompt overrides at launch (session-local, not persisted to disk).
+	// for the generator and evaluator roles, collected by the fixed-triple wizard
+	// steps above but no longer applied anywhere (their only consumer,
+	// launchWorkflow's fresh-launch path, was retired along with it).
 	generatorPrompt string
 	evaluatorPrompt string
 	promptAsked     bool // true once the behaviour-prompt steps have been shown
@@ -41,11 +48,8 @@ type workflowWizardState struct {
 	workflowID      int                   // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
 	kind            workflow.WorkflowKind // dev vs. interp-driven; used by the clear-confirmation path
 
-	// Generic (registry-driven, non-"dev") workflow fields. dev keeps using the
-	// designer/generator/evaluator fields above and the wfdev-specific launch
-	// path; any other name registered in workflow.LoadRegistry() (e.g. "pair",
-	// "swarm", or a user-defined workflow) drives an arbitrary role list
-	// through these fields and launches via internal/workflow/interp instead.
+	// Generic (registry-driven) workflow fields — every definition, including
+	// the built-in "dev", launches through these via internal/workflow/interp.
 	// /workflow resume, clear, and reconfigure all work for this path (see
 	// handleGenericWorkflowResume/Reconfigure, interp.Runner.WithCheckpoint).
 	def          workflow.Definition // resolved definition; zero value unused when name == "dev"
@@ -99,63 +103,19 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	if name == "reconfigure" {
 		return m.handleWorkflowReconfigure()
 	}
-	if name != "dev" {
-		def, ok := reg.Lookup(name)
-		if !ok {
-			m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: %s, resume, reconfigure, clear\n", name, strings.Join(reg.Names(), ", ")))
-			return m, nil
-		}
-		return m.handleGenericWorkflowCmd(name, def, parts[1:])
-	}
-
-	// Parse optional flags.
-	remaining, flags, flagErr := parseWorkflowFlags(parts[1:])
-	if flagErr != nil {
-		m.appendTranscript(milkTag() + " workflow error: " + flagErr.Error() + "\n")
+	// Every workflow, including the built-in "dev", launches through the
+	// registry + interpreter now — there is no more dev-specific fresh-launch
+	// path. The fixed designer/generator/evaluator wizard steps below remain
+	// only for resuming a pre-existing dev.go-format checkpoint (an old state
+	// file predating AgentMap support) and for /workflow reconfigure against
+	// one — both read an on-disk file that already fixes dev's shape, so
+	// there's nothing to generalize there.
+	def, ok := reg.Lookup(name)
+	if !ok {
+		m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: %s, resume, reconfigure, clear\n", name, strings.Join(reg.Names(), ", ")))
 		return m, nil
 	}
-	task := strings.Join(remaining, " ")
-
-	wizard := &workflowWizardState{
-		name:      name,
-		task:      task,
-		designer:  flags["designer"],
-		generator: flags["generator"],
-		evaluator: flags["evaluator"],
-	}
-
-	// Enter wizard for any missing fields. Agent steps are skipped when all
-	// three were supplied via flags; otherwise the wizard collects them in order.
-	if wizard.task == "" {
-		wizard.step = wizardStepTask
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + " workflow dev — enter task description:\n")
-		m.refreshPrompt()
-		return m, nil
-	}
-	if wizard.designer == "" {
-		wizard.step = wizardStepDesigner
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
-		m.refreshPrompt()
-		return m, nil
-	}
-	if wizard.generator == "" {
-		wizard.step = wizardStepGenerator
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
-		m.refreshPrompt()
-		return m, nil
-	}
-	if wizard.evaluator == "" {
-		wizard.step = wizardStepEvaluator
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
-		m.refreshPrompt()
-		return m, nil
-	}
-
-	return m.launchWorkflow(wizard)
+	return m.handleGenericWorkflowCmd(name, def, parts[1:])
 }
 
 // handleGenericWorkflowCmd dispatches /workflow <name> [args...] for any
@@ -262,14 +222,7 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		w.task = input
-		if len(w.roles) > 0 { // generic (non-"dev") workflow — arbitrary role list
-			return m.advanceToNextGenericRoleOrLaunch(w)
-		}
-		w.step = wizardStepDesigner
-		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
-		m.refreshPrompt()
-		return m, nil
+		return m.advanceToNextGenericRoleOrLaunch(w)
 
 	case wizardStepGenericRole:
 		role := w.roles[w.roleIdx]
@@ -338,14 +291,16 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 		m.globalHistory = appendDeduped(m.globalHistory, full, maxPersistedHistory)
 	}
 
+	// Reaching here means completing the fixed designer/generator/evaluator
+	// steps for dev.go's own wizard shape — only reachable via
+	// handleWorkflowResume's pre-AgentMap fallback (resuming) or
+	// handleWorkflowReconfigure (reconfiguring); every fresh launch, dev
+	// included, goes through the generic role wizard above instead.
 	m.pendingWorkflowWizard = nil
 	if w.reconfiguring {
 		return m.applyWorkflowReconfigure(w)
 	}
-	if w.resuming {
-		return m.launchWorkflowResume(w, w.sprint, w.pass, 0, w.role)
-	}
-	return m.launchWorkflow(w)
+	return m.launchWorkflowResume(w, w.sprint, w.pass, 0, w.role)
 }
 
 // handleWorkflowClear starts the confirmation wizard for /workflow clear.
@@ -614,97 +569,14 @@ func (m model) applyWorkflowReconfigure(w *workflowWizardState) (tea.Model, tea.
 	return m, nil
 }
 
-// launchWorkflow resolves agents, builds runners, and starts the workflow goroutine.
-func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
-	cfg := applyWorkflowBehaviourOverrides(m.st.cfg, w)
-	sess := m.st.sess
-	send := func(msg tea.Msg) { m.st.program.Send(msg) }
-
-	roles := map[string]string{
-		"designer":  w.designer,
-		"generator": w.generator,
-		"evaluator": w.evaluator,
-	}
-
-	agentNames, err := workflow.ResolveAgentNames(roles, cfg)
-	if err != nil {
-		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
-		return m, nil
-	}
-
-	stateDir, err := session.Dir()
-	if err != nil {
-		m.appendTranscript(milkTag() + " workflow error: cannot determine state dir: " + err.Error() + "\n")
-		return m, nil
-	}
-	workflowID, err := workflow.NextWorkflowID(stateDir, sess.ID)
-	if err != nil {
-		m.appendTranscript(milkTag() + " workflow error: cannot determine workflow ID: " + err.Error() + "\n")
-		return m, nil
-	}
-
-	// Build TUI-wired agents (permission handlers, tool-use hints, skip-permissions)
-	// so that workflow roles have the same tool access as normal turns.
-	m.st.toolFutures = map[string]chan string{}
-	ir0 := &tuiInputReader{send: send}
-	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
-
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
-	if err != nil {
-		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
-		return m, nil
-	}
-
-	answersCh := make(chan string, 1)
-
-	wf := wfdev.New(w.task, 0)
-	runCfg := workflow.RunConfig{
-		Session:    sess,
-		Runners:    runners,
-		Send:       send,
-		StateDir:   stateDir,
-		AnswersCh:  answersCh,
-		WorkflowID: workflowID,
-	}
-
-	// Show panel immediately and mark busy so the TUI blocks normal input.
-	m.workflowPanelOpen = true
-	m.busy = true
-	m.spinnerFrame = 0
-	m.lastWorkflowActivity = time.Now()
-	m.workflowTimeoutWarned = false
-	m.workflowState = &workflow.State{
-		WorkflowName: "dev",
-		Sprint:       1,
-		Pass:         1,
-		Role:         "starting",
-		AgentMap:     agentNames,
-		WorkflowID:   workflowID,
-	}
-	m.appendTranscript(milkTag() + fmt.Sprintf(" starting workflow dev (designer: %s  generator: %s  evaluator: %s)\n",
-		agentNames["designer"], agentNames["generator"], agentNames["evaluator"]))
-	m.syncLayout()
-
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancelTurn = cancel
-	return m, tea.Batch(
-		spinnerTick(),
-		workflowIdleCheck(),
-		func() tea.Msg {
-			defer cancel()
-			err := wf.Run(ctx, runCfg)
-			return wfdev.WorkflowDoneMsg{Err: err}
-		},
-	)
-}
-
 // launchGenericWorkflow resolves agents, builds runners, and starts the
-// interpreter-driven workflow goroutine for any registered definition other
-// than "dev". Mirrors launchWorkflow's TUI wiring (panel, spinner, busy
-// state, cancellation) but has no on-disk checkpoint/resume support yet —
-// see internal/workflow/interp's package doc — so w.workflowState is shown
-// once at start and not updated stage-by-stage the way dev's
-// wfdev.WorkflowProgressMsg does; it next changes on completion.
+// interpreter-driven workflow goroutine for any registered definition,
+// including the built-in "dev" — every fresh launch goes through here now.
+// w.workflowState is shown once at start and not updated stage-by-stage the
+// way dev.go's wfdev.WorkflowProgressMsg did; see internal/workflow/interp's
+// package doc for that and other still-open gaps against the retired
+// hand-written dev.go launch path (dev.go itself remains in place — it's
+// still needed to resume a pre-existing, dev.go-format checkpoint).
 func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 	cfg := m.st.cfg
 	sess := m.st.sess
@@ -1113,36 +985,6 @@ func workflowAgentReconfigurePrompt(role, current string) string {
 // generator and evaluator agent configs overridden with any behaviour prompts
 // collected during the wizard. The override is session-local — it is NOT
 // written back to ~/.milk/config.json. Empty prompts leave the config unchanged.
-func applyWorkflowBehaviourOverrides(cfg config.Config, w *workflowWizardState) config.Config {
-	if w.generatorPrompt == "" && w.evaluatorPrompt == "" {
-		return cfg
-	}
-	// Resolve agent names the same way launchWorkflow does, then patch.
-	roles := map[string]string{
-		"generator": w.generator,
-		"evaluator": w.evaluator,
-	}
-	agentNames, err := workflow.ResolveAgentNames(roles, cfg)
-	if err != nil {
-		return cfg // resolution failure; launchWorkflow will surface the error
-	}
-	genName := agentNames["generator"]
-	evalName := agentNames["evaluator"]
-
-	agents := make([]config.AgentConfig, len(cfg.Agents))
-	copy(agents, cfg.Agents)
-	for i, a := range agents {
-		if w.generatorPrompt != "" && a.Name == genName {
-			agents[i].Prompt = w.generatorPrompt
-		}
-		if w.evaluatorPrompt != "" && a.Name == evalName {
-			agents[i].Prompt = w.evaluatorPrompt
-		}
-	}
-	cfg.Agents = agents
-	return cfg
-}
-
 // workflowAgentInputWithDefault normalises a wizard agent answer.
 // In reconfigure mode, blank keeps the existing value (current); in normal mode
 // blank falls back to AliasEscalation.

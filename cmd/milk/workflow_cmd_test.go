@@ -129,18 +129,29 @@ func TestAdvanceWorkflowWizard_BlankTaskTwiceStillRePrompts(t *testing.T) {
 
 // TestAdvanceWorkflowWizard_TaskAdvancesToDesigner verifies that a non-empty task
 // advances the wizard to the designer step rather than launching immediately.
-func TestAdvanceWorkflowWizard_TaskAdvancesToDesigner(t *testing.T) {
+// TestAdvanceWorkflowWizard_TaskAdvancesToFirstRole verifies that entering a
+// task at wizardStepTask advances to wizardStepGenericRole for the
+// definition's first declared role — every fresh launch, "dev" included,
+// goes through the generic role wizard now (see
+// TestHandleWorkflowCmd_DevLaunchesThroughGenericPath for "dev" specifically).
+func TestAdvanceWorkflowWizard_TaskAdvancesToFirstRole(t *testing.T) {
 	m := testModel()
-	m.pendingWorkflowWizard = &workflowWizardState{name: "dev", step: wizardStepTask}
+	m.pendingWorkflowWizard = &workflowWizardState{
+		name: "dev", step: wizardStepTask,
+		roles: []string{"designer", "generator", "evaluator"}, roleValues: map[string]string{},
+	}
 
 	newM, _ := m.advanceWorkflowWizard("build a REST API")
 	nm := newM.(model)
 
 	if nm.pendingWorkflowWizard == nil {
-		t.Fatal("expected wizard still pending after task entry (should be at designer step)")
+		t.Fatal("expected wizard still pending after task entry (should be at the first role)")
 	}
-	if nm.pendingWorkflowWizard.step != wizardStepDesigner {
-		t.Errorf("step = %d, want wizardStepDesigner (%d)", nm.pendingWorkflowWizard.step, wizardStepDesigner)
+	if nm.pendingWorkflowWizard.step != wizardStepGenericRole {
+		t.Errorf("step = %d, want wizardStepGenericRole (%d)", nm.pendingWorkflowWizard.step, wizardStepGenericRole)
+	}
+	if nm.pendingWorkflowWizard.roleIdx != 0 {
+		t.Errorf("roleIdx = %d, want 0 (designer, the first role)", nm.pendingWorkflowWizard.roleIdx)
 	}
 	if nm.pendingWorkflowWizard.task != "build a REST API" {
 		t.Errorf("task = %q, want %q", nm.pendingWorkflowWizard.task, "build a REST API")
@@ -528,31 +539,42 @@ func TestWorkflowCmdVariants(t *testing.T) {
 // runners, both cfg.ActiveAgent().Name and da.primary.Name() resolve to "", so
 // buildWorkflowRunners takes the "matches primary name" branch for all three roles
 // (no error returned) and the code reaches the ctx/cancel assignment.
-func TestLaunchWorkflow_SetsCancelTurn(t *testing.T) {
+// TestHandleWorkflowCmd_DevLaunchesThroughGenericPath verifies that /workflow
+// dev — like every other name now — routes through handleGenericWorkflowCmd
+// and launchGenericWorkflow rather than any dev-specific fresh-launch code
+// (that path, launchWorkflow, no longer exists).
+func TestHandleWorkflowCmd_DevLaunchesThroughGenericPath(t *testing.T) {
+	sandboxMilkHome(t)
 	m := testModel()
 	m.ctx = context.Background()
 	// Zero-value interactiveState (cfg is empty, ActiveAgent().Name == "") but
-	// with a real session, since launchWorkflow resolves a workflow ID from
-	// sess.ID before ever reaching the async goroutine.
-	m.st = &interactiveState{sess: &session.Session{ID: "test-launch-workflow-session"}}
+	// with a real session, since launchGenericWorkflow resolves a workflow ID
+	// from sess.ID before ever reaching the async goroutine.
+	m.st = &interactiveState{sess: &session.Session{ID: "test-dev-generic-launch-session"}}
 	// da.primary and da.escalation are nil, so both primaryName and escalationName
 	// are "". AliasPrimary resolves to cfg.ActiveAgent().Name == "" as well,
 	// so buildWorkflowRunners takes the matching-primary-name branch (no error).
-	// da.agents is already zero-value (nil primary/escalation), which is fine.
 
-	wizard := &workflowWizardState{
-		name:      "dev",
-		task:      "build hello world",
-		designer:  workflow.AliasPrimary,
-		generator: workflow.AliasPrimary,
-		evaluator: workflow.AliasPrimary,
+	m1, _ := m.handleWorkflowCmd("dev build hello world")
+	nm1 := m1.(model)
+	w := nm1.pendingWorkflowWizard
+	if w == nil || w.def.Name != "dev" || len(w.roles) == 0 {
+		t.Fatalf("expected a pending generic wizard for the \"dev\" definition, got %+v", w)
 	}
 
-	newM, _ := m.launchWorkflow(wizard)
-	nm := newM.(model)
-
-	if nm.cancelTurn == nil {
-		t.Error("expected cancelTurn to be non-nil after launchWorkflow; was the workflow goroutine launched?")
+	cur := nm1
+	for range w.roles {
+		mN, _ := cur.advanceWorkflowWizard(workflow.AliasPrimary)
+		cur = mN.(model)
+	}
+	if cur.pendingWorkflowWizard != nil {
+		t.Fatalf("expected the wizard to clear after all roles answered, still at %+v", cur.pendingWorkflowWizard)
+	}
+	if cur.cancelTurn == nil {
+		t.Error("expected cancelTurn to be non-nil — was the workflow goroutine launched?")
+	}
+	if cur.workflowState == nil || cur.workflowState.WorkflowName != "dev" {
+		t.Errorf("workflowState = %+v, want WorkflowName %q", cur.workflowState, "dev")
 	}
 }
 

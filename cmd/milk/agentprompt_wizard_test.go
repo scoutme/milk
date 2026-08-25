@@ -98,59 +98,14 @@ func TestWorkflowBehaviourPrompt_TextReturned(t *testing.T) {
 	}
 }
 
-// TestApplyWorkflowBehaviourOverrides_GeneratorPromptApplied verifies that
-// applyWorkflowBehaviourOverrides sets the Prompt field on the generator agent.
-func TestApplyWorkflowBehaviourOverrides_GeneratorPromptApplied(t *testing.T) {
-	cfg := config.Config{
-		Agents: []config.AgentConfig{
-			{Name: "local", URL: "http://localhost", Model: "m"},
-			{Name: "claude", Provider: "claude-cli"},
-		},
-	}
-	w := &workflowWizardState{
-		generator:       "local",
-		evaluator:       "claude",
-		generatorPrompt: "Only respond in bullet points.",
-		evaluatorPrompt: "",
-	}
-	got := applyWorkflowBehaviourOverrides(cfg, w)
-
-	var genAgent config.AgentConfig
-	for _, a := range got.Agents {
-		if a.Name == "local" {
-			genAgent = a
-			break
-		}
-	}
-	if genAgent.Prompt != "Only respond in bullet points." {
-		t.Errorf("generator Prompt = %q, want %q", genAgent.Prompt, "Only respond in bullet points.")
-	}
-	// Original cfg unchanged.
-	for _, a := range cfg.Agents {
-		if a.Name == "local" && a.Prompt != "" {
-			t.Errorf("original cfg modified: local.Prompt = %q", a.Prompt)
-		}
-	}
-}
-
-// TestApplyWorkflowBehaviourOverrides_NoOverrideReturnsSameCfg verifies that
-// when both prompts are empty, the function returns the original config unchanged.
-func TestApplyWorkflowBehaviourOverrides_NoOverrideReturnsSameCfg(t *testing.T) {
-	cfg := config.Config{
-		Agents: []config.AgentConfig{
-			{Name: "local", URL: "http://localhost", Model: "m"},
-		},
-	}
-	w := &workflowWizardState{
-		generator:       "local",
-		generatorPrompt: "",
-		evaluatorPrompt: "",
-	}
-	got := applyWorkflowBehaviourOverrides(cfg, w)
-	if len(got.Agents) != len(cfg.Agents) {
-		t.Errorf("agent count changed: %d → %d", len(cfg.Agents), len(got.Agents))
-	}
-	if got.Agents[0].Prompt != "" {
-		t.Errorf("unexpected Prompt set: %q", got.Agents[0].Prompt)
-	}
-}
+// Note: applyWorkflowBehaviourOverrides (previously tested here) was removed
+// along with dev.go's fresh-launch path (launchWorkflow) — it was the only
+// caller. The generic launch path (handleGenericWorkflowCmd/
+// launchGenericWorkflow) that dev now shares with every other workflow has
+// no equivalent inline behaviour-prompt-override wizard step yet; a
+// persistent AgentConfig.Prompt in ~/.milk/config.json is the workaround
+// until/unless that's generalized. workflowWizardState.generatorPrompt/
+// evaluatorPrompt are still collected by the resume-fallback and reconfigure
+// wizards (see wizardStepGeneratorPrompt/EvaluatorPrompt) but were already
+// unused there even before this change — only the now-removed fresh-launch
+// path ever applied them.
