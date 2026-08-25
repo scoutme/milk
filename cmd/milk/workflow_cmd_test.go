@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 	"github.com/scoutme/milk/internal/workflow/interp"
@@ -496,7 +497,11 @@ func TestWorkflowCmdVariants(t *testing.T) {
 	for i, v := range vs {
 		sigs[i] = v.sig
 	}
-	for _, want := range []string{"dev", "resume", "reconfigure", "clear"} {
+	// dev/pair/swarm are registered workflows, not hardcoded subcommands —
+	// the generic "<name>" form covers them (and any custom workflow in
+	// ~/.milk/workflows/) in one variant, alongside the three fixed
+	// subcommands that remain reserved words (see #123's design discussion).
+	for _, want := range []string{"<name>", "resume", "reconfigure", "clear"} {
 		found := false
 		for _, sig := range sigs {
 			if strings.Contains(sig, want) {
@@ -788,20 +793,68 @@ func TestHandleWorkflowClear_InterpKind_RenamesCheckpointFile(t *testing.T) {
 	}
 }
 
-func TestHandleWorkflowReconfigure_InterpKind_PrintsNotSupported(t *testing.T) {
+func TestHandleWorkflowReconfigure_InterpKind_WalksRolesAndApplies(t *testing.T) {
 	sandboxMilkHome(t)
 	sessID := "test-reconfigure-session"
 	stateDir := stateDirForTest(t)
 	path := workflow.InterpCheckpointPath(stateDir, sessID, 0)
-	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{DefinitionName: "swarm", Task: "x"}); err != nil {
+	// "claude" is always resolvable (the built-in claude-cli entry), used here
+	// as the pre-existing value every role should keep on blank input.
+	if err := interp.SaveCheckpoint(path, &interp.Checkpoint{
+		DefinitionName: "swarm",
+		Task:           "x",
+		AgentMap: map[string]string{
+			"designer": "claude", "worker": "claude",
+			"evaluator": "claude", "implementer": "claude",
+		},
+	}); err != nil {
 		t.Fatalf("SaveCheckpoint: %v", err)
 	}
 
 	m := testModel()
-	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
-	newM, _ := m.handleWorkflowReconfigure()
-	nm := newM.(model)
-	if !strings.Contains(nm.transcript.String(), "not yet supported") {
-		t.Errorf("transcript = %q, expected a not-yet-supported message", nm.transcript.String())
+	m.st = &interactiveState{
+		sess: &session.Session{ID: sessID},
+		// A real configured agent so reassigning "worker" to it resolves
+		// successfully (an arbitrary made-up name would fail ResolveAgentNames,
+		// same as it would for a real user typo).
+		cfg: config.Config{Agents: []config.AgentConfig{{Name: "new-worker", Provider: "claude-cli"}}},
+	}
+	m1, _ := m.handleWorkflowReconfigure()
+	nm1 := m1.(model)
+	w := nm1.pendingWorkflowWizard
+	if w == nil || w.step != wizardStepGenericRole || !w.reconfiguring {
+		t.Fatalf("expected a pending reconfigure wizard at the first role, got %+v", w)
+	}
+	if !strings.Contains(nm1.transcript.String(), `keep "claude"`) {
+		t.Errorf("transcript = %q, expected the current agent shown as the default", nm1.transcript.String())
+	}
+
+	// Blank on every role keeps its current value except "worker", which we
+	// explicitly reassign.
+	cur := nm1
+	for _, role := range w.roles {
+		answer := ""
+		if role == "worker" {
+			answer = "new-worker"
+		}
+		mN, _ := cur.advanceWorkflowWizard(answer)
+		cur = mN.(model)
+	}
+	if cur.pendingWorkflowWizard != nil {
+		t.Fatalf("expected the wizard to clear after all roles answered, still at %+v", cur.pendingWorkflowWizard)
+	}
+	if !strings.Contains(cur.transcript.String(), "workflow reconfigured") {
+		t.Errorf("transcript = %q, expected a reconfigured confirmation", cur.transcript.String())
+	}
+
+	cp, err := interp.LoadCheckpoint(path)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint: %v", err)
+	}
+	if cp.AgentMap["designer"] != "claude" {
+		t.Errorf("designer = %q, want kept as %q", cp.AgentMap["designer"], "claude")
+	}
+	if cp.AgentMap["worker"] != "new-worker" {
+		t.Errorf("worker = %q, want reassigned to %q", cp.AgentMap["worker"], "new-worker")
 	}
 }
