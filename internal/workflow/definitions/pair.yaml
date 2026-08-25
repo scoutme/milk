@@ -104,6 +104,7 @@ stages:
             kind: agent_turn
             role: generator
             save_as: sprint_output
+            empty_output_fallback: git_diff
             prompt: |
               You are the generator. Execute Sprint {{.sprint}}{{if gt .pass 1}} (pass {{.pass}} -- refine based on evaluator findings){{end}}.
 

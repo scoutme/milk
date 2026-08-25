@@ -60,6 +60,12 @@ type Stage struct {
 	SkipUserCheckpointMarker string                 `yaml:"skip_user_checkpoint_marker,omitempty" json:"skip_user_checkpoint_marker,omitempty"`
 	OnAnswerPrompt           string                 `yaml:"on_answer_prompt,omitempty" json:"on_answer_prompt,omitempty"`
 	Verdict                  map[string]VerdictRule `yaml:"verdict,omitempty" json:"verdict,omitempty"`
+	// EmptyOutputFallback substitutes a canned value for this turn's output
+	// when it comes back empty/whitespace-only — e.g. a generator that
+	// completed entirely via tool calls without writing a closing summary.
+	// Only "git_diff" is currently supported (a `git diff --stat`/`git diff`
+	// summary of uncommitted changes since HEAD).
+	EmptyOutputFallback string `yaml:"empty_output_fallback,omitempty" json:"empty_output_fallback,omitempty"`
 	// RunUnlessMarkerIn/RunUnlessContains: an agent_turn stage this pair is
 	// set on is skipped entirely (no runner call, no SaveAs) when
 	// Vars[RunUnlessMarkerIn] contains a standalone line equal to
@@ -149,6 +155,9 @@ func (s Stage) validate(defName string) error {
 		}
 		if (s.RunUnlessMarkerIn == "") != (s.RunUnlessContains == "") {
 			return fmt.Errorf("workflow definition %q: stage %q (agent_turn): run_unless_marker_in and run_unless_contains must be set together", defName, s.ID)
+		}
+		if s.EmptyOutputFallback != "" && s.EmptyOutputFallback != "git_diff" {
+			return fmt.Errorf("workflow definition %q: stage %q (agent_turn): unknown empty_output_fallback %q (only \"git_diff\" is supported)", defName, s.ID, s.EmptyOutputFallback)
 		}
 	case StageKindUserCheckpoint:
 		if s.Prompt == "" {

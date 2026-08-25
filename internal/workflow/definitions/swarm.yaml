@@ -4,7 +4,7 @@
 # pass fixes cross-item integration issues.
 #
 # See internal/workflow/definitions/dev.yaml's header for what's generally
-# deferred (checkpoint/resume, on-disk artifact files). Additionally here:
+# deferred (on-disk artifact files, live panel updates). Additionally here:
 # per-item worker retries are bounded by a static max_iterations rather than
 # a plan-declared value (swarm's items don't each declare their own limits
 # the way dev/pair's sprints do) -- revisit once real usage shows whether
@@ -98,6 +98,7 @@ stages:
             kind: agent_turn
             role: worker
             save_as: worker_output
+            empty_output_fallback: git_diff
             prompt: |
               You are a worker. Implement Item {{.item}}{{if gt .pass 1}} (pass {{.pass}} -- refine based on evaluator findings){{end}}.
 

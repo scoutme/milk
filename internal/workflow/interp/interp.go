@@ -8,22 +8,23 @@
 // trace of completed leaf stages — see TraceEntry's doc for why that's
 // sufficient without recording loop iteration numbers. Runner.WithCheckpoint
 // opts a run into it; without it, Run behaves exactly as before (nothing
-// written, nothing read).
+// written, nothing read). cmd/milk's /workflow resume/reconfigure/clear all
+// call it (see workflow.CurrentWorkflowID's WorkflowKind). A CLI-supplied
+// max_iterations override (Runner.WithMaxIterationsOverride) beats a
+// plan-declared value for the "continue with doubled passes?" recovery flow
+// after an ExhaustedError — dev.go's MaxPassesOverride equivalent.
+// Stage.EmptyOutputFallback == "git_diff" covers dev.go's git-diff fallback
+// when a turn's tool calls produce no closing text summary.
 //
 // Still deliberately deferred, pending a parity pass against dev.go (see the
 // design discussion on GitHub issue #117):
-//   - cmd/milk wiring for /workflow resume against an interpreter-driven
-//     run — dev.go remains the only resume-capable path reachable from the
-//     TUI until that lands; this package's checkpoint mechanism is complete
-//     and tested but not yet called from cmd/milk.
 //   - On-disk plan/sprint/findings artifact files (workflow.PlanPath et
-//     al.) in dev.go's specific layout — this package's checkpoint already
-//     persists every stage's output (via the trace), just not in that
-//     per-artifact-file shape.
-//   - A CLI-supplied max-iterations override taking precedence over a
-//     plan-declared value (dev.go's MaxPassesOverride).
-//   - dev.go's git-diff fallback when a generator's tool calls produce no
-//     closing text summary.
+//     al.) in dev.go's specific per-file layout — this package's checkpoint
+//     already persists every stage's output (via the trace), just as one
+//     JSON file rather than separate inspectable markdown files.
+//   - Live stage-by-stage progress reporting for the TUI panel (dev.go's
+//     wfdev.WorkflowProgressMsg) — an interpreter-driven run's panel entry
+//     shows a fixed "starting" state until the run finishes.
 package interp
 
 import (
@@ -61,10 +62,11 @@ type ItemResult struct {
 
 // Runner adapts a workflow.Definition to the workflow.Workflow interface.
 type Runner struct {
-	Def            workflow.Definition
-	Task           string
-	checkpointPath string            // "" = no checkpointing; see WithCheckpoint
-	agentMap       map[string]string // see WithAgentMap
+	Def              workflow.Definition
+	Task             string
+	checkpointPath   string            // "" = no checkpointing; see WithCheckpoint
+	agentMap         map[string]string // see WithAgentMap
+	maxIterOverrides map[string]int    // stage ID -> forced max_iterations; see WithMaxIterationsOverride
 }
 
 // New constructs a Runner for def, seeded with the initial task/prompt.
@@ -94,6 +96,21 @@ func (r *Runner) WithAgentMap(m map[string]string) *Runner {
 	return &c
 }
 
+// WithMaxIterationsOverride forces the named "loop" stage's max_iterations
+// bound to n for this run, beating both its static MaxIterations and any
+// MaxIterationsFrom-resolved plan value. Intended for the "continue with
+// doubled passes?" recovery flow after an ExhaustedError: resuming from the
+// checkpoint that produced the error, with the override raised, replays every
+// already-recorded pass and then — since the loop's bound is now higher —
+// proceeds to a genuinely new one instead of immediately re-exhausting.
+func (r *Runner) WithMaxIterationsOverride(stageID string, n int) *Runner {
+	c := *r
+	c.maxIterOverrides = make(map[string]int, len(r.maxIterOverrides)+1)
+	maps.Copy(c.maxIterOverrides, r.maxIterOverrides)
+	c.maxIterOverrides[stageID] = n
+	return &c
+}
+
 func (r *Runner) Name() string { return r.Def.Name }
 
 // Run executes every top-level stage in order, resuming from r.checkpointPath
@@ -120,7 +137,7 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace}
+	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides}
 	if r.checkpointPath != "" {
 		liveTrace := append([]TraceEntry{}, trace...)
 		ec.onLeafComplete = func(e TraceEntry) {
@@ -163,6 +180,10 @@ type execContext struct {
 	replay         []TraceEntry
 	replayIdx      int
 	onLeafComplete func(TraceEntry)
+
+	// maxIterOverrides forces a named "loop" stage's max_iterations bound;
+	// see Runner.WithMaxIterationsOverride.
+	maxIterOverrides map[string]int
 }
 
 // nextReplay returns the next unconsumed trace entry, if any.
@@ -267,6 +288,9 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	out, err := workflow.Turn(ec.ctx, runner, prompt, ec.cfg.Send)
 	if err != nil {
 		return "", fmt.Errorf("workflow: stage %q: %w", s.ID, err)
+	}
+	if s.EmptyOutputFallback == "git_diff" && strings.TrimSpace(out) == "" {
+		out = gitDiffSummary()
 	}
 
 	if s.SkipUserCheckpointMarker != "" {
@@ -401,10 +425,15 @@ func execBoundedLoop(ec *execContext, s workflow.Stage) error {
 		if n, ok := decls.Scalars[strings.ToLower(s.MaxIterationsFrom)]; ok && n > 0 {
 			maxIter = n
 		}
-		ec.vars[strings.ToLower(s.MaxIterationsFrom)] = maxIter
+	}
+	if override, ok := ec.maxIterOverrides[s.ID]; ok && override > 0 {
+		maxIter = override
 	}
 	if maxIter <= 0 {
 		maxIter = 1
+	}
+	if s.MaxIterationsFrom != "" {
+		ec.vars[strings.ToLower(s.MaxIterationsFrom)] = maxIter
 	}
 	for iter := 1; iter <= maxIter; iter++ {
 		if s.IterationVar != "" {

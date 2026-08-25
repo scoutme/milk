@@ -42,6 +42,15 @@ func TestDefinition_Validate_RunUnlessFieldsMustBePaired(t *testing.T) {
 	}
 }
 
+func TestDefinition_Validate_UnknownEmptyOutputFallback(t *testing.T) {
+	d := Definition{Name: "x", Stages: []Stage{
+		{ID: "a", Kind: StageKindAgentTurn, Role: "r", Prompt: "p", EmptyOutputFallback: "bogus"},
+	}}
+	if err := d.Validate(); err == nil {
+		t.Error("expected error for unknown empty_output_fallback")
+	}
+}
+
 func TestDefinition_Validate_LoopNeedsOverOrMaxIterations(t *testing.T) {
 	d := Definition{Name: "x", Stages: []Stage{{
 		ID: "loop1", Kind: StageKindLoop,

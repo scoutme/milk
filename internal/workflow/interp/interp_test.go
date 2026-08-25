@@ -133,6 +133,38 @@ func TestExecAgentTurn_RunUnlessMarkerRunsWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestExecAgentTurn_EmptyOutputFallbackGitDiff(t *testing.T) {
+	worker := &fakeRunner{name: "w", responses: []string{""}}
+	checker := &fakeRunner{name: "c", responses: []string{"ok"}}
+	def := workflow.Definition{Name: "t", Stages: []workflow.Stage{
+		{ID: "a", Kind: workflow.StageKindAgentTurn, Role: "w", Prompt: "go", SaveAs: "out", EmptyOutputFallback: "git_diff"},
+		{ID: "b", Kind: workflow.StageKindAgentTurn, Role: "c", Prompt: "{{.out}}"},
+	}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"w": worker, "c": checker})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := checker.lastPrompt(); got == "" {
+		t.Error("expected empty_output_fallback to substitute a non-empty git-diff summary")
+	}
+}
+
+func TestExecAgentTurn_EmptyOutputFallbackNotTriggeredWhenOutputPresent(t *testing.T) {
+	worker := &fakeRunner{name: "w", responses: []string{"real output"}}
+	checker := &fakeRunner{name: "c", responses: []string{"ok"}}
+	def := workflow.Definition{Name: "t", Stages: []workflow.Stage{
+		{ID: "a", Kind: workflow.StageKindAgentTurn, Role: "w", Prompt: "go", SaveAs: "out", EmptyOutputFallback: "git_diff"},
+		{ID: "b", Kind: workflow.StageKindAgentTurn, Role: "c", Prompt: "{{.out}}"},
+	}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"w": worker, "c": checker})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := checker.lastPrompt(); got != "real output" {
+		t.Errorf("prompt = %q, want the original output preserved (%q)", got, "real output")
+	}
+}
+
 func TestExecLoop_BoundedRetryThenBreak(t *testing.T) {
 	evaluator := &fakeRunner{name: "eval", responses: []string{
 		"findings\nneeds_refinement",

@@ -1,12 +1,10 @@
 # dev — designer -> generator/evaluator sprint loop.
 #
 # This is the data-driven equivalent of internal/workflow/dev.DevWorkflow,
-# run by internal/workflow/interp. It intentionally does not yet replicate
-# every nuance of the hand-written version (git-diff fallback when the
-# generator's tool calls produce no closing summary, a CLI-supplied
-# max_passes override taking precedence over the plan's declared value,
-# verdict-history backfill on resume) — see internal/workflow/interp's
-# package doc for what's deferred to a follow-up once parity is verified.
+# run by internal/workflow/interp. See internal/workflow/interp's package
+# doc for the remaining differences from the hand-written version (mainly:
+# no on-disk plan/sprint/findings markdown files, no live stage-by-stage
+# panel updates yet).
 
 vars:
   plan_instructions: |
@@ -106,6 +104,7 @@ stages:
             kind: agent_turn
             role: generator
             save_as: sprint_output
+            empty_output_fallback: git_diff
             prompt: |
               You are the generator. Execute Sprint {{.sprint}}{{if gt .pass 1}} (pass {{.pass}} -- refine based on evaluator findings){{end}}.
 

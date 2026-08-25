@@ -216,6 +216,55 @@ func TestCheckpoint_ResumeMidPassLoopRetry(t *testing.T) {
 	}
 }
 
+// TestCheckpoint_MaxIterationsOverrideAfterExhaustion covers the "continue
+// with doubled passes?" recovery flow: a run exhausts a 2-pass bound, and
+// resuming with the bound overridden to 4 replays both already-recorded
+// passes (re-invoking neither) and then proceeds live into a genuinely new
+// pass 3 instead of immediately re-exhausting.
+func TestCheckpoint_MaxIterationsOverrideAfterExhaustion(t *testing.T) {
+	def := workflow.Definition{
+		Name: "overridecheckpoint",
+		Stages: []workflow.Stage{
+			{
+				ID: "pass_loop", Kind: workflow.StageKindLoop, MaxIterations: 2, IterationVar: "pass",
+				Body: []workflow.Stage{
+					{ID: "gen", Kind: workflow.StageKindAgentTurn, Role: "gen", Prompt: "gen {{.pass}}", SaveAs: "gen_out"},
+					{
+						ID: "eval", Kind: workflow.StageKindAgentTurn, Role: "eval", Prompt: "eval {{.pass}}", SaveAs: "eval_out",
+						Verdict: map[string]workflow.VerdictRule{
+							"good_to_go":       {Action: "break"},
+							"needs_refinement": {Action: "retry"},
+						},
+					},
+				},
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "cp.json")
+
+	gen1 := &fakeRunner{name: "gen", responses: []string{"g1", "g2"}}
+	eval1 := &fakeRunner{name: "eval", responses: []string{"needs_refinement", "needs_refinement"}}
+	r1 := New(def, "task").WithCheckpoint(path)
+	err := r1.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"gen": gen1, "eval": eval1}))
+	var exhausted *ExhaustedError
+	if !errors.As(err, &exhausted) || exhausted.MaxIterations != 2 {
+		t.Fatalf("expected exhaustion at 2 iterations, got %v", err)
+	}
+
+	gen2 := &fakeRunner{name: "gen", responses: []string{"g3"}}
+	eval2 := &fakeRunner{name: "eval", responses: []string{"good_to_go"}}
+	r2 := New(def, "task").WithCheckpoint(path).WithMaxIterationsOverride("pass_loop", 4)
+	if err := r2.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"gen": gen2, "eval": eval2})); err != nil {
+		t.Fatalf("resume with override: %v", err)
+	}
+	if gen2.callCount() != 1 || eval2.callCount() != 1 {
+		t.Errorf("expected exactly 1 new live call each (pass 3), got gen=%d eval=%d", gen2.callCount(), eval2.callCount())
+	}
+	if got := gen2.lastPrompt(); got != "gen 3" {
+		t.Errorf("gen's live prompt = %q, want %q (the first pass beyond the replayed two)", got, "gen 3")
+	}
+}
+
 func TestCheckpoint_ParallelGroupAtomicReplaySkipsRerun(t *testing.T) {
 	def := workflow.Definition{
 		Name: "swarmcheckpoint",
