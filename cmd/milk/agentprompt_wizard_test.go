@@ -82,75 +82,11 @@ func TestAddAgentWizard_SkipPromptLeavesEmpty(t *testing.T) {
 	}
 }
 
-// ── workflow behaviour prompt ─────────────────────────────────────────────────
-
-// TestWorkflowBehaviourPrompt_TextReturned verifies that workflowBehaviourPrompt
-// returns a non-empty string mentioning the role.
-func TestWorkflowBehaviourPrompt_TextReturned(t *testing.T) {
-	for _, role := range []string{"generator", "evaluator"} {
-		got := workflowBehaviourPrompt(role)
-		if got == "" {
-			t.Errorf("workflowBehaviourPrompt(%q) returned empty string", role)
-		}
-		if !strings.Contains(got, role) {
-			t.Errorf("workflowBehaviourPrompt(%q) = %q, does not contain role", role, got)
-		}
-	}
-}
-
-// TestApplyWorkflowBehaviourOverrides_GeneratorPromptApplied verifies that
-// applyWorkflowBehaviourOverrides sets the Prompt field on the generator agent.
-func TestApplyWorkflowBehaviourOverrides_GeneratorPromptApplied(t *testing.T) {
-	cfg := config.Config{
-		Agents: []config.AgentConfig{
-			{Name: "local", URL: "http://localhost", Model: "m"},
-			{Name: "claude", Provider: "claude-cli"},
-		},
-	}
-	w := &workflowWizardState{
-		generator:       "local",
-		evaluator:       "claude",
-		generatorPrompt: "Only respond in bullet points.",
-		evaluatorPrompt: "",
-	}
-	got := applyWorkflowBehaviourOverrides(cfg, w)
-
-	var genAgent config.AgentConfig
-	for _, a := range got.Agents {
-		if a.Name == "local" {
-			genAgent = a
-			break
-		}
-	}
-	if genAgent.Prompt != "Only respond in bullet points." {
-		t.Errorf("generator Prompt = %q, want %q", genAgent.Prompt, "Only respond in bullet points.")
-	}
-	// Original cfg unchanged.
-	for _, a := range cfg.Agents {
-		if a.Name == "local" && a.Prompt != "" {
-			t.Errorf("original cfg modified: local.Prompt = %q", a.Prompt)
-		}
-	}
-}
-
-// TestApplyWorkflowBehaviourOverrides_NoOverrideReturnsSameCfg verifies that
-// when both prompts are empty, the function returns the original config unchanged.
-func TestApplyWorkflowBehaviourOverrides_NoOverrideReturnsSameCfg(t *testing.T) {
-	cfg := config.Config{
-		Agents: []config.AgentConfig{
-			{Name: "local", URL: "http://localhost", Model: "m"},
-		},
-	}
-	w := &workflowWizardState{
-		generator:       "local",
-		generatorPrompt: "",
-		evaluatorPrompt: "",
-	}
-	got := applyWorkflowBehaviourOverrides(cfg, w)
-	if len(got.Agents) != len(cfg.Agents) {
-		t.Errorf("agent count changed: %d → %d", len(cfg.Agents), len(got.Agents))
-	}
-	if got.Agents[0].Prompt != "" {
-		t.Errorf("unexpected Prompt set: %q", got.Agents[0].Prompt)
-	}
-}
+// Note: applyWorkflowBehaviourOverrides and the inline behaviour-prompt wizard
+// steps it fed (previously tested here) were removed entirely, not just for
+// dev's retired fresh-launch path — they were already dead in every
+// remaining path (resume-fallback, reconfigure) even before that. See
+// workflowWizardState's doc for why: a task description (and the plan the
+// designer produces from it) can already carry a specific behaviour request
+// into the generator/evaluator prompts; a persistent AgentConfig.Prompt in
+// ~/.milk/config.json remains the way to give an agent a standing override.

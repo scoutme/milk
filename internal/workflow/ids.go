@@ -67,14 +67,28 @@ func NextWorkflowID(stateDir, sessionID string) (int, error) {
 	return next, nil
 }
 
-// CurrentWorkflowID returns the ID of the most recent workflow run in this
-// session that still has a live state file (i.e. not renamed by
+// WorkflowKind distinguishes which on-disk format a resolved workflow ID's
+// live file belongs to — dev.go's State (StatePath) or an interpreter-driven
+// run's Checkpoint (InterpCheckpointPath). Callers that only care about
+// "is there anything to resume" can compare against WorkflowKindNone; callers
+// that need to load the right format branch on Dev vs. Interp.
+type WorkflowKind int
+
+const (
+	WorkflowKindNone WorkflowKind = iota
+	WorkflowKindDev
+	WorkflowKindInterp
+)
+
+// CurrentWorkflowID returns the ID and kind of the most recent workflow run
+// in this session that still has a live file (i.e. not renamed by
 // /workflow clear), for resume/reconfigure/clear and the startup resume
-// check to target. ok is false when no live state file exists for any ID.
-func CurrentWorkflowID(stateDir, sessionID string) (id int, ok bool, err error) {
+// check to target. kind is WorkflowKindNone when no live file exists for
+// any ID.
+func CurrentWorkflowID(stateDir, sessionID string) (id int, kind WorkflowKind, err error) {
 	ids, err := sessionWorkflowIDs(stateDir, sessionID)
 	if err != nil {
-		return 0, false, err
+		return 0, WorkflowKindNone, err
 	}
 	candidates := make([]int, 0, len(ids))
 	for id := range ids {
@@ -83,8 +97,11 @@ func CurrentWorkflowID(stateDir, sessionID string) (id int, ok bool, err error) 
 	sort.Sort(sort.Reverse(sort.IntSlice(candidates)))
 	for _, id := range candidates {
 		if _, statErr := os.Stat(StatePath(stateDir, sessionID, id)); statErr == nil {
-			return id, true, nil
+			return id, WorkflowKindDev, nil
+		}
+		if _, statErr := os.Stat(InterpCheckpointPath(stateDir, sessionID, id)); statErr == nil {
+			return id, WorkflowKindInterp, nil
 		}
 	}
-	return 0, false, nil
+	return 0, WorkflowKindNone, nil
 }

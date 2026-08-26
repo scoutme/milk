@@ -205,3 +205,31 @@ func TestBuildWorkflowPanelLines_SprintFallsBackWithoutTotal(t *testing.T) {
 		t.Errorf("expected sprint line to contain %q, got %q", "sprint 1", got)
 	}
 }
+
+func TestBuildWorkflowPanelLines_GenericShowsStagePathNotSprint(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "pair", Task: "build a thing", Role: "generator",
+		StagePath: "sprint_loop[1] > pass_loop[2]", Generic: true,
+	}
+	lines := buildWorkflowPanelLines(st, 60)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "role: generator") {
+		t.Errorf("expected the current role rendered, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "sprint_loop[1] > pass_loop[2]") {
+		t.Errorf("expected the stage path rendered, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "sprint 0") || strings.Contains(joined, "pass 0") {
+		t.Errorf("generic state must not render the dev-shaped sprint/pass line, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_DevStateUnaffectedByGenericField(t *testing.T) {
+	// A zero-value Generic (the common case for every existing dev.go state)
+	// must still render the legacy sprint/pass/verdict-history layout.
+	st := &workflow.State{WorkflowName: "dev", Sprint: 2, TotalSprints: 3, Role: "evaluator"}
+	got := sprintLine(t, st)
+	if !strings.Contains(got, "sprint 2/3") {
+		t.Errorf("expected the dev-shaped sprint line, got %q", got)
+	}
+}

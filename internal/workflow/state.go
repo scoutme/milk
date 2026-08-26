@@ -30,6 +30,17 @@ type State struct {
 	// existed. Carried in-memory so a run can be rebuilt (e.g. the
 	// passes-exhausted "continue?" prompt) without re-resolving the ID.
 	WorkflowID int `json:"workflow_id,omitempty"`
+	// StagePath is set (in-memory only — dev.go never persists it) by an
+	// interpreter-driven run's ProgressMsg instead of Sprint/Pass/
+	// TotalSprints/VerdictHistory, which stay zero/empty for those runs. See
+	// ProgressMsg's doc.
+	StagePath string `json:"-"`
+	// Generic marks a State populated by an interpreter-driven run (via
+	// ProgressMsg) rather than dev.go's own Sprint/Pass/TotalSprints/
+	// VerdictHistory reporting — panel rendering branches on this rather
+	// than on StagePath's emptiness, since a top-level (not-yet-nested-in-
+	// a-loop) stage has an empty StagePath too.
+	Generic bool `json:"-"`
 }
 
 // VerdictEntry records the evaluator's verdict for one sprint/pass pair.
@@ -70,6 +81,15 @@ func SprintPath(stateDir, sessionID string, workflowID, sprint int) string {
 // FindingsPath returns the canonical path for a sprint's evaluator findings file.
 func FindingsPath(stateDir, sessionID string, workflowID, sprint int) string {
 	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, fmt.Sprintf("findings%d.md", sprint)))
+}
+
+// InterpCheckpointPath returns the canonical path for an interpreter-driven
+// workflow's checkpoint file (see internal/workflow/interp.Runner.WithCheckpoint).
+// Uses the same "<sessionID>.workflow.<id>." naming scheme as StatePath so
+// NextWorkflowID/sessionWorkflowIDs already account for it — an interp-driven
+// run and a dev run in the same session never collide on the same ID.
+func InterpCheckpointPath(stateDir, sessionID string, workflowID int) string {
+	return filepath.Join(stateDir, workflowFileName(sessionID, workflowID, "interp.json"))
 }
 
 // LoadState reads and deserialises a State from path.

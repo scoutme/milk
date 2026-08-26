@@ -193,12 +193,13 @@ const interactiveHelp = `
   /mcp auth <name>       run OAuth authorization flow for an MCP server
 
 ── Workflow ───────────────────────────────────────────────────────────────
-  /workflow                          list available workflows
-  /workflow dev [<task>]             start designer→generator→evaluator workflow
-  /workflow dev [<task>] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]
-  /workflow resume                   resume workflow from last checkpoint
-  /workflow reconfigure              reassign agent roles for current workflow (preserves state)
-  /workflow clear                    delete saved workflow state for this session
+  /workflow                                          list available workflows
+  /workflow <name> [<task>] [--<role> <agent> ...]   start a registered workflow, e.g. dev (designer→generator→evaluator),
+                                                      pair (adds a user checkpoint before each verdict), swarm (concurrent
+                                                      items + a final pass) — or a custom one from ~/.milk/workflows/
+  /workflow resume                                   resume workflow from last checkpoint
+  /workflow reconfigure                              reassign agent roles for current workflow (preserves state)
+  /workflow clear                                    delete saved workflow state for this session
 
 ── Direct bash ───────────────────────────────────────────────────────────
   /bash list             list the auto-allow prefixes (no confirmation prompt)

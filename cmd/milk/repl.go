@@ -40,6 +40,7 @@ import (
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
+	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
 const agentTimeout = 10 * time.Minute
@@ -161,7 +162,14 @@ type updateAvailableMsg struct{ release *updater.Release }
 
 // workflowResumeCheckMsg is sent at startup when a saved workflow state file
 // was found for the current session. The TUI prints a one-line resume offer.
-type workflowResumeCheckMsg struct{ state *workflow.State }
+type workflowResumeCheckMsg struct {
+	state *workflow.State
+	// genericName/genericTask are set instead of state for an unfinished
+	// interpreter-driven (non-"dev") checkpoint — it has no sprint/pass to
+	// report, just a name and task.
+	genericName string
+	genericTask string
+}
 
 // updateProgressMsg carries download progress during /update install.
 type updateProgressMsg struct{ done, total int64 }
@@ -537,11 +545,12 @@ type model struct {
 	updateTotal    int64
 
 	// workflow panel
-	workflowPanelOpen     bool
-	workflowPanelOffset   int
-	workflowState         *workflow.State
-	pendingWorkflowWizard *workflowWizardState
-	pendingWorkflowExtend *workflowExtendState
+	workflowPanelOpen            bool
+	workflowPanelOffset          int
+	workflowState                *workflow.State
+	pendingWorkflowWizard        *workflowWizardState
+	pendingWorkflowExtend        *workflowExtendState
+	pendingGenericWorkflowExtend *genericWorkflowExtendState
 
 	// designer disambiguation
 	pendingWorkflowQuestions string        // raw questions from designer (non-nil while collecting answers)
@@ -1176,6 +1185,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingWorkflowExtend != nil {
 			return m.handleWorkflowExtendKey(msg)
 		}
+		if m.pendingGenericWorkflowExtend != nil {
+			return m.handleGenericWorkflowExtendKey(msg)
+		}
 		if m.inputLocked() {
 			return m.handleBusyKey(msg)
 		}
@@ -1343,6 +1355,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastWorkflowActivity = time.Now()
 		m.workflowTimeoutWarned = false
 		m.syncLayout()
+
+	case workflow.ProgressMsg:
+		// Generic (interpreter-driven) counterpart to wfdev.WorkflowProgressMsg
+		// above. Update fields in place rather than replacing m.workflowState
+		// wholesale, so AgentMap (set once at launch) survives every
+		// subsequent progress update.
+		if m.workflowState == nil {
+			m.workflowState = &workflow.State{}
+		}
+		m.workflowState.WorkflowName = msg.WorkflowName
+		m.workflowState.Task = msg.Task
+		m.workflowState.WorkflowID = msg.WorkflowID
+		m.workflowState.Role = msg.Role
+		m.workflowState.StagePath = msg.StagePath
+		m.workflowState.Generic = true
+		m.workflowPanelOpen = true
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
+		m.syncLayout()
 		return m, nil
 
 	case workflow.WorkflowChunkMsg:
@@ -1437,6 +1468,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"%s workflow: sprint %d exhausted %d passes — continue with %d passes? [y/n] ",
 					milkTag(), exhausted.Sprint, exhausted.MaxPasses, exhausted.MaxPasses*2,
 				))
+			} else if genericExhausted := (*interp.ExhaustedError)(nil); errors.As(msg.Err, &genericExhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
+				// Offer to continue with a doubled iteration limit — the
+				// generic counterpart to the dev-specific branch above.
+				reg, regErrs := workflow.LoadRegistry()
+				for _, e := range regErrs {
+					obs.Info("workflow.registry.load_error", "error", e.Error())
+				}
+				def, defOK := reg.Lookup(m.workflowState.WorkflowName)
+				if defOK {
+					w := &workflowWizardState{
+						name:       m.workflowState.WorkflowName,
+						task:       m.workflowState.Task,
+						def:        def,
+						roles:      def.Roles,
+						roleValues: m.workflowState.AgentMap,
+						resuming:   true,
+						workflowID: m.workflowState.WorkflowID,
+					}
+					m.pendingGenericWorkflowExtend = &genericWorkflowExtendState{
+						wizard: w, stageID: genericExhausted.StageID, maxIterations: genericExhausted.MaxIterations,
+					}
+					m.appendTranscript(fmt.Sprintf(
+						"%s workflow: stage %q exceeded %d iterations — continue with %d? [y/n] ",
+						milkTag(), genericExhausted.StageID, genericExhausted.MaxIterations, genericExhausted.MaxIterations*2,
+					))
+				} else {
+					m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
+				}
 			} else {
 				m.appendTranscript(milkTag() + " workflow error: " + msg.Err.Error() + "\n")
 			}
@@ -1459,6 +1518,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					milkTag(), st.WorkflowName, st.Sprint, st.Pass,
 				))
 			}
+			m.syncLayout()
+		} else if msg.genericName != "" {
+			m.workflowState = &workflow.State{WorkflowName: msg.genericName, Task: msg.genericTask, Role: "interrupted"}
+			m.workflowPanelOpen = true
+			m.appendTranscript(fmt.Sprintf(
+				"%s workflow %s in progress (%s) — /workflow resume to continue, or ignore\n",
+				milkTag(), msg.genericName, msg.genericTask,
+			))
 			m.syncLayout()
 		}
 		return m, nil
@@ -2910,9 +2977,16 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if err != nil {
 				return workflowResumeCheckMsg{}
 			}
-			id, ok, err := workflow.CurrentWorkflowID(stateDir, sessID)
-			if err != nil || !ok {
+			id, kind, err := workflow.CurrentWorkflowID(stateDir, sessID)
+			if err != nil || kind == workflow.WorkflowKindNone {
 				return workflowResumeCheckMsg{}
+			}
+			if kind == workflow.WorkflowKindInterp {
+				cp, err := interp.LoadCheckpoint(workflow.InterpCheckpointPath(stateDir, sessID, id))
+				if err != nil || cp == nil || cp.Done {
+					return workflowResumeCheckMsg{}
+				}
+				return workflowResumeCheckMsg{genericName: cp.DefinitionName, genericTask: cp.Task}
 			}
 			st, err := workflow.LoadState(workflow.StatePath(stateDir, sessID, id))
 			if err != nil || st == nil {

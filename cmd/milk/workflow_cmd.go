@@ -10,45 +10,71 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 	wfdev "github.com/scoutme/milk/internal/workflow/dev"
+	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
-// workflowWizardState tracks multi-step wizard input for /workflow.
+// workflowWizardState tracks multi-step wizard input for /workflow. Every
+// fresh launch — "dev" included — goes through the generic (roles/
+// roleValues/roleDefaults) fields below via handleGenericWorkflowCmd. The
+// designer/generator/evaluator fields and their fixed wizard steps
+// (wizardStepDesigner/Generator/Evaluator) survive only to resume or
+// reconfigure a pre-existing dev.go-format checkpoint (workflow.State,
+// predating this migration, or one missing AgentMap) — see
+// handleWorkflowResume/handleWorkflowReconfigure's dev-specific branches.
+//
+// There is deliberately no inline behaviour-prompt-override step (dev.go's
+// wizard used to have one, applied as a session-local AgentConfig.Prompt
+// override) — a task description, and the plan the designer produces from
+// it, can already carry any specific behaviour request into the generator/
+// evaluator prompts naturally; a separate runtime override mechanism was
+// redundant with that, and didn't fit the generic (arbitrary-role)
+// definitions at all. A persistent AgentConfig.Prompt in ~/.milk/config.json
+// remains the way to give an agent a standing behaviour override.
 type workflowWizardState struct {
-	name      string // workflow name (e.g. "dev")
-	task      string
-	designer  string
-	generator string
-	evaluator string
-	// generatorPrompt and evaluatorPrompt hold optional inline behaviour prompts
-	// for the generator and evaluator roles. Set during the wizard; applied as
-	// AgentConfig.Prompt overrides at launch (session-local, not persisted to disk).
-	generatorPrompt string
-	evaluatorPrompt string
-	promptAsked     bool // true once the behaviour-prompt steps have been shown
-	step            workflowWizardStep
-	clearing        bool   // true when this wizard is a /workflow clear confirmation
-	resuming        bool   // true when completing the wizard should resume rather than start fresh
-	reconfiguring   bool   // true when completing the wizard should update state agent map only
-	sprint          int    // checkpoint sprint (used when resuming/reconfiguring == true)
-	pass            int    // checkpoint pass (used when resuming/reconfiguring == true)
-	role            string // checkpoint role (used when resuming/reconfiguring == true)
-	workflowID      int    // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
+	name          string // workflow name (e.g. "dev")
+	task          string
+	designer      string
+	generator     string
+	evaluator     string
+	step          workflowWizardStep
+	clearing      bool                  // true when this wizard is a /workflow clear confirmation
+	resuming      bool                  // true when completing the wizard should resume rather than start fresh
+	reconfiguring bool                  // true when completing the wizard should update state agent map only
+	sprint        int                   // checkpoint sprint (used when resuming/reconfiguring == true)
+	pass          int                   // checkpoint pass (used when resuming/reconfiguring == true)
+	role          string                // checkpoint role (used when resuming/reconfiguring == true)
+	workflowID    int                   // resolved workflow ID (see workflow.CurrentWorkflowID/NextWorkflowID); used by clear/reconfigure/resume
+	kind          workflow.WorkflowKind // dev vs. interp-driven; used by the clear-confirmation path
+
+	// Generic (registry-driven) workflow fields — every definition, including
+	// the built-in "dev", launches through these via internal/workflow/interp.
+	// /workflow resume, clear, and reconfigure all work for this path (see
+	// handleGenericWorkflowResume/Reconfigure, interp.Runner.WithCheckpoint).
+	def          workflow.Definition // resolved definition; zero value unused when name == "dev"
+	roles        []string            // def.Roles, in wizard-ask order
+	roleValues   map[string]string   // answers collected so far this wizard pass, role -> agent specifier
+	roleDefaults map[string]string   // current agent per role when reconfiguring (shown as the "blank = keep X" default); nil for a fresh launch
+	roleIdx      int                 // index into roles for the role currently being asked
+	// maxIterOverrideStageID/N: when set, launchGenericWorkflow applies
+	// interp.Runner.WithMaxIterationsOverride — used by the "continue with
+	// doubled passes?" recovery flow after a genericWorkflowExtendState.
+	maxIterOverrideStageID string
+	maxIterOverrideN       int
 }
 
 type workflowWizardStep int
 
 const (
-	wizardStepTask            workflowWizardStep = iota // ask for task description
-	wizardStepDesigner                                  // ask for designer agent
-	wizardStepGenerator                                 // ask for generator agent
-	wizardStepEvaluator                                 // ask for evaluator agent
-	wizardStepGeneratorPrompt                           // optional — behaviour prompt for generator
-	wizardStepEvaluatorPrompt                           // optional — behaviour prompt for evaluator
-	wizardStepClearConfirm                              // ask user to type "clear" to confirm
+	wizardStepTask         workflowWizardStep = iota // ask for task description
+	wizardStepDesigner                               // ask for designer agent
+	wizardStepGenerator                              // ask for generator agent
+	wizardStepEvaluator                              // ask for evaluator agent
+	wizardStepClearConfirm                           // ask user to type "clear" to confirm
+	wizardStepGenericRole                            // ask for the role at roles[roleIdx] (non-"dev" workflows)
 	wizardStepDone
 )
 
@@ -56,9 +82,14 @@ const (
 func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(args)
 
+	reg, regErrs := workflow.LoadRegistry()
+	for _, e := range regErrs {
+		obs.Info("workflow.registry.load_error", "error", e.Error())
+	}
+
 	if len(parts) == 0 {
 		// List available workflows.
-		m.appendTranscript(milkTag() + " available workflows:\n  dev — designer → generator → evaluator loop\n\nUsage:\n  /workflow dev [task] [--designer <agent>] [--generator <agent>] [--evaluator <agent>]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
+		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
 		return m, nil
 	}
 
@@ -72,13 +103,29 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	if name == "reconfigure" {
 		return m.handleWorkflowReconfigure()
 	}
-	if name != "dev" {
-		m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: dev, resume, reconfigure, clear\n", name))
+	// Every workflow, including the built-in "dev", launches through the
+	// registry + interpreter now — there is no more dev-specific fresh-launch
+	// path. The fixed designer/generator/evaluator wizard steps below remain
+	// only for resuming a pre-existing dev.go-format checkpoint (an old state
+	// file predating AgentMap support) and for /workflow reconfigure against
+	// one — both read an on-disk file that already fixes dev's shape, so
+	// there's nothing to generalize there.
+	def, ok := reg.Lookup(name)
+	if !ok {
+		m.appendTranscript(milkTag() + fmt.Sprintf(" unknown workflow %q — available: %s, resume, reconfigure, clear\n", name, strings.Join(reg.Names(), ", ")))
 		return m, nil
 	}
+	return m.handleGenericWorkflowCmd(name, def, parts[1:])
+}
 
-	// Parse optional flags.
-	remaining, flags, flagErr := parseWorkflowFlags(parts[1:])
+// handleGenericWorkflowCmd dispatches /workflow <name> [args...] for any
+// registered definition, including the built-in "dev" (e.g. "pair", "swarm",
+// or a user-defined workflow in ~/.milk/workflows/). Drives an agent wizard
+// over def.Roles (an arbitrary list — dev's designer/generator/evaluator
+// triple is just what dev.yaml happens to declare, not special-cased here)
+// before launching via internal/workflow/interp.
+func (m model) handleGenericWorkflowCmd(name string, def workflow.Definition, rest []string) (tea.Model, tea.Cmd) {
+	remaining, flags, flagErr := parseWorkflowFlags(rest)
 	if flagErr != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + flagErr.Error() + "\n")
 		return m, nil
@@ -86,45 +133,69 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 	task := strings.Join(remaining, " ")
 
 	wizard := &workflowWizardState{
-		name:      name,
-		task:      task,
-		designer:  flags["designer"],
-		generator: flags["generator"],
-		evaluator: flags["evaluator"],
+		name:       name,
+		task:       task,
+		def:        def,
+		roles:      def.Roles,
+		roleValues: map[string]string{},
+	}
+	for _, role := range def.Roles {
+		if v, ok := flags[role]; ok {
+			wizard.roleValues[role] = v
+		}
 	}
 
-	// Enter wizard for any missing fields. Agent steps are skipped when all
-	// three were supplied via flags; otherwise the wizard collects them in order.
 	if wizard.task == "" {
 		wizard.step = wizardStepTask
 		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + " workflow dev — enter task description:\n")
+		m.appendTranscript(milkTag() + fmt.Sprintf(" workflow %s — enter task description:\n", name))
 		m.refreshPrompt()
 		return m, nil
 	}
-	if wizard.designer == "" {
-		wizard.step = wizardStepDesigner
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
-		m.refreshPrompt()
-		return m, nil
-	}
-	if wizard.generator == "" {
-		wizard.step = wizardStepGenerator
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("generator"))
-		m.refreshPrompt()
-		return m, nil
-	}
-	if wizard.evaluator == "" {
-		wizard.step = wizardStepEvaluator
-		m.pendingWorkflowWizard = wizard
-		m.appendTranscript(milkTag() + workflowAgentPrompt("evaluator"))
-		m.refreshPrompt()
-		return m, nil
-	}
+	return m.advanceToNextGenericRoleOrLaunch(wizard)
+}
 
-	return m.launchWorkflow(wizard)
+// advanceToNextGenericRoleOrLaunch finds the first role in w.roles not yet in
+// w.roleValues and prompts for it, or launches the workflow once every role
+// has a value.
+func (m model) advanceToNextGenericRoleOrLaunch(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	for i, role := range w.roles {
+		if _, ok := w.roleValues[role]; ok {
+			continue
+		}
+		w.roleIdx = i
+		w.step = wizardStepGenericRole
+		m.pendingWorkflowWizard = w
+		if w.reconfiguring {
+			m.appendTranscript(milkTag() + genericWorkflowAgentReconfigurePrompt(w.name, role, w.roleDefaults[role]))
+		} else {
+			m.appendTranscript(milkTag() + genericWorkflowAgentPrompt(w.name, role))
+		}
+		m.refreshPrompt()
+		return m, nil
+	}
+	m.pendingWorkflowWizard = nil
+	if w.reconfiguring {
+		return m.applyGenericWorkflowReconfigure(w)
+	}
+	return m.launchGenericWorkflow(w)
+}
+
+// genericWorkflowAgentPrompt returns the wizard prompt line for a role in a
+// non-"dev" workflow.
+func genericWorkflowAgentPrompt(workflowName, role string) string {
+	return fmt.Sprintf(" workflow %s — %s agent (blank = escalation):\n", workflowName, role)
+}
+
+// genericWorkflowAgentReconfigurePrompt is genericWorkflowAgentPrompt's
+// reconfigure-mode counterpart, showing the role's current agent as the
+// default kept on blank input — mirrors workflowAgentReconfigurePrompt (dev's
+// fixed-triple equivalent).
+func genericWorkflowAgentReconfigurePrompt(workflowName, role, current string) string {
+	if current == "" {
+		return fmt.Sprintf(" workflow %s reconfigure — %s agent (blank = escalation):\n", workflowName, role)
+	}
+	return fmt.Sprintf(" workflow %s reconfigure — %s agent (blank = keep %q):\n", workflowName, role, current)
 }
 
 // advanceWorkflowWizard handles a user input while a workflow wizard is active.
@@ -142,7 +213,7 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingWorkflowWizard = nil
-		return m.execWorkflowClear(w.workflowID)
+		return m.execWorkflowClear(w.workflowID, w.kind)
 
 	case wizardStepTask:
 		if input == "" {
@@ -151,11 +222,12 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		w.task = input
-		w.step = wizardStepDesigner
-		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowAgentPrompt("designer"))
-		m.refreshPrompt()
-		return m, nil
+		return m.advanceToNextGenericRoleOrLaunch(w)
+
+	case wizardStepGenericRole:
+		role := w.roles[w.roleIdx]
+		w.roleValues[role] = workflowAgentInputWithDefault(input, w.roleDefaults[role], w.reconfiguring)
+		return m.advanceToNextGenericRoleOrLaunch(w)
 
 	case wizardStepDesigner:
 		w.designer = workflowAgentInputWithDefault(input, w.designer, w.reconfiguring)
@@ -183,33 +255,6 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 
 	case wizardStepEvaluator:
 		w.evaluator = workflowAgentInputWithDefault(input, w.evaluator, w.reconfiguring)
-		// After evaluator: inject behaviour-prompt steps before completing.
-		if !w.promptAsked && !w.reconfiguring {
-			w.step = wizardStepGeneratorPrompt
-			m.pendingWorkflowWizard = w
-			m.appendTranscript(milkTag() + workflowBehaviourPrompt("generator"))
-			m.refreshPrompt()
-			return m, nil
-		}
-		w.step = wizardStepDone
-
-		// Record the fully-assembled command in history so the user can
-		// recall and re-run it without stepping through the wizard again.
-		full := "/workflow dev " + w.task
-		m.sessionHistory = appendDeduped(m.sessionHistory, full, maxPersistedHistory)
-		m.globalHistory = appendDeduped(m.globalHistory, full, maxPersistedHistory)
-
-	case wizardStepGeneratorPrompt:
-		w.generatorPrompt = input // blank = no override
-		w.step = wizardStepEvaluatorPrompt
-		m.pendingWorkflowWizard = w
-		m.appendTranscript(milkTag() + workflowBehaviourPrompt("evaluator"))
-		m.refreshPrompt()
-		return m, nil
-
-	case wizardStepEvaluatorPrompt:
-		w.evaluatorPrompt = input // blank = no override
-		w.promptAsked = true
 		w.step = wizardStepDone
 
 		// Record the fully-assembled command in history so the user can
@@ -219,14 +264,16 @@ func (m model) advanceWorkflowWizard(input string) (tea.Model, tea.Cmd) {
 		m.globalHistory = appendDeduped(m.globalHistory, full, maxPersistedHistory)
 	}
 
+	// Reaching here means completing the fixed designer/generator/evaluator
+	// steps for dev.go's own wizard shape — only reachable via
+	// handleWorkflowResume's pre-AgentMap fallback (resuming) or
+	// handleWorkflowReconfigure (reconfiguring); every fresh launch, dev
+	// included, goes through the generic role wizard above instead.
 	m.pendingWorkflowWizard = nil
 	if w.reconfiguring {
 		return m.applyWorkflowReconfigure(w)
 	}
-	if w.resuming {
-		return m.launchWorkflowResume(w, w.sprint, w.pass, 0, w.role)
-	}
-	return m.launchWorkflow(w)
+	return m.launchWorkflowResume(w, w.sprint, w.pass, 0, w.role)
 }
 
 // handleWorkflowClear starts the confirmation wizard for /workflow clear.
@@ -237,12 +284,12 @@ func (m model) handleWorkflowClear() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow clear error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
+	id, kind, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow clear error: " + err.Error() + "\n")
 		return m, nil
 	}
-	if !ok {
+	if kind == workflow.WorkflowKindNone {
 		m.workflowState = nil
 		m.workflowPanelOpen = false
 		m.syncLayout()
@@ -250,10 +297,14 @@ func (m model) handleWorkflowClear() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	path := workflow.StatePath(stateDir, sess.ID, id)
+	if kind == workflow.WorkflowKindInterp {
+		path = workflow.InterpCheckpointPath(stateDir, sess.ID, id)
+	}
 	m.pendingWorkflowWizard = &workflowWizardState{
 		step:       wizardStepClearConfirm,
 		clearing:   true,
 		workflowID: id,
+		kind:       kind,
 	}
 	m.appendTranscript(milkTag() + fmt.Sprintf(
 		" workflow clear — type \"clear\" to rename the state file (won't delete plan/findings/sprint files), anything else to cancel:\n  %s\n",
@@ -267,7 +318,7 @@ func (m model) handleWorkflowClear() (tea.Model, tea.Cmd) {
 // out of the way (adding a ".cleared" suffix) so /workflow clear does not
 // destroy a checkpoint the user might still want to inspect, and so the
 // workflow's ID stays reserved and is never reused by a later run.
-func (m model) execWorkflowClear(workflowID int) (tea.Model, tea.Cmd) {
+func (m model) execWorkflowClear(workflowID int, kind workflow.WorkflowKind) (tea.Model, tea.Cmd) {
 	sess := m.st.sess
 	if sess == nil {
 		m.appendTranscript(milkTag() + " workflow clear error: no active session\n")
@@ -279,6 +330,9 @@ func (m model) execWorkflowClear(workflowID int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	path := workflow.StatePath(stateDir, sess.ID, workflowID)
+	if kind == workflow.WorkflowKindInterp {
+		path = workflow.InterpCheckpointPath(stateDir, sess.ID, workflowID)
+	}
 	if err := os.Rename(path, path+".cleared"); err != nil && !os.IsNotExist(err) {
 		m.appendTranscript(milkTag() + " workflow clear error: " + err.Error() + "\n")
 		return m, nil
@@ -302,14 +356,17 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow reconfigure error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
+	id, kind, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
 		return m, nil
 	}
-	if !ok {
+	if kind == workflow.WorkflowKindNone {
 		m.appendTranscript(milkTag() + " no saved workflow state for this session — start a workflow first\n")
 		return m, nil
+	}
+	if kind == workflow.WorkflowKindInterp {
+		return m.handleGenericWorkflowReconfigure(stateDir, id)
 	}
 	st, err := workflow.LoadState(workflow.StatePath(stateDir, sess.ID, id))
 	if err != nil {
@@ -342,6 +399,94 @@ func (m model) handleWorkflowReconfigure() (tea.Model, tea.Cmd) {
 		st.Sprint, st.Pass, st.Task,
 	))
 	m.appendTranscript(milkTag() + workflowAgentReconfigurePrompt("designer", w.designer))
+	m.refreshPrompt()
+	return m, nil
+}
+
+// handleGenericWorkflowReconfigure starts the role-reassignment wizard for an
+// interpreter-driven (non-"dev") checkpoint at stateDir/id — the generic
+// counterpart to handleWorkflowReconfigure's dev-specific path above. Every
+// role is re-asked (unlike dev's fixed triple, a generic definition's role
+// list isn't known until the definition is looked up), each defaulting to
+// its current agent on blank input.
+func (m model) handleGenericWorkflowReconfigure(stateDir string, id int) (tea.Model, tea.Cmd) {
+	sess := m.st.sess
+	path := workflow.InterpCheckpointPath(stateDir, sess.ID, id)
+	cp, err := interp.LoadCheckpoint(path)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
+		return m, nil
+	}
+	if cp == nil {
+		m.appendTranscript(milkTag() + " no saved workflow state for this session — start a workflow first\n")
+		return m, nil
+	}
+
+	reg, regErrs := workflow.LoadRegistry()
+	for _, e := range regErrs {
+		obs.Info("workflow.registry.load_error", "error", e.Error())
+	}
+	def, ok := reg.Lookup(cp.DefinitionName)
+	if !ok {
+		m.appendTranscript(milkTag() + fmt.Sprintf(" workflow reconfigure error: workflow %q is no longer registered\n", cp.DefinitionName))
+		return m, nil
+	}
+
+	w := &workflowWizardState{
+		name:          cp.DefinitionName,
+		task:          cp.Task,
+		def:           def,
+		roles:         def.Roles,
+		roleValues:    map[string]string{},
+		roleDefaults:  cp.AgentMap,
+		reconfiguring: true,
+		workflowID:    id,
+	}
+	m.appendTranscript(milkTag() + fmt.Sprintf(
+		" workflow reconfigure — reassign agents for %s (task: %s)\n", cp.DefinitionName, cp.Task,
+	))
+	return m.advanceToNextGenericRoleOrLaunch(w)
+}
+
+// applyGenericWorkflowReconfigure writes new agent names from the wizard into
+// the checkpoint's AgentMap, leaving Trace/Done untouched so a subsequent
+// /workflow resume continues exactly where it left off with the new agents.
+func (m model) applyGenericWorkflowReconfigure(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	sess := m.st.sess
+	stateDir, err := session.Dir()
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: cannot determine state dir: " + err.Error() + "\n")
+		return m, nil
+	}
+	path := workflow.InterpCheckpointPath(stateDir, sess.ID, w.workflowID)
+	cp, err := interp.LoadCheckpoint(path)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
+		return m, nil
+	}
+	if cp == nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: checkpoint disappeared during wizard\n")
+		return m, nil
+	}
+
+	agentNames, err := workflow.ResolveAgentNames(w.roleValues, m.st.cfg)
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	cp.AgentMap = agentNames
+	if err := interp.SaveCheckpoint(path, cp); err != nil {
+		m.appendTranscript(milkTag() + " workflow reconfigure error: cannot save checkpoint: " + err.Error() + "\n")
+		return m, nil
+	}
+
+	if m.workflowState != nil {
+		m.workflowState.AgentMap = agentNames
+	}
+	m.appendTranscript(milkTag() + fmt.Sprintf(
+		" workflow reconfigured — %s\n  use /workflow resume to continue\n", formatGenericAgentNames(w.roles, agentNames),
+	))
 	m.refreshPrompt()
 	return m, nil
 }
@@ -397,19 +542,20 @@ func (m model) applyWorkflowReconfigure(w *workflowWizardState) (tea.Model, tea.
 	return m, nil
 }
 
-// launchWorkflow resolves agents, builds runners, and starts the workflow goroutine.
-func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
-	cfg := applyWorkflowBehaviourOverrides(m.st.cfg, w)
+// launchGenericWorkflow resolves agents, builds runners, and starts the
+// interpreter-driven workflow goroutine for any registered definition,
+// including the built-in "dev" — every fresh launch goes through here now.
+// w.workflowState is shown once at start and not updated stage-by-stage the
+// way dev.go's wfdev.WorkflowProgressMsg did; see internal/workflow/interp's
+// package doc for that and other still-open gaps against the retired
+// hand-written dev.go launch path (dev.go itself remains in place — it's
+// still needed to resume a pre-existing, dev.go-format checkpoint).
+func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	cfg := m.st.cfg
 	sess := m.st.sess
 	send := func(msg tea.Msg) { m.st.program.Send(msg) }
 
-	roles := map[string]string{
-		"designer":  w.designer,
-		"generator": w.generator,
-		"evaluator": w.evaluator,
-	}
-
-	agentNames, err := workflow.ResolveAgentNames(roles, cfg)
+	agentNames, err := workflow.ResolveAgentNames(w.roleValues, cfg)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
 		return m, nil
@@ -420,14 +566,16 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	workflowID, err := workflow.NextWorkflowID(stateDir, sess.ID)
-	if err != nil {
-		m.appendTranscript(milkTag() + " workflow error: cannot determine workflow ID: " + err.Error() + "\n")
-		return m, nil
+	workflowID := w.workflowID
+	if !w.resuming {
+		var err error
+		workflowID, err = workflow.NextWorkflowID(stateDir, sess.ID)
+		if err != nil {
+			m.appendTranscript(milkTag() + " workflow error: cannot determine workflow ID: " + err.Error() + "\n")
+			return m, nil
+		}
 	}
 
-	// Build TUI-wired agents (permission handlers, tool-use hints, skip-permissions)
-	// so that workflow roles have the same tool access as normal turns.
 	m.st.toolFutures = map[string]chan string{}
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
@@ -440,7 +588,11 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 
 	answersCh := make(chan string, 1)
 
-	wf := wfdev.New(w.task, 0)
+	checkpointPath := workflow.InterpCheckpointPath(stateDir, sess.ID, workflowID)
+	r := interp.New(w.def, w.task).WithCheckpoint(checkpointPath).WithAgentMap(agentNames)
+	if w.maxIterOverrideStageID != "" {
+		r = r.WithMaxIterationsOverride(w.maxIterOverrideStageID, w.maxIterOverrideN)
+	}
 	runCfg := workflow.RunConfig{
 		Session:    sess,
 		Runners:    runners,
@@ -450,22 +602,24 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		WorkflowID: workflowID,
 	}
 
-	// Show panel immediately and mark busy so the TUI blocks normal input.
 	m.workflowPanelOpen = true
 	m.busy = true
 	m.spinnerFrame = 0
 	m.lastWorkflowActivity = time.Now()
 	m.workflowTimeoutWarned = false
 	m.workflowState = &workflow.State{
-		WorkflowName: "dev",
-		Sprint:       1,
-		Pass:         1,
+		WorkflowName: w.def.Name,
+		Task:         w.task,
 		Role:         "starting",
 		AgentMap:     agentNames,
 		WorkflowID:   workflowID,
+		Generic:      true,
 	}
-	m.appendTranscript(milkTag() + fmt.Sprintf(" starting workflow dev (designer: %s  generator: %s  evaluator: %s)\n",
-		agentNames["designer"], agentNames["generator"], agentNames["evaluator"]))
+	verb := "starting"
+	if w.resuming {
+		verb = "resuming"
+	}
+	m.appendTranscript(milkTag() + fmt.Sprintf(" %s workflow %s (%s)\n", verb, w.def.Name, formatGenericAgentNames(w.roles, agentNames)))
 	m.syncLayout()
 
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -475,10 +629,20 @@ func (m model) launchWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
 		workflowIdleCheck(),
 		func() tea.Msg {
 			defer cancel()
-			err := wf.Run(ctx, runCfg)
+			err := r.Run(ctx, runCfg)
 			return wfdev.WorkflowDoneMsg{Err: err}
 		},
 	)
+}
+
+// formatGenericAgentNames renders "role1: name1  role2: name2  ..." in roles
+// order, for the "starting workflow" transcript line.
+func formatGenericAgentNames(roles []string, agentNames map[string]string) string {
+	parts := make([]string, len(roles))
+	for i, role := range roles {
+		parts[i] = fmt.Sprintf("%s: %s", role, agentNames[role])
+	}
+	return strings.Join(parts, "  ")
 }
 
 // handleWorkflowWizardKey handles keypresses while the workflow wizard is active.
@@ -512,14 +676,17 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " workflow resume error: cannot determine state dir: " + err.Error() + "\n")
 		return m, nil
 	}
-	id, ok, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
+	id, kind, err := workflow.CurrentWorkflowID(stateDir, sess.ID)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
 		return m, nil
 	}
-	if !ok {
+	if kind == workflow.WorkflowKindNone {
 		m.appendTranscript(milkTag() + " no saved workflow state for this session\n")
 		return m, nil
+	}
+	if kind == workflow.WorkflowKindInterp {
+		return m.handleGenericWorkflowResume(stateDir, id)
 	}
 	st, err := workflow.LoadState(workflow.StatePath(stateDir, sess.ID, id))
 	if err != nil {
@@ -573,6 +740,56 @@ func (m model) handleWorkflowResume() (tea.Model, tea.Cmd) {
 	}
 
 	return m.launchWorkflowResume(w, st.Sprint, st.Pass, 0, st.Role)
+}
+
+// handleGenericWorkflowResume resumes an interpreter-driven (non-"dev")
+// workflow from its checkpoint at stateDir/id. Unlike dev's resume path,
+// there is no separate wizard re-ask when the agent map is missing — every
+// interp checkpoint written by this version of milk already carries one
+// (see interp.Runner.WithAgentMap); a checkpoint from an older build without
+// one falls back to the escalation alias for every role rather than
+// launching a wizard, since a generic role list has no fixed shape to
+// pre-populate wizard steps against the way dev's fixed triple does.
+func (m model) handleGenericWorkflowResume(stateDir string, id int) (tea.Model, tea.Cmd) {
+	sess := m.st.sess
+	cp, err := interp.LoadCheckpoint(workflow.InterpCheckpointPath(stateDir, sess.ID, id))
+	if err != nil {
+		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
+		return m, nil
+	}
+	if cp == nil || cp.Done {
+		m.appendTranscript(milkTag() + " workflow already completed — use /workflow clear to remove\n")
+		return m, nil
+	}
+
+	reg, regErrs := workflow.LoadRegistry()
+	for _, e := range regErrs {
+		obs.Info("workflow.registry.load_error", "error", e.Error())
+	}
+	def, ok := reg.Lookup(cp.DefinitionName)
+	if !ok {
+		m.appendTranscript(milkTag() + fmt.Sprintf(" workflow resume error: workflow %q is no longer registered\n", cp.DefinitionName))
+		return m, nil
+	}
+
+	roleValues := cp.AgentMap
+	if len(roleValues) == 0 {
+		roleValues = make(map[string]string, len(def.Roles))
+		for _, role := range def.Roles {
+			roleValues[role] = workflow.AliasEscalation
+		}
+	}
+
+	w := &workflowWizardState{
+		name:       cp.DefinitionName,
+		task:       cp.Task,
+		def:        def,
+		roles:      def.Roles,
+		roleValues: roleValues,
+		resuming:   true,
+		workflowID: id,
+	}
+	return m.launchGenericWorkflow(w)
 }
 
 // launchWorkflowResume is like launchWorkflow but resumes from a sprint/pass/role checkpoint.
@@ -685,14 +902,43 @@ func (m model) handleWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// genericWorkflowExtendState holds context for the "N iterations exhausted —
+// continue?" prompt for an interpreter-driven (non-"dev") workflow — the
+// generic counterpart to workflowExtendState above.
+type genericWorkflowExtendState struct {
+	wizard        *workflowWizardState
+	stageID       string
+	maxIterations int // current (exhausted) limit; resume will double it
+}
+
+// handleGenericWorkflowExtendKey handles keypresses while a generic extend
+// prompt is pending. y/Enter doubles the exhausted stage's iteration limit
+// and resumes; n/Ctrl+C/Esc dismisses with an error message.
+func (m model) handleGenericWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ext := m.pendingGenericWorkflowExtend
+	switch msg.String() {
+	case "y", "Y", "enter", "ctrl+m":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("y\n")
+		m.pendingGenericWorkflowExtend = nil
+		ext.wizard.maxIterOverrideStageID = ext.stageID
+		ext.wizard.maxIterOverrideN = ext.maxIterations * 2
+		return m.launchGenericWorkflow(ext.wizard)
+	case "n", "N", "ctrl+c", "esc":
+		m.ta.Reset()
+		m.syncLayout()
+		m.appendTranscript("n\n" + milkTag() + fmt.Sprintf(" workflow halted after %d iterations\n", ext.maxIterations))
+		m.pendingGenericWorkflowExtend = nil
+		m.refreshPrompt()
+		return m, nil
+	}
+	return m, nil
+}
+
 // workflowAgentPrompt returns the wizard prompt line for an agent role.
 func workflowAgentPrompt(role string) string {
 	return fmt.Sprintf(" workflow dev — %s agent (blank = escalation):\n", role)
-}
-
-// workflowBehaviourPrompt returns the wizard prompt for the optional behaviour step.
-func workflowBehaviourPrompt(role string) string {
-	return fmt.Sprintf(" workflow dev — %s behaviour prompt (optional — inline text or file=<path>, enter to skip):\n", role)
 }
 
 // workflowAgentReconfigurePrompt returns the wizard prompt for a reconfigure step,
@@ -708,36 +954,6 @@ func workflowAgentReconfigurePrompt(role, current string) string {
 // generator and evaluator agent configs overridden with any behaviour prompts
 // collected during the wizard. The override is session-local — it is NOT
 // written back to ~/.milk/config.json. Empty prompts leave the config unchanged.
-func applyWorkflowBehaviourOverrides(cfg config.Config, w *workflowWizardState) config.Config {
-	if w.generatorPrompt == "" && w.evaluatorPrompt == "" {
-		return cfg
-	}
-	// Resolve agent names the same way launchWorkflow does, then patch.
-	roles := map[string]string{
-		"generator": w.generator,
-		"evaluator": w.evaluator,
-	}
-	agentNames, err := workflow.ResolveAgentNames(roles, cfg)
-	if err != nil {
-		return cfg // resolution failure; launchWorkflow will surface the error
-	}
-	genName := agentNames["generator"]
-	evalName := agentNames["evaluator"]
-
-	agents := make([]config.AgentConfig, len(cfg.Agents))
-	copy(agents, cfg.Agents)
-	for i, a := range agents {
-		if w.generatorPrompt != "" && a.Name == genName {
-			agents[i].Prompt = w.generatorPrompt
-		}
-		if w.evaluatorPrompt != "" && a.Name == evalName {
-			agents[i].Prompt = w.evaluatorPrompt
-		}
-	}
-	cfg.Agents = agents
-	return cfg
-}
-
 // workflowAgentInputWithDefault normalises a wizard agent answer.
 // In reconfigure mode, blank keeps the existing value (current); in normal mode
 // blank falls back to AliasEscalation.
