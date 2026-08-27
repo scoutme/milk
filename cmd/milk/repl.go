@@ -70,6 +70,104 @@ type dispatchAgents struct {
 	// mcpToolSets holds the live MCP ToolSet for each agent that has MCP servers
 	// configured, keyed by agent name. Used by /mcp list and /mcp reconnect.
 	mcpToolSets map[string]*mcp.ToolSet
+	// mcpServersSeen caches the EffectiveMCPServers resolution last used to
+	// build mcpToolSets/mcpServers for each agent name, so refreshMCPForRole
+	// can skip rebuilding when nothing has actually changed.
+	mcpServersSeen map[string][]config.MCPServerConfig
+}
+
+// refreshMCPToolSets rebuilds the MCP toolset for the primary and escalation
+// agents when their EffectiveMCPServers has changed since it was last built
+// — on a config-write event (the config-watcher reload path, or right after
+// any wizard/exec command saves a change that could affect MCPServers or an
+// agent's mcp_servers list). When nothing changed for a role, this is a
+// no-op: the existing runner/toolset is reused exactly as before, with no
+// added per-turn cost. A turn already in flight keeps using the
+// runner/toolset snapshot it started with — only the next turn on an
+// affected role sees the rebuilt one.
+func (m model) refreshMCPToolSets() model {
+	var changedPrimary, changedEscalation bool
+	m, changedPrimary = m.refreshMCPForRole(RolePrimary, activeLocalAgentConfig(m.st.cfg).Name)
+	m, changedEscalation = m.refreshMCPForRole(RoleEscalation, m.st.cfg.EscalationAgentConfig().Name)
+	if changedPrimary || changedEscalation {
+		m.appendTranscript(milkTag() + " MCP servers reconnected to match current config\n")
+	}
+	return m
+}
+
+// refreshMCPForRole rebuilds the live MCP connections/server list for the
+// TurnRunner currently serving role, if agentName's EffectiveMCPServers no
+// longer matches what was last built for it. Returns changed=true when a
+// rebuild happened.
+func (m model) refreshMCPForRole(role AgentRole, agentName string) (model, bool) {
+	if agentName == "" {
+		return m, false
+	}
+	newServers := m.st.cfg.EffectiveMCPServers(agentName)
+	if reflect.DeepEqual(newServers, m.agents.mcpServersSeen[agentName]) {
+		return m, false
+	}
+	if m.agents.mcpServersSeen == nil {
+		m.agents.mcpServersSeen = map[string][]config.MCPServerConfig{}
+	}
+	m.agents.mcpServersSeen[agentName] = newServers
+
+	var runner TurnRunner
+	if role == RolePrimary {
+		runner = m.agents.primary
+	} else {
+		runner = m.agents.escalation
+	}
+
+	switch r := runner.(type) {
+	case *localRunner:
+		old := m.agents.mcpToolSets[agentName]
+		_, ts := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		if ts == nil {
+			ts = mcp.NewToolSet(nil)
+		}
+		if role == RolePrimary {
+			m.agents.local = m.agents.local.WithMCPToolSet(ts)
+			m.agents.primary = newLocalRunner(m.agents.local, agentName)
+		} else {
+			m.agents.escalationLocal = m.agents.escalationLocal.WithMCPToolSet(ts)
+			m.agents.escalation = newLocalRunner(m.agents.escalationLocal, agentName)
+		}
+		m = m.trackMCPToolSet(agentName, old, ts)
+	case *subprocessRunner:
+		old := m.agents.mcpToolSets[agentName]
+		servers, ts := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		if ts == nil {
+			ts = mcp.NewToolSet(nil)
+		}
+		newRunner := r.withMCPToolSet(servers, ts)
+		if role == RolePrimary {
+			m.agents.primary = newRunner
+		} else {
+			m.agents.escalation = newRunner
+		}
+		m = m.trackMCPToolSet(agentName, old, ts)
+	case *cliRunner:
+		// No live connection in milk's own process — the claude subprocess
+		// connects directly via --mcp-config, regenerated fresh every turn
+		// (internal/agent/claude/claude.go writeMCPConfigFile). Only the
+		// cached server-name list needs updating.
+		m.agents.escalation = r.withMCPServers(newServers)
+	}
+	return m, true
+}
+
+// trackMCPToolSet closes old (if any) and records ts as the live toolset for
+// agentName, so /mcp list and the next refresh comparison see the update.
+func (m model) trackMCPToolSet(agentName string, old, ts *mcp.ToolSet) model {
+	if old != nil {
+		old.Close(m.ctx)
+	}
+	if m.agents.mcpToolSets == nil {
+		m.agents.mcpToolSets = map[string]*mcp.ToolSet{}
+	}
+	m.agents.mcpToolSets[agentName] = ts
+	return m
 }
 
 // --- TUI message types ---
@@ -1629,8 +1727,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendTranscript(fmt.Sprintf("%s config reload error: %v\n", milkTag(), msg.err))
 			return m, nil
 		}
-		// Detect MCP server changes — connections are NOT restarted on reload.
-		hasMCPChange := len(msg.cfg.MCPServers) != len(m.st.cfg.MCPServers)
 		// Detect whether anything user-visible actually changed. Metadata-only
 		// writes (e.g. update_last_check saved on startup) must not show a banner
 		// that hides the splash screen.
@@ -1642,9 +1738,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if contentChanged {
 			m.appendTranscript(milkTag() + " config reloaded\n")
 		}
-		if hasMCPChange {
-			m.appendTranscript(milkTag() + " note: mcp_servers changed — restart milk to apply MCP connection changes\n")
-		}
+		m = m.refreshMCPToolSets()
 		return m, nil
 
 	case openFileMsg:
@@ -2683,7 +2777,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 
 // --- runREPL entry point ---
 
-func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string) error {
+func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string, startupWarning string) error {
 	sess, err := loadSession(cwd, initialFlagNew, initialFlagSession)
 	if err != nil {
 		return fmt.Errorf("loading session: %w", err)
@@ -2901,6 +2995,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	// Build TurnRunner instances for dispatch.
 	mcpToolSets := map[string]*mcp.ToolSet{}
+	mcpServersSeen := map[string][]config.MCPServerConfig{}
 	var primaryRunner TurnRunner
 	switch {
 	case tuiSubprocessPrimaryAgent != nil:
@@ -2908,13 +3003,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
+			mcpServersSeen[tuiPrimaryAC.Name] = servers
 			defer ts.Close(context.Background())
 		}
 		primaryRunner = r
 	case localAgent != nil:
-		if _, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
 			localAgent = localAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
+			mcpServersSeen[tuiPrimaryAC.Name] = servers
 			defer ts.Close(context.Background())
 		}
 		primaryRunner = newLocalRunner(localAgent, tuiPrimaryAC.Name)
@@ -2926,13 +3023,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiEscAC.Name] = ts
+			mcpServersSeen[tuiEscAC.Name] = servers
 			defer ts.Close(context.Background())
 		}
 		escalationRunner = r
 	case escalationLocalAgent != nil:
-		if _, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
 			escalationLocalAgent = escalationLocalAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiEscAC.Name] = ts
+			mcpServersSeen[tuiEscAC.Name] = servers
 			defer ts.Close(context.Background())
 		}
 		escalationRunner = newLocalRunner(escalationLocalAgent, tuiEscAC.Name)
@@ -2946,6 +3045,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
 		if servers := cfg.EffectiveMCPServers(cliAC.Name); len(servers) > 0 {
 			cr = cr.withMCPServers(servers)
+			mcpServersSeen[cliAC.Name] = servers
 		}
 		escalationRunner = cr
 	}
@@ -2961,11 +3061,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAvail:        localAvail,
 		escalationAvail:   escalationAvail,
 		mcpToolSets:       mcpToolSets,
+		mcpServersSeen:    mcpServersSeen,
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.taskStore = taskStore
 	m.hasInferenceAgent = cfg.HasInferenceAgent()
+	if startupWarning != "" {
+		m.startupWarnings = append(m.startupWarnings, startupWarning)
+	}
 	for _, w := range config.Validate(cfg) {
 		m.startupWarnings = append(m.startupWarnings, w.String())
 	}

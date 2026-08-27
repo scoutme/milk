@@ -529,6 +529,10 @@ func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
 	}
 
 	m.appendTranscript(execMCP(arg, m.st, m.agents.mcpToolSets) + "\n")
+	switch verb {
+	case "remove", "enable", "disable", "assign", "unassign":
+		m = m.refreshMCPToolSets()
+	}
 	return m, nil
 }
 
@@ -702,36 +706,63 @@ func execAgentList(st *interactiveState) string {
 	return b.String()
 }
 
-// execAgentRemove removes the named agent from config.
-// Refuses if the agent is currently active as primary or escalation.
-func execAgentRemove(name string, st *interactiveState) string {
-	if name == "" {
-		return milkTag() + " usage: /agent remove <name>"
-	}
-	primaryName := st.cfg.ActiveAgent().Name
-	escalationName := st.cfg.EscalationAgentConfig().Name
+// agentRemoveOutcome describes the result of removeAgentConfig.
+type agentRemoveOutcome int
+
+const (
+	agentRemoveOK agentRemoveOutcome = iota
+	agentRemoveIsPrimary
+	agentRemoveIsEscalation
+	agentRemoveNotFound
+)
+
+// removeAgentConfig removes the named agent from cfg.Agents, refusing when it
+// is the active primary or escalation agent. Shared by /agent remove and the
+// headless "milk config agent remove" CLI subcommand. removed is the
+// agent's stored name (for message formatting); empty unless outcome is OK.
+func removeAgentConfig(cfg *config.Config, name string) (outcome agentRemoveOutcome, removed string) {
+	primaryName := cfg.ActiveAgent().Name
+	escalationName := cfg.EscalationAgentConfig().Name
 	if strings.EqualFold(name, primaryName) {
-		return fmt.Sprintf("%s cannot remove %q — it is the active primary agent (switch first with /agent switch)", milkTag(), name)
+		return agentRemoveIsPrimary, ""
 	}
 	if strings.EqualFold(name, escalationName) {
-		return fmt.Sprintf("%s cannot remove %q — it is the active escalation agent (switch first with /agent switch)", milkTag(), name)
+		return agentRemoveIsEscalation, ""
 	}
 	idx := -1
-	for i, a := range st.cfg.Agents {
+	for i, a := range cfg.Agents {
 		if strings.EqualFold(a.Name, name) {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
+		return agentRemoveNotFound, ""
+	}
+	removed = cfg.Agents[idx].Name
+	cfg.Agents = append(cfg.Agents[:idx], cfg.Agents[idx+1:]...)
+	return agentRemoveOK, removed
+}
+
+// execAgentRemove removes the named agent from config.
+// Refuses if the agent is currently active as primary or escalation.
+func execAgentRemove(name string, st *interactiveState) string {
+	if name == "" {
+		return milkTag() + " usage: /agent remove <name>"
+	}
+	switch outcome, removed := removeAgentConfig(&st.cfg, name); outcome {
+	case agentRemoveIsPrimary:
+		return fmt.Sprintf("%s cannot remove %q — it is the active primary agent (switch first with /agent switch)", milkTag(), name)
+	case agentRemoveIsEscalation:
+		return fmt.Sprintf("%s cannot remove %q — it is the active escalation agent (switch first with /agent switch)", milkTag(), name)
+	case agentRemoveNotFound:
 		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
+	default:
+		if err := config.Save(st.cfg); err != nil {
+			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
+		}
+		return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
 	}
-	removed := st.cfg.Agents[idx].Name
-	st.cfg.Agents = append(st.cfg.Agents[:idx], st.cfg.Agents[idx+1:]...)
-	if err := config.Save(st.cfg); err != nil {
-		return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
-	}
-	return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
 }
 
 // execBash handles /bash [list | allow <prefix> | deny <prefix>].

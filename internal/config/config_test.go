@@ -1,6 +1,10 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -890,4 +894,158 @@ func findSub(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestUpsertMCPServer_AppendsNew(t *testing.T) {
+	cfg := &Config{}
+	updated := UpsertMCPServer(cfg, MCPServerConfig{Name: "github", URL: "https://x"})
+	if updated {
+		t.Error("expected updated=false for a brand-new server")
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Name != "github" {
+		t.Errorf("MCPServers = %+v, want one entry named github", cfg.MCPServers)
+	}
+}
+
+func TestUpsertMCPServer_ReplacesCaseInsensitive(t *testing.T) {
+	cfg := &Config{MCPServers: []MCPServerConfig{{Name: "GitHub", URL: "https://old"}}}
+	updated := UpsertMCPServer(cfg, MCPServerConfig{Name: "github", URL: "https://new"})
+	if !updated {
+		t.Error("expected updated=true for a case-insensitive name match")
+	}
+	if len(cfg.MCPServers) != 1 {
+		t.Fatalf("MCPServers = %+v, want exactly one entry (replaced in place)", cfg.MCPServers)
+	}
+	if cfg.MCPServers[0].URL != "https://new" {
+		t.Errorf("URL = %q, want %q", cfg.MCPServers[0].URL, "https://new")
+	}
+}
+
+func TestUpsertMCPServer_NormalizesAuthNone(t *testing.T) {
+	cfg := &Config{}
+	UpsertMCPServer(cfg, MCPServerConfig{Name: "x", Auth: "None"})
+	if cfg.MCPServers[0].Auth != "" {
+		t.Errorf("Auth = %q, want empty (canonical form of \"none\")", cfg.MCPServers[0].Auth)
+	}
+}
+
+func TestLoadFrom_ValidJSON_RefreshesBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v, want nil", err)
+	}
+	if cfg.Agent != "good" {
+		t.Errorf("Agent = %q, want %q", cfg.Agent, "good")
+	}
+
+	bakData, err := os.ReadFile(path + configBackupSuffix)
+	if err != nil {
+		t.Fatalf("expected a backup file to be written, got: %v", err)
+	}
+	if string(bakData) != `{"agent":"good"}` {
+		t.Errorf("backup content = %q, want the just-loaded bytes", bakData)
+	}
+}
+
+func TestLoadFrom_InvalidJSON_NoBackup_ReturnsHardError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{not valid json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFrom(path)
+	if err == nil {
+		t.Fatal("expected an error when config.json is invalid and no backup exists")
+	}
+	var recovered *ErrConfigRecovered
+	if errors.As(err, &recovered) {
+		t.Errorf("did not expect ErrConfigRecovered when no backup exists, got %v", err)
+	}
+}
+
+func TestLoadFrom_InvalidJSON_WithBackup_Recovers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	// First load with valid content seeds the backup.
+	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatalf("seeding LoadFrom() error = %v, want nil", err)
+	}
+
+	// Simulate a bad automated edit: the primary file becomes invalid JSON.
+	if err := os.WriteFile(path, []byte(`{"agent":"good",}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err == nil {
+		t.Fatal("expected a non-nil error (ErrConfigRecovered) when recovering from backup")
+	}
+	var recovered *ErrConfigRecovered
+	if !errors.As(err, &recovered) {
+		t.Fatalf("err = %v (%T), want *ErrConfigRecovered", err, err)
+	}
+	if recovered.Path != path {
+		t.Errorf("recovered.Path = %q, want %q", recovered.Path, path)
+	}
+	if cfg.Agent != "good" {
+		t.Errorf("recovered cfg.Agent = %q, want %q (from backup)", cfg.Agent, "good")
+	}
+}
+
+func TestSave_RefreshesBackup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := Save(Config{Agent: "saved"}); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	bakData, err := os.ReadFile(path + configBackupSuffix)
+	if err != nil {
+		t.Fatalf("expected Save to refresh the backup, got: %v", err)
+	}
+	var got Config
+	if err := json.Unmarshal(bakData, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Agent != "saved" {
+		t.Errorf("backup Agent = %q, want %q", got.Agent, "saved")
+	}
+}
+
+func TestLoad_RecoversFromBackupEndToEnd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := Save(Config{Agent: "good"}); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"agent":"good",}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	var recovered *ErrConfigRecovered
+	if !errors.As(err, &recovered) {
+		t.Fatalf("Load() err = %v, want *ErrConfigRecovered", err)
+	}
+	if cfg.Agent != "good" {
+		t.Errorf("recovered cfg.Agent = %q, want %q", cfg.Agent, "good")
+	}
 }

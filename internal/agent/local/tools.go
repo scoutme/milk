@@ -18,6 +18,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -334,6 +335,20 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 				},
 			},
 		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "milk_config_help",
+				"description": "Look up how to manage milk's own configuration — agents, MCP servers, memory, routing, etc. — from milk's own docs, instead of guessing the config.json schema. Omit topic to list what's available.",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"topic": map[string]any{"type": "string", "description": `e.g. "mcp add", "mcp remove", "mcp assign", "agent add", "agent remove", "mcp auth". Omit to list all topics.`},
+					},
+					"required": []string{},
+				},
+			},
+		},
 	}
 	// Apply whitelist/blacklist filtering to the base built-in tool set.
 	// Dynamic tools (memory, otel, session, task, agent) are appended after
@@ -567,6 +582,8 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return dispatchGetContextStats(sess, argsJSON), false
 	case "escalate":
 		return "", true // caller checks the bool
+	case "milk_config_help":
+		return runMilkConfigHelp(args)
 	case "create_task", "update_task", "list_tasks", "complete_task":
 		if ts == nil {
 			return toolResult{Error: errTaskUnavailable}.String(), false
@@ -941,6 +958,22 @@ func expandTilde(path string) string {
 		return path
 	}
 	return home + path[1:]
+}
+
+// runMilkConfigHelp looks up a self-config doc section by topic, or lists
+// available topics when none is given. Read-only, so it is not registered in
+// toolNeedsPermission.
+func runMilkConfigHelp(args map[string]any) (string, bool) {
+	topic, _ := args["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return toolResult{Output: "topics: " + strings.Join(selfdocs.Topics(), ", ")}.String(), false
+	}
+	body, ok := selfdocs.Lookup(topic)
+	if !ok {
+		return toolResult{Error: fmt.Sprintf("no doc section for %q — topics: %s", topic, strings.Join(selfdocs.Topics(), ", "))}.String(), false
+	}
+	return toolResult{Output: body}.String(), false
 }
 
 func runFindFiles(ctx context.Context, args map[string]any, cwd string) (string, bool) {

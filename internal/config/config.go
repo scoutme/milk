@@ -1166,6 +1166,27 @@ func (c Config) EffectiveMCPServers(agentName string) []MCPServerConfig {
 	return result
 }
 
+// UpsertMCPServer normalises sc (auth="none" → "") and writes it into
+// cfg.MCPServers: replacing the entry whose Name matches case-insensitively,
+// or appending sc as a new entry. Returns true when an existing entry was
+// replaced, false when sc was appended. This is the single implementation
+// shared by the TUI wizard, the inline "/mcp add" command, and the headless
+// "milk config mcp add" CLI subcommand — callers must not duplicate this
+// dedup/normalisation logic.
+func UpsertMCPServer(cfg *Config, sc MCPServerConfig) bool {
+	if strings.EqualFold(sc.Auth, "none") {
+		sc.Auth = ""
+	}
+	for i, existing := range cfg.MCPServers {
+		if strings.EqualFold(existing.Name, sc.Name) {
+			cfg.MCPServers[i] = sc
+			return true
+		}
+	}
+	cfg.MCPServers = append(cfg.MCPServers, sc)
+	return false
+}
+
 // EffectiveToolAgents returns the merged list of peer-agent tool entries for the
 // named caller agent. It starts with the global AgentTools list, applies
 // per-agent overrides from the caller's Tools field (replacing global entries by
@@ -1375,40 +1396,81 @@ func Load() (Config, error) {
 	if p := os.Getenv("MILK_CONFIG"); p != "" {
 		return LoadFrom(p)
 	}
-	cfg := defaults()
-
 	dir, err := Dir()
 	if err != nil {
-		return cfg, err
+		return defaults(), err
 	}
 
 	path := filepath.Join(dir, "config.json")
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		cfg := defaults()
 		_ = Save(cfg)
 		return cfg, nil
 	}
-	if err != nil {
-		return cfg, err
-	}
-
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
+	return LoadFrom(path)
 }
 
-// LoadFrom loads a config from the given explicit path, merging over defaults.
+// configBackupSuffix names the last-known-good copy of a config file,
+// refreshed on every successful Save or successful parse. If the primary
+// file is later found corrupted — e.g. by a malformed automated edit —
+// LoadFrom falls back to this backup instead of leaving milk unable to
+// start.
+const configBackupSuffix = ".bak"
+
+// ErrConfigRecovered indicates the primary config file failed to parse but
+// its backup (the last config that parsed successfully) was used instead.
+// The returned Config is the backup's content and is safe to use — callers
+// should surface Error() as a warning rather than treating this as fatal.
+type ErrConfigRecovered struct {
+	Path     string // path to the primary config file
+	ParseErr error  // the original parse error on Path
+}
+
+func (e *ErrConfigRecovered) Error() string {
+	return fmt.Sprintf("%s was invalid (%v) — recovered from backup; run \"milk config open\" to fix or replace it", e.Path, e.ParseErr)
+}
+
+func (e *ErrConfigRecovered) Unwrap() error { return e.ParseErr }
+
+// LoadFrom loads a config from the given explicit path, merging over
+// defaults. On a parse error it falls back to path's backup (see
+// configBackupSuffix) before giving up, returning *ErrConfigRecovered
+// rather than a hard error when the fallback succeeds.
 func LoadFrom(path string) (Config, error) {
 	cfg := defaults()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, fmt.Errorf("loading config from %s: %w", path, err)
 	}
+	if parseErr := json.Unmarshal(data, &cfg); parseErr != nil {
+		wrapped := fmt.Errorf("parsing config %s: %w", path, parseErr)
+		if bakCfg, bakErr := loadConfigBackup(path); bakErr == nil {
+			return bakCfg, &ErrConfigRecovered{Path: path, ParseErr: wrapped}
+		}
+		return defaults(), wrapped
+	}
+	saveConfigBackup(path, data)
+	return cfg, nil
+}
+
+// loadConfigBackup reads and parses path's backup copy.
+func loadConfigBackup(path string) (Config, error) {
+	cfg := defaults()
+	data, err := os.ReadFile(path + configBackupSuffix)
+	if err != nil {
+		return cfg, err
+	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
+		return cfg, err
 	}
 	return cfg, nil
+}
+
+// saveConfigBackup best-effort refreshes path's backup copy with data (bytes
+// that were just written or successfully parsed). Failures are ignored —
+// the backup is a safety net, not a guarantee.
+func saveConfigBackup(path string, data []byte) {
+	_ = os.WriteFile(path+configBackupSuffix, data, 0o600)
 }
 
 // ValidationWarning describes a configuration problem found at startup.
@@ -1671,5 +1733,10 @@ func Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	saveConfigBackup(path, data)
+	return nil
 }
