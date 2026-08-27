@@ -31,7 +31,7 @@ func TestParseSections_NestedHeadingIncludedInParentBody(t *testing.T) {
 
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
-		"`mcp_servers` field": "mcp_servers-field",
+		"`mcp_servers` field":    "mcp_servers-field",
 		"MCP servers with OAuth": "mcp-servers-with-oauth",
 		"  leading/trailing  ":   "leading-trailing",
 	}

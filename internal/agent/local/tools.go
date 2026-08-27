@@ -343,7 +343,7 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"topic": map[string]any{"type": "string", "description": `e.g. "mcp add", "mcp assign", "agent add", "mcp auth". Omit to list all topics.`},
+						"topic": map[string]any{"type": "string", "description": `e.g. "mcp add", "mcp remove", "mcp assign", "agent add", "agent remove", "mcp auth". Omit to list all topics.`},
 					},
 					"required": []string{},
 				},

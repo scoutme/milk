@@ -80,7 +80,8 @@ func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injec
 func SelfConfigInstruction() string {
 	return "[Milk self-configuration]\n" +
 		`Run "milk config docs <topic>" (e.g. "milk config docs mcp add") to look up how milk's own config.json is structured — agents, MCP servers, memory, routing, etc. — instead of guessing. ` +
-		`To write changes, use "milk config mcp add ...", "milk config mcp assign <server> <agent>", or "milk config agent add ..." rather than hand-editing the file; a running milk session picks up the change without a restart.` +
+		`To write changes, use "milk config mcp add|remove|assign|unassign ..." or "milk config agent add|remove ..." — never hand-edit config.json directly, even for a small removal: a malformed edit breaks the file for every agent reading it, and there is a command for every operation, including removal. ` +
+		`A running milk session picks up the change without a restart.` +
 		"\n\n"
 }
 

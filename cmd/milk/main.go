@@ -1764,7 +1764,30 @@ func newConfigMCPCmd() *cobra.Command {
 			return runConfigMCPAssign(args[0], args[1], false)
 		},
 	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use:   "remove <server>",
+		Short: "Remove an MCP server and clean up any agent references to it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigMCPRemove(args[0])
+		},
+	})
 	return mcpCmd
+}
+
+func runConfigMCPRemove(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if !removeMCPServer(&cfg, name) {
+		return fmt.Errorf("MCP server %q not found", name)
+	}
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("MCP server %q removed\n", name)
+	return nil
 }
 
 func runConfigMCPAdd(inline string) error {
@@ -1838,7 +1861,36 @@ func newConfigAgentCmd() *cobra.Command {
 			return runConfigAgentAdd(strings.Join(args, " "))
 		},
 	})
+	agentCmd.AddCommand(&cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove an agent (refuses if it's the active primary or escalation agent)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigAgentRemove(args[0])
+		},
+	})
 	return agentCmd
+}
+
+func runConfigAgentRemove(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	outcome, removed := removeAgentConfig(&cfg, name)
+	switch outcome {
+	case agentRemoveIsPrimary:
+		return fmt.Errorf("cannot remove %q — it is the active primary agent (switch first)", name)
+	case agentRemoveIsEscalation:
+		return fmt.Errorf("cannot remove %q — it is the active escalation agent (switch first)", name)
+	case agentRemoveNotFound:
+		return fmt.Errorf("no agent named %q", name)
+	}
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("agent %q removed\n", removed)
+	return nil
 }
 
 func runConfigAgentAdd(inline string) error {

@@ -1451,23 +1451,33 @@ func execMCPAdd(rest string, st *interactiveState) string {
 	return fmt.Sprintf("%s MCP server %q %s — use /mcp assign %s for <agent> to expose it", milkTag(), name, verb, name)
 }
 
-// execMCPRemove removes an MCP server by name, also cleaning up all agent references.
-func execMCPRemove(name string, st *interactiveState) string {
-	idx := findMCPServerIdx(st.cfg.MCPServers, name)
+// removeMCPServer removes serverName from cfg.MCPServers and cleans up every
+// agent's mcp_servers reference to it. Returns false (cfg left unchanged)
+// when no matching server was found. Shared by /mcp remove and the headless
+// "milk config mcp remove" CLI subcommand.
+func removeMCPServer(cfg *config.Config, serverName string) bool {
+	idx := findMCPServerIdx(cfg.MCPServers, serverName)
 	if idx < 0 {
-		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
+		return false
 	}
-	st.cfg.MCPServers = append(st.cfg.MCPServers[:idx], st.cfg.MCPServers[idx+1:]...)
-	// Remove references from all agents.
-	lower := strings.ToLower(name)
-	for i, ac := range st.cfg.Agents {
+	cfg.MCPServers = append(cfg.MCPServers[:idx], cfg.MCPServers[idx+1:]...)
+	lower := strings.ToLower(serverName)
+	for i, ac := range cfg.Agents {
 		var kept []string
 		for _, sname := range ac.MCPServers {
 			if strings.ToLower(sname) != lower {
 				kept = append(kept, sname)
 			}
 		}
-		st.cfg.Agents[i].MCPServers = kept
+		cfg.Agents[i].MCPServers = kept
+	}
+	return true
+}
+
+// execMCPRemove removes an MCP server by name, also cleaning up all agent references.
+func execMCPRemove(name string, st *interactiveState) string {
+	if !removeMCPServer(&st.cfg, name) {
+		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
 	}
 	if err := config.Save(st.cfg); err != nil {
 		return fmt.Sprintf("%s removed MCP server %q (config save failed: %v)", milkTag(), name, err)
@@ -1543,8 +1553,8 @@ func execMCPTools(serverName string, st *interactiveState) string {
 type mcpAssignOutcome int
 
 const (
-	mcpAssignOK mcpAssignOutcome = iota
-	mcpAssignNoop                // already assigned (assign) / not assigned (unassign) — nothing to do
+	mcpAssignOK   mcpAssignOutcome = iota
+	mcpAssignNoop                  // already assigned (assign) / not assigned (unassign) — nothing to do
 	mcpAssignServerNotFound
 	mcpAssignAgentNotFound
 )
