@@ -352,6 +352,11 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				la.WithPermissions(lp, nil)
 			}
+			if dbg, err := openLocalDebugLog(cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+			} else if dbg != nil {
+				la = la.WithDebugLog(dbg)
+			}
 			name := escAC.Name
 			if name == "" {
 				name = "escalation"
