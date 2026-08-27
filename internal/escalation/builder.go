@@ -68,8 +68,20 @@ func BuildStaticContext(nonce string, percepts []string, mode ContextMode, injec
 	}
 	b.WriteString(NeedInstruction(nonce))
 	b.WriteString(MemoryInstruction(nonce, primaryName, escalationName))
+	b.WriteString(SelfConfigInstruction())
 	b.WriteString(formatPercepts(percepts))
 	return b.String()
+}
+
+// SelfConfigInstruction points an agent at milk's own config-management
+// surface instead of leaving it to guess config.json's schema. It's cheap by
+// design: a one-line pointer, not the docs themselves — the doc content is
+// fetched on demand via the referenced command.
+func SelfConfigInstruction() string {
+	return "[Milk self-configuration]\n" +
+		`Run "milk config docs <topic>" (e.g. "milk config docs mcp add") to look up how milk's own config.json is structured — agents, MCP servers, memory, routing, etc. — instead of guessing. ` +
+		`To write changes, use "milk config mcp add ...", "milk config mcp assign <server> <agent>", or "milk config agent add ..." rather than hand-editing the file; a running milk session picks up the change without a restart.` +
+		"\n\n"
 }
 
 // BuildPrimaryStaticContext is like BuildStaticContext but prepends the escalation

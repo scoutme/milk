@@ -1166,6 +1166,27 @@ func (c Config) EffectiveMCPServers(agentName string) []MCPServerConfig {
 	return result
 }
 
+// UpsertMCPServer normalises sc (auth="none" → "") and writes it into
+// cfg.MCPServers: replacing the entry whose Name matches case-insensitively,
+// or appending sc as a new entry. Returns true when an existing entry was
+// replaced, false when sc was appended. This is the single implementation
+// shared by the TUI wizard, the inline "/mcp add" command, and the headless
+// "milk config mcp add" CLI subcommand — callers must not duplicate this
+// dedup/normalisation logic.
+func UpsertMCPServer(cfg *Config, sc MCPServerConfig) bool {
+	if strings.EqualFold(sc.Auth, "none") {
+		sc.Auth = ""
+	}
+	for i, existing := range cfg.MCPServers {
+		if strings.EqualFold(existing.Name, sc.Name) {
+			cfg.MCPServers[i] = sc
+			return true
+		}
+	}
+	cfg.MCPServers = append(cfg.MCPServers, sc)
+	return false
+}
+
 // EffectiveToolAgents returns the merged list of peer-agent tool entries for the
 // named caller agent. It starts with the global AgentTools list, applies
 // per-agent overrides from the caller's Tools field (replacing global entries by

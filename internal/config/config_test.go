@@ -891,3 +891,36 @@ func findSub(s, sub string) bool {
 	}
 	return false
 }
+
+func TestUpsertMCPServer_AppendsNew(t *testing.T) {
+	cfg := &Config{}
+	updated := UpsertMCPServer(cfg, MCPServerConfig{Name: "github", URL: "https://x"})
+	if updated {
+		t.Error("expected updated=false for a brand-new server")
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Name != "github" {
+		t.Errorf("MCPServers = %+v, want one entry named github", cfg.MCPServers)
+	}
+}
+
+func TestUpsertMCPServer_ReplacesCaseInsensitive(t *testing.T) {
+	cfg := &Config{MCPServers: []MCPServerConfig{{Name: "GitHub", URL: "https://old"}}}
+	updated := UpsertMCPServer(cfg, MCPServerConfig{Name: "github", URL: "https://new"})
+	if !updated {
+		t.Error("expected updated=true for a case-insensitive name match")
+	}
+	if len(cfg.MCPServers) != 1 {
+		t.Fatalf("MCPServers = %+v, want exactly one entry (replaced in place)", cfg.MCPServers)
+	}
+	if cfg.MCPServers[0].URL != "https://new" {
+		t.Errorf("URL = %q, want %q", cfg.MCPServers[0].URL, "https://new")
+	}
+}
+
+func TestUpsertMCPServer_NormalizesAuthNone(t *testing.T) {
+	cfg := &Config{}
+	UpsertMCPServer(cfg, MCPServerConfig{Name: "x", Auth: "None"})
+	if cfg.MCPServers[0].Auth != "" {
+		t.Errorf("Auth = %q, want empty (canonical form of \"none\")", cfg.MCPServers[0].Auth)
+	}
+}

@@ -301,7 +301,7 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	} else {
 		m.appendTranscript(milkTag() + " use /agent switch " + ac.Name + " to activate it\n")
 	}
-	return m
+	return m.refreshMCPToolSets()
 }
 
 // --- Add-MCP-server wizard ---
@@ -320,15 +320,151 @@ const (
 )
 
 type addMCPState struct {
-	sc   config.MCPServerConfig
-	step addMCPStep
+	sc      config.MCPServerConfig
+	step    addMCPStep
+	editing bool // true when sc.Name matched an existing server: wizard is editing, not adding
+}
+
+// findMCPServer looks up a server by case-insensitive name.
+func findMCPServer(servers []config.MCPServerConfig, name string) (config.MCPServerConfig, bool) {
+	for _, s := range servers {
+		if strings.EqualFold(s.Name, name) {
+			return s, true
+		}
+	}
+	return config.MCPServerConfig{}, false
+}
+
+// mcpMergeExisting overlays any non-empty fields from overrides onto a copy of existing,
+// preserving existing's name. Used to seed the edit wizard with current values while
+// still honoring inline key=val args the user typed alongside an existing name.
+func mcpMergeExisting(existing, overrides config.MCPServerConfig) config.MCPServerConfig {
+	merged := existing
+	if overrides.URL != "" {
+		merged.URL = overrides.URL
+	}
+	if overrides.Transport != "" {
+		merged.Transport = overrides.Transport
+	}
+	if overrides.Auth != "" {
+		merged.Auth = overrides.Auth
+	}
+	if overrides.APIKey != "" {
+		merged.APIKey = overrides.APIKey
+	}
+	if overrides.TokenCmd != "" {
+		merged.TokenCmd = overrides.TokenCmd
+	}
+	if overrides.Timeout != "" {
+		merged.Timeout = overrides.Timeout
+	}
+	if overrides.ConnectTimeout != "" {
+		merged.ConnectTimeout = overrides.ConnectTimeout
+	}
+	if overrides.Command != "" {
+		merged.Command = overrides.Command
+	}
+	if len(overrides.Args) > 0 {
+		merged.Args = overrides.Args
+	}
+	merged.Name = existing.Name
+	return merged
+}
+
+// mcpNextEditStep advances linearly through the edit wizard, branching on
+// transport/auth like mcpFirstMissingStep but never skipping a step just
+// because it already has a value — editing always re-confirms each field.
+func mcpNextEditStep(current addMCPStep, sc config.MCPServerConfig) addMCPStep {
+	isStdio := strings.ToLower(sc.Transport) == "stdio"
+	switch current {
+	case mcpStepName:
+		return mcpStepTransport
+	case mcpStepTransport:
+		if isStdio {
+			return mcpStepCommand
+		}
+		return mcpStepURL
+	case mcpStepURL, mcpStepCommand:
+		return mcpStepAuth
+	case mcpStepAuth:
+		switch strings.ToLower(sc.Auth) {
+		case "bearer":
+			return mcpStepAPIKey
+		case "token_cmd":
+			return mcpStepTokenCmd
+		default:
+			return mcpStepDone
+		}
+	default:
+		return mcpStepDone
+	}
+}
+
+// mcpStepValue returns sc's current value for step, substituting the same
+// defaults the prompts use ("http"/"none") so it round-trips through commitAddMCP.
+func mcpStepValue(step addMCPStep, sc config.MCPServerConfig) string {
+	switch step {
+	case mcpStepName:
+		return sc.Name
+	case mcpStepTransport:
+		if sc.Transport == "" {
+			return "http"
+		}
+		return sc.Transport
+	case mcpStepURL:
+		return sc.URL
+	case mcpStepCommand:
+		return sc.Command
+	case mcpStepAuth:
+		if sc.Auth == "" {
+			return "none"
+		}
+		return sc.Auth
+	case mcpStepAPIKey:
+		return sc.APIKey
+	case mcpStepTokenCmd:
+		return sc.TokenCmd
+	default:
+		return ""
+	}
+}
+
+// promptMCPStep prints the prompt for st's current step. When editing, it shows
+// and pre-fills the textarea with the server's current value so the user can
+// press enter to keep it or type over it to change it.
+func (m model) promptMCPStep(st *addMCPState) model {
+	hint := ""
+	if st.editing {
+		hint = mcpStepValue(st.step, st.sc)
+	}
+	m.appendTranscript(mcpAddPrompt(st.step, hint) + " ")
+	if hint != "" {
+		m.ta.SetValue(hint)
+	} else {
+		m.ta.Reset()
+	}
+	return m
 }
 
 // startAddMCP handles `/mcp add [key=val ...]`.
 // Missing required fields are prompted interactively.
 // For http transport the required field is url; for stdio it is command.
+// If the name matches an existing server, the wizard switches to edit mode:
+// current values are pre-filled at each step so the user can amend them
+// without retyping the whole entry from scratch.
 func (m model) startAddMCP(inline string) model {
 	sc := parseMCPInlineArgs(inline)
+
+	if sc.Name != "" {
+		if existing, ok := findMCPServer(m.st.cfg.MCPServers, sc.Name); ok {
+			st := &addMCPState{sc: mcpMergeExisting(existing, sc), editing: true, step: mcpStepTransport}
+			m.pendingMCPAdd = st
+			m.appendTranscript(fmt.Sprintf("%s MCP server %q already exists — current values shown, edit or press enter to keep\n",
+				milkTag(), existing.Name))
+			return m.promptMCPStep(st)
+		}
+	}
+
 	isStdio := strings.ToLower(sc.Transport) == "stdio"
 	if sc.Name != "" && ((isStdio && sc.Command != "") || (!isStdio && sc.URL != "")) {
 		return m.commitAddMCP(sc)
@@ -336,7 +472,7 @@ func (m model) startAddMCP(inline string) model {
 	st := &addMCPState{sc: sc}
 	st.step = mcpFirstMissingStep(sc)
 	m.pendingMCPAdd = st
-	m.appendTranscript(mcpAddPrompt(st.step) + " ")
+	m.appendTranscript(mcpAddPrompt(st.step, "") + " ")
 	m.ta.Reset()
 	return m
 }
@@ -409,26 +545,33 @@ func mcpFirstMissingStep(sc config.MCPServerConfig) addMCPStep {
 	return mcpStepDone
 }
 
-// mcpAddPrompt returns the prompt string for a wizard step.
-func mcpAddPrompt(step addMCPStep) string {
+// mcpAddPrompt returns the prompt string for a wizard step. current, when
+// non-empty, annotates the prompt with the value being edited (also pre-filled
+// into the textarea by the caller).
+func mcpAddPrompt(step addMCPStep, current string) string {
+	var base string
 	switch step {
 	case mcpStepName:
-		return milkTag() + " name:"
+		base = milkTag() + " name:"
 	case mcpStepTransport:
-		return milkTag() + " transport [http/stdio, enter for http]:"
+		base = milkTag() + " transport [http/stdio, enter for http]:"
 	case mcpStepURL:
-		return milkTag() + " url:"
+		base = milkTag() + " url:"
 	case mcpStepCommand:
-		return milkTag() + " command:"
+		base = milkTag() + " command:"
 	case mcpStepAuth:
-		return milkTag() + " auth [none/bearer/token_cmd, enter to skip]:"
+		base = milkTag() + " auth [none/bearer/token_cmd, enter to skip]:"
 	case mcpStepAPIKey:
-		return milkTag() + " api_key:"
+		base = milkTag() + " api_key:"
 	case mcpStepTokenCmd:
-		return milkTag() + " token_cmd:"
+		base = milkTag() + " token_cmd:"
 	default:
 		return ""
 	}
+	if current == "" {
+		return base
+	}
+	return base + " [current: " + current + "]"
 }
 
 // handleAddMCPKey handles keypresses during the /mcp add wizard.
@@ -448,8 +591,16 @@ func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch st.step {
 		case mcpStepName:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " name is required\n" + mcpAddPrompt(mcpStepName) + " ")
-				return m, nil
+				m.appendTranscript(milkTag() + " name is required\n")
+				return m.promptMCPStep(st), nil
+			}
+			if existing, ok := findMCPServer(m.st.cfg.MCPServers, answer); ok {
+				st.sc = mcpMergeExisting(existing, st.sc)
+				st.editing = true
+				st.step = mcpStepTransport
+				m.appendTranscript(fmt.Sprintf("%s MCP server %q already exists — current values shown, edit or press enter to keep\n",
+					milkTag(), existing.Name))
+				return m.promptMCPStep(st), nil
 			}
 			st.sc.Name = answer
 		case mcpStepTransport:
@@ -459,14 +610,14 @@ func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.sc.Transport = answer
 		case mcpStepURL:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " url is required\n" + mcpAddPrompt(mcpStepURL) + " ")
-				return m, nil
+				m.appendTranscript(milkTag() + " url is required\n")
+				return m.promptMCPStep(st), nil
 			}
 			st.sc.URL = answer
 		case mcpStepCommand:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " command is required\n" + mcpAddPrompt(mcpStepCommand) + " ")
-				return m, nil
+				m.appendTranscript(milkTag() + " command is required\n")
+				return m.promptMCPStep(st), nil
 			}
 			st.sc.Command = answer
 		case mcpStepAuth:
@@ -480,12 +631,16 @@ func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.sc.TokenCmd = answer
 		}
 
-		st.step = mcpFirstMissingStep(st.sc)
+		if st.editing {
+			st.step = mcpNextEditStep(st.step, st.sc)
+		} else {
+			st.step = mcpFirstMissingStep(st.sc)
+		}
 		if st.step == mcpStepDone {
 			m.pendingMCPAdd = nil
 			m = m.commitAddMCP(st.sc)
 		} else {
-			m.appendTranscript(mcpAddPrompt(st.step) + " ")
+			m = m.promptMCPStep(st)
 		}
 		return m, nil
 	}
@@ -495,27 +650,21 @@ func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// commitAddMCP appends the new MCP server to config, saves, and confirms.
+// commitAddMCP saves sc to config — updating the existing entry in place when
+// its name matches one already configured, otherwise appending a new one.
 func (m model) commitAddMCP(sc config.MCPServerConfig) model {
-	for _, existing := range m.st.cfg.MCPServers {
-		if strings.EqualFold(existing.Name, sc.Name) {
-			m.appendTranscript(fmt.Sprintf("%s MCP server %q already exists — use /mcp enable/disable or /mcp remove first\n",
-				milkTag(), sc.Name))
-			return m
-		}
+	updated := config.UpsertMCPServer(&m.st.cfg, sc)
+	verb := "added"
+	if updated {
+		verb = "updated"
 	}
-	// Normalise auth="none" → empty (canonical form).
-	if strings.ToLower(sc.Auth) == "none" {
-		sc.Auth = ""
-	}
-	m.st.cfg.MCPServers = append(m.st.cfg.MCPServers, sc)
 	if err := config.Save(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
-	m.appendTranscript(fmt.Sprintf("%s MCP server %q added — use /mcp assign %s for <agent> to expose it\n",
-		milkTag(), sc.Name, sc.Name))
-	return m
+	m.appendTranscript(fmt.Sprintf("%s MCP server %q %s — use /mcp assign %s for <agent> to expose it\n",
+		milkTag(), sc.Name, verb, sc.Name))
+	return m.refreshMCPToolSets()
 }
 
 // isCopilotURL returns true when the URL looks like a GitHub Copilot API endpoint.

@@ -529,6 +529,10 @@ func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
 	}
 
 	m.appendTranscript(execMCP(arg, m.st, m.agents.mcpToolSets) + "\n")
+	switch verb {
+	case "remove", "enable", "disable", "assign", "unassign":
+		m = m.refreshMCPToolSets()
+	}
 	return m, nil
 }
 

@@ -34,6 +34,7 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
+	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -1690,6 +1691,182 @@ func init() {
 			return runConfigOpen()
 		},
 	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "docs [topic]",
+		Short: `Look up how to manage milk's own config (e.g. "mcp add", "agent add") — omit topic to list them`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigDocs(strings.Join(args, " "))
+		},
+	})
+	configCmd.AddCommand(newConfigMCPCmd())
+	configCmd.AddCommand(newConfigAgentCmd())
+}
+
+// runConfigDocs prints selfdocs.Lookup(topic), or the full topic list when
+// topic is empty. Headless equivalent of the milk_config_help tool — the
+// route any agent with shell access uses instead of guessing config.json's
+// schema.
+func runConfigDocs(topic string) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		for _, t := range selfdocs.Topics() {
+			fmt.Println(t)
+		}
+		return nil
+	}
+	body, ok := selfdocs.Lookup(topic)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "no doc section for %q — available topics:\n", topic)
+		for _, t := range selfdocs.Topics() {
+			fmt.Fprintln(os.Stderr, "  "+t)
+		}
+		return fmt.Errorf("unknown topic %q", topic)
+	}
+	fmt.Println(body)
+	return nil
+}
+
+// printConfigWarnings surfaces config.Validate warnings for a would-be config
+// without blocking the write — Validate never hard-fails by design.
+func printConfigWarnings(cfg config.Config) {
+	for _, w := range config.Validate(cfg) {
+		fmt.Fprintln(os.Stderr, "warning: "+w.String())
+	}
+}
+
+// newConfigMCPCmd builds "milk config mcp add|assign|unassign" — the headless
+// equivalent of the TUI's /mcp add|assign|unassign, sharing the same
+// validated write path (config.UpsertMCPServer, assignMCPServer) so an agent
+// invoking this via its shell tool gets identical dedup/normalisation
+// behavior to the interactive wizard.
+func newConfigMCPCmd() *cobra.Command {
+	mcpCmd := &cobra.Command{Use: "mcp", Short: "Manage MCP servers headlessly"}
+	mcpCmd.AddCommand(&cobra.Command{
+		Use:   "add [key=val ...]",
+		Short: "Add or update an MCP server: name=... url=... (or command=... for stdio)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigMCPAdd(strings.Join(args, " "))
+		},
+	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use:   "assign <server> <agent>",
+		Short: "Assign an MCP server to an agent",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigMCPAssign(args[0], args[1], true)
+		},
+	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use:   "unassign <server> <agent>",
+		Short: "Unassign an MCP server from an agent",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigMCPAssign(args[0], args[1], false)
+		},
+	})
+	return mcpCmd
+}
+
+func runConfigMCPAdd(inline string) error {
+	sc := parseMCPInlineArgs(inline)
+	if sc.Name == "" {
+		return fmt.Errorf(`usage: milk config mcp add name=<name> url=<url> [transport=http|stdio] [auth=bearer|token_cmd|oauth] [api_key=...] [token_cmd=...] [command=...] [args=a,b,c] [timeout=30s]`)
+	}
+	isStdio := strings.EqualFold(sc.Transport, "stdio")
+	if isStdio && sc.Command == "" {
+		return fmt.Errorf("transport=stdio requires command=<path>")
+	}
+	if !isStdio && sc.URL == "" {
+		return fmt.Errorf("requires url=<url> (or transport=stdio command=<path>)")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	updated := config.UpsertMCPServer(&cfg, sc)
+	printConfigWarnings(cfg)
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	verb := "added"
+	if updated {
+		verb = "updated"
+	}
+	fmt.Printf("MCP server %q %s — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, sc.Name)
+	return nil
+}
+
+func runConfigMCPAssign(serverName, agentName string, assign bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	switch assignMCPServer(&cfg, serverName, agentName, assign) {
+	case mcpAssignServerNotFound:
+		return fmt.Errorf(`MCP server %q not found — add it first with "milk config mcp add"`, serverName)
+	case mcpAssignAgentNotFound:
+		return fmt.Errorf("agent %q not found", agentName)
+	case mcpAssignNoop:
+		if assign {
+			fmt.Printf("MCP server %q already assigned to agent %q\n", serverName, agentName)
+		} else {
+			fmt.Printf("MCP server %q not assigned to agent %q\n", serverName, agentName)
+		}
+		return nil
+	}
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	verb := "assigned to"
+	if !assign {
+		verb = "unassigned from"
+	}
+	fmt.Printf("MCP server %q %s agent %q\n", serverName, verb, agentName)
+	return nil
+}
+
+// newConfigAgentCmd builds "milk config agent add" — the headless equivalent
+// of the TUI's /agent add, minus the live-wiring side effects (router
+// construction, credential-refresh callbacks) that only make sense inside a
+// running TUI process.
+func newConfigAgentCmd() *cobra.Command {
+	agentCmd := &cobra.Command{Use: "agent", Short: "Manage agents headlessly"}
+	agentCmd.AddCommand(&cobra.Command{
+		Use:   "add [key=val ...]",
+		Short: "Add a new agent: name=... provider=... url=... model=... [api_key=...]",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigAgentAdd(strings.Join(args, " "))
+		},
+	})
+	return agentCmd
+}
+
+func runConfigAgentAdd(inline string) error {
+	ac := parseAgentInlineArgs(inline)
+	if ac.Name == "" {
+		return fmt.Errorf(`usage: milk config agent add name=<name> provider=<provider> url=<url> model=<model> [api_key=...] [bin=...] (see "milk config docs agent add")`)
+	}
+	if step := firstMissingStep(ac); step != addStepDone {
+		return fmt.Errorf(`missing a required field for provider %q — see "milk config docs agent add"`, ac.Provider)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if findAgentIdx(cfg, ac.Name) >= 0 {
+		return fmt.Errorf(`agent %q already exists — use "milk config open" to edit it`, ac.Name)
+	}
+	isFirst := len(cfg.Agents) == 0
+	cfg.Agents = append(cfg.Agents, ac)
+	if isFirst {
+		cfg.Agent = ac.Name
+	}
+	printConfigWarnings(cfg)
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("agent %q added\n", ac.Name)
+	return nil
 }
 
 func runConfigPrint() error {

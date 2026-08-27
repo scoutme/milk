@@ -867,13 +867,13 @@ On error: `[milk] config reload error: <reason>` is shown; the existing in-memor
 - All `Config` scalar fields: `direct_bash`, `show_reasoning`, `sticky_escalation`, agent limits, routing rules, OTel settings, etc.
 - Agent configs (name, URL, model, credentials) — effective on the **next turn**.
 - `direct_bash` / `direct_bash_allow` — effective immediately for the next prompt submitted.
+- **MCP server connections.** When the primary or escalation agent's `EffectiveMCPServers` resolution changes — a server's fields edited, a server added/removed, or an agent's `mcp_servers` list changed, via `/mcp`, `milk config mcp add|assign|unassign`, or a direct edit to `config.json` — milk closes the stale connections and rebuilds the toolset for the affected role(s), with no restart needed. This is gated on an actual change (compared against what was last built for that agent), not resolved on every turn, so turns where nothing changed pay no extra cost. A turn already in flight keeps using the runner/toolset snapshot it started with; only the next turn on an affected role sees the rebuilt one. `claude-cli`'s own MCP connections (made directly by the `claude` subprocess via `--mcp-config`, not by milk) pick up the change on their next invocation automatically, since that file is regenerated fresh every turn.
 
 ### What is NOT hot-reloaded
 
-- **MCP server connections** — existing connections are not restarted. When `mcp_servers` changes are detected, milk shows:
-  `[milk] note: mcp_servers changed — restart milk to apply MCP connection changes`
 - Active agent sessions — a running turn always uses the config that was active at turn start.
 - The `agents` list used to build TurnRunners — new agent instances are only built on the next turn.
+- MCP OAuth authorization (`auth: "oauth"`) — still requires the interactive `/mcp auth <server>` browser flow; no config edit or CLI command can obtain a token on the user's behalf.
 
 ---
 

@@ -1431,11 +1431,6 @@ func execMCPAdd(rest string, st *interactiveState) string {
 	if name == "" || url == "" {
 		return milkTag() + " usage: /mcp add name=<name> url=<url> [transport=http|sse] [auth=bearer|token_cmd] [api_key=…] [timeout=30s]"
 	}
-	for _, s := range st.cfg.MCPServers {
-		if strings.EqualFold(s.Name, name) {
-			return fmt.Sprintf("%s MCP server %q already exists — use /mcp enable/disable or /mcp remove first", milkTag(), name)
-		}
-	}
 	entry := config.MCPServerConfig{
 		Name:      name,
 		URL:       url,
@@ -1445,11 +1440,15 @@ func execMCPAdd(rest string, st *interactiveState) string {
 		TokenCmd:  fields["token_cmd"],
 		Timeout:   fields["timeout"],
 	}
-	st.cfg.MCPServers = append(st.cfg.MCPServers, entry)
+	updated := config.UpsertMCPServer(&st.cfg, entry)
 	if err := config.Save(st.cfg); err != nil {
 		return fmt.Sprintf("%s added MCP server %q (config save failed: %v)", milkTag(), name, err)
 	}
-	return fmt.Sprintf("%s MCP server %q added — use /mcp assign %s for <agent> to expose it", milkTag(), name, name)
+	verb := "added"
+	if updated {
+		verb = "updated"
+	}
+	return fmt.Sprintf("%s MCP server %q %s — use /mcp assign %s for <agent> to expose it", milkTag(), name, verb, name)
 }
 
 // execMCPRemove removes an MCP server by name, also cleaning up all agent references.
@@ -1540,6 +1539,55 @@ func execMCPTools(serverName string, st *interactiveState) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// mcpAssignOutcome describes the result of assignMCPServer.
+type mcpAssignOutcome int
+
+const (
+	mcpAssignOK mcpAssignOutcome = iota
+	mcpAssignNoop                // already assigned (assign) / not assigned (unassign) — nothing to do
+	mcpAssignServerNotFound
+	mcpAssignAgentNotFound
+)
+
+// assignMCPServer adds or removes serverName from agentName's mcp_servers
+// list in cfg. Shared by the TUI's /mcp assign|unassign and the headless
+// "milk config mcp assign|unassign" CLI subcommand — callers format their
+// own success/error messaging around the returned outcome.
+func assignMCPServer(cfg *config.Config, serverName, agentName string, assign bool) mcpAssignOutcome {
+	if findMCPServerIdx(cfg.MCPServers, serverName) < 0 {
+		return mcpAssignServerNotFound
+	}
+	acIdx := findAgentIdx(*cfg, agentName)
+	if acIdx < 0 {
+		return mcpAssignAgentNotFound
+	}
+	lower := strings.ToLower(serverName)
+	existing := cfg.Agents[acIdx].MCPServers
+	if assign {
+		for _, sn := range existing {
+			if strings.ToLower(sn) == lower {
+				return mcpAssignNoop
+			}
+		}
+		cfg.Agents[acIdx].MCPServers = append(existing, serverName)
+		return mcpAssignOK
+	}
+	var kept []string
+	found := false
+	for _, sn := range existing {
+		if strings.ToLower(sn) == lower {
+			found = true
+		} else {
+			kept = append(kept, sn)
+		}
+	}
+	if !found {
+		return mcpAssignNoop
+	}
+	cfg.Agents[acIdx].MCPServers = kept
+	return mcpAssignOK
+}
+
 // execMCPAssign adds or removes an MCP server reference from an agent's mcp_servers list.
 // rest is "<server-name> for <agent-name>".
 func execMCPAssign(rest string, assign bool, st *interactiveState) string {
@@ -1551,44 +1599,24 @@ func execMCPAssign(rest string, assign bool, st *interactiveState) string {
 	if !ok {
 		return fmt.Sprintf("%s usage: /mcp %s <server> for <agent>", milkTag(), verb)
 	}
-	if findMCPServerIdx(st.cfg.MCPServers, serverName) < 0 {
+	switch assignMCPServer(&st.cfg, serverName, agentName, assign) {
+	case mcpAssignServerNotFound:
 		return fmt.Sprintf("%s MCP server %q not found — add it first with /mcp add", milkTag(), serverName)
-	}
-	acIdx := findAgentIdx(st.cfg, agentName)
-	if acIdx < 0 {
+	case mcpAssignAgentNotFound:
 		return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-	}
-	lower := strings.ToLower(serverName)
-	existing := st.cfg.Agents[acIdx].MCPServers
-	if assign {
-		for _, sn := range existing {
-			if strings.ToLower(sn) == lower {
-				return fmt.Sprintf("%s MCP server %q already assigned to agent %q", milkTag(), serverName, agentName)
-			}
+	case mcpAssignNoop:
+		if assign {
+			return fmt.Sprintf("%s MCP server %q already assigned to agent %q", milkTag(), serverName, agentName)
 		}
-		st.cfg.Agents[acIdx].MCPServers = append(existing, serverName)
-	} else {
-		var kept []string
-		found := false
-		for _, sn := range existing {
-			if strings.ToLower(sn) == lower {
-				found = true
-			} else {
-				kept = append(kept, sn)
-			}
-		}
-		if !found {
-			return fmt.Sprintf("%s MCP server %q not assigned to agent %q", milkTag(), serverName, agentName)
-		}
-		st.cfg.Agents[acIdx].MCPServers = kept
+		return fmt.Sprintf("%s MCP server %q not assigned to agent %q", milkTag(), serverName, agentName)
 	}
 	if err := config.Save(st.cfg); err != nil {
 		return fmt.Sprintf("%s %sed %q for agent %q (config save failed: %v)", milkTag(), verb, serverName, agentName, err)
 	}
 	if assign {
-		return fmt.Sprintf("%s MCP server %q assigned to agent %q — restart milk to connect", milkTag(), serverName, agentName)
+		return fmt.Sprintf("%s MCP server %q assigned to agent %q", milkTag(), serverName, agentName)
 	}
-	return fmt.Sprintf("%s MCP server %q unassigned from agent %q — restart milk to disconnect", milkTag(), serverName, agentName)
+	return fmt.Sprintf("%s MCP server %q unassigned from agent %q", milkTag(), serverName, agentName)
 }
 
 // parseMCPAssignArgs parses "<server> for <agent>" from the rest string.
