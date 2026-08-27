@@ -213,6 +213,13 @@ type Agent struct {
 	// onToolUse is called just before each tool is dispatched, with the tool name
 	// and a short human-readable summary of its key argument.
 	onToolUse func(name, summary string)
+	// onToolResult is called just after each tool finishes, with the tool name
+	// and its result content (the same string stored as the tool message).
+	onToolResult func(name, result string)
+	// onResponseSegment is called with each contiguous chunk of assistant text
+	// as it completes — once per tool-calling round before its tools dispatch,
+	// and once more with the final round's text.
+	onResponseSegment func(string)
 	// onThinking is called on reasoning_content tokens from reasoning models
 	// (Qwen thinking, DeepSeek-R1, etc.). Mirrors the Claude CLI's onThinking.
 	onThinking func(string)
@@ -597,6 +604,22 @@ func (a *Agent) WithOnToolUse(fn func(name, summary string)) *Agent {
 	return &copy
 }
 
+// WithOnToolResult returns a shallow copy of the agent that calls fn just
+// after each tool finishes dispatching, with its result content.
+func (a *Agent) WithOnToolResult(fn func(name, result string)) *Agent {
+	copy := *a
+	copy.onToolResult = fn
+	return &copy
+}
+
+// WithOnResponseSegment returns a shallow copy of the agent that calls fn
+// with each contiguous chunk of assistant text as it completes.
+func (a *Agent) WithOnResponseSegment(fn func(string)) *Agent {
+	copy := *a
+	copy.onResponseSegment = fn
+	return &copy
+}
+
 // WithOnThinking sets the callback fired on reasoning_content tokens from
 // reasoning models (Qwen thinking, DeepSeek-R1, etc.).
 func (a *Agent) WithOnThinking(fn func(string)) *Agent {
@@ -934,6 +957,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 				// blank/near-blank text streamCompletion returned.
 				resp = summarizeToolTrail(msgs, resp)
 			}
+			if a.onResponseSegment != nil && resp != "" {
+				a.onResponseSegment(resp)
+			}
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}
@@ -958,11 +984,18 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
 				resp = summarizeToolTrail(msgs, resp)
 			}
+			if a.onResponseSegment != nil && resp != "" {
+				a.onResponseSegment(resp)
+			}
 			msgs = append(msgs, Message{Role: "assistant", Content: resp})
 			return msgs, nil
 		}
 		for _, tc := range toolCalls {
 			executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
+		}
+
+		if a.onResponseSegment != nil && resp != "" {
+			a.onResponseSegment(resp)
 		}
 
 		var esc *EscalationSignal
@@ -981,6 +1014,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	obs.Warn("exceeded maximum tool iterations", "model", a.model,
 		"agent", agentRoleForMetrics(a.escalationName), "max_iter", maxIter)
 	resp := summarizeToolTrail(msgs, "")
+	if a.onResponseSegment != nil && resp != "" {
+		a.onResponseSegment(resp)
+	}
 	msgs = append(msgs, Message{Role: "assistant", Content: resp})
 	return msgs, nil
 }
@@ -1149,6 +1185,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		}(i, tc)
 	}
 	wg.Wait()
+
+	if a.onToolResult != nil {
+		for i, tc := range toolCalls {
+			if strings.HasPrefix(tc.Function.Name, "agent_") {
+				continue
+			}
+			a.onToolResult(tc.Function.Name, outcomes[i].msg.Content)
+		}
+	}
 
 	// Collect results in order; stop on first escalation signal.
 	for _, outcome := range outcomes {

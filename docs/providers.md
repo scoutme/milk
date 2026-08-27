@@ -809,12 +809,13 @@ Follows the prompts: paste your bot token from @BotFather, send the bot a messag
 | `notify_tools` | true | Forward escalation agent tool-call notifications. |
 
 **What gets forwarded:**
-- Turn start (agent name, target, prompt snippet)
+- Turn start (agent name, target, prompt snippet) — including workflow role turns (designer/generator/evaluator and generic interp-driven roles), labeled `workflow:<role>`
 - Tool calls (name + key argument)
-- Agent response text (capped at 3000 chars)
+- Tool results (truncated summary of the tool's output, capped at 500 chars)
+- Agent response text (capped at 3000 chars), sent as it's produced — for the Claude CLI and local agents, each chunk of text between tool calls arrives as its own message (matching what the TUI transcript shows live), not one bundled message at the end of the turn
 - Permission prompts with y/n reply — first response (TUI or Telegram) wins
 
-**Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Ignored while an agent turn is in progress.
+**Remote input:** send any message to the bot and it is injected as a new turn (shown as `[telegram] …` in the transcript). Queued while an agent turn is in progress and delivered as the next turn once it completes.
 
 ---
 

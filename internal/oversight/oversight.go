@@ -32,6 +32,11 @@ type Notifier interface {
 	// NotifyToolUse fires when the escalation agent begins a tool call.
 	NotifyToolUse(ctx context.Context, toolName, summary string)
 
+	// NotifyToolResult fires when a tool call completes, forwarding a
+	// truncated summary of its output. isError reports whether the tool
+	// itself reported a failure (not a transport-level error).
+	NotifyToolResult(ctx context.Context, toolName, summary string, isError bool)
+
 	// NotifyTurnDone fires when a turn completes (or errors).
 	NotifyTurnDone(ctx context.Context, agent string, err error)
 
@@ -47,10 +52,11 @@ type Notifier interface {
 // Noop is a no-op Notifier used when remote oversight is disabled.
 type Noop struct{}
 
-func (Noop) NotifyTurnStart(_ context.Context, _, _, _ string)   {}
-func (Noop) NotifyToolUse(_ context.Context, _, _ string)        {}
-func (Noop) NotifyTurnDone(_ context.Context, _ string, _ error) {}
-func (Noop) NotifyResponse(_ context.Context, _, _ string)       {}
+func (Noop) NotifyTurnStart(_ context.Context, _, _, _ string)       {}
+func (Noop) NotifyToolUse(_ context.Context, _, _ string)            {}
+func (Noop) NotifyToolResult(_ context.Context, _, _ string, _ bool) {}
+func (Noop) NotifyTurnDone(_ context.Context, _ string, _ error)     {}
+func (Noop) NotifyResponse(_ context.Context, _, _ string)           {}
 func (Noop) AskPermission(_ context.Context, _ PermRequest) PermDecision {
 	return PermAllow
 }

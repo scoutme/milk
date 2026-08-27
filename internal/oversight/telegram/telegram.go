@@ -185,6 +185,21 @@ func (n *Notifier) NotifyToolUse(_ context.Context, toolName, summary string) {
 	n.sendAsync(msg)
 }
 
+func (n *Notifier) NotifyToolResult(_ context.Context, toolName, summary string, isError bool) {
+	if summary == "" {
+		return
+	}
+	const maxLen = 500
+	if len(summary) > maxLen {
+		summary = summary[:maxLen] + "\n…"
+	}
+	icon := "📤"
+	if isError {
+		icon = "❌"
+	}
+	n.sendAsync(fmt.Sprintf("%s *%s*\n`%s`", icon, escMD(toolName), escMD(summary)))
+}
+
 func (n *Notifier) NotifyTurnDone(_ context.Context, agent string, err error) {
 	if err != nil {
 		n.sendAsync(fmt.Sprintf("❌ *%s* error: `%s`", escMD(agent), escMD(err.Error())))

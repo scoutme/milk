@@ -92,7 +92,7 @@ func TestRunPrimaryWithSession_TokenAccountingOrder(t *testing.T) {
 	cfg := config.Config{Agents: []config.AgentConfig{{Name: "test-primary", Provider: "local"}}}
 
 	if err := runPrimaryWithSession(context.Background(), cfg, sess, runner, nil, nil,
-		"hi", "hi", &out, nil, nil); err != nil {
+		"hi", "hi", &out, nil, nil, nil); err != nil {
 		t.Fatalf("runPrimaryWithSession returned error: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestRunEscalationWithSession_TokenAccountingOrder(t *testing.T) {
 	var out bytes.Buffer
 
 	if err := runEscalationWithSession(context.Background(), config.Config{}, sess, runner, "brief", nil,
-		"hi", "hi", "", &out, nil); err != nil {
+		"hi", "hi", "", &out, nil, nil); err != nil {
 		t.Fatalf("runEscalationWithSession returned error: %v", err)
 	}
 

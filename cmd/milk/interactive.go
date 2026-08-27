@@ -391,6 +391,11 @@ type interactiveState struct {
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
 	notifier        oversight.Notifier
 
+	// pendingRemoteInputs queues messages received from the remote oversight
+	// interface (e.g. Telegram) while a turn is in progress. Drained one at a
+	// time by handleAgentDone once the current turn completes.
+	pendingRemoteInputs []string
+
 	// lastEscalationContextHash is a short hash of the last --append-system-prompt-file
 	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
 	lastEscalationContextHash string

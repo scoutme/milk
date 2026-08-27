@@ -32,9 +32,10 @@ func runPrimary(
 	out io.Writer,
 	da *dispatchAgents,
 	onResponse func(string),
+	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
-	return runPrimaryWithSession(ctx, cfg, sess, runner, escalationRunner, mem, prompt, prompt, out, da, onResponse, prefixOut...)
+	return runPrimaryWithSession(ctx, cfg, sess, runner, escalationRunner, mem, prompt, prompt, out, da, onResponse, onSegment, prefixOut...)
 }
 
 // runPrimaryWithSession is like runPrimary but accepts a separate sessionContent
@@ -53,6 +54,7 @@ func runPrimaryWithSession(
 	out io.Writer,
 	da *dispatchAgents,
 	onResponse func(string),
+	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
 	ac := cfg.ActiveAgent()
@@ -84,10 +86,11 @@ func runPrimaryWithSession(
 	escalationName := cfg.EscalationAgentConfig().Name
 
 	cbs := TurnCallbacks{
-		OnNeed:     func(body string) { sess.RecordNeed(body) },
-		OnPercept:  buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
-		OnEscalate: func(reason string) {}, // captured via TurnResult.EscalationReason
-		OnResponse: onResponse,
+		OnNeed:            func(body string) { sess.RecordNeed(body) },
+		OnPercept:         buildPerceptCallback(ctx, mem, primaryName, escalationName, false),
+		OnEscalate:        func(reason string) {}, // captured via TurnResult.EscalationReason
+		OnResponse:        onResponse,
+		OnResponseSegment: onSegment,
 	}
 
 	// Wire tool-agent dispatcher into local runners when dispatchAgents is available.
@@ -158,11 +161,11 @@ func runPrimaryWithSession(
 		session.Save(sess) //nolint:errcheck
 
 		if escalationRunner != nil {
-			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, onResponse)
+			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, onResponse, onSegment)
 		}
 		// Fallback: build CLI escalation runner on-demand.
 		cliEsc := buildFallbackCLIRunner(cfg)
-		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, onResponse)
+		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, onResponse, onSegment)
 	}
 
 	logStateTransition(sess, session.StateRouting, agentName+" primary done")
@@ -182,9 +185,10 @@ func runEscalation(
 	prompt string,
 	out io.Writer,
 	onResponse func(string),
+	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, onResponse, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, onResponse, onSegment, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
@@ -203,6 +207,7 @@ func runEscalationWithSession(
 	imageContextFile string,
 	out io.Writer,
 	onResponse func(string),
+	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
 	escAC := cfg.EscalationAgentConfig()
@@ -277,10 +282,11 @@ func runEscalationWithSession(
 	}
 
 	cbs := TurnCallbacks{
-		OnNeed:           func(body string) { sess.RecordNeed(body) },
-		OnPercept:        buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
-		OnResponse:       onResponse,
-		ImageContextFile: imageContextFile,
+		OnNeed:            func(body string) { sess.RecordNeed(body) },
+		OnPercept:         buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
+		OnResponse:        onResponse,
+		OnResponseSegment: onSegment,
+		ImageContextFile:  imageContextFile,
 	}
 
 	res, err := runner.Execute(ctx, cfg, sess, mem, RoleEscalation, ctxMode,
