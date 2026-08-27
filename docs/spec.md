@@ -109,6 +109,7 @@ Any agent in the `agents` list can be exposed as a callable tool to any other ag
 
 Decision order per turn:
 
+0. **`!` direct-execution mode** — pressing `!` as the first character of an empty textarea enters bang mode (Claude Code-style): the `!` is consumed rather than inserted, the prompt symbol switches live to a red `!`, and the rest of the line (e.g. `git pull`) is typed as plain text with no leading `!`. Submitting runs it immediately as a shell command, no confirmation, regardless of `direct_bash` — this is an explicit user action, not a heuristic, so it always takes priority over slash-command handling and the direct-bash heuristic below. Backspacing an empty bang-mode buffer, or Ctrl+C, exits the mode and reverts to the normal prompt. Non-interactive input (e.g. Telegram) that arrives as a literal `!`-prefixed string is still recognized at submit time.
 0. **Direct-bash shortcut** — when `direct_bash: true` is set in config and the input matches the shell-command heuristic (`IsShellCommand`), milk prompts for `y/N` confirmation before running the command locally via `sh -c`. If the first token is in `direct_bash_allow`, confirmation is skipped. This fires _after_ slash-command handling (so `/git` still works as a slash command) but _before_ agent routing; matching inputs that are not slash commands never reach the agent.
 1. **Explicit flags** — `--escalate` forces escalation agent; `--primary` forces primary (always wins)
 2. **Session state** — if `ESCALATION_WAITING`, bypass router, send directly to escalation agent `--resume`

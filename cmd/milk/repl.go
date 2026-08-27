@@ -576,6 +576,15 @@ type model struct {
 	// shell command directly. The string holds the command to run on approval.
 	pendingDirectBash *string
 
+	// bangMode is true after the user presses "!" as the first character of
+	// an empty textarea — the Claude Code-style direct-execution-mode trigger.
+	// The "!" itself is consumed (never inserted into the textarea); only the
+	// prompt label changes to a red "!" while active. Entered/exited in
+	// handleKey (on "!" / backspace-on-empty), handleCtrlC (clearing the
+	// line), and handleEnter (on submit, which re-prepends "!" to the
+	// submitted text so submitInput's stripBangPrefix still applies).
+	bangMode bool
+
 	// ptyPane is non-nil while a shell command is running inside an embedded PTY.
 	ptyPane *ptyPaneState
 
@@ -712,6 +721,8 @@ func (m *model) refreshPrompt() {
 			dir = "f"
 		}
 		label = yellow("("+dir+"-search)") + " ❯ "
+	} else if m.bangMode {
+		label = red("!") + " "
 	} else {
 		label = promptLabel(m.st)
 	}
@@ -1857,7 +1868,31 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg)
 	}
 
+	// "!" as the first character of an empty textarea enters bang mode:
+	// consume the leading "!" (don't insert it) and switch the prompt label.
+	// Checked against msg.Runes rather than msg.String() == "!" because fast
+	// typing (or scripted input) can deliver several characters in a single
+	// KeyMsg — e.g. "!echo hi" arriving as one tea.KeyRunes burst — and a
+	// plain string match on "!" alone would miss that and insert it literally.
+	if !m.bangMode && m.ta.Value() == "" && msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == '!' {
+		m.bangMode = true
+		if rest := string(msg.Runes[1:]); rest != "" {
+			m.ta.InsertString(rest)
+		}
+		m.refreshPrompt()
+		m.syncLayout()
+		return m, nil
+	}
+
 	switch msg.String() {
+	case "backspace":
+		// Backspacing an empty buffer while in bang mode exits the mode
+		// instead of being a no-op.
+		if m.bangMode && m.ta.Value() == "" {
+			m.bangMode = false
+			m.refreshPrompt()
+			return m, nil
+		}
 	case "ctrl+z":
 		undoDebugLog("KEY ctrl+z val=%q undoStack=%d redoStack=%d lastUndoValue=%q", m.ta.Value(), len(m.undoStack), len(m.redoStack), m.lastUndoValue)
 		if m.undoApply(&m.undoStack, &m.redoStack) {
@@ -2220,8 +2255,9 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.setViewportContent()
 		return m, copyFeedbackClearCmd()
 	}
-	if m.ta.Value() != "" {
+	if m.bangMode || m.ta.Value() != "" {
 		m.ta.Reset()
+		m.bangMode = false
 
 		m.tabMatches = nil
 		m.tabIdx = -1
@@ -2233,6 +2269,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.tabSubcmdMode = false
 		m.tabHints = nil
 		m.tabHintsBase = nil
+		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
 	}
@@ -2258,6 +2295,14 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
+	// Bang mode consumed the "!" at keystroke time so it never lived in the
+	// textarea; re-prepend it here so submitInput's stripBangPrefix still
+	// recognizes this as a direct-execution command.
+	if m.bangMode {
+		input = "!" + input
+		m.bangMode = false
+		m.refreshPrompt()
+	}
 	m.ta.Reset()
 
 	m.tabMatches = nil
@@ -2331,6 +2376,16 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 		// event when the clipboard holds only binary data (image, PDF, etc.), so the
 		// automatic empty-paste hook cannot fire. /paste covers that gap.
 		return m, m.probeClipboardCmd()
+	}
+
+	// "!" prefix: explicit direct-execution mode (Claude Code style). Always
+	// available regardless of the direct_bash config, and skips confirmation —
+	// the leading "!" is itself an unambiguous request to run a shell command.
+	if shellCmd, ok := stripBangPrefix(input); ok {
+		if shellCmd == "" {
+			return m, nil
+		}
+		return m.launchPTYPane(shellCmd)
 	}
 
 	if cmd, rest, found := extractSlashCommand(input); found {
