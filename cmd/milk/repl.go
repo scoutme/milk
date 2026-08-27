@@ -822,6 +822,12 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.colorizeForce = true // turn finished — force a clean full re-colorize
 	m.refreshPrompt()
 	m.syncLayout()
+
+	if len(m.st.pendingRemoteInputs) > 0 {
+		next := m.st.pendingRemoteInputs[0]
+		m.st.pendingRemoteInputs = m.st.pendingRemoteInputs[1:]
+		return m.submitInput(next, dim("[telegram]")+" ")
+	}
 	return m, nil
 }
 
@@ -1194,10 +1200,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case remoteInputMsg:
-		if !m.busy && msg.text != "" {
-			return m.submitInput(msg.text, dim("[telegram]")+" ")
+		if msg.text == "" {
+			return m, nil
 		}
-		return m, nil
+		if m.busy {
+			m.st.pendingRemoteInputs = append(m.st.pendingRemoteInputs, msg.text)
+			return m, nil
+		}
+		return m.submitInput(msg.text, dim("[telegram]")+" ")
 
 	case telegramGetMeMsg:
 		if msg.err != nil {
@@ -2411,6 +2421,11 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 				}
 				send(chunkMsg{text: hint})
 			}).
+			WithOnToolResult(func(name, result string, isError bool) {
+				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+					st.notifier.NotifyToolResult(context.Background(), name, result, isError)
+				}
+			}).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
 		tuiAgents.cliAgent = tuiCliAgent
@@ -2441,12 +2456,20 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			st.notifier.NotifyToolUse(context.Background(), name, summary)
 		}
 	}
+	localOnToolResult := func(name, result string) {
+		if st.cfg.RemoteOversight.NotifyToolsEnabled() {
+			// toolResult.String() omits the "error" key entirely when empty.
+			isError := strings.Contains(result, `"error":"`)
+			st.notifier.NotifyToolResult(context.Background(), name, result, isError)
+		}
+	}
 	if agents.local != nil {
 		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnToolUse(localOnToolUse).
+			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
 		tuiAgents.local = tuiLocalAgent
@@ -2458,6 +2481,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnToolUse(localOnToolUse).
+			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
 		tuiAgents.escalationLocal = tuiEscLocal
@@ -2589,6 +2613,17 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	var lastResponseText string
 	onResponse := func(text string) { lastResponseText = text }
 
+	// onSegment forwards each completed text chunk to remote oversight as it
+	// happens (interleaved with tool-call notifications), instead of waiting
+	// for the whole turn to finish. Only cliRunner/localRunner call it; other
+	// runners leave segmentsFired false and the final NotifyResponse below
+	// (using the full lastResponseText) covers them as before.
+	var segmentsFired bool
+	onSegment := func(text string) {
+		segmentsFired = true
+		st.notifier.NotifyResponse(turnCtx, agentName, text)
+	}
+
 	// sessionContent is the compact version stored in history (with attachment
 	// placeholders). Falls back to input when no attachment override is set.
 	sessionContent := input
@@ -2607,11 +2642,11 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		}
 		// Local path: CLI image temp files not needed; clean up.
 		cleanupCLIImageFiles(st)
-		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, pw)
+		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, onSegment, pw)
 	case router.TargetEscalation:
 		imageCtxFile := st.pendingImageContextFile
 		st.pendingImageContextFile = ""
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, onResponse, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, onResponse, onSegment, pw)
 		// CLI image temp files are no longer needed after the turn.
 		cleanupCLIImageFiles(st)
 	}
@@ -2631,7 +2666,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	}
 	st.notifier.NotifyTurnDone(turnCtx, agentName, turnErr)
 	if turnErr == nil {
-		if lastResponseText != "" {
+		if !segmentsFired && lastResponseText != "" {
 			st.notifier.NotifyResponse(turnCtx, agentName, lastResponseText)
 		}
 		// Auto-sticky: if the router decided to escalate (not user-pinned) and the

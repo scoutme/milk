@@ -23,25 +23,27 @@ const claudeScope = "github.com/scoutme/milk"
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin               string                       // path to claude binary, e.g. "claude"
-	skipPermissions   bool                         // pass --dangerously-skip-permissions to the CLI
-	allowedTools      []string                     // tools pre-approved via --allowedTools
-	addDirs           []string                     // extra directories granted via --add-dir
-	settingsJSON      []byte                       // optional --settings payload (written to temp file at invocation)
-	permissionHandler PermissionHandler            // nil → denyAllHandler
-	debugLog          io.Writer                    // when non-nil, every raw NDJSON line is written here
-	onToolUse         func(string)                 // called on content_block_start tool_use events
-	onToolUseReady    func(string, map[string]any) // called on content_block_stop with full input
-	onThinking        func(string)                 // called on thinking_delta tokens
-	onPercept         func(string, string)         // called for each <milk:percept:NONCE> tag; args: content, consumerHint
-	perceptNonce      string                       // session-specific nonce matching the system-prompt instruction
-	agentNames        []string                     // [primaryName, escalationName] for @<name>: consumer-hint parsing
-	onNeed            func(string)                 // called for each <milk:need:NONCE> tag; arg: new current-need text
-	needNonce         string                       // session-specific nonce matching the system-prompt need instruction
-	extraEnv          []string                     // extra KEY=VALUE pairs injected into subprocess env
-	logContext        bool                         // when true, log system context and prompt at DEBUG level
-	mcpServers        []config.MCPServerConfig     // MCP servers to expose via --mcp-config
-	onOAuthRequired   func(serverName, url string) // called when stderr indicates an OAuth challenge
+	bin               string                                  // path to claude binary, e.g. "claude"
+	skipPermissions   bool                                    // pass --dangerously-skip-permissions to the CLI
+	allowedTools      []string                                // tools pre-approved via --allowedTools
+	addDirs           []string                                // extra directories granted via --add-dir
+	settingsJSON      []byte                                  // optional --settings payload (written to temp file at invocation)
+	permissionHandler PermissionHandler                       // nil → denyAllHandler
+	debugLog          io.Writer                               // when non-nil, every raw NDJSON line is written here
+	onToolUse         func(string)                            // called on content_block_start tool_use events
+	onToolUseReady    func(string, map[string]any)            // called on content_block_stop with full input
+	onThinking        func(string)                            // called on thinking_delta tokens
+	onToolResult      func(name, result string, isError bool) // called on type:"user" tool_result blocks
+	onResponseSegment func(string)                            // called with each completed text segment, see WithOnResponseSegment
+	onPercept         func(string, string)                    // called for each <milk:percept:NONCE> tag; args: content, consumerHint
+	perceptNonce      string                                  // session-specific nonce matching the system-prompt instruction
+	agentNames        []string                                // [primaryName, escalationName] for @<name>: consumer-hint parsing
+	onNeed            func(string)                            // called for each <milk:need:NONCE> tag; arg: new current-need text
+	needNonce         string                                  // session-specific nonce matching the system-prompt need instruction
+	extraEnv          []string                                // extra KEY=VALUE pairs injected into subprocess env
+	logContext        bool                                    // when true, log system context and prompt at DEBUG level
+	mcpServers        []config.MCPServerConfig                // MCP servers to expose via --mcp-config
+	onOAuthRequired   func(serverName, url string)            // called when stderr indicates an OAuth challenge
 }
 
 func New(bin string) *Agent {
@@ -100,6 +102,23 @@ func (a *Agent) OnToolUseCallback() func(string) { return a.onToolUse }
 func (a *Agent) WithOnToolUseReady(fn func(string, map[string]any)) *Agent {
 	c := *a
 	c.onToolUseReady = fn
+	return &c
+}
+
+// WithOnToolResult returns a copy of the agent that calls fn when a
+// tool_result block arrives for a completed tool call.
+func (a *Agent) WithOnToolResult(fn func(name, result string, isError bool)) *Agent {
+	c := *a
+	c.onToolResult = fn
+	return &c
+}
+
+// WithOnResponseSegment returns a copy of the agent that calls fn with each
+// contiguous chunk of assistant text as it completes — once right before each
+// tool call starts, and once more for the trailing text when the turn ends.
+func (a *Agent) WithOnResponseSegment(fn func(string)) *Agent {
+	c := *a
+	c.onResponseSegment = fn
 	return &c
 }
 
@@ -518,16 +537,18 @@ func (a *Agent) runPipe(ctx context.Context, args []string, out io.Writer) (Pars
 	}
 
 	res, parseErr := Stream(stdout, out, stdinPipe, StreamOpts{
-		OnPermission:   a.permissionHandler,
-		OnToolUse:      a.onToolUse,
-		OnToolUseReady: a.onToolUseReady,
-		OnThinking:     a.onThinking,
-		OnPercept:      a.onPercept,
-		PerceptNonce:   a.perceptNonce,
-		AgentNames:     a.agentNames,
-		OnNeed:         a.onNeed,
-		NeedNonce:      a.needNonce,
-		DebugLog:       a.debugLog,
+		OnPermission:      a.permissionHandler,
+		OnToolUse:         a.onToolUse,
+		OnToolUseReady:    a.onToolUseReady,
+		OnThinking:        a.onThinking,
+		OnToolResult:      a.onToolResult,
+		OnResponseSegment: a.onResponseSegment,
+		OnPercept:         a.onPercept,
+		PerceptNonce:      a.perceptNonce,
+		AgentNames:        a.agentNames,
+		OnNeed:            a.onNeed,
+		NeedNonce:         a.needNonce,
+		DebugLog:          a.debugLog,
 	})
 
 	// Close stdin after stream ends so Claude can exit cleanly.

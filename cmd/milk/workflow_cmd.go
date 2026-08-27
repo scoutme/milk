@@ -580,7 +580,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 }, m.st.notifier)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
 		return m, nil
@@ -823,7 +823,7 @@ func (m model) launchWorkflowResume(w *workflowWizardState, sprint, pass, maxPas
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 })
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 }, m.st.notifier)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow resume error: " + err.Error() + "\n")
 		return m, nil

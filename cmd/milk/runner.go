@@ -95,6 +95,12 @@ type TurnCallbacks struct {
 	OnPercept  func(body, consumerHint string)
 	OnEscalate func(reason string) // nil for escalation runners (they never self-escalate)
 	OnResponse func(text string)   // called with the agent's final text after a successful turn
+	// OnResponseSegment, when set, is called with each contiguous chunk of
+	// assistant text as it completes — before each tool call and once more for
+	// the trailing text. Concatenating every call in order reproduces the full
+	// response. Only cliRunner and localRunner support this; other runners
+	// simply never call it, and the caller falls back to OnResponse.
+	OnResponseSegment func(text string)
 	// ImageContextFile is an optional path to a temp file containing image data-URI
 	// blocks. CLI runners append it via --append-system-prompt-file to avoid
 	// inlining large base64 strings in the prompt argument (ARG_MAX).
@@ -186,6 +192,10 @@ func (r *localRunner) Execute(
 
 	if role == RoleWorkflow {
 		agent = agent.AsWorkflowExecutor()
+	}
+
+	if cbs.OnResponseSegment != nil {
+		agent = agent.WithOnResponseSegment(cbs.OnResponseSegment)
 	}
 
 	primaryName := cfg.ActiveAgent().Name
@@ -399,6 +409,9 @@ func (r *cliRunner) Execute(
 	}
 	if cbs.OnNeed != nil {
 		agent = agent.WithOnNeed(cbs.OnNeed, nonce)
+	}
+	if cbs.OnResponseSegment != nil {
+		agent = agent.WithOnResponseSegment(cbs.OnResponseSegment)
 	}
 	if len(r.mcpServers) > 0 {
 		agent = agent.WithMCPServers(r.mcpServers)

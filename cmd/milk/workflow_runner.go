@@ -11,6 +11,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
@@ -32,6 +33,7 @@ type workflowTurnRunner struct {
 	roleName  string // human-readable role (designer, generator, evaluator)
 	nonce     string
 	sessionID string // persists across passes for this role; set after first Execute
+	notifier  oversight.Notifier
 }
 
 func (r *workflowTurnRunner) Name() string { return r.inner.Name() }
@@ -48,6 +50,12 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 		r.nonce = claude.GenerateNonce()
 	}
 
+	r.notifier.NotifyTurnStart(ctx, r.inner.Name(), "workflow:"+r.roleName, prompt)
+
+	// segmentsFired tracks whether OnResponseSegment already forwarded this
+	// turn's text piecemeal (interleaved with tool calls); when it did, the
+	// final NotifyResponse below is skipped to avoid resending the same text.
+	var segmentsFired bool
 	res, err := r.inner.Execute(
 		ctx,
 		r.cfg,
@@ -60,16 +68,26 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 		nil,   // percepts: not injected for workflow turns
 		false, // injectInstructions: not needed for workflow turns
 		prompt,
-		TurnCallbacks{},
+		TurnCallbacks{OnResponseSegment: func(text string) {
+			segmentsFired = true
+			r.notifier.NotifyResponse(ctx, r.inner.Name(), text)
+		}},
 		out,
 	)
 	if err != nil {
+		r.notifier.NotifyTurnDone(ctx, r.inner.Name(), err)
 		return "", err
 	}
 	if res.EscalationReason != "" {
 		// Local agent fired an escalation signal — no escalation target exists in a
 		// workflow role. Treat it as an error so the workflow halts with a clear message.
-		return "", fmt.Errorf("workflow role %q escalated unexpectedly: %s", r.roleName, res.EscalationReason)
+		err := fmt.Errorf("workflow role %q escalated unexpectedly: %s", r.roleName, res.EscalationReason)
+		r.notifier.NotifyTurnDone(ctx, r.inner.Name(), err)
+		return "", err
+	}
+	r.notifier.NotifyTurnDone(ctx, r.inner.Name(), nil)
+	if !segmentsFired {
+		r.notifier.NotifyResponse(ctx, r.inner.Name(), res.Text)
 	}
 	if res.NewSessionID != "" {
 		r.sessionID = res.NewSessionID
@@ -115,7 +133,11 @@ func buildWorkflowRunners(
 	da *dispatchAgents,
 	cliPC permContext,
 	newInput func() inputReader,
+	notifier oversight.Notifier,
 ) (map[string]workflow.TurnRunner, error) {
+	if notifier == nil {
+		notifier = oversight.Noop{}
+	}
 	primaryName := ""
 	if da.primary != nil {
 		primaryName = da.primary.Name()
@@ -162,6 +184,7 @@ func buildWorkflowRunners(
 			mem:      mem,
 			role:     RoleWorkflow,
 			roleName: role,
+			notifier: notifier,
 		}
 	}
 	return out, nil
