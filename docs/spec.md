@@ -862,12 +862,19 @@ The `/reload` slash command triggers an immediate re-parse — useful when the f
 On success: `[milk] config reloaded` appears in the transcript.
 On error: `[milk] config reload error: <reason>` is shown; the existing in-memory config is kept unchanged.
 
+### Recovering from a corrupted config.json
+
+Two distinct safety nets cover a `config.json` that ends up syntactically invalid (e.g. from a bad automated edit by an agent given direct file access):
+
+- **While milk is already running**, the reload path above already keeps the last-known-good in-memory config — the error is shown, nothing crashes, nothing is lost, and the session keeps working normally until the file is fixed.
+- **At startup**, `Load`/`LoadFrom` fall back to `config.json.bak` — a backup refreshed on every successful `Save` and every successful parse. If the primary file fails to parse but the backup does, milk starts normally using the backup's content and shows a startup warning (`... was invalid (...) — recovered from backup; run "milk config open" to fix or replace it`) instead of refusing to launch. Only a `config.json` that was **never** successfully loaded before (no backup exists) still hard-fails, with a message pointing at `milk config open` to fix it by hand.
+
 ### What IS hot-reloaded
 
 - All `Config` scalar fields: `direct_bash`, `show_reasoning`, `sticky_escalation`, agent limits, routing rules, OTel settings, etc.
 - Agent configs (name, URL, model, credentials) — effective on the **next turn**.
 - `direct_bash` / `direct_bash_allow` — effective immediately for the next prompt submitted.
-- **MCP server connections.** When the primary or escalation agent's `EffectiveMCPServers` resolution changes — a server's fields edited, a server added/removed, or an agent's `mcp_servers` list changed, via `/mcp`, `milk config mcp add|assign|unassign`, or a direct edit to `config.json` — milk closes the stale connections and rebuilds the toolset for the affected role(s), with no restart needed. This is gated on an actual change (compared against what was last built for that agent), not resolved on every turn, so turns where nothing changed pay no extra cost. A turn already in flight keeps using the runner/toolset snapshot it started with; only the next turn on an affected role sees the rebuilt one. `claude-cli`'s own MCP connections (made directly by the `claude` subprocess via `--mcp-config`, not by milk) pick up the change on their next invocation automatically, since that file is regenerated fresh every turn.
+- **MCP server connections.** When the primary or escalation agent's `EffectiveMCPServers` resolution changes — a server's fields edited, a server added/removed, or an agent's `mcp_servers` list changed, via `/mcp`, `milk config mcp add|remove|assign|unassign`, or a direct edit to `config.json` — milk closes the stale connections and rebuilds the toolset for the affected role(s), with no restart needed. This is gated on an actual change (compared against what was last built for that agent), not resolved on every turn, so turns where nothing changed pay no extra cost. A turn already in flight keeps using the runner/toolset snapshot it started with; only the next turn on an affected role sees the rebuilt one. `claude-cli`'s own MCP connections (made directly by the `claude` subprocess via `--mcp-config`, not by milk) pick up the change on their next invocation automatically, since that file is regenerated fresh every turn.
 
 ### What is NOT hot-reloaded
 
