@@ -2777,7 +2777,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 
 // --- runREPL entry point ---
 
-func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string) error {
+func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string, startupWarning string) error {
 	sess, err := loadSession(cwd, initialFlagNew, initialFlagSession)
 	if err != nil {
 		return fmt.Errorf("loading session: %w", err)
@@ -3067,6 +3067,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.taskStore = taskStore
 	m.hasInferenceAgent = cfg.HasInferenceAgent()
+	if startupWarning != "" {
+		m.startupWarnings = append(m.startupWarnings, startupWarning)
+	}
 	for _, w := range config.Validate(cfg) {
 		m.startupWarnings = append(m.startupWarnings, w.String())
 	}

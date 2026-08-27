@@ -111,8 +111,16 @@ func run(cmd *cobra.Command, args []string) error {
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 
 	cfg, err := config.Load()
+	startupWarning := ""
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		var recovered *config.ErrConfigRecovered
+		if !errors.As(err, &recovered) {
+			return fmt.Errorf("loading config: %w — fix it by hand (milk config open) or remove it to regenerate defaults", err)
+		}
+		// Recovered from backup: cfg is the last known-good config, not a
+		// hard failure. Warn instead of refusing to start.
+		startupWarning = recovered.Error()
+		fmt.Fprintf(os.Stderr, "%s warning: %s\n", milkTag(), startupWarning)
 	}
 
 	// Apply CLI overrides for agent selection.
@@ -129,7 +137,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	if prompt == "" {
-		return runREPL(cfg, cwd, flagNew, flagSession)
+		return runREPL(cfg, cwd, flagNew, flagSession, startupWarning)
 	}
 
 	for _, w := range config.Validate(cfg) {
