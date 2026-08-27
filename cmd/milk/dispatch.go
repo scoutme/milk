@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/claudesettings"
@@ -13,7 +14,41 @@ import (
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/workflow"
 )
+
+// executeWithRetry wraps runner.Execute with the same transient network/stream
+// error retry (HTTP/2 stream reset or GOAWAY) that workflow turns already get
+// via workflow.Turn — without it, a single upstream hiccup ends a standalone
+// turn that a workflow turn would have silently retried through.
+func executeWithRetry(
+	ctx context.Context,
+	runner TurnRunner,
+	cfg config.Config,
+	sess *session.Session,
+	mem *memory.Store,
+	role AgentRole,
+	ctxMode escalation.ContextMode,
+	sessionID, nonce string,
+	percepts []string,
+	injectInstructions bool,
+	prompt string,
+	cbs TurnCallbacks,
+	out io.Writer,
+) (TurnResult, error) {
+	for attempt := 0; ; attempt++ {
+		res, err := runner.Execute(ctx, cfg, sess, mem, role, ctxMode, sessionID, nonce, percepts, injectInstructions, prompt, cbs, out)
+		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
+			return res, err
+		}
+		fmt.Fprintf(out, "\n[transient error, retrying %d/%d: %v]\n", attempt+1, workflow.MaxTurnRetries, err)
+		select {
+		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-ctx.Done():
+			return TurnResult{}, ctx.Err()
+		}
+	}
+}
 
 // runPrimary executes one primary-agent turn using runner.
 // It handles all session bookkeeping: context-mode resolution, nonce management,
@@ -109,7 +144,7 @@ func runPrimaryWithSession(
 		}
 	}
 
-	res, err := runner.Execute(ctx, cfg, sess, mem, RolePrimary, ctxMode,
+	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RolePrimary, ctxMode,
 		sess.PrimarySessionID, nonce,
 		perceptsForAgent(cfg, mem, prompt, false), true,
 		prompt, cbs, aw)
@@ -289,7 +324,7 @@ func runEscalationWithSession(
 		ImageContextFile:  imageContextFile,
 	}
 
-	res, err := runner.Execute(ctx, cfg, sess, mem, RoleEscalation, ctxMode,
+	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RoleEscalation, ctxMode,
 		sess.EscalationSessionID, nonce,
 		perceptsForAgent(cfg, mem, prompt, true), injectInstructions,
 		prompt, cbs, aw)
