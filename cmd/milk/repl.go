@@ -2950,6 +2950,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
 			}
+			if dbg, err := openLocalDebugLog(cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
+			} else if dbg != nil {
+				defer dbg.Close()
+				escalationLocalAgent = escalationLocalAgent.WithDebugLog(dbg)
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
 		}
