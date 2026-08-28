@@ -2,9 +2,11 @@
 
 ## Overview
 
-milk lets you switch between a primary inference agent and a configurable escalation agent (Claude Code CLI or another inference backend) mid-workflow, maintaining full session context across the switch. The primary agent supports OpenAI-compatible servers (local or remote) and AWS Bedrock natively.
+milk lets you switch between a primary inference agent and a configurable escalation agent mid-workflow, maintaining full session context across the switch. Any provider is valid in either role — see [docs/providers.md](providers.md) for the full catalog and the one routing constraint milk expects you to honor (escalation should be smarter/pricier than primary).
 
 The primary use case is code assistance and shell automation for a single user.
+
+This page is the architecture/CLI reference. For task-oriented docs, start at [docs/getting-started.md](getting-started.md); see also [docs/workflows.md](workflows.md), [docs/tooling.md](tooling.md), [docs/operations.md](operations.md), and [docs/eval.md](eval.md).
 
 ---
 
@@ -39,17 +41,7 @@ OpenAI API      (any AgentConfig)
 tool loop       claude-cli / bedrock / …
 ```
 
-### Session state machine
-
-```
-States: ROUTING | PRIMARY | ESCALATION | ESCALATION_WAITING
-
-ROUTING              → rules + primary model decision → PRIMARY or ESCALATION
-PRIMARY            → --escalate OR primary model escalate() → ESCALATION
-ESCALATION         → escalation agent ends turn with question → ESCALATION_WAITING
-ESCALATION_WAITING → next user input bypasses router → direct --resume to escalation agent
-ESCALATION_WAITING → user --primary flag → back to ROUTING
-```
+Routing mechanics, session states, and the native `/workflow` engine are covered in [docs/workflows.md](workflows.md).
 
 ---
 
@@ -99,111 +91,16 @@ runPrimary / runEscalation role-specific session bookkeeping (dispatch.go)
 run() / runTurn()          single-shot or TUI entry point; builds runners, drives router
 ```
 
-### Agent-as-Tool
-
-Any agent in the `agents` list can be exposed as a callable tool to any other agent via the `agent_tools` global list (or per-agent `tools` overrides). When enabled, milk synthesises an OpenAI function-schema for each peer agent and injects it alongside the built-in tools; the primary agent can invoke a peer by name as it would any other tool call. The peer agent receives the caller's prompt and returns a text result that is fed back as a tool result, with no session state shared between peer calls. Configure tool-agents with the `agent_tools` config field or at runtime with `/agent tool`.
+Any agent can be exposed as a callable tool to any other agent (Agent-as-Tool) — see [docs/tooling.md](tooling.md#agent-as-tool).
 
 ---
 
-## Router
+## Claude CLI escalation mechanics
 
-Decision order per turn:
+Implementation detail for the `claude-cli` provider specifically — see [docs/providers.md — Claude Code CLI](providers.md#claude-code-cli) for configuration, and [docs/workflows.md — Context handoff](workflows.md#context-handoff) for the cross-provider handoff format.
 
-0. **`!` direct-execution mode** — pressing `!` as the first character of an empty textarea enters bang mode (Claude Code-style): the `!` is consumed rather than inserted, the prompt symbol switches live to a red `!`, and the rest of the line (e.g. `git pull`) is typed as plain text with no leading `!`. Submitting runs it immediately as a shell command, no confirmation, regardless of `direct_bash` — this is an explicit user action, not a heuristic, so it always takes priority over slash-command handling and the direct-bash heuristic below. Backspacing an empty bang-mode buffer, or Ctrl+C, exits the mode and reverts to the normal prompt. Non-interactive input (e.g. Telegram) that arrives as a literal `!`-prefixed string is still recognized at submit time.
-0. **Direct-bash shortcut** — when `direct_bash: true` is set in config and the input matches the shell-command heuristic (`IsShellCommand`), milk prompts for `y/N` confirmation before running the command locally via `sh -c`. If the first token is in `direct_bash_allow`, confirmation is skipped. This fires _after_ slash-command handling (so `/git` still works as a slash command) but _before_ agent routing; matching inputs that are not slash commands never reach the agent.
-1. **Explicit flags** — `--escalate` forces escalation agent; `--primary` forces primary (always wins)
-2. **Session state** — if `ESCALATION_WAITING`, bypass router, send directly to escalation agent `--resume`
-3. **Rules layer** — layered scorer:
-   - Hard rules: token length above `escalate_above_tokens` → escalation; keyword match → escalation
-   - Short-prompt shortcut: ≤ `local_below_tokens` tokens → conclusive local
-   - Weighted signal scorer: local verbs, escalate verbs, path references, code blocks, open-question prefixes each contribute a signed score; conclusive if score reaches `escalate_threshold` or `local_threshold`; all lists are configurable (see `rules` field)
-4. **Primary model classification** — when scorer is inconclusive, ask the primary model with minimal prompt, expect `route: local | escalate`; behaviour configurable via `classifier_fallback`
-5. **Default** — attempt primary; escalate if primary returns `escalate(reason)`
-
-### Direct-bash configuration
-
-```json
-{
-  "direct_bash": true,
-  "direct_bash_allow": ["ls", "git", "docker"]
-}
-```
-
-| Field | Default | Description |
-|---|---|---|
-| `direct_bash` | `false` | Enable shell-command shortcut |
-| `direct_bash_allow` | `[]` | Commands that skip the confirmation prompt |
-
-The heuristic is intentionally conservative: the first token must be a known binary name; natural-language openers (`what`, `how`, `explain`, …) always fall through to routing; prompts ending with `?` are always treated as questions; tokens longer than 8 alphabetic characters that are not flags or paths trigger rejection.
-
-The classifier uses the same model instance as the primary agent. No second model or second inference server instance.
-
----
-
-## Primary Agent
-
-- Backend: configurable via `agents` (the primary agent must be an inference-server backend) in `~/.milk/config.json`; multiple named backends can coexist and be switched at runtime with `/agent switch <name> as primary`
-- Protocols: OpenAI-compatible Chat Completions API (llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, Together.ai, Groq, Azure OpenAI) **or** AWS Bedrock Converse API natively (binary event-stream, SigV4 signing — not OpenAI-compat)
-- Model: any tool-calling-capable model. Tested: Qwen2.5-Coder 7B/3B, Gemma 4 E4B, Claude Haiku (via Bedrock).
-
-### Remote inference / authentication
-
-The `provider` field in an `agents` entry selects the backend type and auth transport:
-
-| `provider` | Backend | Auth mechanism | Required fields |
-|---|---|---|---|
-| `""` / `"local"` | OpenAI-compat HTTP | None (plain HTTP) | `url`, `model` |
-| `"bedrock"` | AWS Bedrock Converse | AWS SigV4 | `url`, `model`, `aws_region` + credentials |
-| `"claude-cli"` | Claude Code CLI subprocess | n/a | `bin` (optional, default `"claude"`) |
-| any other string | OpenAI-compat HTTP | `Authorization: Bearer <api_key>` | `url`, `model`, `api_key` |
-
-Extra headers for any provider (e.g. OpenRouter's `HTTP-Referer`) can be injected via `headers`.
-
-**Dynamic tokens (`token_cmd`)**: set `token_cmd` to a shell command whose stdout is the Bearer token. milk runs it at startup and retries it automatically on 401/403. Takes precedence over `api_key`. Example: `"gh auth token --hostname myorg.ghe.com"`.
-
-**Custom inference path (`chat_path`)**: override the endpoint path when the server does not follow the `/v1` prefix convention. Example: `"chat_path": "/chat/completions"`.
-
-**AWS Bedrock credential resolution** (in order): explicit `aws_key_id` / `aws_secret` / `aws_token` config fields → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars → region parsed from `url` when `aws_region` is empty.
-
-**Automatic credential renewal (`aws_refresh_cmd`)**: set `aws_refresh_cmd` to a `credential_process`-compatible shell command (e.g. `aws sts get-session-token --duration-seconds 3600`). When a Bedrock request returns 403, the SigV4 transport runs the command, parses its `AccessKeyId` / `SecretAccessKey` / `SessionToken` JSON output, swaps the credentials atomically, and retries the request once — no agent restart needed. In TUI mode, the status bar shows `[refreshing AWS credentials…]` while the renewal is in flight, then `[AWS creds: ok]` or `[AWS creds failed: <error>]` on completion.
-
-**TLS overrides**: `tls_skip_verify: true` disables cert verification (dev/self-signed only); `tls_ca_cert: "/path/to/ca.pem"` trusts a private CA.
-
-**Azure OpenAI workaround**: Azure uses a non-standard URL path and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint, add `{"api-key": "<key>"}` to `headers`, and leave `provider` empty. A dedicated Azure provider with URL templating is tracked in GitHub Issues. See ADR 27.
-- Tool loop: standard agentic loop — call → check tool calls → execute → feed result → repeat until final answer
-- Built-in tools (implemented in Go, exposed as OpenAI function schemas):
-  - `bash(command string) → stdout, stderr, exit_code`
-  - `grep(pattern string, path string, recursive bool) → matches`
-  - `read_file(path string, offset int, limit int) → content`
-  - `write_file(path string, content string) → ok` — creates parent directories; expands `~`
-  - `edit_file(path string, old_string string, new_string string, replace_all bool) → ok` — exact-string replacement; rejects ambiguous matches unless `replace_all=true`; expands `~`
-  - `delete_file(path string) → ok` — removes a file from disk; permission-gated
-  - `move_file(source string, destination string) → ok` — renames/relocates a file; creates destination parent directories; permission-gated
-  - `list_dir(path string) → entries` — names, types, sizes; expands `~`
-  - `http_get(url string, max_bytes int) → body` — bounded HTTP GET
-  - `http_request(method string, url string, headers object, body string, max_bytes int) → body, status` — generic HTTP request; permission-gated
-  - `get_session_context() → history` — returns the full shared session history (both agents) so the primary model can see prior escalation turns
-  - `get_context_stats() → stats` — returns current history turn counts and total character size so the agent can self-regulate before hitting context limits
-  - `open_file(path string) → ok` — opens a file in the configured editor (same resolution as `/config open` and `/open`); useful when the user asks the agent to open a file for review
-- Self-escalation: primary model may return `escalate(reason string)` as a tool call to trigger promotion
-- Role-aware system prompt: primary agent sees the `escalate` tool and is told to use it for tasks beyond its capabilities; escalation agent does not see the `escalate` tool and is told it is the escalation target
-
----
-
-## Escalation Agent
-
-The escalation agent is any entry in `agents` whose name matches `escalation_agent` in the config. It defaults to the built-in `claude-cli` entry (named `"claude"`). It can be:
-
-- **Claude Code CLI** (`provider: "claude-cli"`): `claude --print --output-format stream-json`
-- **Any inference-server backend**: same OpenAI-compat or Bedrock path as the primary agent, but with a role-aware system prompt (no `escalate` tool, knows it is the escalation target)
-
-### Claude CLI escalation
-
-- **AWS credential injection**: when `aws_auth_refresh: true` in `~/.milk/config.json`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn to obtain fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped from the inherited environment to prevent wrong-account overrides. See ADR 23.
-- Context is split across two `--append-system-prompt-file` flags to preserve Claude's prompt cache:
-  - **Static file** (`BuildStaticContext`): identity block (always present), per-session stable nonce tags (`NeedInstruction`, `MemoryInstruction`), remembered percepts. Byte-identical across turns → cache hit.
-  - **Dynamic file** (`BuildDynamicContext`): escalation brief, current need, `LastLocalSummary`. Changes per turn; suppressed when content is unchanged.
-- First escalation turn:
+- **AWS credential injection**: when `aws_auth_refresh: true`, milk reads the `awsAuthRefresh` command from `~/.claude/settings.json`, runs it before each turn for fresh STS credentials, and injects them as explicit `AWS_*` env vars into the subprocess. Conflicting inherited vars (`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_DEFAULT_*_MODEL`, `AWS_PROFILE`, etc.) are stripped to prevent wrong-account overrides. See ADR 23.
+- **First escalation turn**:
   ```
   claude --print --output-format stream-json \
          --session-id <new-uuid> \
@@ -211,113 +108,34 @@ The escalation agent is any entry in `agents` whose name matches `escalation_age
          --append-system-prompt-file <dynamic-ctx> \
          -- "<user prompt>"
   ```
-- Subsequent turns in same escalation (`ContextModeResume`):
+- **Subsequent turns** (`--resume`):
   ```
   claude --print --output-format stream-json \
          --resume <escalation-session-id> \
          --append-system-prompt-file <dynamic-ctx-if-changed> \
          -- "<user prompt>"
   ```
-- `session_id` is extracted from the first NDJSON message and persisted to the milk session file
-- The escalation agent orients itself from the appended context — no separate reformulation step
+- `session_id` is extracted from the first NDJSON message and persisted to the milk session file.
 
 ### Permission prompt flow
 
-milk passes `--permission-prompt-tool stdio` on every Claude CLI invocation. When Claude wants to use a tool that has not been pre-approved, it emits a `control_request` NDJSON event on stdout and pauses. milk intercepts this event and, in TUI mode, routes a blocking prompt through the bubbletea message queue (see ADR-0015):
+milk passes `--permission-prompt-tool stdio` on every invocation. When Claude wants to use a tool that isn't pre-approved, it emits a `control_request` NDJSON event and pauses; milk intercepts it and, in TUI mode, routes a blocking prompt through the bubbletea message queue (ADR-0015):
 
 1. The agent goroutine calls `tuiInputReader.readLine(prompt)` and blocks on a channel.
 2. The TUI appends the prompt to the transcript and switches key events to `handlePermKey`.
-3. The user types `y` (allow) or `n` (deny) and presses Enter; Ctrl-C sends `n`.
+3. The user types `y`/`n` and Enter; Ctrl-C sends `n`.
 4. milk writes a `control_response` JSON to Claude's stdin; the agent goroutine unblocks.
 
-The prompt shows the tool name, key arguments, and — for `workingDir` blocks — the restricted path. The session stays alive throughout; no `--resume` round-trip is needed.
+The prompt shows the tool name, key arguments, and — for `workingDir` blocks — the restricted path. The session stays alive throughout; no `--resume` round-trip needed.
 
-`dangerously_skip_permissions` (field on the `claude-cli` AgentConfig entry) bypasses this flow entirely: Claude auto-approves all tool uses. `/skip-permissions on|off` overrides this setting per session without restarting.
-
-Pre-approved tools and directories can be listed in `allowed_tools` and `add_dirs` fields on the `claude-cli` entry; they are passed as `--allowedTools` / `--add-dir` flags and never trigger a prompt.
+`dangerously_skip_permissions` bypasses this flow entirely (auto-approve all); `/skip-permissions on|off` overrides it per session without restarting. `allowed_tools`/`add_dirs` pre-approve specific tools/directories without ever prompting.
 
 #### Pre-flight "Stream closed" failures
 
-A second class of permission failure sits *before* the `--permission-prompt-tool stdio` handler: Claude Code's directory-trust pre-flight check. When this fires, the tool returns `"Stream closed"` as its result — no `control_request` event is emitted, no prompt reaches the user, and the turn ends silently with partial output.
+A second failure class sits *before* the permission-prompt handler: Claude Code's directory-trust pre-flight check. When it fires, the tool returns `"Stream closed"` — no `control_request` event, no prompt, the turn ends silently with partial output. milk handles this in two layers:
 
-milk handles this with two layers:
-
-1. **Baseline tool pre-approval**: `Bash`, `Read`, `Write`, and `Edit` are always merged into the `--allowedTools` flag on every `claude-cli` invocation (in addition to any user-configured `allowed_tools`). `/tmp` is always added to the trusted directory list alongside `cwd`. This eliminates the failure for the majority of fresh-workspace first turns with no user interaction.
-
-2. **Post-turn detection and retry**: milk's stream parser tracks `type:"user"` NDJSON messages. A `tool_result` block whose content is `"Stream closed"` is correlated back to the tool name via a per-turn `toolRegistry` (built from `content_block_start` `id` fields during streaming), and recorded in `ParseResult.StreamClosedDenials`. After the turn, `handleStreamClosedDenials` presents each failed tool to the user, offers a tool grant and a directory grant, persists grants to `~/.claude/settings.json`, and retries the turn via `--resume`. See ADR-0035.
-
-### Context handoff (escalation)
-
-When promoting from the primary agent to the escalation agent, milk formats the local conversation history as a plain transcript and passes it via `--append-system-prompt-file` (for Claude CLI, split into static+dynamic files — see ADR-0004) or as the first system message (for inference-server escalation). Format:
-
-```
-[Context from primary agent session]
-User: <turn>
-Assistant: <turn>
-[Tool: bash] <command>
-[Tool result] <output>
-...
-User: <final prompt that triggered escalation>
-```
-
----
-
-## Session Model
-
-### Storage layout
-
-```
-~/.milk/
-├── config.json
-└── sessions/
-    ├── index.json          # cwd → [{id, name, last_used}] sorted by last_used desc
-    └── <uuid>.json         # full session data
-```
-
-### Session file schema
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "name": "optional-user-name",
-  "cwd": "/absolute/path/to/project",
-  "created_at": "2026-05-05T10:00:00Z",
-  "last_used": "2026-05-05T11:32:00Z",
-  "state": "ESCALATION_WAITING",
-  "escalation_session_id": "abc123",
-  "escalation_nonce": "x7k2mq",
-  "history": [
-    {
-      "role": "user | assistant | tool_result",
-      "agent": "local | escalation",
-      "content": "...",
-      "thinking": "...",
-      "tool_calls": [],
-      "timestamp": "2026-05-05T10:01:00Z"
-    }
-  ]
-}
-```
-
-### Session index file schema
-
-```json
-{
-  "/absolute/path/to/project": [
-    {"id": "uuid", "name": "refactor-auth", "last_used": "2026-05-05T11:32:00Z"},
-    {"id": "uuid", "name": "", "last_used": "2026-05-05T10:00:00Z"}
-  ]
-}
-```
-
-### Session lookup on invocation
-
-1. `milk <prompt>` → most recent session for cwd → resume (or create new if none)
-2. `milk --session refactor-auth <prompt>` → find by name within cwd → resume or create
-3. `milk --new <prompt>` → always create fresh session
-4. `milk --session refactor-auth --new <prompt>` → create new named session
-
-Names are cwd-scoped. Same name can exist in different projects.
+1. **Baseline pre-approval**: `Bash`, `Read`, `Write`, `Edit` are always merged into `--allowedTools` on every invocation; `/tmp` is always added to the trusted directory list alongside `cwd`. Eliminates the failure for most fresh-workspace first turns.
+2. **Post-turn detection and retry**: milk's stream parser tracks `type:"user"` NDJSON messages; a `tool_result` block whose content is `"Stream closed"` is correlated back to the tool name via a per-turn registry and recorded. After the turn, milk presents each failed tool, offers a tool/directory grant, persists it to `~/.claude/settings.json`, and retries via `--resume`. See ADR-0035.
 
 ---
 
@@ -336,13 +154,11 @@ milk [flags] <prompt>         # single-prompt mode
 
 **Slash commands:** `/escalate`, `/primary`, `/new`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/open`, `/update`, `/help`, `/exit`
 
-**Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]`
+**Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
-The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–64 chars). The `#` prefix is optional — bare hex like `a1b2c3d4` also works. The local agent can also delete percepts directly via the `forget_memory` tool (same short-ID resolution, same `#` handling).
+**Panel commands:** `/panel memory`, `/panel workflow`, `/panel tasks` — see [docs/operations.md](operations.md) and [docs/workflows.md](workflows.md#the-native-workflow-engine).
 
-**Panel commands:** `/panel memory` — toggle the right-side memory panel (open by default); `/panel workflow` — toggle the workflow progress panel (auto-opens when a workflow starts)
-
-**/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses without prompting; `off` (default) re-enables the per-tool permission flow. The current state is shown with `/skip-permissions` alone. A red warning banner is printed at startup if the flag is already on via config.
+**/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses; `off` (default) re-enables per-tool prompting. Alone, shows current state. A red warning banner appears at startup if already on via config.
 
 **/agent** manages agent backends at runtime:
 
@@ -351,15 +167,14 @@ The `#id` form in `/forget` and `/memory show` accepts a short hex prefix (4–6
 | `/agent` | Show active primary and escalation backends |
 | `/agent list` | List all configured backends; active marked with `*` |
 | `/agent switch <name> as primary\|escalation` | Switch role to the named backend (prompts if args missing) |
-| `/agent add` | Add a backend via interactive wizard (prompts for each field) |
+| `/agent add` | Add a backend via interactive wizard |
 | `/agent add name=… url=… model=… [provider=…] [api_key=…] [aws_region=…]` | Add inline |
 | `/agent tool list [<agent>\|global]` | List tool-agents (effective merged for primary by default) |
-| `/agent tool enable <tool> [for <agent>\|global]` | Enable a tool-agent entry |
-| `/agent tool disable <tool> [for <agent>\|global]` | Disable a tool-agent entry |
+| `/agent tool enable\|disable <tool> [for <agent>\|global]` | Enable/disable a tool-agent entry |
 | `/agent tool add <tool> description=<desc> [for <agent>\|global]` | Add a new tool-agent entry |
 | `/agent tool remove <tool> [for <agent>\|global]` | Remove a tool-agent entry |
 
-New backends are appended to `agents` in `~/.milk/config.json` immediately. Use `/agent switch` to assign a role to a newly added backend in the current session.
+New backends are appended to `agents` in `~/.milk/config.json` immediately; `/agent switch` assigns a role in the current session.
 
 **/colorize** controls transcript syntax and Markdown rendering:
 
@@ -367,109 +182,44 @@ New backends are appended to `agents` in `~/.milk/config.json` immediately. Use 
 |---|---|
 | `/colorize` | Show current mode |
 | `/colorize off` | Disable all colorization |
-| `/colorize fenced` | Highlight fenced code blocks only (chroma) |
-| `/colorize balanced` | Fenced blocks + inline Markdown (bold, headings, bullets, inline code) |
+| `/colorize fenced` | Highlight fenced code blocks only |
+| `/colorize balanced` | Fenced blocks + inline Markdown (default) |
 | `/colorize full` | Full glamour Markdown render — experimental |
 
-The mode is persisted to `~/.milk/config.json` immediately and takes effect on the next render (no restart needed). Default is `balanced`.
+Persisted to config immediately, effective on next render.
 
-**/think** controls reasoning/thinking token visibility:
+**/think** controls reasoning/thinking token visibility: `/think` (show current), `/think on` (show inline), `/think off` (show `[thinking…]` placeholder). Retroactive — both transcript variants are maintained in parallel during streaming, so toggling is instant. Default via `show_reasoning` in config (default `true`). Applies to both primary-model `<think>` blocks and Claude extended thinking.
 
-| Subcommand | Action |
-|---|---|
-| `/think` | Show current reasoning visibility (on/off) |
-| `/think on` | Show thinking/reasoning tokens inline in the transcript |
-| `/think off` | Hide thinking tokens; a `[thinking…]` placeholder is shown instead |
+**/need** sets the current session goal (`/need <one-sentence goal>`); the primary agent calls this automatically when the user states a new objective. Shown in the memory panel and injected into escalation context.
 
-The toggle is retroactive — both transcript variants (full and no-think) are maintained in parallel during streaming, so switching is instantaneous with no rebuild. The default is configurable via `show_reasoning` in `~/.milk/config.json` (default: `true`). Applies to both primary model `<think>` blocks and Claude extended thinking tokens.
+**/workflow** runs a named multi-agent pipeline — see [docs/workflows.md — The native `/workflow` engine](workflows.md#the-native-workflow-engine).
 
-**/need** sets the current goal for the session. The primary agent is instructed to call this tool automatically when the user states a new objective:
-
-```
-/need <one-sentence goal>
-```
-
-The goal is shown in the memory panel and injected into escalation context so the escalation agent knows what is being worked on.
-
-**/workflow** runs a named multi-agent pipeline:
-
-```
-/workflow                                         # list available workflows
-/workflow dev <task>                              # run dev workflow (wizard for missing args)
-/workflow dev <task> --designer <agent> \
-              --generator <agent> \
-              --evaluator <agent>                 # inline agent assignment
-/workflow resume                                  # resume workflow from last sprint/pass checkpoint
-/workflow reconfigure                             # reassign agent roles without losing saved state
-/workflow clear                                   # delete saved state for this session (with confirmation)
-```
-
-The `dev` workflow implements a designer → generator → evaluator loop across one or more sprints:
-
-- **designer** — reads the task description, produces a spec and sprint plan (`<session-id>.workflow.plan.md`).
-- **generator** — executes each sprint according to the plan, writes output to `<session-id>.workflow.sprint<N>.md`.
-- **evaluator** — reviews the sprint output and returns a structured verdict: `good_to_go`, `needs_refinement`, or `next_sprint`. Findings are written to `<session-id>.workflow.findings<N>.md`.
-
-Loop semantics: `needs_refinement` re-runs the generator for the same sprint (up to a configurable pass limit, default 3); `next_sprint` advances; `good_to_go` on the final sprint ends the workflow. Pass limit exceeded halts with an error showing the last findings path.
-
-Agent specifiers accept any name from `config.agents`, plus aliases `primary` (the currently assigned primary agent) and `escalation` (the currently assigned escalation agent). Aliases are resolved once at start; mid-workflow `/agent switch` does not affect a running workflow.
-
-Workflow state is persisted to `~/.milk/sessions/<session-id>.workflow.json` at two points per pass: after the generator writes its sprint file (with `role: "evaluator"`) and after the evaluator completes (with the verdict recorded). `/workflow resume` re-launches from the last checkpointed sprint/pass/role, skipping the designer (plan file is reused) and, when `role` is `"evaluator"`, also skipping the generator. The same agents recorded in the state file are used. `/workflow reconfigure` runs the agent-role wizard against the current saved state (skipping the task prompt) and writes new agent names into the state file without touching sprint/pass/role, so a subsequent `/workflow resume` continues from the same checkpoint with the new agents. `/workflow clear` deletes the state file after a confirmation prompt (type `clear` to confirm, anything else cancels).
-
-The workflow progress panel (toggled with `/panel workflow`, auto-opens at start) shows the current sprint, pass, role, and verdict history.
-
-**/config** manages the milk configuration:
+**/config** manages configuration:
 
 | Subcommand | Action |
 |---|---|
 | `/config` | Print current config JSON in the transcript |
-| `/config init` | Run the interactive setup wizard (create or update `~/.milk/config.json`) |
+| `/config init` | Run the interactive setup wizard |
 | `/config open` | Open `~/.milk/config.json` in the configured editor |
 
-The editor used by `/config open` is selected from the `config_editors` list (see Configuration). The same commands are available on the CLI as `milk config`, `milk config init`, `milk config open`.
+Same commands on the CLI as `milk config`, `milk config init`, `milk config open`. Editor selection uses `config_editors` (see below).
 
-**`milk otel`** manages observability settings from the CLI (no TUI required):
+**`milk otel`** manages observability settings — see [docs/operations.md — Observability](operations.md#observability).
 
-| Command | Action |
-|---|---|
-| `milk otel debug enable` | Enable full debug logging: `otel.log_context=true`, `otel.log_level=DEBUG`, `debug_claude_code=true`, `debug_local=true`, `debug_subprocess=true` |
-| `milk otel debug disable` | Disable debug logging: restores `otel.log_context=false`, `otel.log_level=INFO`, `debug_claude_code=false`, `debug_local=false`, `debug_subprocess=false` |
+**/open** opens any file in the configured editor: `/open <path>` (or `/open @<path>`, `@` stripped automatically). The agent can also open files via the `open_file` tool.
 
-`milk otel debug enable` prints the paths where each debug stream is written:
-- Claude subprocess NDJSON → `~/.milk/claude_debug.ndjson`
-- Local agent SSE → `~/.milk/local_debug.log`
-- Subprocess agent stdout → `~/.milk/subprocess_debug.log`
-- Request payloads (log_context) → `~/.milk/otel/logs.jsonl`
+**/update** checks GitHub for newer milk releases, compares versions, and (with confirmation) downloads and installs the appropriate binary for the current platform.
 
-**/open** opens any file in the configured editor:
+**Multi-line input**: Shift+Enter/Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently.
 
-```
-/open <path>
-/open @<path>   (@ prefix is stripped automatically)
-```
+**Clipboard binary paste**: when a bracketed paste yields empty text, milk probes the system clipboard (`xclip`/`wl-paste`) for non-text content (e.g. `image/png`); found content is saved to a temp file and staged as a pending attachment, same as `/attach`. No special key combination beyond a normal paste gesture.
 
-The same editor resolution as `/config open` is used. The agent can also open files via the `open_file` tool when asked to do so.
-
-**/update** checks for new milk releases on GitHub, compares the running version against the latest published release, and prompts the user to download and install:
-
-```
-/update
-```
-
-If a newer release is available, milk shows the current and latest versions and asks for confirmation before downloading the appropriate binary for the current platform. If already up to date, a confirmation message is shown and no download occurs.
-
-**Multi-line input:** Shift+Enter or Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently — multi-line pastes are sent as a single block.
-
-**Clipboard binary paste:** When a bracketed paste event yields empty text, milk probes the system clipboard via `xclip` (X11) or `wl-paste` (Wayland) for non-text content. If a non-text MIME type is found (e.g. `image/png`, `application/pdf`), the content is saved to a temp file and staged as a pending attachment, exactly as if `/attach` had been called. If neither tool is installed, a dim inline hint is shown suggesting installation. This is transparent — no key combination required beyond the normal paste gesture (Ctrl+Shift+V or middle-click).
-
-**Keyboard:** Up/Down navigates input history (single-line mode only); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
-
-**Memory panel:** A 34-column right-side panel shows SESSION / GLOBAL / GLOBAL (core) percept sections in real time (polls every 5s). Each percept displays a short `#<6hex>` ID (dim), content wrapped to 2 lines, and weight right-aligned. Percepts updated within the last 60s are highlighted bold+yellow. Toggle with `/panel memory`.
+**Keyboard**: Up/Down navigates input history (single-line mode); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
 
 ### Flags
 
 | Flag | Description |
-|------|-------------|
+|---|---|
 | `--escalate` | Force route to escalation agent for this turn |
 | `--primary` | Force route to primary agent for this turn; breaks ESCALATION_WAITING state |
 | `--new` | Start a new session (old sessions for cwd untouched) |
@@ -483,519 +233,49 @@ If a newer release is available, milk shows the current and latest versions and 
 
 ## Configuration
 
-`~/.milk/config.json`:
+`~/.milk/config.json` — see [docs/providers.md](providers.md) for the full `agents`/provider field reference, [docs/workflows.md](workflows.md#customizing-the-rules-block) for the `rules` block, and [docs/tooling.md](tooling.md) for `agent_tools`/`mcp_servers`. This section covers the remaining root-level behavior fields.
 
 ```json
 {
   "agent": "local",
-  "agents": [
-    {
-      "name": "local",
-      "url": "http://localhost:8080",
-      "model": "qwen2.5-coder",
-      "provider": "local"
-    },
-    {
-      "name": "haiku-aws",
-      "url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
-      "model": "arn:aws:bedrock:...:application-inference-profile/...",
-      "provider": "bedrock",
-      "aws_region": "eu-central-1"
-    },
-    {
-      "name": "claude",
-      "provider": "claude-cli",
-      "bin": "claude"
-    }
-  ],
+  "agents": [ { "name": "local", "url": "http://localhost:8080", "model": "qwen2.5-coder", "provider": "local" } ],
   "escalation_agent": "claude",
   "default_route": "local",
   "colorization": "balanced",
   "show_reasoning": true,
   "sticky_escalation": true,
   "experimental_lazy_history_management": false,
-  "aws_auth_refresh": false,
-  "rules": {
-    "escalate_above_tokens": 2000,
-    "local_below_tokens": 30,
-    "escalate_keywords": ["refactor entire", "context brick", "memory panel", "panel memory"],
-    "escalate_threshold": 6,
-    "local_threshold": -4,
-    "local_verb_weight": -3,
-    "escalate_verb_weight": 4,
-    "path_ref_weight": -2,
-    "code_block_weight": -2,
-    "open_question_weight": 3,
-    "classifier_fallback": "local",
-    "local_verbs": [
-      "grep", "find", "list", "run", "read", "fix", "debug", "show", "cat", "ls",
-      "check", "print", "count", "search", "add", "create", "write", "implement",
-      "rename", "delete", "move",
-      "aggiungi", "crea", "scrivi", "implementa", "rinomina", "elimina", "sposta",
-      "cerca", "mostra", "controlla", "esegui", "leggi"
-    ],
-    "escalate_verbs": [
-      "architect", "design", "refactor", "explain why", "compare", "evaluate",
-      "plan", "propose", "summarize", "review", "analyze", "describe",
-      "progetta", "refactorizza", "spiega perché", "confronta", "valuta",
-      "pianifica", "proponi", "riassumi", "revisiona", "analizza", "descrivi"
-    ],
-    "open_question_prefixes": [
-      "what", "why", "how", "when", "where", "who", "which",
-      "could you", "can you", "would you", "should", "is it", "are there", "do you", "does",
-      "cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
-      "potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai"
-    ]
-  }
+  "aws_auth_refresh": false
 }
 ```
 
-`agent` names the active primary backend from `agents`. If empty, the first non-`claude-cli` entry is used.
-
-`escalation_agent` selects which `agents` entry handles escalated turns. Defaults to `"claude"` (the built-in `claude-cli` entry). Set to the name of any `agents` entry — including another inference-server backend — to route escalated turns there instead. Change at runtime with `/agent switch <name> as escalation`.
-
-A built-in `claude-cli` entry named `"claude"` is always available even if not listed explicitly in `agents`. When absent from the file, it is injected in-memory with `bin: "claude"`. 
-
-### `rules` field
-
-Controls the layered routing scorer. All fields have built-in defaults; only the fields you want to override need to be present.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `escalate_above_tokens` | int | 2000 | Prompt exceeding this approximate token count is unconditionally escalated |
-| `local_below_tokens` | int | 30 | Prompt at or below this approximate token count is unconditionally kept local |
-| `escalate_keywords` | array of string | see below | Substring matches that unconditionally escalate (hard, conclusive). Keep this list short and specific — use `escalate_verbs` for soft signals |
-| `escalate_threshold` | int | 6 | Soft score ≥ this → conclusive escalation |
-| `local_threshold` | int | -4 | Soft score ≤ this → conclusive local |
-| `local_verb_weight` | int | -3 | Score delta per `local_verbs` match (negative = towards local) |
-| `escalate_verb_weight` | int | 4 | Score delta per `escalate_verbs` match (positive = towards escalation) |
-| `path_ref_weight` | int | -2 | Score delta when the prompt contains a path that resolves on disk |
-| `code_block_weight` | int | -2 | Score delta when the prompt contains a fenced code block |
-| `open_question_weight` | int | 3 | Score delta when the prompt starts with an open-question prefix |
-| `classifier_fallback` | string | `"local"` | What to do when the scorer is inconclusive: `"local"` calls the primary model as a classifier; `"escalation"` escalates directly |
-| `local_verbs` | array of string | see below | Words/phrases (substring match) that contribute `local_verb_weight` to the score. One match per prompt (first hit wins) |
-| `escalate_verbs` | array of string | see below | Words/phrases (substring match) that contribute `escalate_verb_weight` to the score. One match per prompt (first hit wins) |
-| `open_question_prefixes` | array of string | see below | Words/phrases (case-insensitive prefix match with word-boundary check) that trigger the open-question soft signal |
-
-#### Keyword design guidelines
-
-**`escalate_keywords` (hard, conclusive)** — only add multi-word or highly specific phrases that unambiguously signal a complex conceptual task, such that routing to local would always be wrong. Single common words (e.g. `design`, `analyze`) are too broad: *"the design looks off"* or *"analyze this traceback"* are local tasks. When in doubt, put the term in `escalate_verbs` instead.
-
-**`escalate_verbs` and `local_verbs` (soft signals)** — these contribute a signed score rather than making a binding decision. One match per prompt is counted (first hit wins), so the lists' relative weights and the `escalate_threshold` / `local_threshold` values control how much weight a single verb match carries. Adding more terms to these lists makes routing more decisive; raising the thresholds makes it more conservative.
-
-**`open_question_prefixes`** — prefix-matched (word boundary required) against the start of the trimmed prompt. A match adds `open_question_weight` to the soft score. This is typically combined with an `escalate_verbs` hit to cross the `escalate_threshold`.
-
-#### Adding language or domain-specific terms
-
-The built-in lists cover English and Italian. To extend coverage for other languages or domain-specific vocabulary, add terms directly to the arrays in your `~/.milk/config.json`. The lists are fully replaced by whatever you provide — there is no merge with the built-in defaults; copy the full default set and extend it.
-
-Example — adding French question starters and domain verbs:
-
-```json
-"open_question_prefixes": [
-  "what", "why", "how", "when", "where", "who", "which",
-  "could you", "can you", "would you", "should", "is it", "are there", "do you", "does",
-  "cosa", "come", "perché", "quando", "dove", "chi", "quale", "quali",
-  "potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai",
-  "quoi", "pourquoi", "comment", "quand", "où", "qui", "quel", "quelle",
-  "pourriez-vous", "pouvez-vous", "devriez-vous", "est-ce possible"
-],
-"escalate_verbs": [
-  "architect", "design", "refactor", "explain why", "compare", "evaluate",
-  "plan", "propose", "summarize", "review", "analyze", "describe",
-  "progetta", "refactorizza", "spiega perché", "confronta", "valuta",
-  "pianifica", "proponi", "riassumi", "revisiona", "analizza", "descrivi",
-  "concevoir", "évaluer", "planifier", "proposer", "résumer", "analyser"
-]
-```
-
-#### Default keyword lists
-
-`escalate_keywords` (conclusive hard triggers):
-```
-"refactor entire", "context brick", "memory panel", "panel memory"
-```
-
-`escalate_verbs` (soft, +4 each):
-```
-English: architect, design, refactor, explain why, compare, evaluate,
-         plan, propose, summarize, review, analyze, describe
-Italian: progetta, refactorizza, spiega perché, confronta, valuta,
-         pianifica, proponi, riassumi, revisiona, analizza, descrivi
-```
-
-`local_verbs` (soft, −3 each):
-```
-English: grep, find, list, run, read, fix, debug, show, cat, ls,
-         check, print, count, search, add, create, write, implement,
-         rename, delete, move
-Italian: aggiungi, crea, scrivi, implementa, rinomina, elimina, sposta,
-         cerca, mostra, controlla, esegui, leggi
-```
-
-`open_question_prefixes`:
-```
-English: what, why, how, when, where, who, which,
-         could you, can you, would you, should, is it, are there, do you, does
-Italian: cosa, come, perché, quando, dove, chi, quale, quali,
-         potresti, puoi, dovresti, è possibile, ci sono, sai
-```
-
-### `agents` entry fields
-
-#### Inference-server fields (all providers except `claude-cli`)
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Display name; used as selector key |
-| `url` | string | Base URL of the inference server |
-| `model` | string | Model name or ARN |
-| `provider` | string | Auth transport: `""` / `"local"` = none; `"bedrock"` = AWS SigV4; anything else = Bearer token |
-| `api_key` | string | Static Bearer token; superseded by `token_cmd` when both are set |
-| `token_cmd` | string | Shell command whose stdout is the Bearer token; re-run on 401/403 |
-| `chat_path` | string | Override inference path (default `/v1/chat/completions`) |
-| `headers` | object | Extra HTTP headers (e.g. `"api-key"` for Azure, `"HTTP-Referer"` for OpenRouter) |
-| `tls_skip_verify` | bool | Disable TLS cert verification (dev/self-signed only) |
-| `tls_ca_cert` | string | Path to PEM CA cert for private endpoints |
-| `aws_region` | string | AWS region for Bedrock (fallback: `AWS_REGION` env, then parsed from `url`) |
-| `aws_key_id` | string | AWS access key ID (fallback: `AWS_ACCESS_KEY_ID` env) |
-| `aws_secret` | string | AWS secret key (fallback: `AWS_SECRET_ACCESS_KEY` env) |
-| `aws_token` | string | AWS session token (fallback: `AWS_SESSION_TOKEN` env) |
-| `aws_service` | string | SigV4 service name (default `"bedrock"`) |
-| `aws_refresh_cmd` | string | `credential_process`-compatible command; on 403 the SigV4 transport runs it, swaps credentials, and retries once |
-
-#### Claude CLI fields (`provider: "claude-cli"`)
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Display name; used as selector key |
-| `provider` | string | Must be `"claude-cli"` |
-| `bin` | string | Path to the `claude` binary (default `"claude"`) |
-| `dangerously_skip_permissions` | bool | Auto-approve all tool uses without prompting |
-| `allowed_tools` | array of string | Tools pre-approved; passed as `--allowedTools` |
-| `add_dirs` | array of string | Extra directories; passed as `--add-dir` |
-
-#### Common fields (all providers)
-
-| Field | Type | Description |
-|---|---|---|
-| `tools` | array of AgentToolEntry | Per-agent overrides/extensions of the global `agent_tools` list. An entry whose `agent` name matches a global entry replaces it; new names are appended. |
-
-### `agent_tools` field
-
-Global list of peer agents that can be called as tools by any agent. Each entry is an `AgentToolEntry` object:
-
-| Field | Type | Description |
-|---|---|---|
-| `agent` | string | Name of the agent to expose as a tool (must match a name in `agents`) |
-| `description` | string | Description shown to the calling agent as the tool's purpose |
-| `enabled` | bool | Whether the tool is active (default `true` when omitted) |
-
-Per-agent entries in `AgentConfig.tools` shadow or extend this global list (same `agent` name = replace; new name = append). Cycle guard: an agent cannot call itself as a tool. Unknown agent names are silently dropped.
-
-Example:
-```json
-"agent_tools": [
-  { "agent": "haiku-aws", "description": "Fast summarization and classification agent." },
-  { "agent": "claude", "description": "Full-capability Claude Code escalation agent.", "enabled": false }
-]
-```
-
-Use `/agent tool` subcommands to manage tool-agents at runtime.
-
-### `mcp_servers` field
-
-Global list of MCP (Model Context Protocol) servers that agents can connect to. Each entry is an `MCPServerConfig` object:
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Unique identifier referenced from `AgentConfig.mcp_servers` |
-| `url` | string | MCP endpoint. Required for `http` transport (e.g. `"http://localhost:3000/mcp"`). For Streamable HTTP transport this is a single POST+GET endpoint |
-| `transport` | string | Wire protocol: `"http"` (default) uses Streamable HTTP with SSE fallback; `"stdio"` launches a subprocess and communicates over its stdin/stdout |
-| `command` | string | Executable path. Required when `transport` is `"stdio"` |
-| `args` | string[] | Command-line arguments for the stdio subprocess |
-| `enabled` | bool | Whether the server is active (default `true` when omitted) |
-
-Reference servers from an agent entry via `"mcp_servers": ["my-mcp"]` in the `agents` list.
-
-#### `mcp_connect_timeout_secs`
-
-Per-server startup connect timeout in seconds. Default: `5`.
-
-```json
-"mcp_connect_timeout_secs": 10
-```
-
-If a server does not respond within the timeout at startup, milk logs a warning and continues. The server's tools are still registered; the client reconnects lazily on the first tool call that targets the server.
-
-#### Lazy reconnect
-
-When a startup connection times out or fails, milk defers the live connection rather than aborting the session. On the first tool call targeting the server, milk retries the connection automatically. If reconnect succeeds the call proceeds normally; if it fails the tool returns an error result to the agent. Each lazy reconnect attempt is recorded as an `mcp.lazy_reconnect` span in `~/.milk/otel/traces.jsonl`.
-
-#### `--mcp-config` generation (`claude-cli` agent only)
-
-For `claude-cli` agents, milk translates the applicable `mcp_servers` entries directly into a JSON config file and passes it via the `--mcp-config` flag: HTTP-transport servers become `{"type":"http","url":"...","headers":{...}}` entries (the `Authorization` header, when configured, resolved via `internal/mcpauth.ResolveHeader` — the same resolution path used by the local/primary agent), stdio-transport servers become `{"type":"stdio","command":"...","args":[...]}` entries. The `claude` CLI subprocess connects to each server directly; milk does not proxy the connection.
-
-#### Context injection (`aider-cli` and `subprocess` agents)
-
-`aider-cli` and `subprocess` agents (smolagents and compatible adapters) do not receive a generated MCP config file. Instead, MCP tool schemas are serialised into a text block (`internal/escalation.BuildMCPContextBlock`) and injected into the agent's context alongside the built-in tool descriptions, naming each available tool and its description. This is informational only, not a wired function-calling path: the block explicitly tells the agent it cannot call these tools directly, and milk has no mechanism today to parse a subprocess/aider agent's output back into an actual MCP tool call. `aider` itself has no native MCP client (as of writing, upstream support is still an open, unmerged feature request), so this is the best available fallback for that provider. `smolagents` (the Python library `milk-smolagent` wraps) does have a native MCP client (`MCPClient`/`ToolCollection.from_mcp`, supporting both stdio and Streamable HTTP transports) that milk's smolagent script does not currently use — wiring milk's configured `mcp_servers` into it would give the smolagent provider real, functional MCP tool execution instead of descriptive text only. Tracked as a possible follow-up; not yet scheduled.
-
-#### OTel observability
-
-The MCP client emits spans and counters to `~/.milk/otel/`:
-
-| Signal | Type | Description |
-|---|---|---|
-| `mcp.connect` | span | One span per server per connect attempt; `status` attribute is `ok` or `error` |
-| `mcp.tool_call` | span | One span per tool invocation; includes `server`, `tool`, and `status` attributes |
-| `mcp.lazy_reconnect` | span | Emitted when a deferred reconnect is triggered on first tool call |
-| `mcp.connect_failures` | counter | Incremented on each failed connect or lazy reconnect failure |
-| `mcp.tool_calls` | counter | Total tool calls dispatched through the MCP client |
+`agent` names the active primary backend; empty defaults to the first non-`claude-cli` entry. `escalation_agent` selects which entry handles escalated turns (default `"claude"`) — a built-in `claude-cli` entry named `"claude"` is always available even if unlisted.
 
 ### `colorization` field
 
-Controls transcript syntax and Markdown rendering. Applied per turn to avoid ANSI contamination across turns.
-
-| Value | Behavior |
-|---|---|
-| `"off"` | No colorization — raw text, ANSI from agent labels preserved |
-| `"fenced"` | Syntax-highlight fenced code blocks only (chroma); default |
-| `"balanced"` | Fenced blocks + inline Markdown: bold, inline code, headings, bullets, blockquotes, HR |
-| `"full"` | Full Markdown render via glamour (reflows prose, all Markdown elements) |
+See [/colorize](#interactive-mode) above for the four modes and their behavior.
 
 ### `show_reasoning` field
 
-Controls whether thinking/reasoning tokens are shown in the transcript by default. Can be overridden live with `/think on|off`. When `false`, thinking blocks are replaced with a `[thinking…]` placeholder. Omit or set to `true` to show reasoning (default).
+Default visibility of thinking/reasoning tokens; see [/think](#interactive-mode) above.
 
 ### `config_editors` field
 
-Ordered list of editor commands tried by `/config open` and `/open`. The first command found on `$PATH` is used. Environment variables (e.g. `$EDITOR`, `$VISUAL`) are expanded before lookup.
+Ordered list of editor commands tried by `/config open` and `/open`; first found on `$PATH` wins. Env vars (`$EDITOR`, `$VISUAL`) are expanded before lookup. Default: `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`.
 
-Default (when omitted): `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`
-
-Example — prefer VS Code, fall back to `$EDITOR`:
 ```json
 "config_editors": ["code --wait", "$EDITOR", "nano"]
 ```
 
-### `sticky_escalation` field
-
-When `true` (default), the first router-triggered escalation automatically keeps subsequent turns on the escalation agent — shown as `<agent> (sticky)` in the status bar. Cleared by `/primary` or a single-turn `/primary <prompt>` override. Set to `false` to re-evaluate routing on every turn. Explicit `/escalate` pinning is unaffected by this setting.
-
 ### `experimental_lazy_history_management` field
 
-When `true`, agent context is built lazily: only the current agent's own turns and user turns directed at it are included verbatim. Contiguous blocks of turns by/for other agents are collapsed into a single placeholder (e.g. `[escalation]: (14 turns omitted)`). The agent can retrieve the omitted turns on-demand via `get_session_context` using the agent role and turn count from the placeholder.
-
-This significantly reduces context size for sessions with heavy cross-agent activity. User turns always show `[user to <agent>]` labels regardless of this setting. Default: `false` (include all turns with full labels).
-
-### `debug_claude_code` field
-
-When `true`, every raw NDJSON line emitted by the Claude CLI subprocess is appended to `~/.milk/claude_debug.ndjson`. The `.ndjson` extension reflects the content: each line is a self-contained JSON object, making the file valid Newline-Delimited JSON suitable for `jq` or any NDJSON-aware tool. Useful for diagnosing Claude CLI protocol issues, unexpected event types, or streaming gaps. Default: `false`.
-
-### `debug_local` field
-
-When `true`, every raw SSE line received from the local agent's HTTP stream is appended to `~/.milk/local_debug.log` — including lines that are skipped, blank separator lines, and lines that fail to parse. The `.log` extension reflects the content: SSE frames include `data:` and `event:` prefixes, blank separators, and other protocol framing that is not pure JSON. Useful for diagnosing dropped tokens, unknown event types, or SSE parser mismatches. Default: `false`.
-
-### `debug_subprocess` field
-
-When `true`, every raw stdout line emitted by subprocess agents (aider-cli, smolagent) is appended to `~/.milk/subprocess_debug.log`. Useful for diagnosing NDJSON parse errors, unexpected agent output, or protocol mismatches. Default: `false`.
-
-### `otel.log_context` field
-
-When `true`, the full content of every request payload is logged via `obs.LogPayload` at DEBUG level to `~/.milk/otel/logs.jsonl`. This covers:
-
-- **claude-cli agent**: static context file, dynamic context file, prompt, and MCP config JSON (the `--mcp-config` temp file passed to the subprocess)
-- **local/Bedrock agent**: full serialised inference request body sent to the HTTP endpoint, plus classifier request bodies
-- **subprocess agents (aider, smolagents)**: static context, dynamic context, and prompt passed as temp files
-
-Requires `otel.log_level: "DEBUG"` to appear in the log output. Default: `false`.
-
-Use `milk otel debug enable` to turn on the full debug bundle in one command.
-
-**Azure workaround:** Azure OpenAI uses a non-standard URL path (`/openai/deployments/<deployment>/chat/completions?api-version=…`) and an `api-key` header rather than Bearer auth. Set `url` to the full deployment endpoint and add `{"api-key": "<key>"}` to `headers`. A dedicated Azure provider with URL templating is tracked in GitHub Issues.
-
----
-
-## Persistent Task Tracking
-
-milk provides a lightweight task tracker for the local agent. Tasks are stored in two JSON files:
-
-| File | Contents |
-|---|---|
-| `~/.milk/tasks/<session-id>.json` | Active session tasks |
-| `~/.milk/tasks/global.json` | Cross-session tasks (survive restart) |
-
-### Tools exposed to the local agent
-
-| Tool | Parameters | Returns |
-|---|---|---|
-| `create_task` | `title` (required), `tags?` | `{"id": "<8-char id>"}` |
-| `update_task` | `id`, `status` (pending\|in_progress\|done\|blocked), `title?` | `"ok"` |
-| `list_tasks` | `include_global?` | `[{id, title, status, tags}]` |
-| `complete_task` | `id` | `"ok"` |
-
-The task tools are only available to the primary local-agent (HTTP or Bedrock backends). Subprocess and claude-cli agents do not receive them.
-
-### TUI commands
-
-| Command | Description |
-|---|---|
-| `/tasks` | List session + global tasks inline in the transcript |
-| `/task done <id>` | Mark a task done (accepts id prefix ≥ 4 chars) |
-| `/panel tasks` | Toggle the tasks side-panel (right side, 32 cols) |
-
-### Tasks panel
-
-`/panel tasks` opens a persistent right-side panel that shows session and global tasks with status badges. It updates automatically when the agent creates or modifies tasks.
-
----
-
-## Live Configuration Reload
-
-milk automatically watches `~/.milk/config.json` for changes while the TUI is running. Whenever the file is modified (saved from an editor in another terminal), the updated config is parsed and applied to the in-memory state within ~200 ms.
-
-The `/reload` slash command triggers an immediate re-parse — useful when the file watcher misses a write (e.g. symlink swap or atomic editor replace):
-
-```
-/reload
-```
-
-On success: `[milk] config reloaded` appears in the transcript.
-On error: `[milk] config reload error: <reason>` is shown; the existing in-memory config is kept unchanged.
-
-### Recovering from a corrupted config.json
-
-Two distinct safety nets cover a `config.json` that ends up syntactically invalid (e.g. from a bad automated edit by an agent given direct file access):
-
-- **While milk is already running**, the reload path above already keeps the last-known-good in-memory config — the error is shown, nothing crashes, nothing is lost, and the session keeps working normally until the file is fixed.
-- **At startup**, `Load`/`LoadFrom` fall back to `config.json.bak` — a backup refreshed on every successful `Save` and every successful parse. If the primary file fails to parse but the backup does, milk starts normally using the backup's content and shows a startup warning (`... was invalid (...) — recovered from backup; run "milk config open" to fix or replace it`) instead of refusing to launch. Only a `config.json` that was **never** successfully loaded before (no backup exists) still hard-fails, with a message pointing at `milk config open` to fix it by hand.
-
-### What IS hot-reloaded
-
-- All `Config` scalar fields: `direct_bash`, `show_reasoning`, `sticky_escalation`, agent limits, routing rules, OTel settings, etc.
-- Agent configs (name, URL, model, credentials) — effective on the **next turn**.
-- `direct_bash` / `direct_bash_allow` — effective immediately for the next prompt submitted.
-- **MCP server connections.** When the primary or escalation agent's `EffectiveMCPServers` resolution changes — a server's fields edited, a server added/removed, or an agent's `mcp_servers` list changed, via `/mcp`, `milk config mcp add|remove|assign|unassign`, or a direct edit to `config.json` — milk closes the stale connections and rebuilds the toolset for the affected role(s), with no restart needed. This is gated on an actual change (compared against what was last built for that agent), not resolved on every turn, so turns where nothing changed pay no extra cost. A turn already in flight keeps using the runner/toolset snapshot it started with; only the next turn on an affected role sees the rebuilt one. `claude-cli`'s own MCP connections (made directly by the `claude` subprocess via `--mcp-config`, not by milk) pick up the change on their next invocation automatically, since that file is regenerated fresh every turn.
-
-### What is NOT hot-reloaded
-
-- Active agent sessions — a running turn always uses the config that was active at turn start.
-- The `agents` list used to build TurnRunners — new agent instances are only built on the next turn.
-- MCP OAuth authorization (`auth: "oauth"`) — still requires the interactive `/mcp auth <server>` browser flow; no config edit or CLI command can obtain a token on the user's behalf.
-
----
-
-## Graceful Degradation
-
-| Primary agent | Escalation agent | behavior |
-| --- | --- | --- |
-| up | available (any provider) | normal routing |
-| down | available | warn once per session, route all to escalation agent |
-| up | unavailable/not installed | warn once per session, stay primary-only |
-| down | unavailable | error + exit |
-
----
-
-## Concurrent Tool Dispatch
-
-When the local agent emits a batch of tool calls in a single turn, all tools in the batch are dispatched **concurrently** rather than sequentially. Each tool runs in its own goroutine:
-
-- **Turn cancellation propagates immediately**: if the user presses Ctrl-C or `/stop`, the turn context is cancelled and every in-flight tool goroutine receives the cancellation — no tool waits for the turn timeout.
-- **Per-tool timeout**: each tool goroutine gets its own `context.WithTimeout(ctx, toolTimeout)`. If a single tool hangs, it is cancelled after the per-tool limit and returns a timeout error to the model; other tools in the same batch are unaffected.
-- **Result order preserved**: tool results are appended to the message history in the original call order, regardless of which tool finishes first.
-- **Permission checks are synchronous**: `toolNeedsPermission` checks run before dispatch so the TUI can present prompts in order without interleaving.
-
-### Configuration
-
-| Field | Location | Default | Description |
-|---|---|---|---|
-| `tool_timeout_secs` | `agents[*].limits` | 120 (2 min) | Per-individual-tool timeout in seconds. Set to -1 for no limit. |
-| `turn_timeout_secs` | `agents[*].limits` | 600 (10 min) | Per-turn timeout (unchanged by this feature). |
-
-```json
-{
-  "agents": [
-    {
-      "name": "local",
-      "url": "http://localhost:8080",
-      "model": "qwen2.5-coder",
-      "limits": {
-        "tool_timeout_secs": 30
-      }
-    }
-  ]
-}
-```
+When `true`, agent context is built lazily: only the current agent's own turns and user turns directed at it are included verbatim; contiguous blocks of other-agent turns collapse into a placeholder (e.g. `[escalation]: (14 turns omitted)`), retrievable on-demand via `get_session_context`. Significantly reduces context size for sessions with heavy cross-agent activity. User turns always show `[user to <agent>]` labels regardless. Default: `false`.
 
 ---
 
 ## Streaming
 
-Both agents stream output in real time:
-
-- **Primary agent**: SSE from OpenAI-compat API (`stream: true`), or AWS binary event-stream from Bedrock Converse API (provider-specific frame decoder)
-- **Claude agent**: NDJSON from `--output-format stream-json`, parsed line by line
-
-milk relays tokens to stdout as they arrive.
-
----
-
-## Loop Detection
-
-milk monitors agent output for signs of looping — when an LLM gets stuck repeating the same phrase, tool call, or response pattern. This prevents runaway token consumption when the user doesn't notice and interrupt manually.
-
-### Signals
-
-| Signal | Scope | What it catches | Default threshold |
-|---|---|---|---|
-| `chunk_repetition` | Intra-turn | Same text repeating in streaming output | 3 occurrences in 50-chunk window |
-| `reasoning_chunk_repetition` | Intra-turn | Same text repeating in streaming reasoning/thinking output | 10 occurrences in 50-chunk window |
-| `response_repetition` | Cross-turn | Identical/near-identical responses across turns | 3 consecutive similar responses |
-| `reasoning_repetition` | Cross-turn | Identical/near-identical reasoning text across turns | 6 consecutive similar responses |
-| `token_velocity` | Cross-turn | Rapid token consumption without progress | 50k tokens in 30s window |
-| `tool_call_echo` | Cross-turn | Same tool+args in consecutive turns | 3 consecutive turns |
-| `silent_burn` | Per-turn | High input tokens, near-zero output | 20k input tokens |
-| `turn_flood` | Session | Excessive turns without user input | 10 consecutive non-user turns |
-
-### How it works
-
-**Intra-turn** (the primary use case): every streaming chunk passes through `FeedChunk()`, which maintains a ring buffer of the last 50 chunks. When the same text appears 3+ times, the signal fires at confidence 0.9 and the turn is auto-interrupted via `cancelTurn()`. This catches the common case where an agent repeats a phrase or tool call forever within a single turn.
-
-**Cross-turn**: after each turn completes, `Feed()` checks response similarity (trigram Jaccard), token velocity, tool call patterns, and turn count. These catch patterns across consecutive turns.
-
-### TUI behavior
-
-- **Status bar**: shows `⚠ loop — auto-interrupting` when a high-confidence signal fires, or `⚠ <signal>` for medium-confidence warnings
-- **Transcript**: logs `[⚠ loop detected: <signal> (confidence N%)]` for high-confidence signals
-- **User turn**: resets all warnings and the turn-flood counter
-
-### Configuration
-
-```json
-{
-  "loop_detection": {
-    "enabled": true,
-    "chunk_repetition_threshold": 3,
-    "chunk_window_size": 50,
-    "reasoning_chunk_repetition_threshold": 10,
-    "max_consecutive_similar_responses": 3,
-    "response_similarity_threshold": 0.85,
-    "reasoning_max_consecutive_similar_responses": 6,
-    "token_velocity_window_seconds": 30,
-    "token_velocity_threshold": 50000,
-    "max_silent_burn_tokens": 20000,
-    "max_consecutive_turns_without_user": 10,
-    "tool_echo_threshold": 3,
-    "auto_interrupt": false
-  }
-}
-```
-
-Default: detection ON, auto-interrupt OFF (warn only). Set `auto_interrupt: true` for unattended sessions where the user wants the agent to stop looping automatically.
-
-### Provider compatibility
-
-Loop detection works universally for all providers — local inference servers, Claude Code CLI, Bedrock, aider, smolagents, and any Bearer-token backend. The intra-turn chunk monitor sits at the TUI layer, so it catches loops regardless of which agent is running.
+Both agents stream output in real time: SSE from OpenAI-compat APIs (`stream: true`), AWS binary event-stream from Bedrock Converse, or NDJSON from Claude's `--output-format stream-json`. milk relays tokens to stdout as they arrive.
 
 ---
 

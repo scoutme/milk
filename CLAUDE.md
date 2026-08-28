@@ -4,9 +4,12 @@ Switch models, not context. Routes prompts between a local LLM (any OpenAI-compa
 
 ## Quick orientation
 
-- [docs/setup.md](docs/setup.md) — local inference server setup (llama.cpp), tested models, local testing procedure
-- [docs/providers.md](docs/providers.md) — all agent/provider config (Claude CLI, Bedrock, OpenRouter, smolagents, …), memory/context tuning, remote oversight
-- [docs/spec.md](docs/spec.md) — full product and architecture spec
+- [docs/getting-started.md](docs/getting-started.md) — fastest path to a working setup, provider-agnostic
+- [docs/providers.md](docs/providers.md) — all agent/provider config (Claude CLI, Bedrock, OpenRouter, smolagents, local llama.cpp reference setup, …), memory/context tuning
+- [docs/workflows.md](docs/workflows.md) — routing, session states, sticky escalation, the native `/workflow` engine
+- [docs/tooling.md](docs/tooling.md) — built-in tools, agent-as-tool, MCP servers, attachments
+- [docs/operations.md](docs/operations.md) — memory usage, observability, loop detection, task tracking, remote oversight
+- [docs/spec.md](docs/spec.md) — architecture and CLI reference
 - [docs/eval.md](docs/eval.md) — `milk eval` usage: commands, scenario format, adapters and their per-adapter options, judging, reports
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records (why things are the way they are)
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch naming, conventional commits, per-step branch plan

@@ -77,4 +77,4 @@ See [docs/eval.md](docs/eval.md) for scenario format, per-adapter options, and j
 - `aider-chat` pip package — only if using the `aider-cli` provider
 - `smolagents[litellm]` pip package — only if using the `subprocess`/smolagent provider
 
-For a reference local setup (NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source) see [docs/setup.md](docs/setup.md). For provider-specific configuration see [docs/providers.md](docs/providers.md). For evaluating and comparing agents see [docs/eval.md](docs/eval.md).
+See [docs/getting-started.md](docs/getting-started.md) for the fastest path to a working setup, [docs/providers.md](docs/providers.md) for provider-specific configuration (including a reference local setup with NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source), and [docs/eval.md](docs/eval.md) for evaluating and comparing agents.

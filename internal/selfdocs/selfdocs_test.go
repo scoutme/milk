@@ -50,6 +50,19 @@ func TestLookup_KnownAliasesResolve(t *testing.T) {
 	}
 }
 
+// TestLookup_AllAliasesResolveAgainstRealDocs guards the exact fragility
+// called out in the package doc comment: every alias target must be a real
+// heading slug in one of the embedded docs. A doc reorg that moves or
+// renames a heading without updating aliases breaks this silently at
+// runtime otherwise — this test is the only thing that catches it.
+func TestLookup_AllAliasesResolveAgainstRealDocs(t *testing.T) {
+	for rawKey, slug := range aliases {
+		if _, found := index[slug]; !found {
+			t.Errorf("alias %q -> slug %q has no matching heading in the embedded docs", rawKey, slug)
+		}
+	}
+}
+
 func TestLookup_UnknownTopicMisses(t *testing.T) {
 	if _, ok := Lookup("something that does not exist anywhere"); ok {
 		t.Error("expected a miss for a nonsense topic")

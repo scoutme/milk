@@ -40,10 +40,13 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting Started: setup.md
+  - Getting Started: getting-started.md
   - Providers & Config: providers.md
-  - Architecture: spec.md
+  - Workflows: workflows.md
+  - Tooling & MCP: tooling.md
+  - Operations: operations.md
   - Evaluation: eval.md
+  - Architecture: spec.md
   - Decisions: adr/README.md
 
 # Only the curated, user-facing docs are published. Internal design notes,
