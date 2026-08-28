@@ -1,0 +1,142 @@
+{% extends "main.html" %}
+
+{% block tabs %}
+{{ super() }}
+
+<section class="mk-hero">
+  <div class="mk-hero__inner">
+    <img class="mk-hero__logo" src="{{ 'images/milk.png' | url }}" alt="milk" />
+    <p class="mk-hero__tagline">Switch models, not context.</p>
+    <p class="mk-hero__sub">
+      milk is a terminal AI assistant that routes each prompt between a fast
+      primary agent and a deep escalation agent &mdash; keeping the full
+      conversation in sync across both. Start cheap. Go deep when you need
+      it. Switch mid-workflow.
+    </p>
+    <div class="mk-hero__cta">
+      <a class="md-button md-button--primary" href="{{ 'setup/' | url }}">Get started</a>
+      <a class="md-button" href="https://github.com/scoutme/milk">View on GitHub</a>
+    </div>
+    <pre class="mk-hero__install"><code>git clone https://github.com/scoutme/milk
+cd milk &amp;&amp; task build</code></pre>
+  </div>
+</section>
+
+<section class="mk-demo">
+  <div class="mk-demo__inner">
+    <img src="{{ 'images/milk-tui-compressed.gif' | url }}" alt="milk TUI demo" loading="lazy" />
+  </div>
+</section>
+
+<section class="mk-features">
+  <div class="mk-features__grid">
+    <div class="mk-feature">
+      <h3>Automatic routing</h3>
+      <p>Each prompt is classified and sent to the right agent without you changing tools.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Context handoff</h3>
+      <p>When escalation fires, the primary conversation is reformatted as context &mdash; the escalation agent orients itself without a separate setup step.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Persistent memory</h3>
+      <p>A Percept store survives across sessions; key facts are reinforced, decay, and promote to long-term memory over time.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Built-in tools</h3>
+      <p>Bash, file read/write/edit, grep, find, HTTP GET, session access, and memory tools &mdash; no extra configuration.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Streaming TUI</h3>
+      <p>A bubbletea terminal UI with a scrollable transcript, live memory panel, status bar, and input history.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Loop detection</h3>
+      <p>Monitors agent output for repeating patterns, warns in the status bar, and auto-interrupts when an agent gets stuck.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Any backend, either role</h3>
+      <p>Claude Code CLI, any OpenAI-compatible server, AWS Bedrock, aider, smolagents, or any Bearer-token API &mdash; for primary or escalation.</p>
+    </div>
+    <div class="mk-feature">
+      <h3>Evaluation harness</h3>
+      <p>Run the same scenarios against different agents and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side.</p>
+    </div>
+  </div>
+</section>
+
+<style>
+  .md-content, .md-sidebar { display: none; }
+
+  .mk-hero {
+    padding: 4rem 1rem 3rem;
+    text-align: center;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  }
+  .mk-hero__inner { max-width: 40rem; margin: 0 auto; }
+  .mk-hero__logo { width: 96px; height: auto; margin-bottom: 1.5rem; }
+  .mk-hero__tagline {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 1rem;
+    color: var(--md-default-fg-color);
+  }
+  .mk-hero__sub {
+    font-size: 1.05rem;
+    color: var(--md-default-fg-color--light);
+    margin: 0 0 2rem;
+    line-height: 1.6;
+  }
+  .mk-hero__cta {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-bottom: 2rem;
+    flex-wrap: wrap;
+  }
+  .mk-hero__install {
+    display: inline-block;
+    text-align: left;
+    background: var(--md-code-bg-color);
+    border-radius: 0.4rem;
+    padding: 1rem 1.5rem;
+    font-size: 0.85rem;
+    margin: 0 auto;
+  }
+
+  .mk-demo {
+    padding: 2.5rem 1rem;
+    text-align: center;
+    background: var(--md-code-bg-color);
+  }
+  .mk-demo__inner { max-width: 60rem; margin: 0 auto; }
+  .mk-demo img {
+    max-width: 100%;
+    border-radius: 0.4rem;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+  }
+
+  .mk-features { padding: 3rem 1rem 4rem; }
+  .mk-features__grid {
+    max-width: 64rem;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 1.75rem;
+  }
+  .mk-feature h3 {
+    font-size: 1rem;
+    margin: 0 0 0.4rem;
+    color: var(--md-default-fg-color);
+  }
+  .mk-feature p {
+    font-size: 0.9rem;
+    color: var(--md-default-fg-color--light);
+    line-height: 1.5;
+    margin: 0;
+  }
+</style>
+{% endblock %}
+
+{% block content %}{% endblock %}
+{% block site_nav %}{% endblock %}

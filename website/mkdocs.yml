@@ -1,0 +1,73 @@
+site_name: milk
+site_description: "Switch models, not context."
+site_url: https://milkai.dev
+repo_url: https://github.com/scoutme/milk
+repo_name: scoutme/milk
+edit_uri: edit/main/docs/
+
+docs_dir: ../docs
+site_dir: site
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: images/milk-xs.png
+  favicon: images/milk-xxs.png
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Getting Started: setup.md
+  - Providers & Config: providers.md
+  - Architecture: spec.md
+  - Evaluation: eval.md
+  - Decisions: adr/README.md
+
+# Only the curated, user-facing docs are published. Internal design notes,
+# plans, and analysis docs stay out of the public site.
+exclude_docs: |
+  agent-as-tool-implementation-plan.md
+  branching-strategy.md
+  context-bloat-analysis.md
+  eval-harness-plan.md
+  eval-harness-spec.md
+  memory-design.md
+  mock-setup.md
+  observability-design.md
+  observability-refactor.md
+  silent-turn-issue-analysis.md
+  smolagent-integration-design.md
+  embed.go
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true

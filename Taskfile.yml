@@ -110,3 +110,19 @@ tasks:
       - task: vet
       - task: test
       - task: build
+
+  site:build:
+    desc: Build the milk website with MkDocs (creates website/.venv if missing)
+    dir: website
+    cmds:
+      - test -d .venv || python3 -m venv .venv
+      - .venv/bin/pip install -q -r requirements.txt
+      - .venv/bin/mkdocs build
+
+  site:serve:
+    desc: Serve the milk website locally with live-reload
+    dir: website
+    cmds:
+      - .venv/bin/mkdocs serve
+    deps:
+      - site:build
