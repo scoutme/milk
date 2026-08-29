@@ -35,10 +35,11 @@ milk [prompt | flags]
          │
     ┌────┴──────────┐
     ▼               ▼
-PRIMARY         ESCALATION
-agent           agent
-OpenAI API      (any AgentConfig)
-tool loop       claude-cli / bedrock / …
+PRIMARY              ESCALATION
+agent                agent
+(any AgentConfig)    (any AgentConfig)
+local / bedrock /    local / bedrock /
+claude-cli / …       claude-cli / …
 ```
 
 Routing mechanics, session states, and the native `/workflow` engine are covered in [docs/workflows.md](workflows.md).
