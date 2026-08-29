@@ -39,7 +39,7 @@ A common, valid pattern: one provider, two agent entries at different model weig
 
 ## Backends
 
-Every backend milk supports, one next to the other. All of them can serve as primary or escalation (see the principle above); cross-cutting config that applies *regardless* of which backend you pick — context window, prompt tiering, custom prompts, wire-format overrides, dynamic tokens — lives in [Cross-cutting agent configuration](#cross-cutting-agent-configuration) below, not repeated per backend.
+All backends milk supports can serve as primary or escalation (see the principle above); cross-cutting config that applies *regardless* of which backend you pick — context window, prompt tiering, custom prompts, wire-format overrides, dynamic tokens — lives in [Cross-cutting agent configuration](#cross-cutting-agent-configuration) below, not repeated per backend.
 
 ### Claude Code CLI
 
