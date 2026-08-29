@@ -33,7 +33,15 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	maxBytes := cfg.DebugLogMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 104857600
+	}
+	maxFiles := cfg.DebugLogMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 5
+	}
+	rw, err := NewRotatingWriter(path, maxBytes, maxFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -41,12 +49,12 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}
 	var h slog.Handler
 	if format == "json" {
-		h = slog.NewJSONHandler(f, opts)
+		h = slog.NewJSONHandler(rw, opts)
 	} else {
-		h = slog.NewTextHandler(f, opts)
+		h = slog.NewTextHandler(rw, opts)
 	}
 	milkLogger = slog.New(h)
-	return func() { f.Close() }, nil //nolint:errcheck
+	return func() { rw.Close() }, nil //nolint:errcheck
 }
 
 func parseLogLevel(s string) slog.Level {

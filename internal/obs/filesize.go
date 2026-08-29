@@ -31,6 +31,13 @@ func FileStats(otelDir string) []SignalFileStat {
 
 func statFile(dir, name string) SignalFileStat {
 	path := filepath.Join(dir, name)
+	return statFileFromPath(path)
+}
+
+// statFileFromPath returns a SignalFileStat for a file given its full path.
+// The Name field is set to filepath.Base(path).
+func statFileFromPath(path string) SignalFileStat {
+	name := filepath.Base(path)
 	s := SignalFileStat{Name: name, Path: path}
 
 	info, err := os.Stat(path)
@@ -128,6 +135,25 @@ func Trim(otelDir string) error {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}
 		f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("recreate %s: %w", name, err)
+		}
+		f.Close()
+	}
+	// Also trim the 3 debug log files that live in ~/.milk/ (not otelDir).
+	for _, dbgPath := range debugLogPathsFn() {
+		if _, err := os.Stat(dbgPath); os.IsNotExist(err) {
+			continue
+		}
+		name := filepath.Base(dbgPath)
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		dir := filepath.Dir(dbgPath)
+		dst := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, date, ext))
+		if err := os.Rename(dbgPath, dst); err != nil {
+			return fmt.Errorf("trim %s: %w", name, err)
+		}
+		f, err := os.OpenFile(dbgPath, os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("recreate %s: %w", name, err)
 		}

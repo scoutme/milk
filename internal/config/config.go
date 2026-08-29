@@ -71,6 +71,8 @@ type OtelConfig struct {
 	MaxMB               int    `json:"max_mb"`                        // hard cap, disable otel when exceeded (0 = off)
 	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`         // periodic flush interval (0 = session-end only)
 	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"` // saved by debug enable; restored by debug disable
+	DebugLogMaxBytes    int64  `json:"debug_log_max_bytes"`           // per-file cap, default 104857600 (100 MB)
+	DebugLogMaxFiles    int    `json:"debug_log_max_files"`           // rotated files to keep, default 5
 }
 
 // AgentConfig holds configuration for a single agent backend.
@@ -698,6 +700,8 @@ func defaults() Config {
 			WarnMB:              50,
 			MaxMB:               0,
 			MetricsFlushMinutes: 5,
+			DebugLogMaxBytes:    104857600,
+			DebugLogMaxFiles:    5,
 		},
 		Rules: Rules{
 			EscalateAboveTokens: 2000,
