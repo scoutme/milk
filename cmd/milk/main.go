@@ -589,8 +589,8 @@ func applyAWSCreds(cfg config.Config, agent *claude.Agent) *claude.Agent {
 
 // openCLIDebugLog opens (or creates/appends) the Claude raw NDJSON debug log
 // when cfg.DebugCLILog is true. Returns nil, nil when disabled.
-// The caller is responsible for closing the returned file.
-func openCLIDebugLog(cfg config.Config) (*os.File, error) {
+// The caller is responsible for closing the returned writer.
+func openCLIDebugLog(cfg config.Config) (*obs.RotatingWriter, error) {
 	if !cfg.DebugCLILog {
 		return nil, nil
 	}
@@ -598,10 +598,18 @@ func openCLIDebugLog(cfg config.Config) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	maxBytes := cfg.Otel.DebugLogMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 104857600
+	}
+	maxFiles := cfg.Otel.DebugLogMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 5
+	}
+	return obs.NewRotatingWriter(path, maxBytes, maxFiles)
 }
 
-func openLocalDebugLog(cfg config.Config) (*os.File, error) {
+func openLocalDebugLog(cfg config.Config) (*obs.RotatingWriter, error) {
 	if !cfg.DebugLocalLog {
 		return nil, nil
 	}
@@ -609,10 +617,18 @@ func openLocalDebugLog(cfg config.Config) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	maxBytes := cfg.Otel.DebugLogMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 104857600
+	}
+	maxFiles := cfg.Otel.DebugLogMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 5
+	}
+	return obs.NewRotatingWriter(path, maxBytes, maxFiles)
 }
 
-func openSubprocessDebugLog(cfg config.Config) (*os.File, error) {
+func openSubprocessDebugLog(cfg config.Config) (*obs.RotatingWriter, error) {
 	if !cfg.DebugSubprocessLog {
 		return nil, nil
 	}
@@ -620,7 +636,15 @@ func openSubprocessDebugLog(cfg config.Config) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	maxBytes := cfg.Otel.DebugLogMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 104857600
+	}
+	maxFiles := cfg.Otel.DebugLogMaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 5
+	}
+	return obs.NewRotatingWriter(path, maxBytes, maxFiles)
 }
 
 func memoryDir() (string, error) {

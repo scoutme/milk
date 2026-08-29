@@ -15,14 +15,18 @@ import (
 
 const instrumentationScope = "github.com/scoutme/milk"
 
-// CheckFileSizes checks all otel signal files against warn_mb and max_mb
-// thresholds. Returns a warning message if any file exceeds warn_mb, and
-// whether any file exceeded max_mb (in which case OTel should be disabled).
+// CheckFileSizes checks all otel signal files and debug log files against
+// warn_mb and max_mb thresholds. Returns a warning message if any file exceeds
+// warn_mb, and whether any file exceeded max_mb (in which case OTel should be disabled).
 func CheckFileSizes(cfg config.OtelConfig, otelDir string) (warning string, exceeded bool) {
 	if !cfg.Enabled {
 		return "", false
 	}
 	stats := FileStats(otelDir)
+	// Add debug log file stats (they live in ~/.milk/, not ~/.milk/otel/).
+	for _, dbgPath := range debugLogPathsFn() {
+		stats = append(stats, statFileFromPath(dbgPath))
+	}
 	for _, s := range stats {
 		mb := float64(s.Bytes) / 1024.0 / 1024.0
 		if cfg.MaxMB > 0 && mb >= float64(cfg.MaxMB) {
@@ -30,10 +34,30 @@ func CheckFileSizes(cfg config.OtelConfig, otelDir string) (warning string, exce
 				s.Name, mb, cfg.MaxMB), true
 		}
 		if cfg.WarnMB > 0 && mb >= float64(cfg.WarnMB) {
-			warning = fmt.Sprintf("~/.milk/otel/%s is %.1f MB — run /otel trim to archive", s.Name, mb)
+			warning = fmt.Sprintf("%s is %.1f MB — run /otel trim to archive", s.Path, mb)
 		}
 	}
 	return warning, false
+}
+
+// debugLogPathsFn is a package-level function variable returning the paths of
+// the three debug log files. It is overridable in tests to isolate them from
+// the real user home directory (which would cause destructive side effects on
+// real debug logs during Trim/CheckFileSizes).
+var debugLogPathsFn = defaultDebugLogPaths
+
+func defaultDebugLogPaths() []string {
+	var paths []string
+	if p, err := config.CLIDebugLogPath(); err == nil {
+		paths = append(paths, p)
+	}
+	if p, err := config.LocalDebugLogPath(); err == nil {
+		paths = append(paths, p)
+	}
+	if p, err := config.SubprocessDebugLogPath(); err == nil {
+		paths = append(paths, p)
+	}
+	return paths
 }
 
 // StartSpan is a convenience wrapper for starting a named span.
