@@ -11,7 +11,8 @@ The primary agent (HTTP or Bedrock backends) has these tools available with no c
 | Tool | Parameters | Returns |
 |---|---|---|
 | `bash(command)` | `command string` | stdout, stderr, exit_code |
-| `grep(pattern, path, recursive)` | pattern/path/bool | matches |
+| `find_files(path, pattern)` | root dir + glob (e.g. `*_test.go`) | matching file paths — locate by filename; use `grep` for contents |
+| `grep(pattern, path, recursive)` | pattern/path/bool | matches — searches file contents; use `find_files` for filenames |
 | `read_file(path, offset, limit)` | path + optional range | content |
 | `write_file(path, content)` | — | ok — creates parent directories; expands `~` |
 | `edit_file(path, old_string, new_string, replace_all)` | — | ok — exact-string replacement; rejects ambiguous matches unless `replace_all=true` |
@@ -23,8 +24,11 @@ The primary agent (HTTP or Bedrock backends) has these tools available with no c
 | `get_session_context()` | — | full shared session history (both agents), so the primary model can see prior escalation turns |
 | `get_context_stats()` | — | current history turn counts and total character size, so the agent can self-regulate before hitting context limits |
 | `open_file(path)` | — | ok — opens the file in the configured editor |
+| `current_need(goal)` | one-sentence goal | ok — same effect as the user typing `/need <goal>` |
+| `export_session(format, output_path)` | `"text"`\|`"json"`, optional file path | transcript inline, or written to `output_path` |
+| `milk_config_help(topic)` | e.g. `"mcp add"`, `"agent add"` | a section of milk's own embedded reference docs — lets the agent look up how to manage milk's own config instead of guessing the schema; omit `topic` to list what's available. Backed by `internal/selfdocs`, which indexes `docs/spec.md`/`providers.md`/`workflows.md`/`tooling.md`/`operations.md` by heading — same content this site is built from |
 
-Memory tools (`get_memory`, `list_memory`, `forget_memory`) and task tools (`create_task`, `update_task`, `list_tasks`, `complete_task`) are covered in [docs/operations.md](operations.md).
+Self-escalation (`escalate(reason)`) is covered in [docs/workflows.md](workflows.md#routing). Memory tools (`get_memory`, `list_memory`, `forget_memory`) and task tools (`create_task`, `update_task`, `list_tasks`, `complete_task`) are covered in [docs/operations.md](operations.md).
 
 Restrict or extend the set per agent with `limits.included_tools` / `limits.excluded_tools` — see [docs/providers.md — Per-agent limit overrides](providers.md#per-agent-limit-overrides).
 

@@ -162,18 +162,18 @@ Milk detects when an LLM agent gets stuck in a loop — repeating the same phras
 
 | Signal | Scope | What it catches | Default threshold |
 |---|---|---|---|
-| **chunk_repetition** | Intra-turn | Same text repeating in streaming output | 3 occurrences in 50-chunk window |
+| **chunk_repetition** | Intra-turn | Same text repeating in streaming output (consecutive, or scattered for chunks ≥40 runes) | 5 occurrences in 50-chunk window |
 | **reasoning_chunk_repetition** | Intra-turn | Same text repeating in streaming reasoning/thinking output | 10 occurrences in 50-chunk window |
 | **response_repetition** | Cross-turn | Identical/near-identical responses across turns | 3 consecutive similar responses |
 | **reasoning_repetition** | Cross-turn | Identical/near-identical reasoning text across turns | 6 consecutive similar responses |
-| **token_velocity** | Cross-turn | Rapid token consumption without progress | 50k tokens in 30s window |
+| **token_velocity** | Cross-turn | Rapid token consumption without progress | 300k tokens in 60s window |
 | **tool_call_echo** | Cross-turn | Same tool+args in consecutive turns | 3 consecutive turns |
 | **silent_burn** | Per-turn | High input tokens, near-zero output | 20k input tokens |
 | **turn_flood** | Session | Excessive turns without user input | 10 consecutive non-user turns |
 
 ### How it works
 
-1. **Intra-turn**: `FeedChunk()` is called for every streaming `chunkMsg`. A ring buffer tracks the last 50 chunks. When the same text appears 3+ times, `SignalChunkRepetition` fires (confidence 0.9) and the turn is auto-interrupted via `cancelTurn()`.
+1. **Intra-turn**: `FeedChunk()` is called for every streaming `chunkMsg`. A ring buffer tracks the last 50 chunks. When the same text appears 5+ times consecutively (or recurs anywhere in the window, for chunks ≥40 runes), `SignalChunkRepetition` fires (confidence 0.9) and the turn is auto-interrupted via `cancelTurn()`.
 2. **Cross-turn**: `Feed()` is called after each turn completes. It checks response similarity (trigram Jaccard), token velocity, tool call patterns, and turn count.
 3. **Status bar**: Shows `⚠ loop — auto-interrupted` or `⚠ <signal>` when a signal fires.
 4. **Transcript**: Shows `[⚠ loop detected: <signal> (confidence N%)]` for high-confidence signals.
@@ -184,13 +184,15 @@ Milk detects when an LLM agent gets stuck in a loop — repeating the same phras
 {
   "loop_detection": {
     "enabled": true,
-    "chunk_repetition_threshold": 3,
+    "chunk_repetition_threshold": 5,
     "chunk_window_size": 50,
+    "chunk_repetition_min_scattered_length": 40,
     "reasoning_chunk_repetition_threshold": 10,
     "max_consecutive_similar_responses": 3,
     "response_similarity_threshold": 0.85,
     "reasoning_max_consecutive_similar_responses": 6,
-    "token_velocity_threshold": 50000,
+    "token_velocity_window_seconds": 60,
+    "token_velocity_threshold": 300000,
     "auto_interrupt": false
   }
 }
