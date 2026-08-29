@@ -12,8 +12,6 @@ New to milk? Start with [docs/getting-started.md](getting-started.md) for the fa
 
 The agent handling the fast path — most turns, most tool calls. Configurable via any `agents` entry, including `claude-cli` (see the callout below): inference-server backends (local/cloud HTTP, or AWS Bedrock Converse natively), subprocess backends (aider-cli, smolagents), and Claude Code CLI can all be primary. Any tool-calling-capable model works on the inference-server path; see [Tested models](#tested-models) for models confirmed against milk's tool-calling loop specifically.
 
-> **`/agent switch <name> as primary` at runtime does not yet support switching to a `claude-cli` entry** — that specific code path still builds a broken HTTP agent from it (see [issue #135](https://github.com/scoutme/milk/issues/135)). Configuring `claude-cli` as primary via `agent` in `~/.milk/config.json` (or `--agent <name>`) before launch works correctly; only the interactive runtime switch is affected.
-
 ## Escalation agent
 
 The agent handling turns the primary agent hands off — set via `escalation_agent` in the config root, switch at runtime with `/agent switch <name> as escalation`. Can be Claude Code CLI (`provider: "claude-cli"`), or any inference-server backend using the same protocols as the primary agent, with a role-aware system prompt (no `escalate` tool; it knows it's the escalation target). See [docs/workflows.md](workflows.md) for how a turn gets routed here and what happens across the handoff.
