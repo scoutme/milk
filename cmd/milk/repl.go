@@ -1487,7 +1487,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workflowState.Task = msg.Task
 		m.workflowState.WorkflowID = msg.WorkflowID
 		m.workflowState.Role = msg.Role
-		if msg.ActivePaths != nil { m.workflowState.StageTree = msg.ActivePaths.Root }
+		if msg.ActivePaths != nil {
+			m.workflowState.StageTree = msg.ActivePaths.Root
+		}
 		m.workflowState.Generic = true
 		m.workflowPanelOpen = true
 		m.lastWorkflowActivity = time.Now()

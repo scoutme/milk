@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -637,6 +638,85 @@ func TestReasoningChunkRepetition_ResetTurnClearsBuffer(t *testing.T) {
 	}
 	if !found {
 		t.Error("ResetTurn should allow reasoning detection again in the new turn")
+	}
+}
+
+// ── Reasoning Chunk Flood ───────────────────────────────────────────────────
+
+func TestReasoningChunkFlood_FiresAtThreshold(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkFloodThreshold = 10
+	d := New(cfg)
+	// Feed 10 different short reasoning chunks — each unique so consecutive
+	// and scattered detectors don't fire, but the flood detector should.
+	for i := 0; i < 9; i++ {
+		d.FeedReasoningChunk(fmt.Sprintf("thinking about step %d of the problem", i))
+	}
+	verdicts := d.FeedReasoningChunk("thinking about step 9 of the problem")
+	found := false
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkFlood {
+			found = true
+			if !v.ShouldInterrupt {
+				t.Error("reasoning chunk flood should auto-interrupt")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected SignalReasoningChunkFlood after exceeding threshold")
+	}
+}
+
+func TestReasoningChunkFlood_NoFireBelowThreshold(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkFloodThreshold = 10
+	d := New(cfg)
+	for i := 0; i < 8; i++ {
+		d.FeedReasoningChunk(fmt.Sprintf("thinking about step %d of the problem", i))
+	}
+	verdicts := d.FeedReasoningChunk("thinking about step 8 of the problem")
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkFlood {
+			t.Error("should not fire below the flood threshold")
+		}
+	}
+}
+
+func TestReasoningChunkFlood_FiresOnce(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkFloodThreshold = 5
+	d := New(cfg)
+	for i := 0; i < 4; i++ {
+		d.FeedReasoningChunk(fmt.Sprintf("chunk %d", i))
+	}
+	d.FeedReasoningChunk("chunk 4") // fires here
+	// Continue feeding — should NOT re-fire.
+	verdicts := d.FeedReasoningChunk("chunk 5")
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkFlood {
+			t.Error("should not re-fire within the same turn")
+		}
+	}
+}
+
+func TestReasoningChunkFlood_ResetTurnResetsCounter(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReasoningChunkFloodThreshold = 5
+	d := New(cfg)
+	for i := 0; i < 4; i++ {
+		d.FeedReasoningChunk(fmt.Sprintf("chunk %d", i))
+	}
+	d.FeedReasoningChunk("chunk 4") // fires in first turn
+	d.ResetTurn()
+	// After reset, counter should be back to 0 — 3 more chunks should not fire.
+	for i := 0; i < 3; i++ {
+		d.FeedReasoningChunk(fmt.Sprintf("new chunk %d", i))
+	}
+	verdicts := d.FeedReasoningChunk("new chunk 3")
+	for _, v := range verdicts {
+		if v.Signal == SignalReasoningChunkFlood {
+			t.Error("ResetTurn should reset the flood counter")
+		}
 	}
 }
 

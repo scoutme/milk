@@ -192,9 +192,9 @@ type execContext struct {
 	// path segments from root to the deepest executing stage. Every
 	// goroutine (sequential or parallel) pushes/pops its own segment via
 	// pushPath/popPath; reportProgress builds a tree snapshot from the list.
-	defName    string
-	activePaths []string   // shared across goroutines — protect with activeMu
-	activeMu   *sync.Mutex // shared across goroutines; nil only in test stubs
+	defName     string
+	activePaths []string    // shared across goroutines — protect with activeMu
+	activeMu    *sync.Mutex // shared across goroutines; nil only in test stubs
 }
 
 // pushPath appends a segment to the shared activePaths list.

@@ -5,6 +5,7 @@ package loop
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,12 @@ type Config struct {
 	// default threshold — reasoning naturally repeats phrases more than final
 	// answers do, so it needs more slack before it's treated as a stuck loop.
 	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold"` // default 10
+
+	// Reasoning chunk flood (intra-turn): fires when the total number of
+	// reasoning chunks exceeds this threshold within a single turn, even if
+	// no individual chunk repeats. Catches "death by a thousand cuts" loops
+	// where the model cycles through many short, varied reasoning fragments.
+	ReasoningChunkFloodThreshold int `json:"reasoning_chunk_flood_threshold"` // default 200
 
 	// Scattered chunk repetition (intra-turn): fires when the same chunk text
 	// recurs ChunkRepetitionThreshold+ times within the window WITHOUT requiring
@@ -95,6 +102,9 @@ func (c *Config) defaults() {
 	if c.ReasoningChunkRepetitionThreshold <= 0 {
 		c.ReasoningChunkRepetitionThreshold = c.ChunkRepetitionThreshold * 2
 	}
+	if c.ReasoningChunkFloodThreshold <= 0 {
+		c.ReasoningChunkFloodThreshold = 200
+	}
 	if c.ChunkRepetitionMinScatteredLength <= 0 {
 		c.ChunkRepetitionMinScatteredLength = 40
 	}
@@ -117,6 +127,7 @@ const (
 	SignalReasoningRepetition               // cross-turn: reasoning text repeating across turns
 	SignalScatteredChunkRepetition          // intra-turn: same long chunk text recurring without adjacency
 	SignalScatteredReasoningChunkRepetition // intra-turn: same long reasoning chunk text recurring without adjacency
+	SignalReasoningChunkFlood               // intra-turn: too many reasoning chunks without content output
 )
 
 func (s Signal) String() string {
@@ -141,6 +152,8 @@ func (s Signal) String() string {
 		return "scattered_chunk_repetition"
 	case SignalScatteredReasoningChunkRepetition:
 		return "scattered_reasoning_chunk_repetition"
+	case SignalReasoningChunkFlood:
+		return "reasoning_chunk_flood"
 	default:
 		return "unknown"
 	}
@@ -188,6 +201,11 @@ type Detector struct {
 	consecReasonRepeat  int
 	lastReasonChunkText string
 	reasonScatter       scatterState
+
+	// Reasoning chunk flood: total count of reasoning chunks in the current
+	// turn. Fires once when ReasoningChunkFloodThreshold is exceeded.
+	reasonChunkCount int
+	firedReasonFlood bool
 }
 
 // scatterState tracks exact-match occurrence counts of chunk texts within a
@@ -256,23 +274,36 @@ func (d *Detector) Feed(turn TurnSummary) []Verdict {
 	var verdicts []Verdict
 
 	if v := d.checkResponseRepetition(); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkReasoningRepetition(); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkTokenVelocity(); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkSilentBurn(turn); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkToolCallEcho(); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkTurnFlood(); v != nil {
+		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
+
+	slog.Default().Debug("loop: Feed cross-turn",
+		"history_len", len(d.history),
+		"verdicts", len(verdicts),
+		"input_tokens", turn.InputTokens,
+		"output_tokens", turn.OutputTokens,
+	)
 
 	return verdicts
 }
@@ -289,6 +320,8 @@ func (d *Detector) Reset() {
 	d.consecReasonRepeat = 0
 	d.lastReasonChunkText = ""
 	d.reasonScatter.reset()
+	d.reasonChunkCount = 0
+	d.firedReasonFlood = false
 	d.mu.Unlock()
 }
 
@@ -303,6 +336,8 @@ func (d *Detector) ResetTurn() {
 	d.consecReasonRepeat = 0
 	d.lastReasonChunkText = ""
 	d.reasonScatter.reset()
+	d.reasonChunkCount = 0
+	d.firedReasonFlood = false
 	d.mu.Unlock()
 }
 
@@ -351,26 +386,41 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 		d.lastChunkText = trimmed
 		d.firedChunk = false
 	}
+	slog.Default().Debug("loop: FeedChunk",
+		"consec", d.consecRepeat,
+		"threshold", d.cfg.ChunkRepetitionThreshold,
+		"chunk", truncateForDisplay(trimmed),
+	)
 	if !d.firedChunk && d.consecRepeat >= d.cfg.ChunkRepetitionThreshold {
 		d.firedChunk = true
-		verdicts = append(verdicts, Verdict{
+		v := Verdict{
 			Signal:          SignalChunkRepetition,
 			Confidence:      0.9,
 			Message:         fmt.Sprintf("chunk repeating %d×: %q", d.consecRepeat, truncateForDisplay(trimmed)),
 			ShouldInterrupt: true,
-		})
+		}
+		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		verdicts = append(verdicts, v)
 	}
 
 	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
 		count := d.chunkScatter.feed(d.cfg.ChunkWindowSize, trimmed)
+		slog.Default().Debug("loop: FeedChunk scattered",
+			"scatter_count", count,
+			"scatter_threshold", d.cfg.ChunkRepetitionThreshold,
+			"min_len", d.cfg.ChunkRepetitionMinScatteredLength,
+			"chunk", truncateForDisplay(trimmed),
+		)
 		if count >= d.cfg.ChunkRepetitionThreshold && !d.chunkScatter.alreadyFired(trimmed) {
 			d.chunkScatter.markFired(trimmed)
-			verdicts = append(verdicts, Verdict{
+			v := Verdict{
 				Signal:          SignalScatteredChunkRepetition,
 				Confidence:      0.85,
 				Message:         fmt.Sprintf("phrase recurring %d× in recent output: %q", count, truncateForDisplay(trimmed)),
 				ShouldInterrupt: true,
-			})
+			}
+			slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+			verdicts = append(verdicts, v)
 		}
 	}
 
@@ -402,27 +452,63 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 		d.lastReasonChunkText = trimmed
 		d.firedReasonChunk = false
 	}
+	slog.Default().Debug("loop: FeedReasoningChunk",
+		"consec", d.consecReasonRepeat,
+		"threshold", d.cfg.ReasoningChunkRepetitionThreshold,
+		"chunk", truncateForDisplay(trimmed),
+	)
 	if !d.firedReasonChunk && d.consecReasonRepeat >= d.cfg.ReasoningChunkRepetitionThreshold {
 		d.firedReasonChunk = true
-		verdicts = append(verdicts, Verdict{
+		v := Verdict{
 			Signal:          SignalReasoningChunkRepetition,
 			Confidence:      0.9,
 			Message:         fmt.Sprintf("reasoning repeating %d×: %q", d.consecReasonRepeat, truncateForDisplay(trimmed)),
 			ShouldInterrupt: true,
-		})
+		}
+		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		verdicts = append(verdicts, v)
 	}
 
 	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
 		count := d.reasonScatter.feed(d.cfg.ChunkWindowSize, trimmed)
+		slog.Default().Debug("loop: FeedReasoningChunk scattered",
+			"scatter_count", count,
+			"scatter_threshold", d.cfg.ReasoningChunkRepetitionThreshold,
+			"chunk", truncateForDisplay(trimmed),
+		)
 		if count >= d.cfg.ReasoningChunkRepetitionThreshold && !d.reasonScatter.alreadyFired(trimmed) {
 			d.reasonScatter.markFired(trimmed)
-			verdicts = append(verdicts, Verdict{
+			v := Verdict{
 				Signal:          SignalScatteredReasoningChunkRepetition,
 				Confidence:      0.8,
 				Message:         fmt.Sprintf("reasoning phrase recurring %d×: %q", count, truncateForDisplay(trimmed)),
 				ShouldInterrupt: true,
-			})
+			}
+			slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+			verdicts = append(verdicts, v)
 		}
+	}
+
+	// Reasoning chunk flood: total count of reasoning chunks per turn exceeds
+	// the threshold. Catches "death by a thousand cuts" loops where the model
+	// cycles through many short, varied reasoning fragments that individually
+	// evade both consecutive and scattered repetition detectors.
+	d.reasonChunkCount++
+	slog.Default().Debug("loop: FeedReasoningChunk flood_count",
+		"count", d.reasonChunkCount,
+		"threshold", d.cfg.ReasoningChunkFloodThreshold,
+	)
+	if !d.firedReasonFlood && d.cfg.ReasoningChunkFloodThreshold > 0 &&
+		d.reasonChunkCount >= d.cfg.ReasoningChunkFloodThreshold {
+		d.firedReasonFlood = true
+		v := Verdict{
+			Signal:          SignalReasoningChunkFlood,
+			Confidence:      0.85,
+			Message:         fmt.Sprintf("reasoning chunk flood: %d chunks in single turn", d.reasonChunkCount),
+			ShouldInterrupt: true,
+		}
+		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		verdicts = append(verdicts, v)
 	}
 
 	return verdicts
