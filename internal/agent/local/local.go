@@ -251,6 +251,10 @@ type Agent struct {
 	// limits holds the per-agent tool whitelist/blacklist configuration.
 	// Nil means no filtering (all tools exposed).
 	limits *config.AgentLimits
+	// maxPayloadBytes is the maximum HTTP request body size (bytes).
+	// When the marshaled chatRequest exceeds this limit, message history
+	// is trimmed further before sending. 0 means no limit.
+	maxPayloadBytes int
 	// systemPromptTier selects the verbosity level of the system prompt.
 	// Valid values: "minimal", "standard" (default), "full". Empty = "standard".
 	systemPromptTier string
@@ -379,6 +383,15 @@ func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
 	return &copy
 }
 
+// WithMaxPayloadBytes sets the maximum HTTP request body size in bytes.
+// When the marshaled chatRequest exceeds this limit, message history is
+// trimmed further before sending. 0 disables the check.
+func (a *Agent) WithMaxPayloadBytes(n int) *Agent {
+	copy := *a
+	copy.maxPayloadBytes = n
+	return &copy
+}
+
 // SystemOverheadChars returns an estimate of the character overhead that Run
 // will add as system messages on top of the history slice: the role system
 // prompt and the memory instruction block (when re-injection is due). Callers
@@ -492,6 +505,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:           ac.Limits,
 			systemPromptTier: ac.SystemPromptTier,
 			promptCaching:    ac.PromptCaching,
+			maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 		}
 	case "", "local":
 		// plain transport; extra headers may still apply
@@ -542,6 +556,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		client:           &http.Client{Transport: transport},
 		limits:           ac.Limits,
 		systemPromptTier: ac.SystemPromptTier,
+		maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 	}
 }
 
@@ -1476,6 +1491,38 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if err != nil {
 		return "", "", nil, false, err
 	}
+
+	// Pre-flight payload size check: when the marshaled body exceeds the
+	// configured max (default 900KB), progressively trim the oldest history
+	// messages and re-marshal to avoid 413 errors from reverse proxies.
+	if a.maxPayloadBytes > 0 && len(body) > a.maxPayloadBytes {
+		obs.Warn("payload exceeds limit, trimming history",
+			"size_bytes", len(body), "limit_bytes", a.maxPayloadBytes,
+			"messages_before", len(msgs),
+		)
+		// Preserve system prompt (index 0) and current user message (last).
+		// Trim from the oldest history messages first.
+		for len(msgs) > 2 { // at least system + user
+			// Drop the next oldest history message (index 1).
+			msgs = append(msgs[:1], msgs[2:]...)
+			// Skip any consecutive non-user messages after the dropped one.
+			for len(msgs) > 2 && msgs[1].Role != "user" {
+				msgs = append(msgs[:1], msgs[2:]...)
+			}
+			req.Messages = msgs
+			body, err = json.Marshal(req)
+			if err != nil {
+				return "", "", nil, false, err
+			}
+			if len(body) <= a.maxPayloadBytes {
+				break
+			}
+		}
+		obs.Warn("payload after trimming",
+			"size_bytes", len(body), "messages_after", len(msgs),
+		)
+	}
+
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body)
 	}

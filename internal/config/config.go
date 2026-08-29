@@ -59,6 +59,13 @@ var DefaultOpenQuestionPrefixes = []string{
 	"potresti", "puoi", "dovresti", "è possibile", "ci sono", "sai",
 }
 
+// DefaultMaxPayloadBytes is the default maximum HTTP request body size for
+// local LLM agents. This is conservative (900KB) to stay safely under
+// typical reverse proxy limits (1MB default for nginx/openresty).
+// When the marshaled chatRequest exceeds this limit, message history is
+// trimmed further before sending.
+const DefaultMaxPayloadBytes = 900 * 1024
+
 // OtelConfig controls OpenTelemetry signal collection and file management.
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
@@ -278,6 +285,13 @@ type AgentLimits struct {
 	// call returns an error result to the model. Other tools in the same batch are
 	// unaffected. Default: 120 s (2 min). Set to -1 for no per-tool limit.
 	ToolTimeoutSecs *int `json:"tool_timeout_secs,omitempty"`
+
+	// MaxPayloadBytes overrides the maximum HTTP request body size (bytes)
+	// for this agent. When the marshaled chatRequest exceeds this limit,
+	// message history is trimmed further before sending to avoid 413 errors
+	// from reverse proxies (e.g. openresty/nginx).
+	// Default: 900KB (conservative margin below typical 1MB proxy limits).
+	MaxPayloadBytes *int `json:"max_payload_bytes,omitempty"`
 
 	// IncludedTools is a whitelist of tool names exposed to this agent. When
 	// non-empty, only the listed names are included in the outgoing request
@@ -950,6 +964,20 @@ func (c Config) AgentMessageBudget(a AgentConfig) int {
 		return ctw * 3
 	}
 	return c.LocalContextBudget()
+}
+
+// AgentMaxPayloadBytes returns the maximum HTTP request body size (bytes)
+// for the given agent, falling back to DefaultMaxPayloadBytes.
+// A value of 0 disables the payload size check.
+func (c Config) AgentMaxPayloadBytes(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.MaxPayloadBytes != nil {
+		v := *a.Limits.MaxPayloadBytes
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	return DefaultMaxPayloadBytes
 }
 
 // AgentMemoryReinjectionTurnThreshold returns the memory re-injection turn interval

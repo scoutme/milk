@@ -178,7 +178,8 @@ func (r *localRunner) Execute(
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, role == RolePrimary),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
-	}).WithToolTimeout(cfg.AgentToolTimeout(ac))
+	}).WithToolTimeout(cfg.AgentToolTimeout(ac)).
+		WithMaxPayloadBytes(cfg.AgentMaxPayloadBytes(ac))
 
 	// Apply custom prompt (prompt / prompt_file in agent config) when set.
 	if ac.Prompt != "" || ac.PromptFile != "" {
