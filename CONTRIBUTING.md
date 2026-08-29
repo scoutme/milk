@@ -34,9 +34,13 @@ Non-trivial design choices are recorded as ADRs under [docs/adr/](docs/adr/). If
 
 ## Where to look first
 
-- [docs/spec.md](docs/spec.md) — full product and architecture spec
+- [docs/getting-started.md](docs/getting-started.md) — fastest path to a working setup
 - [docs/providers.md](docs/providers.md) — agent/provider configuration
+- [docs/workflows.md](docs/workflows.md) — routing, sticky escalation, the native `/workflow` engine
+- [docs/tooling.md](docs/tooling.md) — built-in tools, agent-as-tool, MCP servers
+- [docs/operations.md](docs/operations.md) — memory, observability, loop detection, remote oversight
 - [docs/eval.md](docs/eval.md) — evaluation harness
+- [docs/spec.md](docs/spec.md) — architecture and CLI reference
 - [CLAUDE.md](CLAUDE.md) — project structure and key design decisions
 
 ## Code of conduct

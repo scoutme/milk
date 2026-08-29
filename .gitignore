@@ -27,3 +27,7 @@ Thumbs.db
 .aider.*
 .aider*
 eval/results/
+
+# Website (mkdocs)
+website/site/
+website/.venv/

@@ -255,6 +255,44 @@ The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and to
 
 `GenerateReport` prints per-scenario tables (`correctness`/etc. scores, `Weighted Score`) and per-agent metrics (`Tokens (in/out)`, `Cache (create/read)`, `Cache hit rate`, `Cost USD`, `Duration`, `Tool calls`), followed by an aggregate section (by weighted score, and by cost-efficiency). `GenerateCacheReport` (`--cache-only`) prints just the cache analysis. `GenerateJSON` (`--json`) is the same data as a machine-readable structure — see `ScenarioResult`/`AgentResult` in `eval/scenario.go` and `eval/harness.go`.
 
+Real output shape (from milk's own report-generator test fixture, not a live run — trimmed to one scenario):
+
+```
+=== Agent Evaluation Report ===
+
+Scenario: fix-typo-in-readme
+Category: code_generation | Difficulty: easy
+
+                     claude-code    milk-tui
+────────────────────────────────────────────
+         correctness         1.0         1.0
+          efficiency         3.0         4.0
+────────────────────────────────────────────
+      Weighted Score         3.6         4.2
+
+                     claude-code    milk-tui
+────────────────────────────────────────────
+     Tokens (in/out)   25,477/18   1,200/340
+ Cache (create/read)    25,477/0         0/0
+      Cache hit rate        0.0%        0.0%
+            Cost USD      $0.096      $0.001
+            Duration        2.5s        2.1s
+          Tool calls           1           2
+
+=== Aggregate Evaluation Report ===
+...
+By cost-efficiency (quality per dollar):
+                     claude-code    milk-tui
+────────────────────────────────────────────
+   Avg cost/scenario      $0.180      $0.002
+      Quality/dollar        20.9     2,050.0
+      Cache hit rate       25.0%       27.9%
+
+Overall winner: milk-tui (90x cheaper)
+```
+
+(`Cost USD` is `$0.001`-ish here only because the fixture's numbers are illustrative — see the caveat below; token/cache columns are the reliable comparison today.)
+
 `Cost USD` is currently always `$0.000` — `RunResult.CostUSD` isn't populated by either adapter yet (out of scope for now; token counts and cache columns are accurate and are the more meaningful comparison in the meantime).
 
 ---

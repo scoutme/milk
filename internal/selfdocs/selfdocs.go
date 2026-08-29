@@ -1,7 +1,13 @@
-// Package selfdocs indexes milk's own embedded reference docs (docs/spec.md,
-// docs/providers.md) by heading, so any agent — primary or escalation, on
-// any backend — can look up how to manage milk's own configuration without
-// that content being injected into every turn's context. See Lookup.
+// Package selfdocs indexes milk's own embedded reference docs (see
+// docs/embed.go's //go:embed list) by heading, so any agent — primary or
+// escalation, on any backend — can look up how to manage milk's own
+// configuration without that content being injected into every turn's
+// context. See Lookup.
+//
+// The embedded file list and the aliases map below are coupled to specific
+// doc headings by heading text (slugified) — moving or renaming a heading in
+// one of the embedded files without updating aliases here breaks the
+// corresponding lookup silently (no compile-time check catches it).
 package selfdocs
 
 import (
@@ -51,7 +57,7 @@ var (
 
 func init() {
 	index = map[string]section{}
-	for _, name := range []string{"spec.md", "providers.md"} {
+	for _, name := range []string{"spec.md", "providers.md", "workflows.md", "tooling.md", "operations.md"} {
 		data, err := docs.FS.ReadFile(name)
 		if err != nil {
 			continue

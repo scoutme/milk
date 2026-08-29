@@ -261,23 +261,39 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	}
 	m.hasInferenceAgent = true
 	if isFirst {
-		freshAC := applyFreshAWSCreds(m.st.cfg, activeLocalAgentConfig(m.st.cfg))
-		newAgent := local.NewFromConfig(freshAC)
-		if od, err := config.OtelDir(); err == nil {
-			newAgent.WithOtelDir(od)
+		if ac.IsCLI() {
+			cliAgt := newCLIAgent(ac)
+			cliAgt = applyAWSCreds(m.st.cfg, cliAgt)
+			cliAgt = cliAgt.WithLogContext(m.st.cfg.Otel.LogContext)
+			if dbg, err := openCLIDebugLog(m.st.cfg); err != nil {
+				m.appendTranscript(fmt.Sprintf("%s warning: cannot open claude debug log: %v\n", milkTag(), err))
+			} else if dbg != nil {
+				cliAgt = cliAgt.WithDebugLog(dbg)
+			}
+			m.agents.local = nil
+			m.agents.localAvail = cliAgt.Ping() == nil
+			m.agents.primary = newCLIRunner(cliAgt, ac.Name,
+				permContext{cs: m.st.cs, cwd: m.st.cwd}, func() inputReader { return newStdinInputReader() })
+			m.rtr = router.New(m.st.cfg, nil)
+		} else {
+			freshAC := applyFreshAWSCreds(m.st.cfg, activeLocalAgentConfig(m.st.cfg))
+			newAgent := local.NewFromConfig(freshAC)
+			if od, err := config.OtelDir(); err == nil {
+				newAgent.WithOtelDir(od)
+			}
+			prog := m.st.program
+			newAgent.WithOnSigV4Refresh(func(err error) {
+				prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
+			})
+			newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
+			ist := m.st
+			newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+				ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
+			})
+			m.agents.local = newAgent
+			m.agents.localAvail = newAgent.Ping(m.ctx) == nil
+			m.rtr = router.New(m.st.cfg, newAgent)
 		}
-		prog := m.st.program
-		newAgent.WithOnSigV4Refresh(func(err error) {
-			prog.Send(credRefreshReadyMsg{label: "AWS", err: err})
-		})
-		newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
-		ist := m.st
-		newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
-			ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
-		})
-		m.agents.local = newAgent
-		m.agents.localAvail = newAgent.Ping(m.ctx) == nil
-		m.rtr = router.New(m.st.cfg, newAgent)
 	}
 	provider := ac.Provider
 	if provider == "" {
@@ -1388,6 +1404,34 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		if err := config.Save(m.st.cfg); err != nil {
 			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
 		}
+
+		primaryAC := m.st.cfg.ActiveAgent()
+		if primaryAC.IsCLI() {
+			// No cheap classifier for a claude-cli primary — router.New already
+			// treats a nil *local.Agent as "skip step 4, attempt primary
+			// directly", same as it does for subprocess primaries.
+			cliAgt := newCLIAgent(primaryAC)
+			cliAgt = applyAWSCreds(m.st.cfg, cliAgt)
+			cliAgt = cliAgt.WithLogContext(m.st.cfg.Otel.LogContext)
+			if dbg, err := openCLIDebugLog(m.st.cfg); err != nil {
+				m.appendTranscript(fmt.Sprintf("%s warning: cannot open claude debug log: %v\n", milkTag(), err))
+			} else if dbg != nil {
+				cliAgt = cliAgt.WithDebugLog(dbg)
+			}
+			m.agents.local = nil
+			m.agents.localAvail = cliAgt.Ping() == nil
+			m.agents.primary = newCLIRunner(cliAgt, name,
+				permContext{cs: m.st.cs, cwd: m.st.cwd}, func() inputReader { return newStdinInputReader() })
+			m.rtr = router.New(m.st.cfg, nil)
+			m.credStatus = ""
+			m.credLabel = ""
+			m.credOK = false
+			m.credRefreshing = false
+			m.appendTranscript(fmt.Sprintf("%s primary agent → %s\n", milkTag(), bold(name)))
+			m.appendTranscript(execAgent(m.st) + "\n")
+			return m, nil
+		}
+
 		newAgent := local.NewFromConfig(activeLocalAgentConfig(m.st.cfg))
 		if od, err := config.OtelDir(); err == nil {
 			newAgent.WithOtelDir(od)

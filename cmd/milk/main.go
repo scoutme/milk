@@ -246,6 +246,35 @@ func run(cmd *cobra.Command, args []string) error {
 // Also returns the underlying *local.Agent when it exists (needed for the router classifier).
 func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *session.Session) (TurnRunner, *local.Agent, error) {
 	primaryAC := cfg.ActiveAgent()
+
+	if primaryAC.IsCLI() {
+		// No cheap classifier is available for a claude-cli primary — the
+		// router already treats a nil *local.Agent as "skip step 4, attempt
+		// primary directly" (see internal/router.Decide), same as it does
+		// for subprocess primaries.
+		cliAgt := newCLIAgent(primaryAC)
+		cliAgt = applyAWSCreds(cfg, cliAgt)
+		cliAgt = cliAgt.WithLogContext(cfg.Otel.LogContext)
+		if dbg, err := openCLIDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			cliAgt = cliAgt.WithDebugLog(dbg)
+		}
+		var cs *claudesettings.Store
+		if store, err := claudesettings.Open(cwd); err == nil {
+			cs = store
+		}
+		name := primaryAC.Name
+		if name == "" {
+			name = "primary"
+		}
+		r := newCLIRunner(cliAgt, name, permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
+		if servers := cfg.EffectiveMCPServers(primaryAC.Name); len(servers) > 0 {
+			r = r.withMCPServers(servers)
+		}
+		return r, nil, nil
+	}
+
 	if primaryAC.IsExternalProcess() && !primaryAC.IsCLI() {
 		var sp *subprocess.Agent
 		switch {

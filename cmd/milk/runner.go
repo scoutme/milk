@@ -417,23 +417,33 @@ func (r *cliRunner) Execute(
 		agent = agent.WithMCPServers(r.mcpServers)
 	}
 
-	staticCtx := escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
+	var staticCtx, dynamicCtx string
+	switch role {
+	case RoleWorkflow:
+		// Workflow executors receive no session orientation — their context comes
+		// entirely from the workflow prompt injected by the caller. Mirrors
+		// localRunner.Execute's identical switch.
+	case RolePrimary:
+		staticCtx = escalation.BuildPrimaryStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
+		dynamicCtx = escalation.BuildPrimaryDynamicContext(sess, ctxMode)
+	default: // RoleEscalation
+		staticCtx = escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
+		dynamicCtx = escalation.BuildDynamicContext(sess, ctxMode)
+	}
 	if cfg.ExperimentalPermissionManagement {
 		staticCtx += permissionManagementInstruction
 	}
 
-	// Prepend custom prompt from the escalation agent config when set.
-	escAC := cfg.EscalationAgentConfig()
-	if escAC.Prompt != "" || escAC.PromptFile != "" {
+	// Prepend custom prompt from this role's own agent config when set.
+	roleAC := agentConfigForRole(cfg, role)
+	if roleAC.Prompt != "" || roleAC.PromptFile != "" {
 		vars := buildPromptVars(sess, percepts, cfg)
-		if rendered, err := agentprompt.Render(escAC, vars); err != nil {
-			fmt.Fprintf(os.Stderr, "%s warning: custom prompt render failed for agent %q: %v\n", milkTag(), escAC.Name, err)
+		if rendered, err := agentprompt.Render(roleAC, vars); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: custom prompt render failed for agent %q: %v\n", milkTag(), roleAC.Name, err)
 		} else if rendered != "" {
 			staticCtx = rendered + "\n\n" + staticCtx
 		}
 	}
-
-	dynamicCtx := escalation.BuildDynamicContext(sess, ctxMode)
 
 	// Append image context (data-URI blocks) to dynamicCtx so large base64 strings
 	// reach Claude via --append-system-prompt-file (temp file) rather than the
