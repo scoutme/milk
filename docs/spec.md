@@ -2,7 +2,7 @@
 
 ## Overview
 
-milk lets you switch between a primary inference agent and a configurable escalation agent mid-workflow, maintaining full session context across the switch. Any backend can serve either role except `claude-cli`, which is escalation-only — see [docs/providers.md](providers.md) for the full catalog and the one routing constraint milk expects you to honor (escalation should be smarter/pricier than primary).
+milk lets you switch between a primary inference agent and a configurable escalation agent mid-workflow, maintaining full session context across the switch. Any backend can serve either role — see [docs/providers.md](providers.md) for the full catalog and the one routing constraint milk expects you to honor (escalation should be smarter/pricier than primary).
 
 The primary use case is code assistance and shell automation for a single user.
 

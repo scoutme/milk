@@ -2863,11 +2863,25 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	// Build the primary agent. When the active agent is a subprocess provider
-	// (subprocess, aider-cli), bypass the HTTP local agent.
+	// (subprocess, aider-cli), bypass the HTTP local agent. When it's
+	// claude-cli, bypass both — no cheap classifier is available for it (the
+	// router already treats a nil *local.Agent as "skip step 4, attempt
+	// primary directly", same as for subprocess primaries).
 	tuiPrimaryAC := cfg.ActiveAgent()
 	var localAgent *local.Agent
 	var tuiSubprocessPrimaryAgent *subprocess.Agent
-	if tuiPrimaryAC.IsExternalProcess() && !tuiPrimaryAC.IsCLI() {
+	var tuiPrimaryCLIAgent *claude.Agent
+	if tuiPrimaryAC.IsCLI() {
+		tuiPrimaryCLIAgent = newCLIAgent(tuiPrimaryAC)
+		tuiPrimaryCLIAgent = applyAWSCreds(cfg, tuiPrimaryCLIAgent)
+		tuiPrimaryCLIAgent = tuiPrimaryCLIAgent.WithLogContext(cfg.Otel.LogContext)
+		if dbg, err := openCLIDebugLog(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s warning: cannot open claude debug log: %v\n", milkTag(), err)
+		} else if dbg != nil {
+			defer dbg.Close()
+			tuiPrimaryCLIAgent = tuiPrimaryCLIAgent.WithDebugLog(dbg)
+		}
+	} else if tuiPrimaryAC.IsExternalProcess() {
 		switch {
 		case tuiPrimaryAC.IsSubprocess():
 			if tuiPrimaryAC.Bin == "" {
@@ -2990,7 +3004,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
 	var localAvail, escalationAvail bool
-	if tuiSubprocessPrimaryAgent != nil {
+	if tuiPrimaryCLIAgent != nil {
+		localAvail = tuiPrimaryCLIAgent.Ping() == nil
+		escalationAvail = true // CLI/local escalation checked lazily
+		if !localAvail {
+			fmt.Fprintln(os.Stderr, milkTag()+" warning: "+tuiPrimaryAC.Name+" primary agent unreachable")
+		}
+	} else if tuiSubprocessPrimaryAgent != nil {
 		localAvail = tuiSubprocessPrimaryAgent.Ping() == nil
 		escalationAvail = true // CLI/local escalation checked lazily
 		if !localAvail {
@@ -3059,6 +3079,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	mcpServersSeen := map[string][]config.MCPServerConfig{}
 	var primaryRunner TurnRunner
 	switch {
+	case tuiPrimaryCLIAgent != nil:
+		r := newCLIRunner(tuiPrimaryCLIAgent, tuiPrimaryAC.Name,
+			permContext{cs: cs, cwd: cwd}, func() inputReader { return newStdinInputReader() })
+		if servers := cfg.EffectiveMCPServers(tuiPrimaryAC.Name); len(servers) > 0 {
+			r = r.withMCPServers(servers)
+			mcpServersSeen[tuiPrimaryAC.Name] = servers
+		}
+		primaryRunner = r
 	case tuiSubprocessPrimaryAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
 		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {

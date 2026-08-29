@@ -2,7 +2,7 @@
 
 How a prompt gets routed between agents, what happens across a turn, and milk's native multi-agent pipeline engine.
 
-**The only rule milk enforces**: the escalation agent should be smarter (and typically pricier) than the primary agent; the primary agent should be cheaper than the escalation agent. Beyond that, there is no preferred or default backend for either role — except `claude-cli`, which can only be escalation (milk has no code path to run it as primary). See [docs/providers.md](providers.md) for the full backend catalog, including an example of the same provider used at two model tiers for exactly this pairing.
+**The only rule milk enforces**: the escalation agent should be smarter (and typically pricier) than the primary agent; the primary agent should be cheaper than the escalation agent. Beyond that, there is no preferred or default backend for either role — every backend, including `claude-cli`, can serve either role (`claude-cli` as primary works but isn't a smart everyday choice — see [docs/providers.md](providers.md#primary-agent)). See [docs/providers.md](providers.md) for the full backend catalog, including an example of the same provider used at two model tiers for exactly this pairing.
 
 ---
 
