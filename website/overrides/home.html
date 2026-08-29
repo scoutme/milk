@@ -5,13 +5,13 @@
 
 <section class="mk-hero">
   <div class="mk-hero__inner">
+    <div class="mk-hero__eyebrow">Terminal AI assistant</div>
     <img class="mk-hero__logo" src="{{ 'images/milk.png' | url }}" alt="milk" />
-    <p class="mk-hero__tagline">Switch models, not context.</p>
+    <h1 class="mk-hero__tagline">Switch models,<br>not context.</h1>
     <p class="mk-hero__sub">
-      milk is a terminal AI assistant that routes each prompt between a fast
-      primary agent and a deep escalation agent &mdash; keeping the full
-      conversation in sync across both. Start cheap. Go deep when you need
-      it. Switch mid-workflow.
+      milk routes each prompt between a fast primary agent and a deep
+      escalation agent &mdash; keeping the full conversation in sync
+      across both. Start cheap. Go deep when you need it.
     </p>
     <div class="mk-hero__cta">
       <a class="md-button md-button--primary" href="{{ 'getting-started/' | url }}">Get started</a>
@@ -23,68 +23,144 @@
 
 <section class="mk-demo">
   <div class="mk-demo__inner">
-    <img src="{{ 'images/milk-tui-compressed.gif' | url }}" alt="milk TUI demo" loading="lazy" />
+    <div class="mk-terminal">
+      <div class="mk-terminal__chrome">
+        <div class="mk-terminal__dots">
+          <span class="mk-dot mk-dot--red"></span>
+          <span class="mk-dot mk-dot--yellow"></span>
+          <span class="mk-dot mk-dot--green"></span>
+        </div>
+        <div class="mk-terminal__tab">
+          <span class="mk-terminal__tab-label">milk</span>
+        </div>
+        <div class="mk-terminal__status">
+          <span class="mk-status-dot mk-status-dot--routing"></span>
+          <span class="mk-status-label">ROUTING</span>
+        </div>
+      </div>
+      <div class="mk-terminal__states">
+        <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--routing"></span> Routing</span>
+        <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--local"></span> Local</span>
+        <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--escalation"></span> Escalation</span>
+        <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--escalation-waiting"></span> Waiting</span>
+      </div>
+      <img class="mk-terminal__screen" src="{{ 'images/milk-tui-compressed.gif' | url }}" alt="milk TUI demo" loading="lazy" />
+    </div>
   </div>
 </section>
 
 <section class="mk-features">
-  <div class="mk-features__grid">
-    <div class="mk-feature">
-      <h3>Automatic routing</h3>
-      <p>Each prompt is classified and sent to the right agent without you changing tools.</p>
+  <div class="mk-features__container">
+    <div class="mk-features__eyebrow">Why milk</div>
+    <div class="mk-features__primary">
+      <div class="mk-feature-card">
+        <span class="mk-feature-card__num">01</span>
+        <h3>Automatic routing</h3>
+        <p>Each prompt is classified and sent to the right agent without you changing tools.</p>
+      </div>
+      <div class="mk-feature-card">
+        <span class="mk-feature-card__num">02</span>
+        <h3>Context handoff</h3>
+        <p>When escalation fires, the primary conversation is reformatted as context &mdash; the escalation agent orients itself without a separate setup step.</p>
+      </div>
+      <div class="mk-feature-card">
+        <span class="mk-feature-card__num">03</span>
+        <h3>Persistent memory</h3>
+        <p>A Percept store survives across sessions; key facts are reinforced, decay, and promote to long-term memory over time.</p>
+      </div>
+      <div class="mk-feature-card">
+        <span class="mk-feature-card__num">04</span>
+        <h3>Loop detection</h3>
+        <p>Monitors agent output for repeating patterns, warns in the status bar, and auto-interrupts when an agent gets stuck.</p>
+      </div>
+      <div class="mk-feature-card">
+        <span class="mk-feature-card__num">05</span>
+        <h3>Evaluation harness</h3>
+        <p>Run the same scenarios against different agents and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side.</p>
+      </div>
     </div>
-    <div class="mk-feature">
-      <h3>Context handoff</h3>
-      <p>When escalation fires, the primary conversation is reformatted as context &mdash; the escalation agent orients itself without a separate setup step.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Persistent memory</h3>
-      <p>A Percept store survives across sessions; key facts are reinforced, decay, and promote to long-term memory over time.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Built-in tools</h3>
-      <p>Bash, file read/write/edit, grep, find, HTTP GET, session access, and memory tools &mdash; no extra configuration.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Streaming TUI</h3>
-      <p>A bubbletea terminal UI with a scrollable transcript, live memory panel, status bar, and input history.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Loop detection</h3>
-      <p>Monitors agent output for repeating patterns, warns in the status bar, and auto-interrupts when an agent gets stuck.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Any backend, either role</h3>
-      <p>Claude Code CLI, any OpenAI-compatible server, AWS Bedrock, aider, smolagents, or any Bearer-token API &mdash; for primary or escalation.</p>
-    </div>
-    <div class="mk-feature">
-      <h3>Evaluation harness</h3>
-      <p>Run the same scenarios against different agents and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side.</p>
+    <div class="mk-features__secondary">
+      <span class="mk-pill">Built-in tools</span>
+      <span class="mk-pill">Streaming TUI</span>
+      <span class="mk-pill">Any backend, either role</span>
     </div>
   </div>
 </section>
 
 <style>
+  /* ── Hide Material defaults ── */
   .md-content, .md-sidebar { display: none; }
 
-  .mk-hero {
-    padding: 4rem 1rem 3rem;
-    text-align: center;
-    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  /* ── Design tokens ── */
+  :root {
+    --mk-gut: 34px;
+    --mk-max-w: 1440px;
+    --mk-accent: #38c9a2;
+    --mk-accent-dim: color-mix(in srgb, var(--mk-accent) 12%, transparent);
+    --mk-font-display: 'Archivo', 'Inter', sans-serif;
+    --mk-font-body: 'Inter', sans-serif;
+    --mk-font-mono: 'JetBrains Mono', monospace;
   }
-  .mk-hero__inner { max-width: 40rem; margin: 0 auto; }
-  .mk-hero__logo { width: 96px; height: auto; margin-bottom: 1.5rem; }
+
+  /* Dark mode tokens (Material .md-ys--slate) */
+  [data-md-color-scheme="slate"] {
+    --mk-bg: #17171a;
+    --mk-panel: #1e1e22;
+    --mk-mass: #26262b;
+    --mk-fg: #e8e8ec;
+    --mk-fg-muted: #a0a0ab;
+    --mk-border: #303036;
+  }
+
+  /* Light mode tokens */
+  [data-md-color-scheme="default"] {
+    --mk-bg: #efece5;
+    --mk-panel: #f5f2eb;
+    --mk-mass: #e8e5de;
+    --mk-fg: #1a1a1f;
+    --mk-fg-muted: #6b6b76;
+    --mk-border: #d4d1ca;
+  }
+
+  /* ── Hero ── */
+  .mk-hero {
+    background: var(--mk-bg);
+    padding: 5rem var(--mk-gut) 4rem;
+    text-align: center;
+  }
+  .mk-hero__inner {
+    max-width: 44rem;
+    margin: 0 auto;
+  }
+  .mk-hero__logo {
+    display: block;
+    height: 200px;
+    margin: 0 auto 1.25rem;
+  }
+  .mk-hero__eyebrow {
+    font-family: var(--mk-font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--mk-accent);
+    margin-bottom: 1rem;
+  }
   .mk-hero__tagline {
-    font-size: 1.6rem;
-    font-weight: 700;
-    margin: 0 0 1rem;
-    color: var(--md-default-fg-color);
+    font-family: var(--mk-font-display);
+    font-size: clamp(2.2rem, 5vw, 3.4rem);
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+    margin: 0 0 1.25rem;
+    color: var(--mk-fg);
   }
   .mk-hero__sub {
-    font-size: 1.05rem;
-    color: var(--md-default-fg-color--light);
-    margin: 0 0 2rem;
-    line-height: 1.6;
+    font-family: var(--mk-font-body);
+    font-size: 1.1rem;
+    color: var(--mk-fg-muted);
+    margin: 0 auto 2.25rem;
+    line-height: 1.65;
+    max-width: 36rem;
   }
   .mk-hero__cta {
     display: flex;
@@ -93,46 +169,235 @@
     margin-bottom: 2rem;
     flex-wrap: wrap;
   }
+  .mk-hero__cta .md-button {
+    font-family: var(--mk-font-display);
+    font-weight: 600;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    padding: 0.55rem 1.4rem;
+  }
+  .mk-hero__cta .md-button--primary {
+    background: var(--mk-accent);
+    color: #0f0f12;
+    border: none;
+  }
+  .mk-hero__cta .md-button--primary:hover {
+    filter: brightness(1.1);
+  }
   .mk-hero__install {
     display: inline-block;
     text-align: left;
-    background: var(--md-code-bg-color);
-    border-radius: 0.4rem;
-    padding: 1rem 1.5rem;
-    font-size: 0.85rem;
-    margin: 0 auto;
+    background: var(--mk-panel);
+    border: 1px solid var(--mk-border);
+    border-radius: 6px;
+    padding: 0.85rem 1.4rem;
+    font-family: var(--mk-font-mono);
+    font-size: 0.8rem;
+    color: var(--mk-fg-muted);
   }
 
+  /* ── Terminal chrome ── */
   .mk-demo {
-    padding: 2.5rem 1rem;
-    text-align: center;
-    background: var(--md-code-bg-color);
+    background: var(--mk-panel);
+    padding: 3rem var(--mk-gut) 3.5rem;
   }
-  .mk-demo__inner { max-width: 60rem; margin: 0 auto; }
-  .mk-demo img {
-    max-width: 100%;
-    border-radius: 0.4rem;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+  .mk-demo__inner {
+    max-width: 54rem;
+    margin: 0 auto;
+  }
+  .mk-terminal {
+    background: var(--mk-mass);
+    border: 1px solid var(--mk-border);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.35);
+  }
+  .mk-terminal__chrome {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    background: var(--mk-panel);
+    border-bottom: 1px solid var(--mk-border);
+  }
+  .mk-terminal__dots {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .mk-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .mk-dot--red   { background: #ff5f57; }
+  .mk-dot--yellow { background: #febc2e; }
+  .mk-dot--green  { background: #28c840; }
+  .mk-terminal__tab {
+    display: flex;
+    align-items: center;
+    background: var(--mk-mass);
+    border-radius: 5px 5px 0 0;
+    padding: 0.25rem 0.75rem;
+    font-family: var(--mk-font-mono);
+    font-size: 0.72rem;
+    color: var(--mk-fg-muted);
+  }
+  .mk-terminal__status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mk-font-mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mk-fg-muted);
+  }
+  .mk-terminal__screen {
+    display: block;
+    width: 100%;
   }
 
-  .mk-features { padding: 3rem 1rem 4rem; }
-  .mk-features__grid {
-    max-width: 64rem;
+  .mk-terminal__states {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    padding: 0.55rem 1rem;
+    background: var(--mk-mass);
+    border-top: 1px solid var(--mk-border);
+  }
+  .mk-state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mk-font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    color: var(--mk-fg-muted);
+    text-transform: uppercase;
+  }
+
+  /* ── Status dots ── */
+  .mk-status-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .mk-status-dot--routing {
+    background: #38c9a2;
+    box-shadow: 0 0 4px rgba(56, 201, 162, 0.5);
+  }
+  .mk-status-dot--local {
+    background: #60a5fa;
+    box-shadow: 0 0 4px rgba(96, 165, 250, 0.5);
+  }
+  .mk-status-dot--escalation {
+    background: #f59e0b;
+    box-shadow: 0 0 4px rgba(245, 158, 11, 0.5);
+  }
+  .mk-status-dot--escalation-waiting {
+    background: #ef4444;
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
+    animation: mk-pulse 2s ease-in-out infinite;
+  }
+  @keyframes mk-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Features ── */
+  .mk-features {
+    background: var(--mk-bg);
+    padding: 4rem var(--mk-gut) 5rem;
+  }
+  .mk-features__container {
+    max-width: var(--mk-max-w);
     margin: 0 auto;
+  }
+  .mk-features__eyebrow {
+    font-family: var(--mk-font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--mk-accent);
+    margin-bottom: 1.5rem;
+  }
+  .mk-features__primary {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: 1.75rem;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.25rem;
+    margin-bottom: 2.5rem;
   }
-  .mk-feature h3 {
-    font-size: 1rem;
-    margin: 0 0 0.4rem;
-    color: var(--md-default-fg-color);
+  .mk-feature-card {
+    background: var(--mk-panel);
+    border: 1px solid var(--mk-border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    position: relative;
+    transition: border-color 0.2s;
   }
-  .mk-feature p {
-    font-size: 0.9rem;
-    color: var(--md-default-fg-color--light);
-    line-height: 1.5;
+  .mk-feature-card:hover {
+    border-color: var(--mk-accent);
+  }
+  .mk-feature-card__num {
+    font-family: var(--mk-font-display);
+    font-size: 1.6rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    color: var(--mk-accent);
+    opacity: 0.3;
+    position: absolute;
+    top: 1rem;
+    right: 1.25rem;
+  }
+  .mk-feature-card h3 {
+    font-family: var(--mk-font-display);
+    font-size: 1.05rem;
+    font-weight: 800;
+    margin: 0 0 0.35rem;
+    color: var(--mk-fg);
+  }
+  .mk-feature-card p {
+    font-family: var(--mk-font-body);
+    font-size: 0.88rem;
+    color: var(--mk-fg-muted);
+    line-height: 1.55;
     margin: 0;
+  }
+
+  .mk-features__secondary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .mk-pill {
+    font-family: var(--mk-font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    padding: 0.35rem 0.75rem;
+    border-radius: 4px;
+    background: var(--mk-panel);
+    border: 1px solid var(--mk-border);
+    color: var(--mk-fg-muted);
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    :root { --mk-gut: 20px; }
+
+    .mk-hero { padding: 3rem var(--mk-gut) 2.5rem; }
+    .mk-hero__tagline { font-size: 2rem; }
+
+    .mk-features__primary {
+      grid-template-columns: 1fr;
+    }
+
+    .mk-states__list {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
 {% endblock %}
