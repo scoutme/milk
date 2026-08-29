@@ -2,13 +2,15 @@
 
 milk supports multiple agent backends. Use `/agent add` in the TUI to register them, `/agent list` to see what's configured, and `/agent switch <name> as primary|escalation` to assign roles. Each backend is a named entry under `agents` in `~/.milk/config.json`; the active primary agent is set by `agent`, the escalation agent by `escalation_agent`.
 
-**There is no preferred or default backend for either role.** Claude Code CLI is one option among many for escalation, not the recommended one — it happens to be listed first below because it ships as a zero-config built-in, not because it's endorsed over any other provider. Likewise, local inference is one option for the primary role, not a requirement. The only constraint milk expects you to honor: **the escalation agent should be smarter (and typically pricier) than the primary agent; the primary agent should be cheaper than the escalation agent.** Any provider — local, cloud, CLI-based — is valid in either role.
+**There is no preferred or default backend for either role — with one hard exception.** `claude-cli` can only be the escalation agent: milk has no code path to run the `claude` binary as the primary loop, only as escalation. Every other backend — inference-server (local/cloud HTTP, Bedrock) and subprocess (aider-cli, smolagents) alike — can serve as either primary or escalation. Claude Code CLI being listed first below is a zero-config-built-in convenience, not an endorsement over any other escalation option; likewise local inference is one option for the primary role among several, not a requirement. The only constraint milk expects you to honor yourself: **the escalation agent should be smarter (and typically pricier) than the primary agent; the primary agent should be cheaper than the escalation agent.**
 
 New to milk? Start with [docs/getting-started.md](getting-started.md) for the fastest path to a working config, then come back here for backend-specific detail.
 
 ## Primary agent
 
-The agent handling the fast path — most turns, most tool calls. Configurable via any `agents` entry that is an inference-server backend (not `claude-cli`); switch at runtime with `/agent switch <name> as primary`. Protocols: OpenAI-compatible Chat Completions (llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, Together.ai, Groq, Azure OpenAI) or the AWS Bedrock Converse API natively. Any tool-calling-capable model works; see [Tested models](#tested-models) for models confirmed against milk's tool-calling loop specifically.
+The agent handling the fast path — most turns, most tool calls. Configurable via any `agents` entry **except `claude-cli`**: inference-server backends (local/cloud HTTP, or AWS Bedrock Converse natively) and subprocess backends (aider-cli, smolagents) can all be primary. Switch at runtime with `/agent switch <name> as primary`. Any tool-calling-capable model works on the inference-server path; see [Tested models](#tested-models) for models confirmed against milk's tool-calling loop specifically.
+
+> `/agent switch <name> as primary` does not currently validate this — pointing it at a `claude-cli` entry is silently accepted and produces a non-functional primary agent (see [issue #135](https://github.com/scoutme/milk/issues/135)).
 
 ## Escalation agent
 

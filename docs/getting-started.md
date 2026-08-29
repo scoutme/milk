@@ -52,7 +52,7 @@ The wizard asks for a name, URL/model (or `claude-cli`/`aider-cli`/`subprocess` 
 /agent switch <name> as escalation
 ```
 
-**There is no preferred pairing.** The only constraint milk expects you to honor yourself: the escalation agent should be smarter (and usually pricier) than the primary agent. Any provider — local, cloud, CLI-based — works in either role. A local model as escalation and a cloud model as primary is a perfectly valid, if unusual, setup. See [docs/workflows.md](workflows.md#routing) for how routing decides which agent handles a given prompt.
+**There is no preferred pairing** — with one exception: `claude-cli` can only be the escalation agent, never primary (milk has no code path to run it that way). Every other backend can serve either role, and the only constraint milk expects you to honor yourself is that the escalation agent should be smarter (and usually pricier) than the primary agent. A local model as escalation and a cloud model as primary is a perfectly valid, if unusual, setup. See [docs/workflows.md](workflows.md#routing) for how routing decides which agent handles a given prompt.
 
 If you don't already have a backend in mind, [docs/providers.md](providers.md) has copy-paste examples for local llama.cpp/Ollama/LM Studio, Claude Code CLI, AWS Bedrock, OpenRouter, Together.ai, Groq, Azure OpenAI, aider, and smolagents — including a full local-hardware reference setup (NVIDIA GPU, WSL2, llama.cpp from source) if you want to run inference yourself rather than call an API.
 
