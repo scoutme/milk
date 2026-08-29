@@ -60,7 +60,7 @@ Check what's configured any time with `/agent` (or `/agent list`).
 
 ## Your first turn
 
-milk is built around the **TUI** — this is the intended, day-to-day way to use it, not an afterthought over a CLI. Launch it with no arguments:
+Launch the **TUI** with no arguments — this is how milk is meant to be used day to day:
 
 ```sh
 milk
