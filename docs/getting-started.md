@@ -6,7 +6,7 @@ The fastest path to a working milk setup — no specific backend required. milk 
 
 | Dependency | Required | Notes |
 |---|---|---|
-| Go 1.21+ | yes | build only |
+| Go 1.21+ | no | only if building from source |
 | An inference server or cloud API key | no | any backend from [docs/providers.md](providers.md); milk degrades gracefully if the primary or escalation agent is absent — see [docs/operations.md — Graceful degradation](operations.md#graceful-degradation) |
 | `claude` CLI | no | only if you want Claude Code as an agent; not required otherwise |
 | Git Bash or WSL2 (Windows only) | yes (Windows) | milk's primary agent uses `sh`, `find`, `grep` — `cmd.exe`/PowerShell are not supported. See [docs/providers.md — Windows and WSL2](providers.md#windows-and-wsl2) |
@@ -27,21 +27,19 @@ Or build from source (requires Go 1.21+):
 task build:local   # builds ./milk in the current directory
 # or, to install to ~/.local/bin:
 task build
-# or to a custom destination:
-task build DEST=/usr/local/bin/milk
 ```
 
 `install-from-source.sh` does the equivalent in one line without a manual clone: `curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh`.
 
 ## Configure a backend
 
-You need at least one working agent to do anything useful — it can serve as primary, escalation, or both. Run milk with no config and it starts in setup mode:
+You need at least one working agent to do anything useful — it can serve as primary, escalation, or both. Launch milk with no config and it starts in setup mode:
 
 ```sh
-./milk config
+milk
 ```
 
-Then add a backend interactively:
+Add a backend interactively:
 
 ```
 /agent add
@@ -58,50 +56,56 @@ The wizard asks for a name, URL/model (or `claude-cli`/`aider-cli`/`subprocess` 
 
 If you don't already have a backend in mind, [docs/providers.md](providers.md) has copy-paste examples for local llama.cpp/Ollama/LM Studio, Claude Code CLI, AWS Bedrock, OpenRouter, Together.ai, Groq, Azure OpenAI, aider, and smolagents — including a full local-hardware reference setup (NVIDIA GPU, WSL2, llama.cpp from source) if you want to run inference yourself rather than call an API.
 
-Verify what's configured:
-
-```sh
-./milk config
-```
+Check what's configured any time with `/agent` (or `/agent list`).
 
 ## Your first turn
 
-**Automated tests** (no running agent required — uses temp dirs and mocks):
+milk is built around the **TUI** — this is the intended, day-to-day way to use it, not an afterthought over a CLI. Launch it with no arguments:
 
 ```sh
-task test
+milk
 ```
 
-**Config and session management** (no server needed):
+You land in an interactive REPL: a `❯` prompt, a scrollable transcript above it, and a status bar showing the current routing state and active agent. Type a prompt and press Enter:
+
+```
+❯ list Go files in the current directory
+```
+
+This routes to the primary agent, which runs its `bash` tool and returns the result. Keep going in the same session:
+
+```
+❯ now show only the test files
+```
+
+Force a specific agent for one turn with `/primary <prompt>` or `/escalate <prompt>`:
+
+```
+❯ /escalate explain the session state machine design
+```
+
+Once escalation fires — whether you asked for it or the primary agent called `escalate()` on its own — milk keeps subsequent turns on the escalation agent automatically (**auto-sticky**, shown as `<agent> (sticky)` in the status bar) until you type `/primary`. See [docs/workflows.md](workflows.md) for the full routing and session-state model.
+
+Manage sessions from inside the TUI with `/new` (start fresh), `/drop` (delete the current one), and `/list` (sessions for this directory). Type `/help` for the full command list, `/exit` or Ctrl-D to quit.
+
+### Single-prompt mode
+
+`milk [flags] <prompt>` runs one turn non-interactively and exits — useful for scripting or a quick one-off check, but a secondary mode, not how milk is meant to be used day to day:
 
 ```sh
-./milk --new --session test "hello"
-./milk --list
-./milk --drop
-./milk --list   # should be empty
+milk "list Go files in the current directory"
+milk --escalate "explain the session state machine design"
+milk --primary "grep for TODO comments"
+milk --new "start a fresh session"
+milk --list
+milk --drop
 ```
 
-**Primary-agent routing** (an agent must be configured and reachable):
+Sessions are shared with the TUI's session model — the same `--list`/`--new`/`--drop` flags here correspond to `/list`/`/new`/`/drop` there.
 
-```sh
-./milk "list Go files in the current directory"     # routes to primary, runs the bash tool
-./milk "now show only the test files"                # resumes the same session
-./milk --primary "grep for TODO comments"             # force primary even if rules would escalate
-```
+### Graceful degradation
 
-**Escalation** (both primary and escalation agents configured):
-
-```sh
-./milk --escalate "explain the session state machine design"       # force escalation
-./milk "design a plugin architecture for milk"                     # self-escalation: primary calls escalate()
-
-./milk --escalate "what would you need to know to refactor the router?"
-./milk "focus on the rules layer"       # ESCALATION_WAITING: goes directly to --resume, no routing
-
-./milk --primary "grep for TODO"        # break back to primary
-```
-
-**Graceful degradation** — stop either agent and confirm milk warns rather than crashing; see [docs/operations.md — Graceful degradation](operations.md#graceful-degradation) for the full behavior table.
+Stop either agent (or never configure one) and confirm milk warns rather than crashing, in either mode — see [docs/operations.md — Graceful degradation](operations.md#graceful-degradation) for the full behavior table.
 
 ## Where to go next
 
@@ -116,10 +120,6 @@ task test
 
 ## Troubleshooting
 
-**Session in a bad state**: drop it and start fresh.
-
-```sh
-./milk --drop
-```
+**Session in a bad state**: drop it and start fresh — `/drop` in the TUI, or `milk --drop` from the shell.
 
 For backend-specific troubleshooting (e.g. local llama.cpp server issues), see the relevant section in [docs/providers.md](providers.md).
