@@ -10,7 +10,7 @@ New to milk? Start with [docs/getting-started.md](getting-started.md) for the fa
 
 ## Primary agent
 
-The agent handling the fast path — most turns, most tool calls. Configurable via any `agents` entry, including `claude-cli` (see the callout below): inference-server backends (local/cloud HTTP, or AWS Bedrock Converse natively), subprocess backends (aider-cli, smolagents), and Claude Code CLI can all be primary. Any tool-calling-capable model works on the inference-server path; see [Tested models](#tested-models) for models confirmed against milk's tool-calling loop specifically.
+The agent handling the fast path — most turns, most tool calls. Configurable via any `agents` entry, including `claude-cli` (see the callout above): inference-server backends (local/cloud HTTP, or AWS Bedrock Converse natively), subprocess backends (aider-cli, smolagents), and Claude Code CLI can all be primary. Any tool-calling-capable model works on the inference-server path; see [Tested models](#tested-models) for models confirmed against milk's tool-calling loop specifically.
 
 ## Escalation agent
 
@@ -37,7 +37,11 @@ A common, valid pattern: one provider, two agent entries at different model weig
 
 ---
 
-## Claude Code CLI
+## Backends
+
+Every backend milk supports, one next to the other. All of them can serve as primary or escalation (see the principle above); cross-cutting config that applies *regardless* of which backend you pick — context window, prompt tiering, custom prompts, wire-format overrides, dynamic tokens — lives in [Cross-cutting agent configuration](#cross-cutting-agent-configuration) below, not repeated per backend.
+
+### Claude Code CLI
 
 **Provider**: `claude-cli` — runs the `claude` binary as a subprocess, not via HTTP.
 
@@ -55,7 +59,7 @@ A built-in entry named `"claude"` with `provider: "claude-cli"` is always availa
 | `add_dirs` | — | Extra directories; passed as `--add-dir` |
 | `settings` | — | JSON object passed via `--settings` (same schema as Claude's `settings.local.json`, e.g. `{"env": {...}}`) |
 
-### Claude CLI against a non-Anthropic backend
+#### Claude CLI against a non-Anthropic backend
 
 `claude-cli` isn't tied to Anthropic's hosted API — the `claude` binary reads its backend from environment variables, which `settings.env` can override per agent entry. This example points Claude Code at an entirely different, OpenAI-key-style provider that happens to speak the Anthropic wire format:
 
@@ -81,101 +85,7 @@ Claude CLI can also be a **tool-agent** — called inline during another agent's
 
 ---
 
-## Context window declaration (`context_window_tokens`)
-
-Set on any agent entry to declare the model's context window size. milk then derives sensible defaults for two per-turn limits without requiring explicit `limits` overrides:
-
-| Derived limit | Formula | Example (32 768 tokens) |
-|---|---|---|
-| `message_budget_chars` | `context_window_tokens × 3` | 98 304 chars |
-| `max_tool_iterations` | `max(5, context_window_tokens / 4096)` | 8 iterations |
-
-Explicit `limits.message_budget_chars` / `limits.max_tool_iterations` always win.
-
-```json
-{ "name": "qwythos-local", "url": "http://localhost:8080", "model": "qwythos", "provider": "local",
-  "context_window_tokens": 32768, "run_cmd": "llama-server --model ~/models/qwythos.gguf --ctx-size 32768 --port 8080" }
-```
-
-For local models, read the value directly from the `--ctx-size` flag in `run_cmd`.
-
----
-
-## System prompt verbosity (`system_prompt_tier`)
-
-milk's default system prompt (`standard`) is tuned for capable models. Smaller local models benefit from a shorter prompt that frees context for history and tools.
-
-| Value | Approx. size | Contents |
-|---|---|---|
-| `"minimal"` | ~60 tokens | Core task framing only |
-| `"standard"` | ~700 tokens | Full default (default when omitted) |
-| `"full"` | ~900 tokens | Standard plus verbose guidance |
-
-```json
-{ "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
-  "context_window_tokens": 8192, "system_prompt_tier": "minimal" }
-```
-
----
-
-## Custom agent behaviour (`prompt` / `prompt_file`)
-
-Any agent entry can carry a custom system prompt, **prepended** to milk's default on every turn.
-
-```json
-{ "name": "local", "url": "http://localhost:8080", "model": "qwen2.5-coder",
-  "prompt": "You are a strict code reviewer. Only respond in bullet points.\n\nAvailable tools: {{milk:tools}}" }
-```
-
-Or from a file (wins over `prompt` if both are set — a config warning is shown at startup):
-
-```json
-{ "name": "local", "url": "http://localhost:8080", "model": "qwen2.5-coder",
-  "prompt_file": "~/.milk/prompts/code-reviewer.md" }
-```
-
-### Placeholders
-
-| Placeholder | Substituted with |
-|---|---|
-| `{{milk:memory}}` | The current remembered-facts block from percepts |
-| `{{milk:need}}` | The session's current need description |
-| `{{milk:escalation}}` | The last escalation-agent summary |
-| `{{milk:tools}}` | Comma-separated list of built-in primary-agent tool names |
-
-An empty value removes the placeholder silently. If **no** `{{milk:*}}` placeholder is present, a compact `*(milk context injected below)*` footer is auto-appended so milk's own context still reaches the agent.
-
-### Wizard
-
-`/agent add` asks a behaviour step after required fields: press Enter to skip, type inline text to set `prompt`, or `file=/path/to/prompt.md` to set `prompt_file`.
-
----
-
-## OpenAI Responses API
-
-Enable the [Responses API](https://platform.openai.com/docs/api-reference/responses) wire format on any local or Bearer-auth entry with `"api_format": "responses"`.
-
-```json
-{ "name": "local-responses", "url": "http://localhost:8080", "model": "qwen2.5-coder", "api_format": "responses" }
-```
-
-Defaults the endpoint to `/v1/responses` (override with `chat_path`), skips the `/health` probe, translates message history (`tool` role → `function_call_output`, assistant `tool_calls` → `function_call`), flattens tool schemas, and uses Responses-style SSE events. The default for HTTP agents otherwise is `"chat_completions"` (`/v1/chat/completions`).
-
-Real example — an enterprise Copilot proxy using Responses instead of Chat Completions, alongside a bearer `token_cmd`:
-
-```json
-{
-  "name": "copilot-lite", "provider": "bearer",
-  "url": "https://copilot-api.your-enterprise-ghe.example.com", "model": "gpt-5-mini",
-  "token_cmd": "gh auth token --hostname your-enterprise-ghe.example.com",
-  "headers": { "Copilot-Integration-Id": "vscode-chat", "X-GitHub-Api-Version": "2026-01-09" },
-  "api_format": "responses"
-}
-```
-
----
-
-## Local llama.cpp / Ollama / LM Studio
+### Local llama.cpp / Ollama / LM Studio
 
 **Auth**: none — plain HTTP.
 
@@ -185,7 +95,7 @@ Real example — an enterprise Copilot proxy using Responses instead of Chat Com
 
 For Ollama the default port is `11434`; for LM Studio it's `1234`. The model name must match what the server reports (check `/v1/models`). The model must support function/tool calling for either OpenAI-compatible Chat Completions or the AWS Bedrock Converse API.
 
-### Automatic server startup (`run_cmd`)
+#### Automatic server startup (`run_cmd`)
 
 Launch the inference server automatically if unreachable at milk startup:
 
@@ -204,7 +114,7 @@ milk checks reachability at startup (skips the command if already up), launches 
 
 `agent` defaults to the active local agent when omitted.
 
-### Real `run_cmd` tuning examples
+#### Real `run_cmd` tuning examples
 
 Three separate real configs (paths genericized), showing different tuning knobs rather than one golden path:
 
@@ -234,7 +144,7 @@ Three separate real configs (paths genericized), showing different tuning knobs 
   "run_cmd": "/path/to/llama.cpp/build/bin/llama-server --model /path/to/models/qwen2.5-coder-7b/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf --host 127.0.0.1 --port 8090 --ctx-size 131072 --n-gpu-layers 99 --flash-attn on --jinja" }
 ```
 
-### Tested models
+#### Tested models
 
 Confirmed working with milk's tool-calling loop, served via llama.cpp with `--jinja` (the streaming tool-format detector handles format differences automatically):
 
@@ -246,7 +156,7 @@ Confirmed working with milk's tool-calling loop, served via llama.cpp with `--ji
 
 Other instruction-tuned models with OpenAI-style function calling should work. If tool calls are emitted in an unrecognised format, open an issue — adding a new format to the stream detector is straightforward.
 
-### Reference setup: NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source
+#### Reference setup: NVIDIA GPU, Ubuntu/WSL2, llama.cpp from source
 
 One worked example among several ways to get local inference running — not the default path, and not required if you're using a cloud provider or already have a server running. Parameters (CUDA architecture, quant size, GPU layer count, context size) will differ for other hardware; for general llama.cpp installation see the [official README](https://github.com/ggml-org/llama.cpp).
 
@@ -332,7 +242,7 @@ Expected: a `tool_calls` array with `"name": "bash"`. If the call appears inside
 
 **6. Build and verify milk** — see [docs/getting-started.md](getting-started.md#install).
 
-### Windows and WSL2
+#### Windows and WSL2
 
 milk's Go core is cross-platform (config paths use `os.UserHomeDir()`, TUI uses bubbletea, no PTY or Unix-only syscalls), but the primary-agent `bash` tool hard-codes `sh -c` and will not work on native Windows. **WSL2 is the recommended path.**
 
@@ -356,7 +266,7 @@ milk's Go core is cross-platform (config paths use `os.UserHomeDir()`, TUI uses 
 
 Tracked in [issue #38](https://github.com/scoutme/milk/issues/38).
 
-### Troubleshooting
+#### Troubleshooting
 
 **400 on first call**: server started without `--jinja` — restart with `./scripts/llama-serve.sh`.
 
@@ -366,11 +276,11 @@ Tracked in [issue #38](https://github.com/scoutme/milk/issues/38).
 
 ---
 
-## AWS Bedrock
+### AWS Bedrock
 
 **Auth**: AWS SigV4. milk uses the native Bedrock Converse API — no OpenAI-compat layer.
 
-### Step 1 — IAM permissions
+#### Step 1 — IAM permissions
 
 ```json
 { "Version": "2012-10-17", "Statement": [{ "Effect": "Allow",
@@ -380,13 +290,13 @@ Tracked in [issue #38](https://github.com/scoutme/milk/issues/38).
 
 If using inference profiles, add the profile ARN to `Resource` or use `"*"`.
 
-### Step 2 — Configure credentials
+#### Step 2 — Configure credentials
 
 Resolved in order: explicit `aws_key_id`/`aws_secret`/`aws_token` fields → env vars `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`/`AWS_REGION`. For temporary (STS-assumed) credentials, set `aws_auth_refresh: true` at the config root — milk refreshes automatically before each Claude turn and before local Bedrock calls at startup.
 
 `aws_refresh_cmd` (per agent entry) wires a `credential_process`-compatible command directly into the SigV4 transport: on a 403, milk runs it, swaps credentials atomically, and retries once — no restart needed.
 
-### Step 3 — Add the backend entry
+#### Step 3 — Add the backend entry
 
 ```json
 { "name": "haiku", "url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
@@ -403,13 +313,13 @@ Cross-region inference profiles use the profile ARN as `model`:
 
 Verify: `milk --new --primary "say hi in one word"`.
 
-### Prompt caching (`prompt_caching`) — ⚠️ experimental, not live-tested
+#### Prompt caching (`prompt_caching`) — ⚠️ experimental, not live-tested
 
 > This was implemented and unit-tested against AWS's documented Converse API contract, but has **not** been exercised against a real Bedrock endpoint — no Bedrock agent was available during development. The request-side gating (never sends `cachePoint` unless you opt in) is verified; live behavior on a real account/model/region is not. Contrast with local-agent implicit caching for OpenAI-compatible providers (e.g. Xiaomi MiMo), which *has* been live-verified and needs no config flag.
 
 Set `"prompt_caching": true` on a `provider: "bedrock"` entry to append a `{"cachePoint": {"type": "default"}}` block to the Converse API `system` array. Off by default and must be opted in explicitly — sending `cachePoint` to a model/region that doesn't support it is a hard API error, not a graceful no-op. Only caches the system-prompt prefix, not per-message content. Cache-hit stats appear in the same `cache:NN%` display used elsewhere.
 
-### Troubleshooting
+#### Troubleshooting
 
 | Error | Cause | Fix |
 |---|---|---|
@@ -420,7 +330,7 @@ Set `"prompt_caching": true` on a `provider: "bedrock"` entry to append a `{"cac
 
 ---
 
-## OpenRouter
+### OpenRouter
 
 **Auth**: Bearer token — access to hundreds of hosted models via one key.
 
@@ -446,7 +356,7 @@ Full list: [openrouter.ai/models](https://openrouter.ai/models).
 
 ---
 
-## Together.ai
+### Together.ai
 
 **Auth**: Bearer token. Sign up at [api.together.xyz](https://api.together.xyz) → **Settings** → **API Keys**.
 
@@ -459,7 +369,7 @@ Model names use the Hugging Face format (`Org/Model-Name`).
 
 ---
 
-## Groq
+### Groq
 
 **Auth**: Bearer token — very fast inference for open-source models. Sign up at [console.groq.com](https://console.groq.com) → **API Keys**.
 
@@ -472,7 +382,7 @@ Models with tool calling: `qwen-qwq-32b`, `llama-3.3-70b-versatile`, `llama3-gro
 
 ---
 
-## Azure OpenAI
+### Azure OpenAI
 
 **Auth**: `api-key` header (not Bearer). Azure's deployment URL contains an `/openai` prefix; milk appends `/v1/chat/completions` automatically, so set `url` to the base *before* `/v1`.
 
@@ -488,36 +398,7 @@ If a deployment exposes the endpoint directly without `/v1`, add `"chat_path": "
 
 ---
 
-## Dynamic token providers (`token_cmd`)
-
-For providers using short-lived tokens managed by an external CLI (company SSO, a vault CLI, a cloud provider's auth tool), use `token_cmd` instead of a static `api_key`. milk runs the command at startup, uses stdout as the Bearer token, and retries with a fresh token on 401/403 — run via `sh -c`, so shell syntax and env vars work.
-
-Real example — an enterprise GitHub Copilot proxy, combining `token_cmd`, custom headers, and exposing another agent as a tool (`tools`):
-
-```json
-{
-  "name": "copilot-enterprise", "provider": "bearer",
-  "url": "https://copilot-api.your-enterprise-ghe.example.com", "model": "claude-sonnet-4.6",
-  "token_cmd": "gh auth token --hostname your-enterprise-ghe.example.com",
-  "headers": {
-    "Copilot-Integration-Id": "vscode-chat",
-    "Editor-Plugin-Version": "copilot-chat/0.49.0",
-    "Editor-Version": "vscode/1.121.0",
-    "X-GitHub-Api-Version": "2026-01-09"
-  },
-  "chat_path": "/chat/completions",
-  "context_window_tokens": 200000,
-  "tools": [
-    { "agent": "aider", "description": "aider is a coding agent that directly reads source code files and applies the requested changes" }
-  ]
-}
-```
-
-See [docs/tooling.md — Agent-as-Tool](tooling.md#agent-as-tool) for what the `tools` field does.
-
----
-
-## aider
+### aider
 
 **Provider**: `aider-cli` — invokes the `aider` binary directly, no adapter script.
 
@@ -552,7 +433,7 @@ Verify: `milk --new --escalate "list the Go files in this directory"`.
 
 ---
 
-## smolagents (HuggingFace)
+### smolagents (HuggingFace)
 
 **Provider**: `subprocess` — runs the bundled `milk-smolagent` adapter (auto-deployed to `~/.milk/scripts/milk-smolagent` on first use, no manual install), which wraps HuggingFace smolagents and translates its stream to milk's NDJSON protocol.
 
@@ -582,6 +463,133 @@ Set as escalation agent: `{ "escalation_agent": "smolagent" }`.
 | `extra_args` | array | — | Raw CLI args forwarded verbatim |
 
 Verify: `milk --new --escalate "say hello"`.
+
+---
+
+## Cross-cutting agent configuration
+
+These apply to any `agents` entry, regardless of which backend above it is — not one-per-backend settings.
+
+### Context window declaration (`context_window_tokens`)
+
+Set on any agent entry to declare the model's context window size. milk then derives sensible defaults for two per-turn limits without requiring explicit `limits` overrides:
+
+| Derived limit | Formula | Example (32 768 tokens) |
+|---|---|---|
+| `message_budget_chars` | `context_window_tokens × 3` | 98 304 chars |
+| `max_tool_iterations` | `max(5, context_window_tokens / 4096)` | 8 iterations |
+
+Explicit `limits.message_budget_chars` / `limits.max_tool_iterations` always win.
+
+```json
+{ "name": "qwythos-local", "url": "http://localhost:8080", "model": "qwythos", "provider": "local",
+  "context_window_tokens": 32768, "run_cmd": "llama-server --model ~/models/qwythos.gguf --ctx-size 32768 --port 8080" }
+```
+
+For local models, read the value directly from the `--ctx-size` flag in `run_cmd`.
+
+---
+
+### System prompt verbosity (`system_prompt_tier`)
+
+milk's default system prompt (`standard`) is tuned for capable models. Smaller local models benefit from a shorter prompt that frees context for history and tools.
+
+| Value | Approx. size | Contents |
+|---|---|---|
+| `"minimal"` | ~60 tokens | Core task framing only |
+| `"standard"` | ~700 tokens | Full default (default when omitted) |
+| `"full"` | ~900 tokens | Standard plus verbose guidance |
+
+```json
+{ "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
+  "context_window_tokens": 8192, "system_prompt_tier": "minimal" }
+```
+
+---
+
+### Custom agent behaviour (`prompt` / `prompt_file`)
+
+Any agent entry can carry a custom system prompt, **prepended** to milk's default on every turn.
+
+```json
+{ "name": "local", "url": "http://localhost:8080", "model": "qwen2.5-coder",
+  "prompt": "You are a strict code reviewer. Only respond in bullet points.\n\nAvailable tools: {{milk:tools}}" }
+```
+
+Or from a file (wins over `prompt` if both are set — a config warning is shown at startup):
+
+```json
+{ "name": "local", "url": "http://localhost:8080", "model": "qwen2.5-coder",
+  "prompt_file": "~/.milk/prompts/code-reviewer.md" }
+```
+
+#### Placeholders
+
+| Placeholder | Substituted with |
+|---|---|
+| `{{milk:memory}}` | The current remembered-facts block from percepts |
+| `{{milk:need}}` | The session's current need description |
+| `{{milk:escalation}}` | The last escalation-agent summary |
+| `{{milk:tools}}` | Comma-separated list of built-in primary-agent tool names |
+
+An empty value removes the placeholder silently. If **no** `{{milk:*}}` placeholder is present, a compact `*(milk context injected below)*` footer is auto-appended so milk's own context still reaches the agent.
+
+#### Wizard
+
+`/agent add` asks a behaviour step after required fields: press Enter to skip, type inline text to set `prompt`, or `file=/path/to/prompt.md` to set `prompt_file`.
+
+---
+
+### OpenAI Responses API
+
+Enable the [Responses API](https://platform.openai.com/docs/api-reference/responses) wire format on any local or Bearer-auth entry with `"api_format": "responses"`.
+
+```json
+{ "name": "local-responses", "url": "http://localhost:8080", "model": "qwen2.5-coder", "api_format": "responses" }
+```
+
+Defaults the endpoint to `/v1/responses` (override with `chat_path`), skips the `/health` probe, translates message history (`tool` role → `function_call_output`, assistant `tool_calls` → `function_call`), flattens tool schemas, and uses Responses-style SSE events. The default for HTTP agents otherwise is `"chat_completions"` (`/v1/chat/completions`).
+
+Real example — an enterprise Copilot proxy using Responses instead of Chat Completions, alongside a bearer `token_cmd`:
+
+```json
+{
+  "name": "copilot-lite", "provider": "bearer",
+  "url": "https://copilot-api.your-enterprise-ghe.example.com", "model": "gpt-5-mini",
+  "token_cmd": "gh auth token --hostname your-enterprise-ghe.example.com",
+  "headers": { "Copilot-Integration-Id": "vscode-chat", "X-GitHub-Api-Version": "2026-01-09" },
+  "api_format": "responses"
+}
+```
+
+---
+
+### Dynamic token providers (`token_cmd`)
+
+For providers using short-lived tokens managed by an external CLI (company SSO, a vault CLI, a cloud provider's auth tool), use `token_cmd` instead of a static `api_key`. milk runs the command at startup, uses stdout as the Bearer token, and retries with a fresh token on 401/403 — run via `sh -c`, so shell syntax and env vars work.
+
+Real example — an enterprise GitHub Copilot proxy, combining `token_cmd`, custom headers, and exposing another agent as a tool (`tools`):
+
+```json
+{
+  "name": "copilot-enterprise", "provider": "bearer",
+  "url": "https://copilot-api.your-enterprise-ghe.example.com", "model": "claude-sonnet-4.6",
+  "token_cmd": "gh auth token --hostname your-enterprise-ghe.example.com",
+  "headers": {
+    "Copilot-Integration-Id": "vscode-chat",
+    "Editor-Plugin-Version": "copilot-chat/0.49.0",
+    "Editor-Version": "vscode/1.121.0",
+    "X-GitHub-Api-Version": "2026-01-09"
+  },
+  "chat_path": "/chat/completions",
+  "context_window_tokens": 200000,
+  "tools": [
+    { "agent": "aider", "description": "aider is a coding agent that directly reads source code files and applies the requested changes" }
+  ]
+}
+```
+
+See [docs/tooling.md — Agent-as-Tool](tooling.md#agent-as-tool) for what the `tools` field does.
 
 ---
 
