@@ -48,19 +48,34 @@ type WorkflowQuestionsMsg struct {
 	AnswersCh chan<- string // channel to send user answers back to the workflow goroutine
 }
 
+// StageNode is one node in the tree of currently-active execution paths.
+// Each parallel item or loop iteration is a node; siblings under the same
+// parent represent concurrent or sequential sub-paths. The tree is rebuilt
+// from scratch on each ProgressMsg so it always reflects the live state.
+type StageNode struct {
+	Label    string       `json:"label"`
+	Children []*StageNode `json:"children,omitempty"`
+}
+
+// PathSnapshot carries the full tree of active execution paths. The panel
+// renders it as an indented tree where the deepest path (last child at each
+// level) is highlighted.
+type PathSnapshot struct {
+	Root *StageNode `json:"root"`
+}
+
 // ProgressMsg is sent to the TUI after each state transition by an
 // interpreter-driven run (internal/workflow/interp) — the generic
 // counterpart to dev.go's own wfdev.WorkflowProgressMsg (which carries a
 // full dev-shaped State instead, since dev.go's control flow is fixed-shape
-// enough to report as one). StagePath/Role fill the same panel display slot
-// dev.go's Sprint/Pass/Role do, just for an arbitrary stage tree: StagePath
-// is a human-readable breadcrumb of where execution currently is (e.g.
-// "sprint_loop[2] > pass_loop[1]"), Role is the role of the turn in flight,
-// if any (empty between turns, e.g. while a loop decides whether to continue).
+// enough to report as one). ActivePaths carries the full tree of currently
+// active execution paths (loops, parallel items), and Role is the role of
+// the turn in flight, if any (empty between turns, e.g. while a loop
+// decides whether to continue).
 type ProgressMsg struct {
 	WorkflowName string
 	Task         string
 	WorkflowID   int
-	StagePath    string
+	ActivePaths  *PathSnapshot
 	Role         string
 }

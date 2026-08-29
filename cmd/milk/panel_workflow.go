@@ -79,8 +79,26 @@ func buildDevWorkflowPanelLines(st *workflow.State, inner int) []string {
 	return lines
 }
 
+// renderStageTree walks the StageNode tree, producing indented lines
+// with the deepest active path highlighted (bold + arrow).
+func renderStageTree(node *workflow.StageNode, depth int, inner int, add func(string)) {
+	if node == nil {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	isLeaf := len(node.Children) == 0
+	if isLeaf {
+		add(truncatePanel(bold(dim("▸ ")+node.Label), inner))
+	} else {
+		add(truncatePanel(dim(indent+node.Label), inner))
+	}
+	for _, child := range node.Children {
+		renderStageTree(child, depth+1, inner, add)
+	}
+}
+
 // buildGenericWorkflowPanelLines renders an interpreter-driven run's
-// progress (workflow.ProgressMsg): StagePath instead of Sprint/Pass, no
+// progress (workflow.ProgressMsg): StageTree instead of Sprint/Pass, no
 // verdict history (the checkpoint's trace is the record of what happened,
 // not surfaced in this panel).
 func buildGenericWorkflowPanelLines(st *workflow.State, inner int) []string {
@@ -100,10 +118,8 @@ func buildGenericWorkflowPanelLines(st *workflow.State, inner int) []string {
 	}
 	add("")
 
-	if st.StagePath != "" {
-		for _, line := range wordWrapPanel(st.StagePath, inner) {
-			add(truncatePanel(dim("  "+line), inner))
-		}
+	if st.StageTree != nil {
+		renderStageTree(st.StageTree, 0, inner, add)
 	}
 
 	return lines

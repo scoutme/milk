@@ -137,7 +137,8 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides, defName: r.Def.Name}
+	activeMu := &sync.Mutex{}
+	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides, defName: r.Def.Name, activeMu: activeMu}
 	if r.checkpointPath != "" {
 		liveTrace := append([]TraceEntry{}, trace...)
 		ec.onLeafComplete = func(e TraceEntry) {
@@ -185,23 +186,56 @@ type execContext struct {
 	// see Runner.WithMaxIterationsOverride.
 	maxIterOverrides map[string]int
 
-	// defName and path back workflow.ProgressMsg reporting (see
+	// defName and activePaths back workflow.ProgressMsg reporting (see
 	// reportProgress): defName is the Definition's own name (set once, in
-	// Run); path is a breadcrumb of stage IDs (with iteration/item index
-	// where applicable) from the root down to wherever live execution
-	// currently is — pushed on entering a loop iteration or parallel_group
-	// item, popped on leaving. Not meaningful (and not maintained) inside a
-	// parallel_group's per-item execContext copies — see execParallelGroup.
-	defName string
-	path    []string
+	// Run); activePaths is a shared, mutex-protected list of currently-active
+	// path segments from root to the deepest executing stage. Every
+	// goroutine (sequential or parallel) pushes/pops its own segment via
+	// pushPath/popPath; reportProgress builds a tree snapshot from the list.
+	defName    string
+	activePaths []string   // shared across goroutines — protect with activeMu
+	activeMu   *sync.Mutex // shared across goroutines; nil only in test stubs
 }
 
-// pushPath/popPath maintain the breadcrumb reportProgress reports.
-func (ec *execContext) pushPath(seg string) { ec.path = append(ec.path, seg) }
-func (ec *execContext) popPath()            { ec.path = ec.path[:len(ec.path)-1] }
+// pushPath appends a segment to the shared activePaths list.
+func (ec *execContext) pushPath(seg string) {
+	ec.activeMu.Lock()
+	ec.activePaths = append(ec.activePaths, seg)
+	ec.activeMu.Unlock()
+}
+
+// popPath removes the last segment from the shared activePaths list.
+func (ec *execContext) popPath() {
+	ec.activeMu.Lock()
+	ec.activePaths = ec.activePaths[:len(ec.activePaths)-1]
+	ec.activeMu.Unlock()
+}
+
+// buildPathTree constructs a PathSnapshot from the current activePaths.
+// The deepest path (last segment at each level) is highlighted by being
+// the last child. Concurrent siblings under a parallel group each form
+// their own branch.
+func (ec *execContext) buildPathTree() *workflow.PathSnapshot {
+	ec.activeMu.Lock()
+	snapshot := make([]string, len(ec.activePaths))
+	copy(snapshot, ec.activePaths)
+	ec.activeMu.Unlock()
+
+	if len(snapshot) == 0 {
+		return nil
+	}
+	root := &workflow.StageNode{Label: snapshot[0]}
+	cur := root
+	for _, seg := range snapshot[1:] {
+		child := &workflow.StageNode{Label: seg}
+		cur.Children = append(cur.Children, child)
+		cur = child
+	}
+	return &workflow.PathSnapshot{Root: root}
+}
 
 // reportProgress sends a workflow.ProgressMsg reflecting the current
-// breadcrumb and the role about to run (or "" if none — e.g. a
+// activePaths tree and the role about to run (or "" if none — e.g. a
 // user_checkpoint pause, or a parallel_group announcing its own start).
 // No-op if the caller supplied no Send func.
 func (ec *execContext) reportProgress(role string) {
@@ -213,7 +247,7 @@ func (ec *execContext) reportProgress(role string) {
 		WorkflowName: ec.defName,
 		Task:         task,
 		WorkflowID:   ec.cfg.WorkflowID,
-		StagePath:    strings.Join(ec.path, " > "),
+		ActivePaths:  ec.buildPathTree(),
 		Role:         role,
 	})
 }
@@ -553,8 +587,9 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 
 				itemEC := &execContext{
 					ctx: ec.ctx, cfg: ec.cfg, vars: itemVars, defName: ec.defName,
-					path: []string{fmt.Sprintf("%s %s[%d]", s.ID, label, sec.Index)},
+					activePaths: append([]string{}, ec.activePaths...), activeMu: ec.activeMu,
 				}
+				itemEC.pushPath(fmt.Sprintf("%s %s[%d]", s.ID, label, sec.Index))
 				outcome, err := executeStages(itemEC, s.Body)
 				r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
 				if lastSaveAs := lastSaveAsOf(s.Body); lastSaveAs != "" {

@@ -35,6 +35,27 @@ func (c *progressCollector) all() []workflow.ProgressMsg {
 	return append([]workflow.ProgressMsg{}, c.messages...)
 }
 
+// pathTreeContains reports whether any node in the PathSnapshot tree has a
+// label containing substr. Returns false when snap is nil.
+func pathTreeContains(snap *workflow.PathSnapshot, substr string) bool {
+	if snap == nil || snap.Root == nil {
+		return false
+	}
+	var walk func(n *workflow.StageNode) bool
+	walk = func(n *workflow.StageNode) bool {
+		if strings.Contains(n.Label, substr) {
+			return true
+		}
+		for _, c := range n.Children {
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(snap.Root)
+}
+
 func TestReportProgress_AgentTurnReportsRoleAndStagePath(t *testing.T) {
 	collector := &progressCollector{}
 	a := &fakeRunner{name: "a", responses: []string{"a-out"}}
@@ -89,11 +110,11 @@ func TestReportProgress_LoopStagePathReflectsIteration(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2 (one per pass)", len(msgs))
 	}
-	if !strings.Contains(msgs[0].StagePath, "pass_loop[1]") {
-		t.Errorf("first message StagePath = %q, want it to mention pass_loop[1]", msgs[0].StagePath)
+	if !pathTreeContains(msgs[0].ActivePaths, "pass_loop[1]") {
+		t.Errorf("first message ActivePaths missing pass_loop[1], got %+v", msgs[0].ActivePaths)
 	}
-	if !strings.Contains(msgs[1].StagePath, "pass_loop[2]") {
-		t.Errorf("second message StagePath = %q, want it to mention pass_loop[2]", msgs[1].StagePath)
+	if !pathTreeContains(msgs[1].ActivePaths, "pass_loop[2]") {
+		t.Errorf("second message ActivePaths missing pass_loop[2], got %+v", msgs[1].ActivePaths)
 	}
 }
 
@@ -120,7 +141,7 @@ func TestReportProgress_ParallelGroupAnnouncesItemCount(t *testing.T) {
 	msgs := collector.all()
 	var found bool
 	for _, m := range msgs {
-		if strings.Contains(m.StagePath, "fanout (3 items)") {
+		if pathTreeContains(m.ActivePaths, "fanout (3 items)") {
 			found = true
 			break
 		}
