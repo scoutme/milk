@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+{{ super() }}
+<style>
+  /* Every page here is a single flat entry (no nested nav sections), so the
+     primary sidebar just duplicates the top nav tabs with a mostly-empty
+     column below them. Hide it — .md-content is a flex child and reclaims
+     the freed space automatically. Also hide the mobile drawer toggle,
+     which would otherwise open an equally-redundant off-canvas copy. */
+  .md-sidebar--primary,
+  label.md-header__button[for="__drawer"] {
+    display: none;
+  }
+</style>
+{% endblock %}
