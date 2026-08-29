@@ -6,6 +6,24 @@ Switch models, not context.
 
 milk is a terminal AI assistant that routes each prompt between a fast primary agent and a deep escalation agent — keeping the full conversation in sync across both. Start cheap. Go deep when you need it. Switch mid-workflow.
 
+## Install
+
+Pre-built binary (macOS, Linux, Windows via WSL2):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+```
+
+Installs to `~/.local/bin/milk`, verifying the release checksum. Pin a specific version with `MILK_VERSION=v0.2.0`.
+
+Build from source instead (`git clone` + `task build`, or in one line):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh
+```
+
+Requires Go 1.21+. See [docs/getting-started.md](docs/getting-started.md) for what to do next.
+
 ## What it does
 
 - **Automatic routing** — each prompt is classified and sent to the right agent without you changing tools
@@ -72,7 +90,7 @@ See [docs/eval.md](docs/eval.md) for scenario format, per-adapter options, and j
 
 ## Prerequisites
 
-- Go 1.21+ (build from source only; pre-built binaries available)
+- Go 1.21+ — only if building from source; the pre-built binary needs nothing but the [install script](#install)
 - At least one configured agent backend (primary and/or escalation — each is optional; milk degrades gracefully if either is absent)
 - `aider-chat` pip package — only if using the `aider-cli` provider
 - `smolagents[litellm]` pip package — only if using the `subprocess`/smolagent provider

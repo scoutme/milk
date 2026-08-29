@@ -328,7 +328,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 Expected: a `tool_calls` array with `"name": "bash"`. If the call appears inside `content` as raw text instead, `--jinja` is missing or the server started without it.
 
-**6. Build and verify milk** — see [docs/getting-started.md](getting-started.md#build).
+**6. Build and verify milk** — see [docs/getting-started.md](getting-started.md#install).
 
 ### Windows and WSL2
 

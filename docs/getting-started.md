@@ -11,7 +11,17 @@ The fastest path to a working milk setup — no specific backend required. milk 
 | `claude` CLI | no | only if you want Claude Code as an agent; not required otherwise |
 | Git Bash or WSL2 (Windows only) | yes (Windows) | milk's primary agent uses `sh`, `find`, `grep` — `cmd.exe`/PowerShell are not supported. See [docs/providers.md — Windows and WSL2](providers.md#windows-and-wsl2) |
 
-## Build
+## Install
+
+Pre-built binary — no Go toolchain needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install.sh | sh
+```
+
+Installs to `~/.local/bin/milk`, verifying the release checksum. Pin a version with `MILK_VERSION=v0.2.0`. On Windows, run this inside WSL2 (see [docs/providers.md — Windows and WSL2](providers.md#windows-and-wsl2)).
+
+Or build from source (requires Go 1.21+):
 
 ```sh
 task build:local   # builds ./milk in the current directory
@@ -20,6 +30,8 @@ task build
 # or to a custom destination:
 task build DEST=/usr/local/bin/milk
 ```
+
+`install-from-source.sh` does the equivalent in one line without a manual clone: `curl -fsSL https://raw.githubusercontent.com/scoutme/milk/main/install-from-source.sh | sh`.
 
 ## Configure a backend
 
