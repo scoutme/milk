@@ -133,34 +133,68 @@ If the topic has switched, or `returning_fresh_start_local_turns` local turns (d
 
 ## The native `/workflow` engine
 
-Routing and escalation handle a single agent handing off to a smarter one mid-conversation. The `/workflow` engine is different: it runs a **predefined multi-agent pipeline** with structured roles and a typed completion contract, rather than an open-ended conversation.
+Routing and escalation handle a single agent handing off to a smarter one mid-conversation. The `/workflow` engine is different: it runs a **predefined multi-agent pipeline** with structured roles, loops, and a typed completion contract, rather than an open-ended conversation.
 
 The motivating problem: orchestrating a multi-stage pipeline (e.g. design → implement → review, looping until the reviewer signs off) through an interactive coding agent is fragile — there's no structured handoff between stages, no typed verdict, and no reliable way to know a background stage actually finished. `/workflow` gives milk direct control over stage transitions instead.
 
-### The `dev` workflow
+Workflows are **data, not code**: each one is a YAML (or JSON) *definition* — a list of stages an interpreter (`internal/workflow/interp`) walks through — not a hand-written Go pipeline. Three ship built in; you can add your own the same way.
 
-Three roles, each assigned to any configured agent (or the aliases `primary` / `escalation`, resolved once at workflow start):
+### Built-in workflows
 
-- **designer** — reads the task description, produces a spec and sprint plan (`<session-id>.workflow.plan.md`).
-- **generator** — executes the current sprint per the plan, writes output (`<session-id>.workflow.sprint<N>.md`).
-- **evaluator** — reviews the sprint's output and returns a structured verdict: `good_to_go`, `needs_refinement`, or `next_sprint`. Findings go to `<session-id>.workflow.findings<N>.md`.
+| Name | Roles | Shape |
+|---|---|---|
+| `dev` | designer, generator, evaluator | Designer plans sprints → generator implements each sprint → evaluator verdicts `good_to_go` / `needs_refinement` (retry) / `sprint_done` (advance). |
+| `pair` | designer, generator, evaluator | Same shape as `dev`, but the evaluator pauses after writing findings for a **user checkpoint** — you can add context or say "continue" — before it decides the verdict. A human-in-the-loop variant of `dev`. |
+| `swarm` | designer, worker, evaluator, implementer | Designer splits the task into independent (or dependency-ordered) items; a worker+evaluator retry loop runs **per item, concurrently** (bounded fan-out); a final evaluator checks cross-item integration; an optional implementer pass fixes integration issues, skipped entirely if the final evaluator found none. |
 
-**Loop semantics**: `needs_refinement` re-runs the generator for the same sprint (up to a configurable pass limit, default 3); `next_sprint` advances the generator to the next sprint; `good_to_go` on the final sprint ends the workflow successfully. Exceeding the pass limit halts with an error pointing at the last findings file.
+All three separate ambiguity resolution from execution: the designer either asks clarifying questions up front (paused for a user reply, with the design proceeding on stated defaults if you don't answer) or proceeds straight to planning when the task is already clear.
 
 ### Usage
 
 ```
-/workflow                                          # list available workflows
+/workflow                                          # list available workflows (built in + yours)
 /workflow dev <task description>                   # run; wizard collects missing agent assignments
 /workflow dev <task> --designer <agent> \
               --generator <agent> --evaluator <agent>   # inline agent assignment
-/workflow resume                                   # resume from the last sprint/pass checkpoint
+/workflow swarm <task> --designer <agent> --worker <agent> \
+                --evaluator <agent> --implementer <agent>
+/workflow resume                                   # resume from the last checkpoint
 /workflow reconfigure                              # reassign agent roles without losing saved state
 /workflow clear                                    # delete saved state for this session (type "clear" to confirm)
 ```
 
-Workflow state is checkpointed to `~/.milk/sessions/<session-id>.workflow.json` at two points per pass: after the generator writes its sprint file, and after the evaluator's verdict. `/workflow resume` re-launches from that checkpoint, skipping the designer (the plan file is reused) and, if the checkpoint was mid-evaluation, skipping the generator too. `/workflow reconfigure` re-runs the agent-assignment wizard against the saved state without touching sprint/pass/role, so the next `/workflow resume` continues from the same point with new agents.
+The role flags are whatever the chosen definition declares (`dev`/`pair`: `--designer`/`--generator`/`--evaluator`; `swarm`: `--designer`/`--worker`/`--evaluator`/`--implementer`) — the wizard asks for any role you didn't pass inline. Each role accepts any configured agent name, or the aliases `primary`/`escalation`, resolved once at workflow start.
 
-The workflow progress panel (`/panel workflow`, auto-opens when a workflow starts) shows the current sprint, pass, role, and verdict history.
+State is checkpointed to `~/.milk/sessions/<session-id>.workflow.<id>.interp.json` after every stage. `/workflow resume` re-launches from that checkpoint. `/workflow reconfigure` re-runs the agent-assignment wizard against the saved state without touching progress, so the next `/workflow resume` continues from the same point with new agents.
 
-Remote oversight (Telegram) labels workflow turns `workflow:<role>` — see [docs/operations.md](operations.md#remote-oversight-telegram).
+The workflow progress panel (`/panel workflow`, auto-opens when a workflow starts) shows current stage/iteration and verdict history. Remote oversight (Telegram) labels workflow turns `workflow:<role>` — see [docs/operations.md](operations.md#remote-oversight-telegram).
+
+### Writing a custom workflow
+
+Drop a `.yaml` or `.json` file in `~/.milk/workflows/` — same `Definition` schema as the built-ins (`internal/workflow/definitions/*.yaml`, embedded in the binary). A file whose `name` matches a built-in replaces it; a new name registers a new workflow, listed by plain `/workflow`.
+
+```yaml
+name: my-workflow
+roles: [designer, generator, evaluator]   # RunConfig.Runners must provide one agent per role
+vars:                                      # seeds the template context every stage's prompt renders against
+  shared_instructions: "..."
+stages:
+  - id: designer
+    kind: agent_turn
+    role: designer
+    prompt: "Task: {{.task}}\n\n{{.shared_instructions}}"
+    save_as: plan                          # subsequent stages see this as {{.plan}}
+```
+
+**Stage kinds**:
+
+| Kind | Purpose | Key fields |
+|---|---|---|
+| `agent_turn` | Run one turn on a role's agent | `role`, `prompt` (Go template), `save_as`; optional `verdict` (map of outcome → `{action: break\|retry, warn}`, read from the turn's output for an enclosing `loop`), `skip_user_checkpoint_marker`/`on_answer_prompt` (treat output as clarifying questions unless a marker line is present), `empty_output_fallback: git_diff`, `run_unless_marker_in`/`run_unless_contains` (skip this stage based on a prior stage's output) |
+| `loop` | Repeat its `body` | Either `over`+`from` (iterate a declared collection parsed out of another stage's saved output — see below) or `max_iterations`/`max_iterations_from` (a bounded retry loop; the last body stage must declare `verdict`) |
+| `user_checkpoint` | Pause for a real user reply | `prompt` (rendered from current vars), `save_as` |
+| `parallel_group` | Like `loop over`, but each item's `body` runs **concurrently** | `over`, `from`, `max_concurrency`, `save_as` (aggregated per-item results) |
+
+**Declared collections**: a designer-style stage's saved output can declare structure the interpreter parses automatically — numbered sections (`## Sprint 1`, or `## Item 2 (depends_on: 1)` for dependency-ordered `parallel_group` items) and scalar limits (`max_passes: 4` on its own line). `dev.yaml`'s `plan_instructions` var is the exact text instructing the designer agent to produce this format — reuse or adapt it in a custom definition rather than inventing a new plan syntax from scratch.
+
+The hand-written Go `dev` workflow (`internal/workflow/dev`, predating this data-driven system) still exists solely to resume checkpoints saved before the migration — every fresh `/workflow` run, `dev` included, goes through the YAML-driven interpreter now.
