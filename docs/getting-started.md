@@ -88,6 +88,53 @@ Once escalation fires — whether you asked for it or the primary agent called `
 
 Manage sessions from inside the TUI with `/new` (start fresh), `/drop` (delete the current one), and `/list` (sessions for this directory). Type `/help` for the full command list, `/exit` or Ctrl-D to quit.
 
+### A realistic session
+
+A real (lightly trimmed) transcript from a two-agent setup, showing routing, memory, and escalation in one session:
+
+```
+❯ list the go files under internal/router
+mimo-local: [thinking…]
+  ⚙ find_files: internal/router
+Here are the Go files under `internal/router`:
+- internal/router/router.go
+- internal/router/rules.go
+- internal/router/rules_test.go
+```
+
+A simple lookup stays on the primary agent, which runs `find_files` itself — no escalation needed.
+
+```
+❯ /learn this project prefers editing over rewriting files when possible
+```
+
+`/learn` records the fact as a percept. It shows up in the memory panel (`/panel memory`) immediately, marked with a star for "just updated":
+
+```
+GLOBAL (core)
+★ #5028a1 this project prefers
+  editing over rewriting files …
+```
+
+```
+❯ /escalate explain the tradeoffs of the router weighted-scorer design versus a pure keyword approach
+mimo-pro-local: [thinking…]
+  ⚙ read_file: internal/router/router.go
+  ⚙ read_file: internal/router/rules.go
+  ⚙ read_file: internal/router/rules_test.go
+Here's a breakdown of the tradeoffs between the current weighted-scorer design and a pure keyword approach:
+
+## Weighted-Scorer Design (what you have)
+...
+1. Composability / nuance. A single signal isn't decisive — signals *combine*. "Why should
+   we evaluate this approach?" fires both open-question (+3) and escalate-verb (+4) = 7,
+   crossing the escalate threshold of 6. A keyword-only router would need an explicit entry
+   for every combination or miss the escalation.
+...
+```
+
+The escalation agent reads the actual source files rather than answering from assumptions, then gives a genuine multi-point analysis. After this turn, the status bar shows `mimo-pro-local (sticky)` — **auto-sticky** kept the session on the escalation agent, so a follow-up question continues the conversation there without you having to type `/escalate` again. `/primary` breaks back out whenever you're ready.
+
 ### Single-prompt mode
 
 `milk [flags] <prompt>` runs one turn non-interactively and exits — useful for scripting or a quick one-off check, but a secondary mode, not how milk is meant to be used day to day:
