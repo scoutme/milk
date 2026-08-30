@@ -255,7 +255,7 @@ func (a *Agent) converseEndpoint(stream bool) string {
 }
 
 // bedrockStreamCompletion implements streamCompletion using the Bedrock Converse streaming API.
-func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, error) {
+func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, error) {
 	bedrockMsgs, system := convertMessagesToConverse(msgs)
 	if a.promptCaching {
 		system = appendSystemCachePoint(system)
@@ -272,7 +272,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", "", nil, false, err
+		return "", "", nil, false, "", err
 	}
 	if a.logContext {
 		obs.LogPayload(a.converseEndpoint(true), body)
@@ -280,7 +280,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.converseEndpoint(true), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, false, err
+		return "", "", nil, false, "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -292,7 +292,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, fmt.Errorf("bedrock unreachable: %w", err)
+		return "", "", nil, false, "", fmt.Errorf("bedrock unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -303,7 +303,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, fmt.Errorf("bedrock error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, "", fmt.Errorf("bedrock error %d: %s", httpResp.StatusCode, b)
 	}
 
 	type partialTC struct {
@@ -321,7 +321,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
-			return "", "", nil, false, fmt.Errorf("bedrock stream: %w", err)
+			return "", "", nil, false, "", fmt.Errorf("bedrock stream: %w", err)
 		}
 
 		switch eventType {
@@ -373,7 +373,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 		default:
 			// exception variants — surface them as errors
 			if strings.Contains(eventType, "Exception") || strings.Contains(eventType, "exception") {
-				return "", "", nil, false, fmt.Errorf("bedrock %s: %s", eventType, string(payload))
+				return "", "", nil, false, "", fmt.Errorf("bedrock %s: %s", eventType, string(payload))
 			}
 		}
 	}
@@ -414,7 +414,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 		if out != nil && textBuf.Len() > 0 {
 			fmt.Fprintln(out)
 		}
-		return textBuf.String(), "", tcList, false, nil
+		return textBuf.String(), "", tcList, false, "", nil
 	}
 	if out != nil && textBuf.Len() > 0 {
 		fmt.Fprintln(out)
@@ -422,7 +422,7 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	// No tool calls and possibly no text: a degenerate/empty completion. Flag
 	// it so Run() can fall back to a summary of this turn's tool activity
 	// instead of persisting (or discarding) a blank assistant message.
-	return textBuf.String(), "", nil, textBuf.Len() == 0, nil
+	return textBuf.String(), "", nil, textBuf.Len() == 0, "", nil
 }
 
 // bedrockClassify uses the synchronous Bedrock Converse API for routing classification.

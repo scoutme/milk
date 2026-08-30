@@ -26,7 +26,7 @@ func TestExecuteToolCalls_ConcurrentDispatch(t *testing.T) {
 
 	ctx := context.Background()
 	start := time.Now()
-	msgs, esc := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil)
+	msgs, esc := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "")
 	elapsed := time.Since(start)
 
 	if esc != nil {
@@ -58,7 +58,7 @@ func TestExecuteToolCalls_PerToolTimeout(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	msgs, esc := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil)
+	msgs, esc := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "")
 
 	if esc != nil {
 		t.Fatalf("unexpected escalation signal: %v", esc)
@@ -107,7 +107,7 @@ func TestExecuteToolCalls_ContextCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil) //nolint:errcheck
+		a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "") //nolint:errcheck
 	}()
 
 	// Cancel after a brief delay to let the goroutines start.
@@ -137,7 +137,7 @@ func TestExecuteToolCalls_ResultOrder(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	msgs, _ := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil)
+	msgs, _ := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "")
 
 	var toolMsgs []string
 	for _, m := range msgs {
@@ -185,7 +185,7 @@ func benchmarkToolConcurrency(tcs []toolCall) time.Duration {
 	a := &Agent{skipPerms: true, toolTimeout: 5 * time.Second}
 	ctx := context.Background()
 	start := time.Now()
-	a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil) //nolint:errcheck
+	a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "") //nolint:errcheck
 	return time.Since(start)
 }
 

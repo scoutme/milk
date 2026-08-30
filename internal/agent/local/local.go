@@ -64,12 +64,13 @@ type ImageURLPart struct {
 // serialized to the wire payload — it is used by history builders to label
 // turns so the receiving agent can identify who said what.
 type Message struct {
-	Role         string        `json:"role"`
-	Speaker      string        `json:"-"` // actual agent role; not serialized to wire
-	Content      string        `json:"content,omitempty"`
-	ToolCallID   string        `json:"tool_call_id,omitempty"`
-	ToolCalls    []toolCall    `json:"tool_calls,omitempty"`
-	ContentParts []ContentPart `json:"-"` // not persisted; used only for outbound API payload
+	Role             string        `json:"role"`
+	Speaker          string        `json:"-"` // actual agent role; not serialized to wire
+	Content          string        `json:"content,omitempty"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"` // MiMo/DeepSeek deep thinking; preserved across turns
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	ToolCalls        []toolCall    `json:"tool_calls,omitempty"`
+	ContentParts     []ContentPart `json:"-"` // not persisted; used only for outbound API payload
 }
 
 // MarshalJSON serialises a Message to JSON.
@@ -78,29 +79,33 @@ type Message struct {
 func (m Message) MarshalJSON() ([]byte, error) {
 	if len(m.ContentParts) > 0 {
 		type messageMultipart struct {
-			Role       string        `json:"role"`
-			Content    []ContentPart `json:"content"`
-			ToolCallID string        `json:"tool_call_id,omitempty"`
-			ToolCalls  []toolCall    `json:"tool_calls,omitempty"`
+			Role             string        `json:"role"`
+			Content          []ContentPart `json:"content"`
+			ReasoningContent string        `json:"reasoning_content,omitempty"`
+			ToolCallID       string        `json:"tool_call_id,omitempty"`
+			ToolCalls        []toolCall    `json:"tool_calls,omitempty"`
 		}
 		return json.Marshal(messageMultipart{
-			Role:       m.Role,
-			Content:    m.ContentParts,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
+			Role:             m.Role,
+			Content:          m.ContentParts,
+			ReasoningContent: m.ReasoningContent,
+			ToolCallID:       m.ToolCallID,
+			ToolCalls:        m.ToolCalls,
 		})
 	}
 	type messagePlain struct {
-		Role       string     `json:"role"`
-		Content    string     `json:"content,omitempty"`
-		ToolCallID string     `json:"tool_call_id,omitempty"`
-		ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+		Role             string     `json:"role"`
+		Content          string     `json:"content,omitempty"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
+		ToolCalls        []toolCall `json:"tool_calls,omitempty"`
 	}
 	return json.Marshal(messagePlain{
-		Role:       m.Role,
-		Content:    m.Content,
-		ToolCallID: m.ToolCallID,
-		ToolCalls:  m.ToolCalls,
+		Role:             m.Role,
+		Content:          m.Content,
+		ReasoningContent: m.ReasoningContent,
+		ToolCallID:       m.ToolCallID,
+		ToolCalls:        m.ToolCalls,
 	})
 }
 
@@ -951,16 +956,18 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 
 	executedKeys := map[string]bool{}
+	var lastReasoningText string // track across iterations for the max-iter fallback
 
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
 		maxIter = defaultMaxToolIterations
 	}
 	for i := 0; i < maxIter; i++ {
-		resp, fallbackRaw, toolCalls, emptyFallback, err := a.streamCompletion(ctx, msgs, tools, out)
+		resp, fallbackRaw, toolCalls, emptyFallback, reasoningText, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
 			return msgs, err
 		}
+		lastReasoningText = reasoningText
 
 		if len(toolCalls) == 0 {
 			// No tool calls: either a final text response, or the model emitting EOS
@@ -976,7 +983,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			if a.onResponseSegment != nil && resp != "" {
 				a.onResponseSegment(resp)
 			}
-			msgs = append(msgs, Message{Role: "assistant", Content: resp})
+			msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
 			return msgs, nil
 		}
 
@@ -1003,7 +1010,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			if a.onResponseSegment != nil && resp != "" {
 				a.onResponseSegment(resp)
 			}
-			msgs = append(msgs, Message{Role: "assistant", Content: resp})
+			msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
 			return msgs, nil
 		}
 		for _, tc := range toolCalls {
@@ -1015,7 +1022,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 
 		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem)
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText)
 		if esc != nil {
 			return msgs, esc
 		}
@@ -1033,7 +1040,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if a.onResponseSegment != nil && resp != "" {
 		a.onResponseSegment(resp)
 	}
-	msgs = append(msgs, Message{Role: "assistant", Content: resp})
+	msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: lastReasoningText})
 	return msgs, nil
 }
 
@@ -1153,8 +1160,8 @@ type toolCallOutcome struct {
 	reason   string
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, *EscalationSignal) {
-	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls})
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string) ([]Message, *EscalationSignal) {
+	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls, ReasoningContent: reasoningContent})
 
 	// Pre-print tool hints and collect permission decisions synchronously (before
 	// concurrent dispatch) so the TUI displays them in order and permission prompts
@@ -1468,7 +1475,7 @@ func toolArgSummary(args map[string]any) string {
 // streamCompletion sends a chat completion request and streams the response.
 // Routes to the Bedrock Converse streaming API when useBedrockNative is set;
 // otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
-func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, error) {
+func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, error) {
 	if a.useBedrockNative {
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
 	}
@@ -1489,7 +1496,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", "", nil, false, err
+		return "", "", nil, false, "", err
 	}
 
 	// Pre-flight payload size check: when the marshaled body exceeds the
@@ -1512,7 +1519,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			req.Messages = msgs
 			body, err = json.Marshal(req)
 			if err != nil {
-				return "", "", nil, false, err
+				return "", "", nil, false, "", err
 			}
 			if len(body) <= a.maxPayloadBytes {
 				break
@@ -1530,7 +1537,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, false, err
+		return "", "", nil, false, "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -1542,7 +1549,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, fmt.Errorf("inference server unreachable: %w", err)
+		return "", "", nil, false, "", fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -1553,7 +1560,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, "", fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -1565,7 +1572,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	toolCalls, promptTokens, completionTokens, cacheRead, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
-		return "", "", nil, false, err
+		return "", "", nil, false, "", err
 	}
 	// det.RawBlock() == "" already implies there is no usable block content
 	// regardless of whether the detector is still formally InBlock() — a
@@ -1627,7 +1634,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		a.detectedFormat = det.Format
 	}
 	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
-	return text, fallbackRaw, tcs, emptyFallback, err
+	return text, fallbackRaw, tcs, emptyFallback, reasoningText, err
 }
 
 // classifyStreamResult interprets what the stream produced and returns the

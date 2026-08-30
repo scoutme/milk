@@ -314,7 +314,7 @@ func TestBedrockStreamCompletion_PromptCachingFalse_RequestUnchanged(t *testing.
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "hi"},
 	}
-	if _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+	if _, _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestBedrockStreamCompletion_PromptCachingTrue_AppendsCachePoint(t *testing.
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "hi"},
 	}
-	if _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
+	if _, _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), msgs, nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -435,7 +435,7 @@ func TestBedrockStreamCompletion_CacheTokensReported(t *testing.T) {
 		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
 	}
 
-	if _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+	if _, _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
 		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
 	}
 
@@ -476,7 +476,7 @@ func TestBedrockStreamCompletion_NoCacheFields_RegressionGuard(t *testing.T) {
 		gotCacheRead, gotCacheCreation = cacheRead, cacheCreation
 	}
 
-	if _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
+	if _, _, _, _, _, err := a.bedrockStreamCompletion(context.Background(), nil, nil, nil); err != nil {
 		t.Fatalf("bedrockStreamCompletion returned error: %v", err)
 	}
 
