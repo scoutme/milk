@@ -87,6 +87,51 @@ func TestRun_ReasoningOnlyCompletion_RendersAsVisibleContentAndSignalsPromotion(
 	}
 }
 
+func TestRun_NativeToolCallWithNullContinuationFields_ContinuesTurn(t *testing.T) {
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"Let me try another approach."},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"","name":"bash"},"type":"function"}]},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"command\": ","name":null},"type":"function"}]},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"\"printf milk-tool-ok\"","name":null},"type":"function"}]},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"}","name":null},"type":"function"}]},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"finished after tool"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model").WithSkipPermissions(true)
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "try again", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected turn to continue after tool dispatch, got %d completion request(s)", calls.Load())
+	}
+	if history[len(history)-1].Content != "finished after tool" {
+		t.Fatalf("expected final assistant response after tool result, got %#v", history[len(history)-1])
+	}
+	var sawToolResult bool
+	for _, msg := range history {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "milk-tool-ok") {
+			sawToolResult = true
+		}
+	}
+	if !sawToolResult {
+		t.Fatalf("expected bash tool result in history, got %#v", history)
+	}
+}
+
 // TestRun_ToolCallsThenEmptyCompletion_PreservesToolTrail verifies the
 // reported scenario: a turn makes real tool calls (edits, etc.) across
 // several loop iterations, then the final completion comes back empty

@@ -49,7 +49,7 @@ type Config struct {
 	// reasoning chunks exceeds this threshold within a single turn, even if
 	// no individual chunk repeats. Catches "death by a thousand cuts" loops
 	// where the model cycles through many short, varied reasoning fragments.
-	ReasoningChunkFloodThreshold int `json:"reasoning_chunk_flood_threshold"` // default 200
+	ReasoningChunkFloodThreshold int `json:"reasoning_chunk_flood_threshold"` // default 5000
 
 	// Scattered chunk repetition (intra-turn): fires when the same chunk text
 	// recurs ChunkRepetitionThreshold+ times within the window WITHOUT requiring
@@ -103,7 +103,7 @@ func (c *Config) defaults() {
 		c.ReasoningChunkRepetitionThreshold = c.ChunkRepetitionThreshold * 2
 	}
 	if c.ReasoningChunkFloodThreshold <= 0 {
-		c.ReasoningChunkFloodThreshold = 200
+		c.ReasoningChunkFloodThreshold = 5000
 	}
 	if c.ChunkRepetitionMinScatteredLength <= 0 {
 		c.ChunkRepetitionMinScatteredLength = 40

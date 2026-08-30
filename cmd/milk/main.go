@@ -131,6 +131,9 @@ func run(cmd *cobra.Command, args []string) error {
 		cfg.EscalationAgent = flagEscalation
 	}
 
+	// Wire need expiry config to session package.
+	session.NeedExpiryDuration = time.Duration(cfg.AgentNeedExpiryHours()) * time.Hour
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf(errGettingCWD, err)

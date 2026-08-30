@@ -40,3 +40,5 @@
 * [38. Move user-turn AddTurn to after Execute](0038-dispatch-addturn-after-execute.md)
 * [39. Native Workflow Engine](0039-native-workflow-engine.md)
 * [40. Log Rotation and Simplification](0040-log-rotation-and-simplification.md)
+* [41. Time-Based CurrentNeed Expiry](0041-stale-currentneed-expiry.md)
+* [42. Preserve `reasoning_content` Across Multi-Turn Tool Calls](0042-preserve-reasoning-content.md)

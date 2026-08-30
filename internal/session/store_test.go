@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // overrideHome redirects the milk data dir to a temp directory for the test.
@@ -173,5 +174,53 @@ func TestRepairIndex_RemovesOrphans(t *testing.T) {
 	}
 	if fresh.ID == s.ID {
 		t.Error("expected a new session after orphan repair, got the deleted one")
+	}
+}
+
+func TestLoad_TimeBasedNeedExpiry(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	s, _ := New("/proj/expiry", "test")
+	s.CurrentNeed = "deploy the app"
+	s.CurrentNeedSetAt = 1
+	s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour) // 2 days ago
+	if err := Save(s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default expiry is 24h — need should be cleared on load.
+	loaded, err := Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CurrentNeed != "" {
+		t.Errorf("expected CurrentNeed cleared after 48h, got %q", loaded.CurrentNeed)
+	}
+}
+
+func TestLoad_TimeBasedNeedExpiry_Disabled(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	// Disable expiry (0 = never expire).
+	old := NeedExpiryDuration
+	NeedExpiryDuration = 0
+	defer func() { NeedExpiryDuration = old }()
+
+	s, _ := New("/proj/noexpiry", "test")
+	s.CurrentNeed = "deploy the app"
+	s.CurrentNeedSetAt = 1
+	s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour)
+	if err := Save(s); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CurrentNeed != "deploy the app" {
+		t.Errorf("expected CurrentNeed preserved when expiry disabled, got %q", loaded.CurrentNeed)
 	}
 }

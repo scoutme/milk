@@ -548,6 +548,12 @@ type Config struct {
 	// condition entirely (need-staleness check is unaffected).
 	ReturningFreshStartLocalTurns int `json:"returning_fresh_start_local_turns,omitempty"`
 
+	// NeedExpiryHours is the number of hours after which a CurrentNeed is
+	// considered stale and cleared on session resume. Default: 24. Set to 0
+	// to disable time-based expiry (needs persist until fulfilled or manually
+	// cleared). See #134.
+	NeedExpiryHours int `json:"need_expiry_hours,omitempty"`
+
 	// RemoteOversight configures the remote oversight interface. When non-nil
 	// and a backend is configured, agent turn notifications and permission
 	// prompts are forwarded to the configured backend (e.g. Telegram).
@@ -980,6 +986,15 @@ func (c Config) AgentMaxPayloadBytes(a AgentConfig) int {
 	return DefaultMaxPayloadBytes
 }
 
+// NeedExpiryHours returns the configured need expiry threshold in hours.
+// Default: 24. Returns 0 to disable time-based expiry.
+func (c Config) AgentNeedExpiryHours() int {
+	if c.NeedExpiryHours > 0 {
+		return c.NeedExpiryHours
+	}
+	return 24
+}
+
 // AgentMemoryReinjectionTurnThreshold returns the memory re-injection turn interval
 // for the given agent, falling back to the appropriate global default.
 // useLocalDefault selects which global field to fall back to (primary vs escalation).
@@ -1354,7 +1369,7 @@ func CLIDebugLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "claude_debug.ndjson"), nil
+	return filepath.Join(d, debugLogFilename("claude_debug.ndjson")), nil
 }
 
 // LocalDebugLogPath returns the path for the local agent raw SSE debug log.
@@ -1363,7 +1378,7 @@ func LocalDebugLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "local_debug.log"), nil
+	return filepath.Join(d, debugLogFilename("local_debug.log")), nil
 }
 
 // SubprocessDebugLogPath returns the path for the subprocess agent raw stdout debug log.
@@ -1372,7 +1387,19 @@ func SubprocessDebugLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "subprocess_debug.log"), nil
+	return filepath.Join(d, debugLogFilename("subprocess_debug.log")), nil
+}
+
+var debugLogFilenamePrefix string
+
+func debugLogFilename(name string) string {
+	return debugLogFilenamePrefix + name
+}
+
+func SetDebugLogFilenamePrefixForTest(prefix string) func() {
+	previous := debugLogFilenamePrefix
+	debugLogFilenamePrefix = prefix
+	return func() { debugLogFilenamePrefix = previous }
 }
 
 func Dir() (string, error) {

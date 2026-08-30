@@ -12,6 +12,8 @@ import (
 )
 
 func TestCheckFileSizes_WarnAndMax(t *testing.T) {
+	isolateDebugLogPaths(t)
+
 	dir := t.TempDir()
 	mustWrite := func(name string, size int) {
 		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o600); err != nil {
@@ -34,6 +36,8 @@ func TestCheckFileSizes_WarnAndMax(t *testing.T) {
 }
 
 func TestFormatStatsAndTrim(t *testing.T) {
+	isolateDebugLogPaths(t)
+
 	dir := t.TempDir()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	content := []byte(`{"time":"` + stamp + `","body":"x"}
@@ -58,6 +62,91 @@ func TestFormatStatsAndTrim(t *testing.T) {
 		if info.Size() != 0 {
 			t.Fatalf("expected empty %s after trim", name)
 		}
+	}
+}
+
+func TestTrim_TruncatesInPlaceForOpenWriters(t *testing.T) {
+	isolateDebugLogPaths(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "logs.jsonl")
+	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if err := Trim(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("after\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(active) != "after\n" {
+		t.Fatalf("expected existing writer to continue into active file, got %q", active)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "logs.*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one archived log, got %d", len(matches))
+	}
+	archived, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archived) != "before\n" {
+		t.Fatalf("expected archive to contain pre-trim content, got %q", archived)
+	}
+}
+
+func TestTrim_UsesIsolatedDebugLogPrefixInTests(t *testing.T) {
+	isolateDebugLogPaths(t)
+
+	dir := t.TempDir()
+	debugPath, err := config.LocalDebugLogPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(debugPath) != "test_local_debug.log" {
+		t.Fatalf("expected prefixed debug log name, got %q", debugPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(debugPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(debugPath, []byte("debug before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Trim(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected active prefixed debug log to be truncated, got %q", active)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(debugPath), "test_local_debug.*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one prefixed debug archive, got %d", len(matches))
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(debugPath), "local_debug.log")); !os.IsNotExist(err) {
+		t.Fatalf("production debug log name should be untouched in tests, stat err=%v", err)
 	}
 }
 

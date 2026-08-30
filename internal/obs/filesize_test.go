@@ -9,6 +9,8 @@ import (
 )
 
 func TestCheckFileSizesPreciseThresholds(t *testing.T) {
+	isolateDebugLogPaths(t)
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "logs.jsonl")
 	if err := os.WriteFile(path, make([]byte, 1024*1024-1), 0o600); err != nil {
