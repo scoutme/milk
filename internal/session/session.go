@@ -73,6 +73,9 @@ type Session struct {
 
 	CurrentNeed      string `json:"current_need,omitempty"`
 	CurrentNeedSetAt int    `json:"current_need_set_at,omitempty"`
+	// CurrentNeedUpdatedAt is the wall-clock time CurrentNeed was last written.
+	// Used for time-based expiry on session resume (see #134).
+	CurrentNeedUpdatedAt time.Time `json:"current_need_updated_at,omitempty"`
 
 	// EscalationBrief is set when the local model calls escalate(reason).
 	// It is tactical and ephemeral: overwritten on each agent-triggered escalation.
@@ -493,6 +496,7 @@ func (s *Session) RecordNeed(body string) {
 	}
 	s.CurrentNeed = body
 	s.CurrentNeedSetAt = len(s.History)
+	s.CurrentNeedUpdatedAt = time.Now()
 }
 
 // EscalationEverActive reports whether the escalation agent has ever produced a

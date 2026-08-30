@@ -121,6 +121,8 @@ func TestFormatMetrics_ShowsLatestValues(t *testing.T) {
 }
 
 func TestFileStatsAndTrim(t *testing.T) {
+	isolateDebugLogPaths(t)
+
 	dir := t.TempDir()
 	writeSignalFile(t, dir, "logs.jsonl", `{"time":"2024-01-01T00:00:00Z"}
 {"time":"2024-01-02T00:00:00Z"}
@@ -148,6 +150,8 @@ func TestFileStatsAndTrim(t *testing.T) {
 }
 
 func TestCheckFileSizes(t *testing.T) {
+	isolateDebugLogPaths(t)
+
 	dir := t.TempDir()
 	writeSignalFile(t, dir, "metrics.jsonl", strings.Repeat("x", 1024*1024))
 	warn, exceeded := CheckFileSizes(config.OtelConfig{Enabled: true, WarnMB: 1, MaxMB: 2}, dir)

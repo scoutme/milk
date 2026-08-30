@@ -65,6 +65,9 @@ func (rw *RotatingWriter) Write(p []byte) (n int, err error) {
 	if rw.closed {
 		return 0, fmt.Errorf("rotatingwriter: write to closed writer")
 	}
+	if err := rw.reopenIfStaleLocked(); err != nil {
+		return 0, err
+	}
 
 	n, err = rw.file.Write(p)
 	rw.written += int64(n)
@@ -123,13 +126,54 @@ func (rw *RotatingWriter) rotate() error {
 	}
 
 	// Open a fresh primary file.
-	f, err := os.OpenFile(rw.basePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(rw.basePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("rotatingwriter: open fresh: %w", err)
 	}
 
 	rw.file = f
 	rw.written = 0
+	return nil
+}
+
+// reopenIfStaleLocked reopens the active path when another process or writer
+// has renamed/recreated it while this writer still holds the old descriptor.
+// Caller must hold rw.mu.
+func (rw *RotatingWriter) reopenIfStaleLocked() error {
+	current, err := rw.file.Stat()
+	if err != nil {
+		return fmt.Errorf("rotatingwriter: stat current file: %w", err)
+	}
+	active, err := os.Stat(rw.basePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("rotatingwriter: stat active file: %w", err)
+		}
+		return rw.reopenLocked()
+	}
+	if os.SameFile(current, active) {
+		return nil
+	}
+	return rw.reopenLocked()
+}
+
+// reopenLocked closes the current descriptor and appends to the active path.
+// Caller must hold rw.mu.
+func (rw *RotatingWriter) reopenLocked() error {
+	if err := rw.file.Close(); err != nil {
+		return fmt.Errorf("rotatingwriter: close stale file: %w", err)
+	}
+	f, err := os.OpenFile(rw.basePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("rotatingwriter: reopen active file: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("rotatingwriter: stat reopened file: %w", err)
+	}
+	rw.file = f
+	rw.written = info.Size()
 	return nil
 }
 

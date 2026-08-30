@@ -131,14 +131,9 @@ func Trim(otelDir string) error {
 		ext := filepath.Ext(name)
 		base := strings.TrimSuffix(name, ext)
 		dst := filepath.Join(otelDir, fmt.Sprintf("%s.%s%s", base, date, ext))
-		if err := os.Rename(src, dst); err != nil {
+		if err := archiveAndTruncate(src, dst); err != nil {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}
-		f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("recreate %s: %w", name, err)
-		}
-		f.Close()
 	}
 	// Also trim the 3 debug log files that live in ~/.milk/ (not otelDir).
 	for _, dbgPath := range debugLogPathsFn() {
@@ -150,16 +145,34 @@ func Trim(otelDir string) error {
 		base := strings.TrimSuffix(name, ext)
 		dir := filepath.Dir(dbgPath)
 		dst := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, date, ext))
-		if err := os.Rename(dbgPath, dst); err != nil {
+		if err := archiveAndTruncate(dbgPath, dst); err != nil {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}
-		f, err := os.OpenFile(dbgPath, os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("recreate %s: %w", name, err)
-		}
-		f.Close()
 	}
 	return nil
+}
+
+func archiveAndTruncate(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.WriteFile(dst, content, mode); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func formatBytes(b int64) string {

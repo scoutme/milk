@@ -124,6 +124,80 @@ func TestRotatingWriter_DropsOldest(t *testing.T) {
 	}
 }
 
+func TestRotatingWriter_ReopensAfterExternalRename(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "test.ndjson")
+	archived := filepath.Join(dir, "test.archived.ndjson")
+
+	rw, err := NewRotatingWriter(base, 1024, 3)
+	if err != nil {
+		t.Fatalf("NewRotatingWriter: %v", err)
+	}
+	defer rw.Close()
+
+	if _, err := rw.Write([]byte("before\n")); err != nil {
+		t.Fatalf("Write before rename: %v", err)
+	}
+	if err := os.Rename(base, archived); err != nil {
+		t.Fatalf("Rename active log: %v", err)
+	}
+	if err := os.WriteFile(base, nil, 0o600); err != nil {
+		t.Fatalf("Recreate active log: %v", err)
+	}
+
+	if _, err := rw.Write([]byte("after\n")); err != nil {
+		t.Fatalf("Write after rename: %v", err)
+	}
+
+	activeContent, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatalf("ReadFile active: %v", err)
+	}
+	if string(activeContent) != "after\n" {
+		t.Fatalf("expected active log to receive new writes, got %q", activeContent)
+	}
+	archivedContent, err := os.ReadFile(archived)
+	if err != nil {
+		t.Fatalf("ReadFile archived: %v", err)
+	}
+	if string(archivedContent) != "before\n" {
+		t.Fatalf("expected archive to keep old writes only, got %q", archivedContent)
+	}
+}
+
+func TestRotatingWriter_AppendsAfterRotateThenInPlaceTrim(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "test.ndjson")
+	archived := filepath.Join(dir, "test.archived.ndjson")
+
+	rw, err := NewRotatingWriter(base, 20, 3)
+	if err != nil {
+		t.Fatalf("NewRotatingWriter: %v", err)
+	}
+	defer rw.Close()
+
+	if _, err := rw.Write([]byte("rotate-this-file-now\n")); err != nil {
+		t.Fatalf("Write rotate: %v", err)
+	}
+	if _, err := rw.Write([]byte("before\n")); err != nil {
+		t.Fatalf("Write before trim: %v", err)
+	}
+	if err := archiveAndTruncate(base, archived); err != nil {
+		t.Fatalf("archiveAndTruncate: %v", err)
+	}
+	if _, err := rw.Write([]byte("after\n")); err != nil {
+		t.Fatalf("Write after trim: %v", err)
+	}
+
+	activeContent, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatalf("ReadFile active: %v", err)
+	}
+	if string(activeContent) != "after\n" {
+		t.Fatalf("expected post-trim write at start of active file, got %q", activeContent)
+	}
+}
+
 func TestRotatingWriter_ConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "test.ndjson")

@@ -14,6 +14,11 @@ import (
 	"github.com/scoutme/milk/internal/config"
 )
 
+// NeedExpiryDuration is the wall-clock duration after which a CurrentNeed is
+// considered stale and cleared on session resume. Default: 24 hours.
+// Set to 0 to disable time-based expiry. Overridable from config at startup.
+var NeedExpiryDuration = 24 * time.Hour
+
 type IndexEntry struct {
 	ID       string    `json:"id"`
 	Name     string    `json:"name,omitempty"`
@@ -191,9 +196,18 @@ func Load(id string) (*Session, error) {
 	// Clear CurrentNeed if it was already fulfilled before the session ended:
 	// if any escalation assistant turn occurred after CurrentNeedSetAt, the need
 	// was handled and should not be shown as active on resume.
-	if s.CurrentNeed != "" && !s.NeedChangedSinceLastEscalation() {
+	if s.CurrentNeed != "" && EscalationEverActive(&s) && !s.NeedChangedSinceLastEscalation() {
 		s.CurrentNeed = ""
 		s.CurrentNeedSetAt = 0
+	}
+	// Time-based expiry: clear CurrentNeed if it was set more than
+	// NeedExpiryDuration ago (default 24h). Prevents stale needs from
+	// persisting across long-idle sessions (see #134).
+	if s.CurrentNeed != "" && !s.CurrentNeedUpdatedAt.IsZero() && NeedExpiryDuration > 0 {
+		if time.Since(s.CurrentNeedUpdatedAt) > NeedExpiryDuration {
+			s.CurrentNeed = ""
+			s.CurrentNeedSetAt = 0
+		}
 	}
 	return &s, nil
 }

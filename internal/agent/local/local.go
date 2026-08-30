@@ -116,9 +116,53 @@ type toolCall struct {
 	Function toolCallFunction `json:"function"`
 }
 
+func (tc *toolCall) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID       *string          `json:"id"`
+		Index    int              `json:"index,omitempty"`
+		Type     *string          `json:"type"`
+		Function toolCallFunction `json:"function"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.ID != nil {
+		tc.ID = *raw.ID
+	}
+	tc.Index = raw.Index
+	if raw.Type != nil {
+		tc.Type = *raw.Type
+	}
+	tc.Function = raw.Function
+	return nil
+}
+
 type toolCallFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+func (f *toolCallFunction) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name      *string         `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Name != nil {
+		f.Name = *raw.Name
+	}
+	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+		return nil
+	}
+	var arguments string
+	if err := json.Unmarshal(raw.Arguments, &arguments); err == nil {
+		f.Arguments = arguments
+		return nil
+	}
+	f.Arguments = string(raw.Arguments)
+	return nil
 }
 
 type chatRequest struct {
