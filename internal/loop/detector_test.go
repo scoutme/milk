@@ -39,60 +39,6 @@ func TestTrigramSimilarity_Empty(t *testing.T) {
 	}
 }
 
-// ── Response Repetition ──────────────────────────────────────────────────────
-
-func TestResponseRepetition_NoRepeat(t *testing.T) {
-	d := New(testConfig())
-	now := time.Now()
-	d.Feed(TurnSummary{Text: "first response", Timestamp: now})
-	d.Feed(TurnSummary{Text: "second response", Timestamp: now})
-	d.Feed(TurnSummary{Text: "third response completely different", Timestamp: now})
-	verdicts := d.Feed(TurnSummary{Text: "fourth response", Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalResponseRepetition {
-			t.Error("should not fire for different responses")
-		}
-	}
-}
-
-func TestResponseRepetition_FiresAfter3(t *testing.T) {
-	d := New(testConfig())
-	now := time.Now()
-	resp := "I will now run the same command again to check the output"
-	d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	verdicts := d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	found := false
-	for _, v := range verdicts {
-		if v.Signal == SignalResponseRepetition {
-			found = true
-			if v.Confidence < 0.7 {
-				t.Errorf("confidence too low: %f", v.Confidence)
-			}
-		}
-	}
-	if !found {
-		t.Error("expected SignalResponseRepetition after 3 identical responses")
-	}
-}
-
-func TestResponseRepetition_BreaksOnDifferent(t *testing.T) {
-	cfg := testConfig()
-	cfg.MaxConsecutiveSimilarResponses = 3
-	d := New(cfg)
-	now := time.Now()
-	resp := "repeated response"
-	d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	d.Feed(TurnSummary{Text: "something completely different", Timestamp: now})
-	verdicts := d.Feed(TurnSummary{Text: resp, Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalResponseRepetition {
-			t.Error("should not fire after a different response broke the streak")
-		}
-	}
-}
-
 // ── Token Velocity ───────────────────────────────────────────────────────────
 
 func TestTokenVelocity_NoFireBelowThreshold(t *testing.T) {
@@ -220,61 +166,6 @@ func TestSilentBurn_NoFireOnLowInput(t *testing.T) {
 	}
 }
 
-// ── Tool Call Echo ───────────────────────────────────────────────────────────
-
-func TestToolCallEcho_FiresAfter3(t *testing.T) {
-	cfg := testConfig()
-	cfg.ToolEchoThreshold = 3
-	d := New(cfg)
-	now := time.Now()
-	tool := "bash\x00ls -la"
-	d.Feed(TurnSummary{ToolCalls: []string{tool}, Timestamp: now})
-	d.Feed(TurnSummary{ToolCalls: []string{tool}, Timestamp: now})
-	verdicts := d.Feed(TurnSummary{ToolCalls: []string{tool}, Timestamp: now})
-	found := false
-	for _, v := range verdicts {
-		if v.Signal == SignalToolCallEcho {
-			found = true
-			if !v.ShouldInterrupt {
-				t.Error("tool echo should auto-interrupt")
-			}
-		}
-	}
-	if !found {
-		t.Error("expected SignalToolCallEcho after 3 identical tool calls")
-	}
-}
-
-func TestToolCallEcho_NoFireOnDifferent(t *testing.T) {
-	cfg := testConfig()
-	cfg.ToolEchoThreshold = 3
-	d := New(cfg)
-	now := time.Now()
-	d.Feed(TurnSummary{ToolCalls: []string{"bash\x00ls"}, Timestamp: now})
-	d.Feed(TurnSummary{ToolCalls: []string{"bash\x00cat foo"}, Timestamp: now})
-	verdicts := d.Feed(TurnSummary{ToolCalls: []string{"bash\x00ls"}, Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalToolCallEcho {
-			t.Error("should not fire for different tool calls")
-		}
-	}
-}
-
-func TestToolCallEcho_NoFireWithoutToolCalls(t *testing.T) {
-	cfg := testConfig()
-	cfg.ToolEchoThreshold = 3
-	d := New(cfg)
-	now := time.Now()
-	d.Feed(TurnSummary{Text: "hello", Timestamp: now})
-	d.Feed(TurnSummary{Text: "hello", Timestamp: now})
-	verdicts := d.Feed(TurnSummary{Text: "hello", Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalToolCallEcho {
-			t.Error("should not fire without tool calls")
-		}
-	}
-}
-
 // ── Turn Flood ───────────────────────────────────────────────────────────────
 
 func TestTurnFlood_FiresAfterThreshold(t *testing.T) {
@@ -327,59 +218,6 @@ func TestDisabled_NoVerdicts(t *testing.T) {
 }
 
 // ── Reset ────────────────────────────────────────────────────────────────────
-
-func TestReset_ClearsHistory(t *testing.T) {
-	d := New(testConfig())
-	now := time.Now()
-	d.Feed(TurnSummary{Text: "repeat me", Timestamp: now})
-	d.Feed(TurnSummary{Text: "repeat me", Timestamp: now})
-	d.Reset()
-	verdicts := d.Feed(TurnSummary{Text: "repeat me", Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalResponseRepetition {
-			t.Error("reset should clear history, preventing repetition detection")
-		}
-	}
-}
-
-// ── Multiple signals ─────────────────────────────────────────────────────────
-
-func TestMultipleSignals_FireTogether(t *testing.T) {
-	cfg := testConfig()
-	cfg.MaxConsecutiveSimilarResponses = 2
-	cfg.TokenVelocityThreshold = 1000
-	cfg.ToolEchoThreshold = 2
-	d := New(cfg)
-	now := time.Now()
-	tool := "bash\x00loop"
-	d.Feed(TurnSummary{
-		Text:         "I will try again",
-		InputTokens:  10000,
-		OutputTokens: 5000,
-		ToolCalls:    []string{tool},
-		Timestamp:    now,
-	})
-	verdicts := d.Feed(TurnSummary{
-		Text:         "I will try again",
-		InputTokens:  10000,
-		OutputTokens: 5000,
-		ToolCalls:    []string{tool},
-		Timestamp:    now,
-	})
-	signals := map[Signal]bool{}
-	for _, v := range verdicts {
-		signals[v.Signal] = true
-	}
-	if !signals[SignalResponseRepetition] {
-		t.Error("expected response repetition")
-	}
-	if !signals[SignalTokenVelocity] {
-		t.Error("expected token velocity")
-	}
-	if !signals[SignalToolCallEcho] {
-		t.Error("expected tool call echo")
-	}
-}
 
 // ── Chunk Repetition (intra-turn) ────────────────────────────────────────────
 
@@ -657,8 +495,8 @@ func TestReasoningChunkFlood_FiresAtThreshold(t *testing.T) {
 	for _, v := range verdicts {
 		if v.Signal == SignalReasoningChunkFlood {
 			found = true
-			if !v.ShouldInterrupt {
-				t.Error("reasoning chunk flood should auto-interrupt")
+			if v.ShouldInterrupt {
+				t.Error("reasoning chunk flood should warn only, not auto-interrupt")
 			}
 		}
 	}
@@ -717,69 +555,6 @@ func TestReasoningChunkFlood_ResetTurnResetsCounter(t *testing.T) {
 		if v.Signal == SignalReasoningChunkFlood {
 			t.Error("ResetTurn should reset the flood counter")
 		}
-	}
-}
-
-// ── Reasoning Repetition (cross-turn) ────────────────────────────────────────
-
-func TestReasoningRepetition_NoFireBelowThreshold(t *testing.T) {
-	cfg := testConfig()
-	cfg.ReasoningMaxConsecutiveSimilarResponses = 6
-	d := New(cfg)
-	now := time.Now()
-	reasoning := "I should look at the config file to understand defaults"
-	for range 4 {
-		d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
-	}
-	verdicts := d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalReasoningRepetition {
-			t.Error("should not fire below the reasoning repetition threshold")
-		}
-	}
-}
-
-func TestReasoningRepetition_FiresAtThreshold(t *testing.T) {
-	cfg := testConfig()
-	cfg.ReasoningMaxConsecutiveSimilarResponses = 3
-	d := New(cfg)
-	now := time.Now()
-	reasoning := "I should reconsider this approach and try again from scratch"
-	d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
-	d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
-	verdicts := d.Feed(TurnSummary{ReasoningText: reasoning, Timestamp: now})
-	found := false
-	for _, v := range verdicts {
-		if v.Signal == SignalReasoningRepetition {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected SignalReasoningRepetition after N identical reasoning turns")
-	}
-}
-
-func TestReasoningRepetition_NoFireWithoutReasoningText(t *testing.T) {
-	cfg := testConfig()
-	cfg.ReasoningMaxConsecutiveSimilarResponses = 3
-	d := New(cfg)
-	now := time.Now()
-	// Non-reasoning turns (e.g. a non-thinking model) must not spuriously fire.
-	d.Feed(TurnSummary{Text: "final answer one", Timestamp: now})
-	d.Feed(TurnSummary{Text: "final answer two", Timestamp: now})
-	verdicts := d.Feed(TurnSummary{Text: "final answer three", Timestamp: now})
-	for _, v := range verdicts {
-		if v.Signal == SignalReasoningRepetition {
-			t.Error("should not fire when turns carry no reasoning text")
-		}
-	}
-}
-
-func TestReasoningRepetition_DefaultIsHigherThanResponseRepetition(t *testing.T) {
-	cfg := testConfig()
-	if cfg.ReasoningMaxConsecutiveSimilarResponses <= cfg.MaxConsecutiveSimilarResponses {
-		t.Errorf("expected reasoning threshold (%d) > response threshold (%d)",
-			cfg.ReasoningMaxConsecutiveSimilarResponses, cfg.MaxConsecutiveSimilarResponses)
 	}
 }
 

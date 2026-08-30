@@ -63,7 +63,7 @@ cmd/milk/
 
 internal/
   workflow/         workflow engine: Workflow interface, TurnRunner adapter interface, State/verdict/turn
-  workflow/dev/     dev workflow: designer→generator→evaluator loop, sprint counting, prompt builders
+                    definitions (dev.yaml, pair.yaml, swarm.yaml); interpreter (interp/)
   config/           config loading and defaults (~/.milk/config.json)
   session/          session state machine + JSON store (~/.milk/sessions/)
   router/           routing: rules layer → weighted scorer → primary-model classifier

@@ -56,6 +56,15 @@ func (r toolResult) String() string {
 	return string(b)
 }
 
+// isToolError returns true when the tool result JSON contains a non-empty error field.
+func isToolError(result string) bool {
+	var r toolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		return false
+	}
+	return r.Error != ""
+}
+
 // toolName extracts the function name from a tool schema map.
 // Returns "" when the schema is malformed.
 func toolName(s map[string]any) string {

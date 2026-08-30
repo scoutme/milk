@@ -4,8 +4,7 @@ import "fmt"
 
 // Definition is a workflow described as data (YAML/JSON) rather than a
 // hand-written Go type. The interpreter (internal/workflow/interp) walks a
-// Definition's Stages to execute a run; internal/workflow/dev.DevWorkflow is
-// the hand-written equivalent this format is meant to eventually replace.
+// Definition's Stages to execute a run.
 type Definition struct {
 	// Name is the identifier used by /workflow <name> and as the registry key.
 	Name string `yaml:"name" json:"name"`

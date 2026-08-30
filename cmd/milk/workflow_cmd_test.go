@@ -12,7 +12,6 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
-	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
@@ -158,46 +157,6 @@ func TestAdvanceWorkflowWizard_TaskAdvancesToFirstRole(t *testing.T) {
 	}
 }
 
-// TestAdvanceWorkflowWizard_AgentStepsFlow verifies the full designer→generator→evaluator
-// wizard sequence. After all three agent steps, the wizard is cleared and launchWorkflow
-// is invoked (which will fail in test due to no live config — that's expected).
-func TestAdvanceWorkflowWizard_AgentStepsFlow(t *testing.T) {
-	m := testModel()
-	m.st = &interactiveState{}
-	m.pendingWorkflowWizard = &workflowWizardState{name: "dev", task: "build X", step: wizardStepDesigner}
-
-	// designer: blank → should default to AliasEscalation
-	m1, _ := m.advanceWorkflowWizard("")
-	nm1 := m1.(model)
-	if nm1.pendingWorkflowWizard == nil || nm1.pendingWorkflowWizard.step != wizardStepGenerator {
-		t.Fatalf("after blank designer: want wizardStepGenerator, got step=%v pending=%v",
-			nm1.pendingWorkflowWizard.step, nm1.pendingWorkflowWizard != nil)
-	}
-	if nm1.pendingWorkflowWizard.designer != workflow.AliasEscalation {
-		t.Errorf("designer = %q, want %q", nm1.pendingWorkflowWizard.designer, workflow.AliasEscalation)
-	}
-
-	// generator: explicit name
-	m2, _ := nm1.advanceWorkflowWizard("myagent")
-	nm2 := m2.(model)
-	if nm2.pendingWorkflowWizard == nil || nm2.pendingWorkflowWizard.step != wizardStepEvaluator {
-		t.Fatalf("after generator: want wizardStepEvaluator, got step=%v", nm2.pendingWorkflowWizard.step)
-	}
-	if nm2.pendingWorkflowWizard.generator != "myagent" {
-		t.Errorf("generator = %q, want %q", nm2.pendingWorkflowWizard.generator, "myagent")
-	}
-
-	// evaluator: wizard clears and launchWorkflowResume is called (fails in
-	// test — "myagent" doesn't resolve, same reason as the generator step
-	// above would if it were the terminal one). There is no behaviour-prompt
-	// step anymore — see workflowWizardState's doc for why.
-	m3, _ := nm2.advanceWorkflowWizard("")
-	nm3 := m3.(model)
-	if nm3.pendingWorkflowWizard != nil {
-		t.Errorf("expected wizard cleared after evaluator step, still at step=%d", nm3.pendingWorkflowWizard.step)
-	}
-}
-
 // ── /workflow clear wizard ────────────────────────────────────────────────────
 
 // TestAdvanceWorkflowWizard_ClearWrongInputCancels verifies that typing anything
@@ -298,192 +257,6 @@ func TestWorkflowStateTaskOmitEmpty(t *testing.T) {
 	}
 	if st.Task != "" {
 		t.Errorf("Task = %q, want empty for legacy file", st.Task)
-	}
-}
-
-// ── /workflow reconfigure wizard ─────────────────────────────────────────────
-
-// TestReconfigureWizardStepsFlow verifies that the reconfigure wizard walks
-// designer → generator → evaluator in order, populates fields correctly, and
-// calls applyWorkflowReconfigure (not launchWorkflow) at the end.
-// The test drives advanceWorkflowWizard directly, bypassing session.Dir() entirely.
-func TestReconfigureWizardStepsFlow(t *testing.T) {
-	dir := t.TempDir()
-
-	// Write a state file that applyWorkflowReconfigure can load.
-	sessID := "reconf-flow-test"
-	original := &workflow.State{
-		WorkflowName: "dev",
-		Task:         "task X",
-		Sprint:       3,
-		Pass:         2,
-		Role:         "evaluator",
-		AgentMap:     map[string]string{"designer": "old-d", "generator": "old-g", "evaluator": "old-e"},
-	}
-	statePath := workflow.StatePath(dir, sessID, 0)
-	if err := workflow.SaveState(statePath, original); err != nil {
-		t.Fatalf("SaveState: %v", err)
-	}
-
-	sess := &session.Session{ID: sessID}
-	m := testModel()
-	m.st = &interactiveState{sess: sess}
-
-	// Pre-populate the wizard as handleWorkflowReconfigure would.
-	m.pendingWorkflowWizard = &workflowWizardState{
-		name:          "dev",
-		task:          "task X",
-		step:          wizardStepDesigner,
-		reconfiguring: true,
-		sprint:        3,
-		pass:          2,
-		role:          "evaluator",
-	}
-
-	// designer step
-	m1, _ := m.advanceWorkflowWizard("new-d")
-	nm1 := m1.(model)
-	if nm1.pendingWorkflowWizard == nil || nm1.pendingWorkflowWizard.step != wizardStepGenerator {
-		t.Fatalf("after designer: want wizardStepGenerator, got step=%v pending=%v",
-			nm1.pendingWorkflowWizard.step, nm1.pendingWorkflowWizard != nil)
-	}
-	if nm1.pendingWorkflowWizard.designer != "new-d" {
-		t.Errorf("designer = %q, want %q", nm1.pendingWorkflowWizard.designer, "new-d")
-	}
-
-	// generator step
-	m2, _ := nm1.advanceWorkflowWizard("new-g")
-	nm2 := m2.(model)
-	if nm2.pendingWorkflowWizard == nil || nm2.pendingWorkflowWizard.step != wizardStepEvaluator {
-		t.Fatalf("after generator: want wizardStepEvaluator")
-	}
-
-	// evaluator step: wizard completes, applyWorkflowReconfigure is called.
-	// With a nil program (no TUI), applyWorkflowReconfigure will call session.Dir()
-	// which returns the real ~/.milk/sessions — we can't write there in tests.
-	// Instead, verify that wizard is cleared and reconfiguring=true reached the dispatch.
-	m3, _ := nm2.advanceWorkflowWizard("new-e")
-	nm3 := m3.(model)
-	if nm3.pendingWorkflowWizard != nil {
-		t.Error("expected wizard cleared after evaluator step")
-	}
-	// The evaluator field must have been set before dispatch.
-	// (applyWorkflowReconfigure may fail due to missing state dir — that's OK in test.)
-	if nm2.pendingWorkflowWizard.evaluator != "" {
-		// already nil after step advance; check pre-advance state captured in nm2
-	}
-	// Verify reconfiguring branch was taken (not resuming or fresh launch):
-	// if launchWorkflow had been called, cancelTurn would be set; it must NOT be.
-	if nm3.cancelTurn != nil {
-		t.Error("launchWorkflow was called instead of applyWorkflowReconfigure")
-	}
-}
-
-// TestReconfigureWizardBlankKeepsCurrent verifies that blank input at a reconfigure
-// wizard step keeps the pre-populated current agent value instead of defaulting
-// to AliasEscalation.
-func TestReconfigureWizardBlankKeepsCurrent(t *testing.T) {
-	m := testModel()
-	m.st = &interactiveState{}
-	m.pendingWorkflowWizard = &workflowWizardState{
-		name:          "dev",
-		task:          "task",
-		designer:      "current-d",
-		generator:     "current-g",
-		evaluator:     "current-e",
-		step:          wizardStepDesigner,
-		reconfiguring: true,
-	}
-
-	// blank designer → keeps "current-d"
-	m1, _ := m.advanceWorkflowWizard("")
-	nm1 := m1.(model)
-	if nm1.pendingWorkflowWizard == nil {
-		t.Fatal("wizard cleared too early")
-	}
-	if nm1.pendingWorkflowWizard.designer != "current-d" {
-		t.Errorf("designer = %q, want %q (blank should keep current)", nm1.pendingWorkflowWizard.designer, "current-d")
-	}
-	if nm1.pendingWorkflowWizard.step != wizardStepGenerator {
-		t.Errorf("step = %d, want wizardStepGenerator", nm1.pendingWorkflowWizard.step)
-	}
-
-	// blank generator → keeps "current-g"
-	m2, _ := nm1.advanceWorkflowWizard("")
-	nm2 := m2.(model)
-	if nm2.pendingWorkflowWizard == nil {
-		t.Fatal("wizard cleared too early")
-	}
-	if nm2.pendingWorkflowWizard.generator != "current-g" {
-		t.Errorf("generator = %q, want %q", nm2.pendingWorkflowWizard.generator, "current-g")
-	}
-}
-
-// TestReconfigureWizardExplicitOverridesDefault verifies that typing a new agent
-// name overrides the pre-populated current value.
-func TestReconfigureWizardExplicitOverridesDefault(t *testing.T) {
-	m := testModel()
-	m.st = &interactiveState{}
-	m.pendingWorkflowWizard = &workflowWizardState{
-		name:          "dev",
-		task:          "task",
-		designer:      "old-d",
-		generator:     "old-g",
-		evaluator:     "old-e",
-		step:          wizardStepDesigner,
-		reconfiguring: true,
-	}
-
-	m1, _ := m.advanceWorkflowWizard("new-d")
-	nm1 := m1.(model)
-	if nm1.pendingWorkflowWizard == nil {
-		t.Fatal("wizard cleared too early")
-	}
-	if nm1.pendingWorkflowWizard.designer != "new-d" {
-		t.Errorf("designer = %q, want %q", nm1.pendingWorkflowWizard.designer, "new-d")
-	}
-	// generator pre-populated value must still be available for the next step
-	if nm1.pendingWorkflowWizard.generator != "old-g" {
-		t.Errorf("generator pre-populated value lost: got %q, want %q", nm1.pendingWorkflowWizard.generator, "old-g")
-	}
-}
-
-// TestReconfigureWizardState_ReconfigFlagPreserved verifies that the reconfiguring
-// flag is propagated through all wizard steps without being cleared.
-func TestReconfigureWizardState_ReconfigFlagPreserved(t *testing.T) {
-	m := testModel()
-	m.st = &interactiveState{}
-	m.pendingWorkflowWizard = &workflowWizardState{
-		name:          "dev",
-		task:          "task",
-		step:          wizardStepDesigner,
-		reconfiguring: true,
-		sprint:        2,
-		pass:          1,
-		role:          "evaluator",
-	}
-
-	// After designer step, reconfiguring must still be true.
-	m1, _ := m.advanceWorkflowWizard("agent-a")
-	nm1 := m1.(model)
-	if nm1.pendingWorkflowWizard == nil {
-		t.Fatal("wizard cleared too early")
-	}
-	if !nm1.pendingWorkflowWizard.reconfiguring {
-		t.Error("reconfiguring flag lost after designer step")
-	}
-	if nm1.pendingWorkflowWizard.sprint != 2 || nm1.pendingWorkflowWizard.pass != 1 {
-		t.Errorf("checkpoint changed: sprint=%d pass=%d", nm1.pendingWorkflowWizard.sprint, nm1.pendingWorkflowWizard.pass)
-	}
-
-	// After generator step.
-	m2, _ := nm1.advanceWorkflowWizard("agent-b")
-	nm2 := m2.(model)
-	if nm2.pendingWorkflowWizard == nil {
-		t.Fatal("wizard cleared after generator step")
-	}
-	if !nm2.pendingWorkflowWizard.reconfiguring {
-		t.Error("reconfiguring flag lost after generator step")
 	}
 }
 
@@ -884,7 +657,7 @@ func TestWorkflowDoneMsg_GenericExhaustion_OffersContinue(t *testing.T) {
 		AgentMap:     map[string]string{"designer": "claude", "generator": "claude", "evaluator": "claude"},
 		WorkflowID:   0,
 	}
-	newM, _ := m.Update(wfdev.WorkflowDoneMsg{Err: &interp.ExhaustedError{StageID: "pass_loop", MaxIterations: 3}})
+	newM, _ := m.Update(workflow.WorkflowDoneMsg{Err: &interp.ExhaustedError{StageID: "pass_loop", MaxIterations: 3}})
 	nm := newM.(model)
 
 	if nm.pendingGenericWorkflowExtend == nil {

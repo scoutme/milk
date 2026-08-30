@@ -27,7 +27,7 @@ type Declarations struct {
 
 var (
 	scalarLineRE  = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*(\d+)[ \t]*$`)
-	sectionHeadRE = regexp.MustCompile(`(?m)^##[ \t]+([A-Za-z]+)[ \t]+(\d+)(?:[ \t]*\(depends_on:[ \t]*([\d,\s]*)\))?[ \t]*$`)
+	sectionHeadRE = regexp.MustCompile(`(?m)^##[ \t]+([A-Za-z]+)[ \t]+(\d+)(?:[ \t]*\(depends_on:[ \t]*([\d,\s]*)\))?.*$`)
 )
 
 // ParseDeclarations scans doc for scalar declarations and numbered sections.

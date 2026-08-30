@@ -75,21 +75,37 @@ Separate from OTel, three flags capture raw protocol traffic verbatim:
 
 ## Loop detection
 
-milk monitors agent output for signs of looping — repeating the same phrase, tool call, or response pattern — to prevent runaway token consumption when nobody notices and interrupts manually.
+milk monitors agent output for signs of looping — repeating the same phrase, tool call, or response pattern — to prevent runaway token consumption when nobody notices and interrupts manually. Two complementary systems work together:
+
+### Agent-internal streak tracker (`internal/agent/local/loop_streak.go`)
+
+Operates inside the local agent's tool iteration loop. Detects when the model repeats the same reasoning or tool-call pattern across consecutive iterations using SHA-256 hashing. Recovery: injects a mild recovery nudge, then a strong nudge, then terminates the turn. Also **crops looping messages from context** so the model can't see its own loop anymore — significantly more effective than just nudging.
+
+### TUI-level detector (`internal/loop/detector.go`)
+
+Operates at the streaming/TUI layer. Catches patterns the agent-internal tracker can't see:
 
 | Signal | Scope | Catches | Default threshold |
 |---|---|---|---|
 | `chunk_repetition` | Intra-turn | Same text repeating consecutively in streaming output | 5 occurrences / 50-chunk window |
 | `chunk_repetition` (scattered) | Intra-turn | The same chunk recurring within the window without needing to be back-to-back | Chunks ≥ 40 runes only, to avoid flagging short boilerplate phrases |
 | `reasoning_chunk_repetition` | Intra-turn | Same text repeating in streaming reasoning output | 10 / 50-chunk window |
-| `response_repetition` | Cross-turn | Identical/near-identical responses across turns | 3 consecutive (0.85 trigram-Jaccard similarity) |
-| `reasoning_repetition` | Cross-turn | Identical/near-identical reasoning across turns | 6 consecutive |
+| `reasoning_chunk_flood` | Intra-turn | Too many reasoning chunks without content output | 5000 chunks |
 | `token_velocity` | Cross-turn | Rapid token consumption without progress | 300k tokens / 60s |
-| `tool_call_echo` | Cross-turn | Same tool+args in consecutive turns | 3 consecutive |
 | `silent_burn` | Per-turn | High input tokens, near-zero output | 20k input tokens |
 | `turn_flood` | Session | Excessive turns without user input | 10 consecutive non-user turns |
 
-**Intra-turn** (the primary case): every streaming chunk passes through a ring buffer of the last 50 chunks, checked two ways — consecutive identical chunks, and (for longer chunks only) the same chunk recurring anywhere in the window without needing adjacency. Either fires at high confidence and auto-interrupts the turn. **Cross-turn**: after each turn, response similarity (trigram Jaccard), token velocity, tool patterns, and turn count are checked.
+### Try-best detector (`internal/loop/try_best.go`)
+
+Operates at the tool-execution layer. Catches the most common real-world loops:
+
+| Signal | Catches | Default threshold |
+|---|---|---|
+| `edit_repeat` | Near-identical edits to the same file (Jaccard similarity on normalized diffs) | 0.8 similarity × 2 prior matches in window of 12 |
+| `bash_retry` | Same failing bash command retried without success | 3 consecutive failures |
+| `action_streak` | Non-progressing actions of the same kind (edit or verify) | 4 consecutive failures |
+
+**Intra-turn** (the primary case): every streaming chunk passes through a ring buffer of the last 50 chunks, checked two ways — consecutive identical chunks, and (for longer chunks only) the same chunk recurring anywhere in the window without needing adjacency. Either fires at high confidence and auto-interrupts the turn. **Cross-turn**: after each turn, token velocity, silent burn, and turn count are checked. **Tool-level**: after each tool call, edit similarity, bash retries, and action streaks are checked.
 
 Status bar shows `⚠ loop — auto-interrupting` (high confidence) or `⚠ <signal>` (warning); the transcript logs `[⚠ loop detected: <signal> (confidence N%)]`. A user turn resets all warnings and the turn-flood counter. Works identically across every provider — the intra-turn monitor sits at the TUI layer, not inside any specific agent driver.
 
@@ -101,14 +117,11 @@ Status bar shows `⚠ loop — auto-interrupting` (high confidence) or `⚠ <sig
     "chunk_window_size": 50,
     "chunk_repetition_min_scattered_length": 40,
     "reasoning_chunk_repetition_threshold": 10,
-    "max_consecutive_similar_responses": 3,
-    "response_similarity_threshold": 0.85,
-    "reasoning_max_consecutive_similar_responses": 6,
+    "reasoning_chunk_flood_threshold": 5000,
     "token_velocity_window_seconds": 60,
     "token_velocity_threshold": 300000,
     "max_silent_burn_tokens": 20000,
     "max_consecutive_turns_without_user": 10,
-    "tool_echo_threshold": 3,
     "auto_interrupt": false
   }
 }

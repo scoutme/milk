@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -32,69 +31,265 @@ func buildWorkflowPanelLines(st *workflow.State, inner int) []string {
 	switch {
 	case st == nil || st.WorkflowName == "":
 		add(dim("no active workflow"))
-	case st.Generic:
-		add(buildGenericWorkflowPanelLines(st, inner)...)
 	default:
-		add(buildDevWorkflowPanelLines(st, inner)...)
+		add(buildGenericWorkflowPanelLines(st, inner)...)
 	}
 
 	return lines
 }
 
-// buildDevWorkflowPanelLines renders dev.go's own Sprint/Pass/TotalSprints/
-// VerdictHistory progress reporting (wfdev.WorkflowProgressMsg).
-func buildDevWorkflowPanelLines(st *workflow.State, inner int) []string {
-	var lines []string
-	add := func(s string) { lines = append(lines, s) }
-
-	// Task description — word-wrap across multiple lines if needed
-	if st.Task != "" {
-		for _, line := range wordWrapPanel(st.Task, inner) {
-			add(dim(line))
-		}
-		add("")
-	}
-
-	// Current sprint / pass / role
-	sprintLabel := fmt.Sprintf("%d", st.Sprint)
-	if st.TotalSprints > 0 {
-		sprintLabel = fmt.Sprintf("%d/%d", st.Sprint, st.TotalSprints)
-	}
-	add(truncatePanel(bold(st.WorkflowName)+"  sprint "+sprintLabel, inner))
-	add(dim(fmt.Sprintf("pass %d  role: %s", st.Pass, st.Role)))
-	add("")
-
-	// Verdict history
-	for _, v := range st.VerdictHistory {
-		icon := "✓"
-		if v.Verdict == "needs_refinement" || v.Verdict == "unknown" {
-			icon = "·"
-		}
-		add(truncatePanel(dim(fmt.Sprintf("  %s s%d p%d → %s", icon, v.Sprint, v.Pass, v.Verdict)), inner))
-	}
-	if st.Role != "" && st.Role != "done" {
-		add(truncatePanel(dim(fmt.Sprintf("  → s%d p%d %s…", st.Sprint, st.Pass, st.Role)), inner))
-	}
-
-	return lines
-}
-
-// renderStageTree walks the StageNode tree, producing indented lines
-// with the deepest active path highlighted (bold + arrow).
-func renderStageTree(node *workflow.StageNode, depth int, inner int, add func(string)) {
+// renderStageTree walks the full StageNode tree, producing indented lines and
+// overlaying active/completed dynamic branches (for example fanout items).
+func renderStageTree(node *workflow.StageNode, active *workflow.StageNode, completed *workflow.StageNode, depth int, inner int, add func(string)) {
 	if node == nil {
 		return
 	}
 	indent := strings.Repeat("  ", depth)
-	isLeaf := len(node.Children) == 0
-	if isLeaf {
-		add(truncatePanel(bold(dim("▸ ")+node.Label), inner))
+	activeNode := matchingActiveNode(node.Label, active)
+	completedNode := matchingActiveNode(node.Label, completed)
+	displayNode := node
+	if activeNode != nil && stageLabelBase(activeNode.Label) == stageLabelBase(node.Label) {
+		displayNode = activeNode
+	} else if completedNode != nil && stageLabelBase(completedNode.Label) == stageLabelBase(node.Label) {
+		displayNode = completedNode
+	}
+	label := indent + displayStageLabel(displayNode.Label)
+	if activeNode != nil {
+		add(truncatePanel(bold("▸ "+label), inner))
+	} else if completedNode != nil {
+		add(truncatePanel(dim("✓ "+label), inner))
 	} else {
-		add(truncatePanel(dim(indent+node.Label), inner))
+		add(truncatePanel(dim("  "+label), inner))
+	}
+	dynamicChildren := mergedDynamicChildren(node.Children, activeNode, completedNode)
+	for _, child := range dynamicChildren {
+		marker := "✓"
+		if child.active {
+			marker = "▸"
+		}
+		renderDynamicStageTree(child.activeNode, child.completedNode, depth+1, marker, inner, add)
+	}
+	if len(dynamicChildren) > 0 {
+		return
 	}
 	for _, child := range node.Children {
-		renderStageTree(child, depth+1, inner, add)
+		renderStageTree(child, active, completed, depth+1, inner, add)
 	}
+}
+
+type dynamicStageChild struct {
+	activeNode    *workflow.StageNode
+	completedNode *workflow.StageNode
+	active        bool
+}
+
+func mergedDynamicChildren(staticChildren []*workflow.StageNode, activeNode, completedNode *workflow.StageNode) []dynamicStageChild {
+	seen := map[string]int{}
+	var out []dynamicStageChild
+	appendChildren := func(parent *workflow.StageNode, isActive bool) {
+		if parent == nil {
+			return
+		}
+		for _, child := range parent.Children {
+			base := stageLabelBase(child.Label)
+			if staticChildren != nil && !isDynamicStageLabel(child.Label) && stageChildrenContainBase(staticChildren, base) {
+				continue
+			}
+			key := dynamicStageKey(child.Label)
+			if idx, ok := seen[key]; ok {
+				if isActive {
+					out[idx].activeNode = child
+					out[idx].active = true
+				} else {
+					out[idx].completedNode = child
+				}
+				continue
+			}
+			seen[key] = len(out)
+			entry := dynamicStageChild{active: isActive}
+			if isActive {
+				entry.activeNode = child
+			} else {
+				entry.completedNode = child
+			}
+			out = append(out, entry)
+		}
+	}
+	appendChildren(completedNode, false)
+	appendChildren(activeNode, true)
+	return out
+}
+
+func renderDynamicStageTree(active, completed *workflow.StageNode, depth int, marker string, inner int, add func(string)) {
+	displayNode := active
+	if displayNode == nil {
+		displayNode = completed
+	}
+	if displayNode == nil {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	style := dim
+	if marker == "▸" {
+		style = bold
+	}
+	add(truncatePanel(style(marker+" "+indent+displayStageLabel(displayNode.Label)), inner))
+	children := mergedDynamicChildren(nil, active, completed)
+	for _, child := range children {
+		childMarker := "✓"
+		if child.active {
+			childMarker = "▸"
+		}
+		renderDynamicStageTree(child.activeNode, child.completedNode, depth+1, childMarker, inner, add)
+	}
+}
+
+func displayStageLabel(label string) string {
+	base := stageLabelBase(label)
+	switch {
+	case strings.Contains(label, " item["):
+		if idx := strings.Index(label, " item["); idx >= 0 {
+			return "item " + strings.TrimSuffix(strings.TrimPrefix(label[idx+len(" item["):], ""), "]")
+		}
+	case base == "sprint_loop":
+		if idx := strings.Index(label, "["); idx >= 0 {
+			return "sprint " + strings.TrimSuffix(label[idx+1:], "]")
+		}
+		return "sprint loop"
+	case strings.HasSuffix(base, "_pass_loop") || base == "pass_loop":
+		if idx := strings.Index(label, "["); idx >= 0 {
+			return "pass " + strings.TrimSuffix(label[idx+1:], "]")
+		}
+		return "pass loop"
+	}
+	switch base {
+	case "workflow":
+		return "workflow"
+	case "designer", "design":
+		return "design"
+	case "worker_fanout", "fanout":
+		return "fanout"
+	case "worker":
+		return "work"
+	case "worker_eval", "review":
+		return "eval"
+	case "final_evaluation":
+		return "final eval"
+	case "final_implementation":
+		return "final impl"
+	case "implement", "implementation":
+		return "impl"
+	}
+	return strings.ReplaceAll(base, "_", " ")
+}
+
+func isDynamicStageLabel(label string) bool {
+	return strings.Contains(label, "[") || strings.Contains(label, " item[") || strings.Contains(label, " items)")
+}
+
+func dynamicStageKey(label string) string {
+	if isDynamicStageLabel(label) {
+		return strings.TrimSpace(label)
+	}
+	return stageLabelBase(label)
+}
+
+func matchingActiveNode(label string, active *workflow.StageNode) *workflow.StageNode {
+	if active == nil {
+		return nil
+	}
+	targetLabel := label
+	var walk func(*workflow.StageNode) *workflow.StageNode
+	walk = func(node *workflow.StageNode) *workflow.StageNode {
+		if node == nil {
+			return nil
+		}
+		if stageLabelMatches(targetLabel, stageLabelBase(node.Label)) {
+			return node
+		}
+		for _, child := range node.Children {
+			if match := walk(child); match != nil {
+				return match
+			}
+		}
+		return nil
+	}
+	return walk(active)
+}
+
+func stageLabelMatches(label, activeBase string) bool {
+	activeBase = normalizeStageMatchKey(activeBase)
+	if normalizeStageMatchKey(stageLabelBase(label)) == activeBase {
+		return true
+	}
+	_, role, ok := stageLabelParts(label)
+	return ok && normalizeStageMatchKey(role) == activeBase
+}
+
+func normalizeStageMatchKey(s string) string {
+	s = strings.TrimSpace(s)
+	switch s {
+	case "implementer", "implementation":
+		return "implement"
+	case "reviewer":
+		return "review"
+	}
+	return s
+}
+
+func stageChildrenContainBase(children []*workflow.StageNode, base string) bool {
+	for _, child := range children {
+		if stageLabelBase(child.Label) == base {
+			return true
+		}
+	}
+	return false
+}
+
+func stageLabelParts(label string) (id, role string, ok bool) {
+	if idx := strings.Index(label, "  "); idx >= 0 {
+		return strings.TrimSpace(label[:idx]), strings.TrimSpace(label[idx+2:]), true
+	}
+	return strings.TrimSpace(label), "", false
+}
+
+func stageLabelBase(label string) string {
+	if idx := strings.Index(label, "  "); idx >= 0 {
+		return strings.TrimSpace(label[:idx])
+	}
+	if idx := strings.Index(label, " ("); idx >= 0 {
+		return strings.TrimSpace(label[:idx])
+	}
+	if strings.Contains(label, " item[") {
+		return strings.TrimSpace(label)
+	}
+	if idx := strings.Index(label, "["); idx >= 0 {
+		return strings.TrimSpace(label[:idx])
+	}
+	return strings.TrimSpace(label)
+}
+
+func definitionStageTree(stages []workflow.Stage) *workflow.StageNode {
+	root := &workflow.StageNode{Label: "workflow"}
+	for _, stage := range stages {
+		root.Children = append(root.Children, definitionStageNode(stage))
+	}
+	if len(root.Children) == 1 {
+		return root.Children[0]
+	}
+	return root
+}
+
+func definitionStageNode(stage workflow.Stage) *workflow.StageNode {
+	label := stage.ID
+	if stage.Role != "" {
+		label += "  " + stage.Role
+	}
+	node := &workflow.StageNode{Label: label}
+	for _, child := range stage.Body {
+		node.Children = append(node.Children, definitionStageNode(child))
+	}
+	return node
 }
 
 // buildGenericWorkflowPanelLines renders an interpreter-driven run's
@@ -119,7 +314,11 @@ func buildGenericWorkflowPanelLines(st *workflow.State, inner int) []string {
 	add("")
 
 	if st.StageTree != nil {
-		renderStageTree(st.StageTree, 0, inner, add)
+		active := st.ActiveStageTree
+		if active == nil && st.Role != "" && st.Role != "done" {
+			active = &workflow.StageNode{Label: st.Role}
+		}
+		renderStageTree(st.StageTree, active, st.CompletedStageTree, 0, inner, add)
 	}
 
 	return lines

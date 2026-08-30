@@ -31,10 +31,16 @@ type State struct {
 	// passes-exhausted "continue?" prompt) without re-resolving the ID.
 	WorkflowID int `json:"workflow_id,omitempty"`
 	// StageTree is set (in-memory only — dev.go never persists it) by an
-	// interpreter-driven run's ProgressMsg instead of Sprint/Pass/
-	// TotalSprints/VerdictHistory, which stay zero/empty for those runs. See
+	// interpreter-driven run at launch from the workflow definition. See
 	// ProgressMsg's doc.
 	StageTree *StageNode `json:"-"`
+	// ActiveStageTree is set (in-memory only) from ProgressMsg.ActivePaths and
+	// marks the currently executing path inside StageTree.
+	ActiveStageTree *StageNode `json:"-"`
+	// CompletedStageTree is set (in-memory only) from ProgressMsg.CompletedPaths
+	// and tracks dynamic branches, such as completed parallel fanout items, that
+	// should remain visible after they are no longer active.
+	CompletedStageTree *StageNode `json:"-"`
 	// Generic marks a State populated by an interpreter-driven run (via
 	// ProgressMsg) rather than dev.go's own Sprint/Pass/TotalSprints/
 	// VerdictHistory reporting — panel rendering branches on this rather

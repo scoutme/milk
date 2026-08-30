@@ -1,8 +1,6 @@
-// Package interp is the generic interpreter for workflow.Definition — the
-// data-driven counterpart to internal/workflow/dev.DevWorkflow. It walks a
-// Definition's Stage tree instead of following a hand-written Go control
-// flow, so new workflow shapes (see workflow.Definition's four stage kinds)
-// can be added as YAML/JSON rather than as a new Go package.
+// Package interp is the generic interpreter for workflow.Definition. It walks a
+// Definition's Stage tree, so new workflow shapes (see workflow.Definition's
+// four stage kinds) can be added as YAML/JSON rather than as Go code.
 //
 // Checkpoint/resume (see checkpoint.go) persists a flat, positionally-replayed
 // trace of completed leaf stages — see TraceEntry's doc for why that's
@@ -12,19 +10,9 @@
 // call it (see workflow.CurrentWorkflowID's WorkflowKind). A CLI-supplied
 // max_iterations override (Runner.WithMaxIterationsOverride) beats a
 // plan-declared value for the "continue with doubled passes?" recovery flow
-// after an ExhaustedError — dev.go's MaxPassesOverride equivalent.
-// Stage.EmptyOutputFallback == "git_diff" covers dev.go's git-diff fallback
+// after an ExhaustedError.
+// Stage.EmptyOutputFallback == "git_diff" provides a git-diff fallback
 // when a turn's tool calls produce no closing text summary.
-//
-// Still deliberately deferred, pending a parity pass against dev.go (see the
-// design discussion on GitHub issue #117):
-//   - On-disk plan/sprint/findings artifact files (workflow.PlanPath et
-//     al.) in dev.go's specific per-file layout — this package's checkpoint
-//     already persists every stage's output (via the trace), just as one
-//     JSON file rather than separate inspectable markdown files.
-//   - Live stage-by-stage progress reporting for the TUI panel (dev.go's
-//     wfdev.WorkflowProgressMsg) — an interpreter-driven run's panel entry
-//     shows a fixed "starting" state until the run finishes.
 package interp
 
 import (
@@ -32,9 +20,11 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -137,8 +127,7 @@ func (r *Runner) Run(ctx context.Context, cfg workflow.RunConfig) error {
 		}
 	}
 
-	activeMu := &sync.Mutex{}
-	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides, defName: r.Def.Name, activeMu: activeMu}
+	ec := &execContext{ctx: ctx, cfg: cfg, vars: vars, replay: trace, maxIterOverrides: r.maxIterOverrides, defName: r.Def.Name, active: newActivePathTracker(), activePathID: 0, progressSend: cfg.Send}
 	if r.checkpointPath != "" {
 		liveTrace := append([]TraceEntry{}, trace...)
 		ec.onLeafComplete = func(e TraceEntry) {
@@ -186,69 +175,199 @@ type execContext struct {
 	// see Runner.WithMaxIterationsOverride.
 	maxIterOverrides map[string]int
 
-	// defName and activePaths back workflow.ProgressMsg reporting (see
-	// reportProgress): defName is the Definition's own name (set once, in
-	// Run); activePaths is a shared, mutex-protected list of currently-active
-	// path segments from root to the deepest executing stage. Every
-	// goroutine (sequential or parallel) pushes/pops its own segment via
-	// pushPath/popPath; reportProgress builds a tree snapshot from the list.
-	defName     string
-	activePaths []string    // shared across goroutines — protect with activeMu
-	activeMu    *sync.Mutex // shared across goroutines; nil only in test stubs
+	// defName and active back workflow.ProgressMsg reporting (see
+	// reportProgress): defName is the Definition's own name (set once in Run),
+	// while active stores every currently-active branch. Parallel-group items
+	// fork their own branch IDs so a progress snapshot can show multiple workers
+	// in flight at once instead of whichever goroutine reported last.
+	defName      string
+	active       *activePathTracker
+	activePathID int
+
+	// progressSend is the Send func used for ProgressMsg reporting. It is
+	// always the parent's Send (never nil when the caller supplied one),
+	// even for parallel workers whose cfg.Send is nil (streaming suppressed).
+	// This decouples progress/role reporting from output streaming so the
+	// workflow panel can show which role is active during parallel execution.
+	progressSend func(tea.Msg)
+}
+
+type activePathTracker struct {
+	mu        sync.Mutex
+	nextID    int
+	paths     map[int][]string
+	completed [][]string
+}
+
+func newActivePathTracker() *activePathTracker {
+	return &activePathTracker{paths: map[int][]string{0: {}}}
 }
 
 // pushPath appends a segment to the shared activePaths list.
 func (ec *execContext) pushPath(seg string) {
-	ec.activeMu.Lock()
-	ec.activePaths = append(ec.activePaths, seg)
-	ec.activeMu.Unlock()
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	ec.active.paths[ec.activePathID] = append(ec.active.paths[ec.activePathID], seg)
 }
 
 // popPath removes the last segment from the shared activePaths list.
 func (ec *execContext) popPath() {
-	ec.activeMu.Lock()
-	ec.activePaths = ec.activePaths[:len(ec.activePaths)-1]
-	ec.activeMu.Unlock()
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	path := ec.active.paths[ec.activePathID]
+	if len(path) == 0 {
+		return
+	}
+	ec.active.paths[ec.activePathID] = path[:len(path)-1]
+}
+
+func (ec *execContext) forkActivePath() int {
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	ec.active.nextID++
+	id := ec.active.nextID
+	parent := ec.active.paths[ec.activePathID]
+	ec.active.paths[id] = append([]string{}, parent...)
+	return id
+}
+
+func (ec *execContext) removeActivePath() {
+	ec.active.mu.Lock()
+	delete(ec.active.paths, ec.activePathID)
+	ec.active.mu.Unlock()
+}
+
+func (ec *execContext) completeActivePath() {
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	path := ec.active.paths[ec.activePathID]
+	if len(path) == 0 {
+		return
+	}
+	// Store the full path so pathSnapshotFromPaths builds a completed tree
+	// that mirrors the static StageTree structure, enabling correct ✓ overlay
+	// at each depth level during rendering.
+	ec.active.completed = append(ec.active.completed, append([]string{}, path...))
+}
+
+func (ec *execContext) activePathSnapshot() [][]string {
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	ids := make([]int, 0, len(ec.active.paths))
+	for id := range ec.active.paths {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	paths := make([][]string, 0, len(ids))
+	for _, id := range ids {
+		path := ec.active.paths[id]
+		if len(path) == 0 {
+			continue
+		}
+		paths = append(paths, append([]string{}, path...))
+	}
+	return paths
+}
+
+func (ec *execContext) completedPathSnapshot() [][]string {
+	ec.active.mu.Lock()
+	defer ec.active.mu.Unlock()
+	paths := make([][]string, 0, len(ec.active.completed))
+	for _, path := range ec.active.completed {
+		if len(path) == 0 {
+			continue
+		}
+		paths = append(paths, append([]string{}, path...))
+	}
+	return paths
 }
 
 // buildPathTree constructs a PathSnapshot from the current activePaths.
-// The deepest path (last segment at each level) is highlighted by being
-// the last child. Concurrent siblings under a parallel group each form
-// their own branch.
+// Concurrent siblings under a parallel group each form their own branch.
 func (ec *execContext) buildPathTree() *workflow.PathSnapshot {
-	ec.activeMu.Lock()
-	snapshot := make([]string, len(ec.activePaths))
-	copy(snapshot, ec.activePaths)
-	ec.activeMu.Unlock()
+	return pathSnapshotFromPaths(ec.activePathSnapshot())
+}
 
-	if len(snapshot) == 0 {
+func (ec *execContext) buildCompletedPathTree() *workflow.PathSnapshot {
+	return pathSnapshotFromPaths(ec.completedPathSnapshot())
+}
+
+func pathSnapshotFromPaths(paths [][]string) *workflow.PathSnapshot {
+	if len(paths) == 0 {
 		return nil
 	}
-	root := &workflow.StageNode{Label: snapshot[0]}
-	cur := root
-	for _, seg := range snapshot[1:] {
-		child := &workflow.StageNode{Label: seg}
-		cur.Children = append(cur.Children, child)
-		cur = child
+	var root *workflow.StageNode
+	for _, path := range paths {
+		root = insertPath(root, path)
 	}
 	return &workflow.PathSnapshot{Root: root}
+}
+
+func insertPath(root *workflow.StageNode, path []string) *workflow.StageNode {
+	if len(path) == 0 {
+		return root
+	}
+	if root == nil {
+		root = &workflow.StageNode{Label: path[0]}
+		path = path[1:]
+	} else if root.Label != path[0] {
+		// Only wrap when the root is a real stage (not the synthetic
+		// "workflow" container) AND no existing child matches path[0].
+		// Without this check, merging paths that share a common prefix
+		// (e.g. sprint_loop[1]/pass_loop[1]/generator followed by
+		// sprint_loop[1]/pass_loop[1]) would nest redundant "workflow"
+		// wrapper nodes, producing wrong depths and duplicated entries.
+		needsWrap := root.Label != "workflow"
+		if needsWrap {
+			for _, child := range root.Children {
+				if child.Label == path[0] {
+					needsWrap = false
+					break
+				}
+			}
+		}
+		if needsWrap {
+			root = &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{root}}
+		}
+	} else {
+		path = path[1:]
+	}
+	cur := root
+	for _, seg := range path {
+		var child *workflow.StageNode
+		for _, existing := range cur.Children {
+			if existing.Label == seg {
+				child = existing
+				break
+			}
+		}
+		if child == nil {
+			child = &workflow.StageNode{Label: seg}
+			cur.Children = append(cur.Children, child)
+		}
+		cur = child
+	}
+	return root
 }
 
 // reportProgress sends a workflow.ProgressMsg reflecting the current
 // activePaths tree and the role about to run (or "" if none — e.g. a
 // user_checkpoint pause, or a parallel_group announcing its own start).
-// No-op if the caller supplied no Send func.
+// No-op if the caller supplied no Send func. Uses progressSend (not
+// cfg.Send) so parallel workers — whose cfg.Send is nil to suppress
+// streaming — can still report their role to the workflow panel.
 func (ec *execContext) reportProgress(role string) {
-	if ec.cfg.Send == nil {
+	if ec.progressSend == nil {
 		return
 	}
 	task, _ := ec.vars["task"].(string)
-	ec.cfg.Send(workflow.ProgressMsg{
-		WorkflowName: ec.defName,
-		Task:         task,
-		WorkflowID:   ec.cfg.WorkflowID,
-		ActivePaths:  ec.buildPathTree(),
-		Role:         role,
+	ec.progressSend(workflow.ProgressMsg{
+		WorkflowName:   ec.defName,
+		Task:           task,
+		WorkflowID:     ec.cfg.WorkflowID,
+		ActivePaths:    ec.buildPathTree(),
+		CompletedPaths: ec.buildCompletedPathTree(),
+		Role:           role,
 	})
 }
 
@@ -346,6 +465,8 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("workflow: no runner for role %q (stage %q)", s.Role, s.ID)
 	}
+	ec.pushPath(s.ID)
+	defer ec.popPath()
 	ec.reportProgress(s.Role)
 
 	prompt, err := renderTemplate(s.ID+".prompt", s.Prompt, ec.vars)
@@ -372,6 +493,8 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	}
 
 	if len(s.Verdict) == 0 {
+		ec.completeActivePath()
+		ec.reportProgress("")
 		ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: out})
 		return "", nil
 	}
@@ -384,6 +507,8 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 		ec.cfg.Send(workflow.WorkflowChunkMsg{Text: fmt.Sprintf(
 			"\n[warning: unexpected verdict %q at stage %q, treating as %q]\n", v.String(), s.ID, rule.Action)})
 	}
+	ec.completeActivePath()
+	ec.reportProgress("")
 	ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: out, Outcome: rule.Action})
 	return rule.Action, nil
 }
@@ -475,6 +600,8 @@ func execOverLoop(ec *execContext, s workflow.Stage) error {
 		ec.vars[label+"_section"] = sec.Body
 		ec.pushPath(fmt.Sprintf("%s[%d]", s.ID, sec.Index))
 		_, err := executeStages(ec, s.Body)
+		ec.completeActivePath()
+		ec.reportProgress("")
 		ec.popPath()
 		if err != nil {
 			return err
@@ -512,6 +639,8 @@ func execBoundedLoop(ec *execContext, s workflow.Stage) error {
 		}
 		ec.pushPath(fmt.Sprintf("%s[%d]", s.ID, iter))
 		outcome, err := executeStages(ec, s.Body)
+		ec.completeActivePath()
+		ec.reportProgress("")
 		ec.popPath()
 		if err != nil {
 			return err
@@ -549,6 +678,10 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 	decls := ParseDeclarations(doc)
 	sections := decls.SectionsFor(s.Over)
 	if len(sections) == 0 {
+		if ec.cfg.Send != nil {
+			ec.cfg.Send(workflow.WorkflowChunkMsg{Text: fmt.Sprintf(
+				"\n[warning: parallel_group %q found no %q sections in the source document — skipping fanout]\n", s.ID, s.Over)})
+		}
 		ec.recordLeaf(TraceEntry{StageID: s.ID})
 		return nil
 	}
@@ -585,10 +718,18 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 				itemVars[label] = sec.Index
 				itemVars[label+"_section"] = sec.Body
 
+				// Suppress live streaming for parallel workers: concurrent
+				// WorkflowChunkMsg writes interleave in the TUI transcript,
+				// producing garbled output. Each worker runs silently; the
+				// workflow panel still tracks progress via activePathTracker.
+				workerCfg := ec.cfg
+				workerCfg.Send = nil
 				itemEC := &execContext{
-					ctx: ec.ctx, cfg: ec.cfg, vars: itemVars, defName: ec.defName,
-					activePaths: append([]string{}, ec.activePaths...), activeMu: ec.activeMu,
+					ctx: ec.ctx, cfg: workerCfg, vars: itemVars, defName: ec.defName,
+					active: ec.active, activePathID: ec.forkActivePath(),
+					progressSend: ec.progressSend,
 				}
+				defer itemEC.removeActivePath()
 				itemEC.pushPath(fmt.Sprintf("%s %s[%d]", s.ID, label, sec.Index))
 				outcome, err := executeStages(itemEC, s.Body)
 				r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
@@ -601,6 +742,8 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 					r.Status = "error"
 					r.Err = err.Error()
 				}
+				itemEC.completeActivePath()
+				itemEC.reportProgress("")
 				results[posByIndex[sec.Index]] = r
 			}(sec)
 		}

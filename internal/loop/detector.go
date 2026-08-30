@@ -261,6 +261,12 @@ func New(cfg Config) *Detector {
 
 // Feed records a completed turn and returns any triggered verdicts.
 // The caller decides what to do with them (warn, interrupt, log).
+//
+// Note: ResponseRepetition, ReasoningRepetition, and ToolCallEcho signals
+// were removed because the agent-internal streak tracker (loop_streak.go)
+// catches these patterns more precisely via SHA-256 hashing. The remaining
+// cross-turn signals cover patterns the streak tracker doesn't see:
+// token velocity, silent burn, and turn flood.
 func (d *Detector) Feed(turn TurnSummary) []Verdict {
 	if !d.cfg.Enabled {
 		return nil
@@ -273,23 +279,11 @@ func (d *Detector) Feed(turn TurnSummary) []Verdict {
 
 	var verdicts []Verdict
 
-	if v := d.checkResponseRepetition(); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
-		verdicts = append(verdicts, *v)
-	}
-	if v := d.checkReasoningRepetition(); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
-		verdicts = append(verdicts, *v)
-	}
 	if v := d.checkTokenVelocity(); v != nil {
 		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkSilentBurn(turn); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
-		verdicts = append(verdicts, *v)
-	}
-	if v := d.checkToolCallEcho(); v != nil {
 		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
@@ -505,86 +499,13 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 			Signal:          SignalReasoningChunkFlood,
 			Confidence:      0.85,
 			Message:         fmt.Sprintf("reasoning chunk flood: %d chunks in single turn", d.reasonChunkCount),
-			ShouldInterrupt: true,
+			ShouldInterrupt: false, // medium confidence — warn only
 		}
 		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, v)
 	}
 
 	return verdicts
-}
-
-// ── Signal: Response Repetition ──────────────────────────────────────────────
-
-func (d *Detector) checkResponseRepetition() *Verdict {
-	n := d.cfg.MaxConsecutiveSimilarResponses
-	if len(d.history) < n {
-		return nil
-	}
-
-	// Check the last n turns for pairwise similarity.
-	recent := d.history[len(d.history)-n:]
-	for i := 1; i < len(recent); i++ {
-		sim := trigramSimilarity(recent[0].Text, recent[i].Text)
-		if sim < d.cfg.ResponseSimilarityThreshold {
-			return nil // not all similar
-		}
-	}
-
-	confidence := 0.7 + 0.1*float64(n-3) // 3 turns=0.7, 4=0.8, 5+=0.9
-	if confidence > 1.0 {
-		confidence = 1.0
-	}
-
-	return &Verdict{
-		Signal:          SignalResponseRepetition,
-		Confidence:      confidence,
-		Message:         "agent repeating similar responses",
-		ShouldInterrupt: confidence >= 0.8,
-	}
-}
-
-// ── Signal: Reasoning Repetition ─────────────────────────────────────────────
-
-// checkReasoningRepetition is the cross-turn counterpart to
-// checkResponseRepetition, applied to accumulated reasoning/thinking text
-// instead of final output. It requires more consecutive similar turns
-// (ReasoningMaxConsecutiveSimilarResponses) and reports lower confidence,
-// since reasoning naturally revisits similar phrasing across turns without
-// the agent being stuck.
-func (d *Detector) checkReasoningRepetition() *Verdict {
-	n := d.cfg.ReasoningMaxConsecutiveSimilarResponses
-	if len(d.history) < n {
-		return nil
-	}
-
-	recent := d.history[len(d.history)-n:]
-
-	// All turns must have reasoning text — skip turns/models with none.
-	for _, t := range recent {
-		if strings.TrimSpace(t.ReasoningText) == "" {
-			return nil
-		}
-	}
-
-	for i := 1; i < len(recent); i++ {
-		sim := trigramSimilarity(recent[0].ReasoningText, recent[i].ReasoningText)
-		if sim < d.cfg.ResponseSimilarityThreshold {
-			return nil // not all similar
-		}
-	}
-
-	confidence := 0.6 + 0.05*float64(n-6) // 6 turns=0.6, 7=0.65, 8+=0.7...
-	if confidence > 0.85 {
-		confidence = 0.85
-	}
-
-	return &Verdict{
-		Signal:          SignalReasoningRepetition,
-		Confidence:      confidence,
-		Message:         "agent repeating similar reasoning",
-		ShouldInterrupt: confidence >= 0.8,
-	}
 }
 
 // ── Signal: Token Velocity ───────────────────────────────────────────────────
@@ -640,39 +561,6 @@ func (d *Detector) checkSilentBurn(turn TurnSummary) *Verdict {
 		Confidence:      0.6,
 		Message:         "high input tokens with minimal output",
 		ShouldInterrupt: false, // medium confidence — warn only
-	}
-}
-
-// ── Signal: Tool Call Echo ───────────────────────────────────────────────────
-
-func (d *Detector) checkToolCallEcho() *Verdict {
-	n := d.cfg.ToolEchoThreshold
-	if len(d.history) < n {
-		return nil
-	}
-
-	recent := d.history[len(d.history)-n:]
-
-	// All turns must have tool calls.
-	for _, t := range recent {
-		if len(t.ToolCalls) == 0 {
-			return nil
-		}
-	}
-
-	// Check if every turn has the same tool call set.
-	base := toolCallSet(recent[0].ToolCalls)
-	for i := 1; i < len(recent); i++ {
-		if !toolCallSetEqual(base, toolCallSet(recent[i].ToolCalls)) {
-			return nil
-		}
-	}
-
-	return &Verdict{
-		Signal:          SignalToolCallEcho,
-		Confidence:      0.85,
-		Message:         "same tool calls repeated across turns",
-		ShouldInterrupt: true,
 	}
 }
 
@@ -741,26 +629,4 @@ func trigrams(s string) map[string]bool {
 		m[string(runes[i:i+3])] = true
 	}
 	return m
-}
-
-// ── Tool Call Set Helpers ────────────────────────────────────────────────────
-
-func toolCallSet(calls []string) map[string]bool {
-	m := make(map[string]bool, len(calls))
-	for _, c := range calls {
-		m[c] = true
-	}
-	return m
-}
-
-func toolCallSetEqual(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
 }
