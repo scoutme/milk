@@ -311,6 +311,26 @@ type Agent struct {
 	// (AgentConfig.PromptCaching). Only meaningful when useBedrockNative is
 	// true; ignored otherwise. EXPERIMENTAL — see AgentConfig.PromptCaching.
 	promptCaching bool
+	// tryBest is an optional tool-level loop detector that tracks near-identical
+	// edits, retried failing bash commands, and non-progressing action streaks.
+	// When non-nil, RecordToolCall is called after each tool completes and
+	// CheckActionStreak after each tool-calling round.
+	tryBest TryBestRecorder
+}
+
+// TryBestRecorder is the interface for the try-best loop detector.
+// Defined here to avoid importing internal/loop directly.
+type TryBestRecorder interface {
+	RecordToolCall(toolName, argsJSON, result string, exitOK bool) *TryBestVerdict
+	CheckActionStreak() *TryBestVerdict
+	Reset()
+}
+
+// TryBestVerdict mirrors loop.TryBestVerdict to avoid an import cycle.
+type TryBestVerdict struct {
+	Signal   int
+	Message  string
+	FilePath string
 }
 
 // mcpToolSet is the subset of mcp.ToolSet used by the agent, defined as an
@@ -700,6 +720,14 @@ func (a *Agent) WithOnReasoningPromoted(fn func()) *Agent {
 	return &copy
 }
 
+// WithTryBestMonitor sets the tool-level loop detector. When set, the monitor
+// is called after each tool completes and after each tool-calling round.
+func (a *Agent) WithTryBestMonitor(m TryBestRecorder) *Agent {
+	copy := *a
+	copy.tryBest = m
+	return &copy
+}
+
 // WithLogContext enables full request payload logging at DEBUG level.
 func (a *Agent) WithLogContext(v bool) *Agent {
 	a.logContext = v
@@ -985,6 +1013,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		a.pendingImageParts = nil // consume once
 	}
 	msgs = append(msgs, userMsg)
+	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, a.limits)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
@@ -1001,6 +1030,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
+	var streak streakState       // reasoning/tool-call loop detection
 
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
@@ -1069,6 +1099,45 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText)
 		if esc != nil {
 			return msgs, esc
+		}
+
+		// Loop streak detection: reasoning models (mimo-v2.5, DeepSeek) can
+		// get stuck producing near-identical reasoning that drives
+		// slightly-varying tool calls. Exact duplicate detection (executedKeys)
+		// misses this; reasoning-hash comparison catches it.
+		if key := stepKeyFromIteration(reasoningText, toolCalls); streak.tracker.recordStep(key) {
+			streak.recoveryCount++
+			if streak.recoveryCount >= 3 {
+				obs.Warn("loop streak: max recovery exceeded, terminating turn",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
+				resp := summarizeToolTrail(msgs, "")
+				if a.onResponseSegment != nil && resp != "" {
+					a.onResponseSegment(resp)
+				}
+				msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+				return msgs, nil
+			}
+			// Crop looping messages from context so the model can't see its
+			// own loop anymore. This is more effective than just nudging —
+			// the model literally can't continue the loop because the evidence
+			// is gone. Keep the user message that started the turn (at userMsgIdx).
+			cropped := cropLoopingMessages(msgs, userMsgIdx)
+			if len(cropped) < len(msgs) {
+				obs.Warn("loop streak: cropped looping messages",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+					"before", len(msgs), "after", len(cropped))
+				msgs = cropped
+			}
+			nudge := recoveryNudgeMild
+			if streak.recoveryCount >= 2 {
+				nudge = recoveryNudgeStrong
+			}
+			obs.Warn("loop streak detected, injecting recovery nudge",
+				"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+				"recovery", streak.recoveryCount)
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
+		} else {
+			streak.recoveryCount = 0
 		}
 	}
 
@@ -1259,6 +1328,29 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 				continue
 			}
 			a.onToolResult(tc.Function.Name, outcomes[i].msg.Content)
+		}
+	}
+
+	// Try-best loop detection: record each tool call and its result.
+	if a.tryBest != nil {
+		for i, tc := range toolCalls {
+			if strings.HasPrefix(tc.Function.Name, "agent_") {
+				continue
+			}
+			exitOK := !isToolError(outcomes[i].msg.Content)
+			if v := a.tryBest.RecordToolCall(tc.Function.Name, tc.Function.Arguments, outcomes[i].msg.Content, exitOK); v != nil {
+				// Inject a recovery nudge as a system message.
+				nudge := fmt.Sprintf(`<system-reminder>
+Try-best loop detected: %s. You MUST stop repeating this action and try a completely different approach.
+</system-reminder>`, v.Message)
+				msgs = append(msgs, Message{Role: "user", Content: nudge})
+			}
+		}
+		if v := a.tryBest.CheckActionStreak(); v != nil {
+			nudge := fmt.Sprintf(`<system-reminder>
+Action streak detected: %s. You are stuck in a non-progressing loop. Stop and try a different strategy, or explain the blocker to the user.
+</system-reminder>`, v.Message)
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
 		}
 	}
 

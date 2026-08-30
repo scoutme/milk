@@ -197,4 +197,4 @@ stages:
 
 **Declared collections**: a designer-style stage's saved output can declare structure the interpreter parses automatically — numbered sections (`## Sprint 1`, or `## Item 2 (depends_on: 1)` for dependency-ordered `parallel_group` items) and scalar limits (`max_passes: 4` on its own line). `dev.yaml`'s `plan_instructions` var is the exact text instructing the designer agent to produce this format — reuse or adapt it in a custom definition rather than inventing a new plan syntax from scratch.
 
-The hand-written Go `dev` workflow (`internal/workflow/dev`, predating this data-driven system) still exists solely to resume checkpoints saved before the migration — every fresh `/workflow` run, `dev` included, goes through the YAML-driven interpreter now.
+All workflows — including the built-in `dev`, `pair`, and `swarm` — run through the YAML-driven interpreter. Legacy dev-format checkpoints (pre-migration) can be cleared with `/workflow clear` and restarted.

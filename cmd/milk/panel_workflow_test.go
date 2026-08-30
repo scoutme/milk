@@ -97,115 +97,6 @@ func TestWorkflowPanelLineCount_Nil(t *testing.T) {
 	}
 }
 
-func TestWorkflowPanelLineCount_ActiveRole(t *testing.T) {
-	st := &workflow.State{
-		WorkflowName: "dev",
-		Sprint:       1,
-		Pass:         1,
-		Role:         "generator",
-	}
-	// title + blank + workflow+sprint + pass+role + blank + in-progress arrow = 6
-	want := 6
-	got := workflowPanelLineCount(st)
-	if got != want {
-		t.Errorf("lineCount(active role) = %d, want %d", got, want)
-	}
-}
-
-func TestWorkflowPanelLineCount_DoneRole(t *testing.T) {
-	st := &workflow.State{
-		WorkflowName: "dev",
-		Sprint:       1,
-		Pass:         1,
-		Role:         "done",
-	}
-	// title + blank + workflow+sprint + pass+role + blank + 0 verdicts + 0 arrow = 5
-	want := 5
-	got := workflowPanelLineCount(st)
-	if got != want {
-		t.Errorf("lineCount(done) = %d, want %d", got, want)
-	}
-}
-
-func TestWorkflowPanelLineCount_DoneRoleWithVerdicts(t *testing.T) {
-	st := &workflow.State{
-		WorkflowName: "dev",
-		Role:         "done",
-		VerdictHistory: []workflow.VerdictEntry{
-			{Sprint: 1, Pass: 1, Verdict: "good_to_go"},
-			{Sprint: 2, Pass: 1, Verdict: "needs_refinement"},
-		},
-	}
-	// title + blank + workflow+sprint + pass+role + blank + 2 verdicts + 0 arrow = 7
-	want := 7
-	got := workflowPanelLineCount(st)
-	if got != want {
-		t.Errorf("lineCount(done, 2 verdicts) = %d, want %d", got, want)
-	}
-}
-
-func TestWorkflowPanelLineCount_ActiveRoleWithVerdicts(t *testing.T) {
-	st := &workflow.State{
-		WorkflowName: "dev",
-		Role:         "evaluator",
-		VerdictHistory: []workflow.VerdictEntry{
-			{Sprint: 1, Pass: 1, Verdict: "good_to_go"},
-		},
-	}
-	// title + blank + workflow+sprint + pass+role + blank + 1 verdict + 1 arrow = 7
-	want := 7
-	got := workflowPanelLineCount(st)
-	if got != want {
-		t.Errorf("lineCount(active, 1 verdict) = %d, want %d", got, want)
-	}
-}
-
-// TestWorkflowPanelLineCount_DoneVsActive verifies done returns exactly 1 less than active.
-func TestWorkflowPanelLineCount_DoneVsActive(t *testing.T) {
-	verdicts := []workflow.VerdictEntry{{Sprint: 1, Pass: 1, Verdict: "good_to_go"}}
-	active := &workflow.State{WorkflowName: "dev", Role: "generator", VerdictHistory: verdicts}
-	done := &workflow.State{WorkflowName: "dev", Role: "done", VerdictHistory: verdicts}
-	if workflowPanelLineCount(active) != workflowPanelLineCount(done)+1 {
-		t.Errorf("active lineCount=%d, done lineCount=%d — expected active = done+1",
-			workflowPanelLineCount(active), workflowPanelLineCount(done))
-	}
-}
-
-// ── sprint X/Y label ──────────────────────────────────────────────────────────
-
-// sprintLine returns the "workflow  sprint ..." line from a rendered panel,
-// i.e. the 3rd line (title, blank, then this one).
-func sprintLine(t *testing.T, st *workflow.State) string {
-	t.Helper()
-	lines := buildWorkflowPanelLines(st, workflowPanelContentWidth-2)
-	if len(lines) < 3 {
-		t.Fatalf("expected at least 3 lines, got %d: %v", len(lines), lines)
-	}
-	return stripANSI(lines[2])
-}
-
-func TestBuildWorkflowPanelLines_SprintShowsTotalWhenKnown(t *testing.T) {
-	st := &workflow.State{WorkflowName: "dev", Sprint: 2, TotalSprints: 5, Role: "generator"}
-	got := sprintLine(t, st)
-	if !strings.Contains(got, "sprint 2/5") {
-		t.Errorf("expected sprint line to contain %q, got %q", "sprint 2/5", got)
-	}
-}
-
-func TestBuildWorkflowPanelLines_SprintFallsBackWithoutTotal(t *testing.T) {
-	// TotalSprints == 0 covers both a state file saved before this field
-	// existed and the designer role, before the sprint count is known —
-	// neither should render as "sprint N/0".
-	st := &workflow.State{WorkflowName: "dev", Sprint: 1, Role: "designer"}
-	got := sprintLine(t, st)
-	if strings.Contains(got, "/0") {
-		t.Errorf("must never render an unknown total as /0, got %q", got)
-	}
-	if !strings.Contains(got, "sprint 1") {
-		t.Errorf("expected sprint line to contain %q, got %q", "sprint 1", got)
-	}
-}
-
 func TestBuildWorkflowPanelLines_GenericShowsStageTreeNotSprint(t *testing.T) {
 	st := &workflow.State{
 		WorkflowName: "pair", Task: "build a thing", Role: "generator",
@@ -220,10 +111,10 @@ func TestBuildWorkflowPanelLines_GenericShowsStageTreeNotSprint(t *testing.T) {
 	if !strings.Contains(joined, "role: generator") {
 		t.Errorf("expected the current role rendered, got:\n%s", joined)
 	}
-	if !strings.Contains(joined, "sprint_loop[1]") {
+	if !strings.Contains(joined, "sprint 1") {
 		t.Errorf("expected the stage tree rendered, got:\n%s", joined)
 	}
-	if !strings.Contains(joined, "pass_loop[2]") {
+	if !strings.Contains(joined, "pass 2") {
 		t.Errorf("expected nested child rendered, got:\n%s", joined)
 	}
 	if strings.Contains(joined, "sprint 0") || strings.Contains(joined, "pass 0") {
@@ -231,12 +122,225 @@ func TestBuildWorkflowPanelLines_GenericShowsStageTreeNotSprint(t *testing.T) {
 	}
 }
 
-func TestBuildWorkflowPanelLines_DevStateUnaffectedByGenericField(t *testing.T) {
-	// A zero-value Generic (the common case for every existing dev.go state)
-	// must still render the legacy sprint/pass/verdict-history layout.
-	st := &workflow.State{WorkflowName: "dev", Sprint: 2, TotalSprints: 3, Role: "evaluator"}
-	got := sprintLine(t, st)
-	if !strings.Contains(got, "sprint 2/3") {
-		t.Errorf("expected the dev-shaped sprint line, got %q", got)
+func TestBuildWorkflowPanelLines_GenericShowsFullStageTreeWithActiveMarker(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "pair",
+		Task:         "build a thing",
+		Role:         "reviewer",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "design  designer"},
+			{Label: "implement  generator"},
+			{Label: "review  reviewer"},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "review"},
+		Generic:         true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 60), "\n"))
+	for _, stage := range []string{"design", "impl", "eval"} {
+		if !strings.Contains(joined, stage) {
+			t.Fatalf("expected generic panel to show stage %q, got:\n%s", stage, joined)
+		}
+	}
+	if !strings.Contains(joined, "▸   eval") {
+		t.Fatalf("expected active review marker inside full tree, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericMarksStaticRoleNodeActive(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "dev",
+		Role:         "designer",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "sprint_loop"},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "designer"},
+		Generic:         true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	if !strings.Contains(joined, "▸   design") {
+		t.Fatalf("expected active marker on static designer node, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericMarksStaticRoleNodeActiveFromRoleFallback(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "dev",
+		Role:         "designer",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "sprint_loop"},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	if !strings.Contains(joined, "▸   design") {
+		t.Fatalf("expected role fallback to mark static designer node active, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericMarksStaticRoleSuffixActive(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "custom",
+		Role:         "implementer",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "final_implementation  implementer"},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "implementer"},
+		Generic:         true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	if !strings.Contains(joined, "▸   final impl") {
+		t.Fatalf("expected active marker on static role-suffix node, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericShowsConcurrentFanoutBranches(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "swarm",
+		Role:         "worker",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "worker_fanout", Children: []*workflow.StageNode{
+				{Label: "worker_pass_loop", Children: []*workflow.StageNode{
+					{Label: "worker  worker"},
+					{Label: "worker_eval  evaluator"},
+				}},
+			}},
+			{Label: "final_evaluation  evaluator"},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "worker_fanout (2 items)", Children: []*workflow.StageNode{
+			{Label: "worker_fanout item[1]", Children: []*workflow.StageNode{{Label: "worker_pass_loop[1]", Children: []*workflow.StageNode{{Label: "worker"}}}}},
+			{Label: "worker_fanout item[2]", Children: []*workflow.StageNode{{Label: "worker_pass_loop[1]", Children: []*workflow.StageNode{{Label: "worker"}}}}},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	for _, label := range []string{"item 1", "item 2", "pass 1", "work", "final eval"} {
+		if !strings.Contains(joined, label) {
+			t.Fatalf("expected panel to show %q, got:\n%s", label, joined)
+		}
+	}
+	if strings.Contains(joined, "  pass loop") {
+		t.Fatalf("static fanout body template should be hidden when item branches are present, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericKeepsCompletedFanoutItemsAtDone(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "swarm",
+		Role:         "done",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "worker_fanout", Children: []*workflow.StageNode{
+				{Label: "worker_pass_loop", Children: []*workflow.StageNode{
+					{Label: "worker  worker"},
+					{Label: "worker_eval  evaluator"},
+				}},
+			}},
+			{Label: "final_evaluation  evaluator"},
+		}},
+		CompletedStageTree: &workflow.StageNode{Label: "worker_fanout (2 items)", Children: []*workflow.StageNode{
+			{Label: "worker_fanout item[1]"},
+			{Label: "worker_fanout item[2]"},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	for _, label := range []string{"✓     item 1", "✓     item 2"} {
+		if !strings.Contains(joined, label) {
+			t.Fatalf("expected completed fanout item %q, got:\n%s", label, joined)
+		}
+	}
+	if strings.Contains(joined, "▸") {
+		t.Fatalf("done workflow should not show active markers, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericDevShowsDynamicSprintAndPass(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "dev",
+		Role:         "generator",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "sprint_loop", Children: []*workflow.StageNode{
+				{Label: "pass_loop", Children: []*workflow.StageNode{
+					{Label: "generator  generator"},
+					{Label: "evaluator  evaluator"},
+				}},
+			}},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "sprint_loop[2]", Children: []*workflow.StageNode{
+			{Label: "pass_loop[3]", Children: []*workflow.StageNode{{Label: "generator"}}},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	for _, label := range []string{"▸   sprint 2", "▸     pass 3", "▸       generator"} {
+		if !strings.Contains(joined, label) {
+			t.Fatalf("expected dynamic dev label %q, got:\n%s", label, joined)
+		}
+	}
+	if strings.Contains(joined, "sprint loop") || strings.Contains(joined, "pass loop") {
+		t.Fatalf("expected dynamic loop labels instead of templates, got:\n%s", joined)
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericDevShowsCompletedGeneratorAndActiveEvaluator(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "dev",
+		Role:         "evaluator",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "sprint_loop", Children: []*workflow.StageNode{
+				{Label: "pass_loop", Children: []*workflow.StageNode{
+					{Label: "generator  generator"},
+					{Label: "evaluator  evaluator"},
+				}},
+			}},
+		}},
+		ActiveStageTree: &workflow.StageNode{Label: "sprint_loop[1]", Children: []*workflow.StageNode{
+			{Label: "pass_loop[1]", Children: []*workflow.StageNode{{Label: "evaluator"}}},
+		}},
+		CompletedStageTree: &workflow.StageNode{Label: "sprint_loop[1]", Children: []*workflow.StageNode{
+			{Label: "pass_loop[1]", Children: []*workflow.StageNode{{Label: "generator"}}},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	for _, label := range []string{"▸   sprint 1", "▸     pass 1", "✓       generator", "▸       evaluator"} {
+		if !strings.Contains(joined, label) {
+			t.Fatalf("expected panel to show %q, got:\n%s", label, joined)
+		}
+	}
+}
+
+func TestBuildWorkflowPanelLines_GenericDevKeepsCompletedSprintsAtDone(t *testing.T) {
+	st := &workflow.State{
+		WorkflowName: "dev",
+		Role:         "done",
+		StageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "designer  designer"},
+			{Label: "sprint_loop", Children: []*workflow.StageNode{
+				{Label: "pass_loop", Children: []*workflow.StageNode{
+					{Label: "generator  generator"},
+					{Label: "evaluator  evaluator"},
+				}},
+			}},
+		}},
+		CompletedStageTree: &workflow.StageNode{Label: "workflow", Children: []*workflow.StageNode{
+			{Label: "sprint_loop[1]", Children: []*workflow.StageNode{{Label: "pass_loop[1]"}}},
+			{Label: "sprint_loop[2]", Children: []*workflow.StageNode{{Label: "pass_loop[1]"}}},
+		}},
+		Generic: true,
+	}
+	joined := stripANSI(strings.Join(buildWorkflowPanelLines(st, 80), "\n"))
+	for _, label := range []string{"✓   sprint 1", "✓   sprint 2"} {
+		if !strings.Contains(joined, label) {
+			t.Fatalf("expected completed dev sprint %q, got:\n%s", label, joined)
+		}
+	}
+	if strings.Contains(joined, "▸") {
+		t.Fatalf("done workflow should not show active markers, got:\n%s", joined)
 	}
 }

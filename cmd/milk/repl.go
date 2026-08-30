@@ -39,7 +39,6 @@ import (
 	"github.com/scoutme/milk/internal/tasks"
 	"github.com/scoutme/milk/internal/updater"
 	"github.com/scoutme/milk/internal/workflow"
-	wfdev "github.com/scoutme/milk/internal/workflow/dev"
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
 
@@ -656,7 +655,6 @@ type model struct {
 	workflowPanelOffset          int
 	workflowState                *workflow.State
 	pendingWorkflowWizard        *workflowWizardState
-	pendingWorkflowExtend        *workflowExtendState
 	pendingGenericWorkflowExtend *genericWorkflowExtendState
 
 	// designer disambiguation
@@ -1297,9 +1295,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingWorkflowWizard != nil {
 			return m.handleWorkflowWizardKey(msg)
 		}
-		if m.pendingWorkflowExtend != nil {
-			return m.handleWorkflowExtendKey(msg)
-		}
 		if m.pendingGenericWorkflowExtend != nil {
 			return m.handleGenericWorkflowExtendKey(msg)
 		}
@@ -1465,20 +1460,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case wfdev.WorkflowProgressMsg:
-		if msg.State.WorkflowName != "" {
-			st := msg.State
-			m.workflowState = &st
-		}
-		m.workflowPanelOpen = true
-		m.lastWorkflowActivity = time.Now()
-		m.workflowTimeoutWarned = false
-		m.syncLayout()
-
 	case workflow.ProgressMsg:
-		// Generic (interpreter-driven) counterpart to wfdev.WorkflowProgressMsg
-		// above. Update fields in place rather than replacing m.workflowState
-		// wholesale, so AgentMap (set once at launch) survives every
+		// Update fields in place rather than replacing m.workflowState
+		// wholesale, so AgentMap and the full StageTree (set once at launch) survive every
 		// subsequent progress update.
 		if m.workflowState == nil {
 			m.workflowState = &workflow.State{}
@@ -1488,7 +1472,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workflowState.WorkflowID = msg.WorkflowID
 		m.workflowState.Role = msg.Role
 		if msg.ActivePaths != nil {
-			m.workflowState.StageTree = msg.ActivePaths.Root
+			m.workflowState.ActiveStageTree = msg.ActivePaths.Root
+		}
+		if msg.CompletedPaths != nil {
+			m.workflowState.CompletedStageTree = msg.CompletedPaths.Root
 		}
 		m.workflowState.Generic = true
 		m.workflowPanelOpen = true
@@ -1543,7 +1530,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 
-	case wfdev.WorkflowDoneMsg:
+	case workflow.WorkflowDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
 		m.busyHint = ""
@@ -1553,6 +1540,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workflowPanelOpen = true
 		if m.workflowState != nil {
 			m.workflowState.Role = "done"
+			m.workflowState.ActiveStageTree = nil
 		}
 		if m.interrupted {
 			m.interrupted = false
@@ -1560,38 +1548,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if isContextCanceled(msg.Err) {
 			m.appendTranscript(dim("[interrupted]") + "\n")
 		} else if msg.Err != nil {
-			var exhausted *wfdev.ErrPassesExhausted
-			if errors.As(msg.Err, &exhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
-				// Offer to continue with doubled pass limit.
-				w := &workflowWizardState{
-					name:       m.workflowState.WorkflowName,
-					task:       m.workflowState.Task,
-					designer:   m.workflowState.AgentMap["designer"],
-					generator:  m.workflowState.AgentMap["generator"],
-					evaluator:  m.workflowState.AgentMap["evaluator"],
-					workflowID: m.workflowState.WorkflowID,
-				}
-				if w.designer == "" {
-					w.designer = workflow.AliasEscalation
-				}
-				if w.generator == "" {
-					w.generator = workflow.AliasEscalation
-				}
-				if w.evaluator == "" {
-					w.evaluator = workflow.AliasEscalation
-				}
-				m.pendingWorkflowExtend = &workflowExtendState{
-					wizard:    w,
-					sprint:    exhausted.Sprint,
-					maxPasses: exhausted.MaxPasses,
-				}
-				m.appendTranscript(fmt.Sprintf(
-					"%s workflow: sprint %d exhausted %d passes — continue with %d passes? [y/n] ",
-					milkTag(), exhausted.Sprint, exhausted.MaxPasses, exhausted.MaxPasses*2,
-				))
-			} else if genericExhausted := (*interp.ExhaustedError)(nil); errors.As(msg.Err, &genericExhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
-				// Offer to continue with a doubled iteration limit — the
-				// generic counterpart to the dev-specific branch above.
+			if genericExhausted := (*interp.ExhaustedError)(nil); errors.As(msg.Err, &genericExhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
+				// Offer to continue with a doubled iteration limit.
 				reg, regErrs := workflow.LoadRegistry()
 				for _, e := range regErrs {
 					obs.Info("workflow.registry.load_error", "error", e.Error())
@@ -3280,7 +3238,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		if gp, err := globalHistoryPath(); err == nil {
 			writeHistoryFile(gp, fm.globalHistory)
 		}
-		if sp, err := sessionHistoryPath(sess.ID); err == nil {
+		sessID := sess.ID
+		if fm.st != nil && fm.st.sess != nil {
+			sessID = fm.st.sess.ID
+		}
+		if sp, err := sessionHistoryPath(sessID); err == nil {
 			writeHistoryFile(sp, fm.sessionHistory)
 		}
 	}

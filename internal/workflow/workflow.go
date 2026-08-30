@@ -65,17 +65,20 @@ type PathSnapshot struct {
 }
 
 // ProgressMsg is sent to the TUI after each state transition by an
-// interpreter-driven run (internal/workflow/interp) — the generic
-// counterpart to dev.go's own wfdev.WorkflowProgressMsg (which carries a
-// full dev-shaped State instead, since dev.go's control flow is fixed-shape
-// enough to report as one). ActivePaths carries the full tree of currently
-// active execution paths (loops, parallel items), and Role is the role of
-// the turn in flight, if any (empty between turns, e.g. while a loop
-// decides whether to continue).
+// interpreter-driven run (internal/workflow/interp). ActivePaths carries
+// the full tree of currently active execution paths (loops, parallel
+// items), and Role is the role of the turn in flight, if any (empty
+// between turns, e.g. while a loop decides whether to continue).
 type ProgressMsg struct {
-	WorkflowName string
-	Task         string
-	WorkflowID   int
-	ActivePaths  *PathSnapshot
-	Role         string
+	WorkflowName   string
+	Task           string
+	WorkflowID     int
+	ActivePaths    *PathSnapshot
+	CompletedPaths *PathSnapshot
+	Role           string
+}
+
+// WorkflowDoneMsg is sent to the TUI when a workflow run ends (success or error).
+type WorkflowDoneMsg struct {
+	Err error
 }

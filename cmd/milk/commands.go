@@ -21,6 +21,10 @@ import (
 )
 
 func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
+	oldSessionID := ""
+	if m.st != nil && m.st.sess != nil {
+		oldSessionID = m.st.sess.ID
+	}
 	if cmd == cmdHistory {
 		return m.handleHistoryCmd(strings.TrimSpace(rest)), nil
 	}
@@ -79,6 +83,12 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	exit, dispatch, output := handleSlashCommand(cmd, rest, m.st)
+	if err := m.refreshSessionScopedState(oldSessionID); err != nil {
+		if output != "" {
+			output += "\n"
+		}
+		output += fmt.Sprintf("%s warning: session switch state refresh failed: %v", milkTag(), err)
+	}
 	m.refreshPrompt()
 	if exit {
 		return m, tea.Quit
@@ -92,6 +102,57 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m.dispatchAgent(dispatch)
 	}
 	return m, nil
+}
+
+func (m *model) refreshSessionScopedState(oldSessionID string) error {
+	if m.st == nil || m.st.sess == nil || oldSessionID == "" || m.st.sess.ID == oldSessionID {
+		return nil
+	}
+	if sp, err := sessionHistoryPath(oldSessionID); err == nil {
+		writeHistoryFile(sp, m.sessionHistory)
+	}
+	if sp, err := sessionHistoryPath(m.st.sess.ID); err == nil {
+		m.sessionHistory = readHistoryFile(sp)
+	} else {
+		m.sessionHistory = nil
+	}
+	m.histIdx = -1
+	m.saved = ""
+	m.useGlobalHistory = false
+
+	if dir, err := memoryDir(); err == nil {
+		if mem, memErr := memory.NewStore(dir, m.st.sess.ID); memErr == nil {
+			m.mem = mem
+			m.st.mem = mem
+		} else {
+			return memErr
+		}
+	}
+
+	if dir, err := config.Dir(); err == nil {
+		taskStore, taskErr := tasks.New(filepath.Join(dir, "tasks"), m.st.sess.ID)
+		if taskErr != nil {
+			return taskErr
+		}
+		if m.st.program != nil {
+			taskStore.SetOnChange(func() { m.st.program.Send(memoryRefreshMsg{}) })
+		}
+		m.taskStore = taskStore
+		adapter := tasks.NewAdapter(taskStore)
+		if m.agents.local != nil {
+			m.agents.local = m.agents.local.WithTaskStore(adapter)
+		}
+		if m.agents.escalationLocal != nil {
+			m.agents.escalationLocal = m.agents.escalationLocal.WithTaskStore(adapter)
+		}
+	}
+
+	m.workflowResumeInit = nil
+	m.panelOffset = 0
+	m.tasksOffset = 0
+	m.refreshPrompt()
+	m.syncLayout()
+	return nil
 }
 
 // handleTasksCmd handles `/tasks` — lists current session + global tasks in the transcript.
