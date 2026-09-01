@@ -103,6 +103,22 @@ func TestDetectConsecutiveRepeat_LargeBlock(t *testing.T) {
 	}
 }
 
+func TestDetectConsecutiveRepeat_200TokenBlock4x(t *testing.T) {
+	// Real-world case: model repeats a ~200-token planning block 4 times.
+	// With window=1000 and threshold=3, this should trigger.
+	block := make([]string, 200)
+	for i := range block {
+		block[i] = fmt.Sprintf("word_%d", i%30)
+	}
+	tokens := make([]string, 0, 800)
+	for i := 0; i < 4; i++ {
+		tokens = append(tokens, block...)
+	}
+	if !detectConsecutiveRepeat(tokens, 4, 3, 3) {
+		t.Error("expected detection of 200-token block repeated 4 times")
+	}
+}
+
 func TestNormalisedHash_Truncation(t *testing.T) {
 	// Two long texts that share the first 500+ chars but differ after should
 	// hash identically because normalisedHash truncates to streakHashPrefixLen.

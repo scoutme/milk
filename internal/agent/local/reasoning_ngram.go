@@ -19,7 +19,7 @@ type reasoningNgramMonitor struct {
 }
 
 const (
-	defaultNgramWindowSize  = 500
+	defaultNgramWindowSize  = 1000
 	defaultNgramBlockSize   = 4
 	defaultNgramThreshold   = 3
 	defaultNgramMinDistinct = 3
