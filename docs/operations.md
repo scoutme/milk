@@ -75,25 +75,33 @@ Separate from OTel, three flags capture raw protocol traffic verbatim:
 
 ## Loop detection
 
-milk monitors agent output for signs of looping — repeating the same phrase, tool call, or response pattern — to prevent runaway token consumption when nobody notices and interrupts manually. Two complementary systems work together:
+milk monitors agent output for signs of looping — repeating the same phrase, tool call, or response pattern — to prevent runaway token consumption when nobody notices and interrupts manually. Four complementary systems work together:
 
-### Agent-internal streak tracker (`internal/agent/local/loop_streak.go`)
+### Agent-internal detectors (`internal/agent/local/`)
 
-Operates inside the local agent's tool iteration loop. Detects when the model repeats the same reasoning or tool-call pattern across consecutive iterations using SHA-256 hashing. Recovery: injects a mild recovery nudge, then a strong nudge, then terminates the turn. Also **crops looping messages from context** so the model can't see its own loop anymore — significantly more effective than just nudging.
+Operate inside the local agent's tool iteration loop. All share the same recovery flow: crop looping messages from context, inject an escalating recovery nudge (mild → strong), then terminate after max attempts.
+
+| Detector | File | Catches | How |
+|---|---|---|---|
+| **Streak tracker** | `loop_streak.go` | Same reasoning hash or tool-call signature across consecutive iterations | SHA-256 of normalised reasoning (truncated to 500 chars, leading phrases stripped) |
+| **Streaming n-gram** | `reasoning_ngram.go` | Periodic reasoning repetition during streaming ("I'm done → let me check → I'm done") | Sliding 500-token window, detects blocks of 4+ tokens repeating 10+ times consecutively. **Cuts the stream immediately** to save tokens. |
+| **Text-loop tracker** | `loop_streak.go` | Same output text across consecutive steps | Normalised text (200 chars, leading phrases stripped) compared across steps |
+| **Duplicate tool calls** | `local.go` | Model re-issues a tool call already executed with identical arguments | Exact match on tool name + arguments. Nudges first (matching MiMo-Code's approach); terminates after max recovery. |
 
 ### TUI-level detector (`internal/loop/detector.go`)
 
-Operates at the streaming/TUI layer. Catches patterns the agent-internal tracker can't see:
+Operates at the streaming/TUI layer. Catches patterns the agent-internal trackers can't see:
 
 | Signal | Scope | Catches | Default threshold |
 |---|---|---|---|
 | `chunk_repetition` | Intra-turn | Same text repeating consecutively in streaming output | 5 occurrences / 50-chunk window |
 | `chunk_repetition` (scattered) | Intra-turn | The same chunk recurring within the window without needing to be back-to-back | Chunks ≥ 40 runes only, to avoid flagging short boilerplate phrases |
-| `reasoning_chunk_repetition` | Intra-turn | Same text repeating in streaming reasoning output | 10 / 50-chunk window |
 | `reasoning_chunk_flood` | Intra-turn | Too many reasoning chunks without content output | 5000 chunks |
 | `token_velocity` | Cross-turn | Rapid token consumption without progress | 300k tokens / 60s |
 | `silent_burn` | Per-turn | High input tokens, near-zero output | 20k input tokens |
 | `turn_flood` | Session | Excessive turns without user input | 10 consecutive non-user turns |
+
+Note: consecutive reasoning chunk repetition (`SignalReasoningChunkRepetition`) was removed from the TUI detector — it is now handled more effectively by the streaming n-gram detector, which cuts the stream immediately instead of just warning.
 
 ### Try-best detector (`internal/loop/try_best.go`)
 
@@ -116,7 +124,6 @@ Status bar shows `⚠ loop — auto-interrupting` (high confidence) or `⚠ <sig
     "chunk_repetition_threshold": 5,
     "chunk_window_size": 50,
     "chunk_repetition_min_scattered_length": 40,
-    "reasoning_chunk_repetition_threshold": 10,
     "reasoning_chunk_flood_threshold": 5000,
     "token_velocity_window_seconds": 60,
     "token_velocity_threshold": 300000,

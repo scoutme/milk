@@ -316,6 +316,14 @@ type Agent struct {
 	// When non-nil, RecordToolCall is called after each tool completes and
 	// CheckActionStreak after each tool-calling round.
 	tryBest TryBestRecorder
+	// reasoningNgram is a streaming-level detector that catches periodic
+	// repetition in reasoning content (e.g. "I'm done → let me check → I'm
+	// done → let me check").  Created lazily on first use; nil when disabled.
+	reasoningNgram *reasoningNgramMonitor
+	// reasoningNgramTriggered is set to true by scanSSE when the n-gram
+	// monitor detects repetition during streaming.  The main loop checks
+	// this flag after streamCompletion returns.
+	reasoningNgramTriggered bool
 }
 
 // TryBestRecorder is the interface for the try-best loop detector.
@@ -979,6 +987,7 @@ func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns i
 // history is the prior turns only — it must NOT contain the current userPrompt
 // turn (dispatch adds it to sess.History only after Run returns).
 func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) ([]Message, error) {
+	defer func() { a.reasoningNgram = nil }()
 	if history == nil {
 		history = []Message{}
 	}
@@ -1031,6 +1040,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection
+	var textLoop textLoopTracker // output-text loop detection
+	var duplicateRecoveryCount int
+	ngram := newReasoningNgramMonitor()
+	ngramRecoveryCount := 0
+	a.reasoningNgram = ngram
+	a.reasoningNgramTriggered = false
 
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
@@ -1042,6 +1057,44 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			return msgs, err
 		}
 		lastReasoningText = reasoningText
+
+		// Streaming n-gram detection: if the reasoning content contained
+		// periodic repetition (e.g. "I'm done → let me check → I'm done"),
+		// the n-gram monitor flagged it during streaming.  Uses a separate
+		// recovery counter and n-gram-specific prompts (emphasise "vary your
+		// wording" rather than "change tool").
+		if a.reasoningNgramTriggered {
+			a.reasoningNgramTriggered = false
+			ngram.Reset()
+			ngramRecoveryCount++
+			if ngramRecoveryCount > textLoopMaxRecovery {
+				obs.Warn("reasoning n-gram: max recovery exceeded, terminating turn",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
+				loopMsg := "[turn terminated: the model was stuck in a reasoning repetition loop and could not self-recover after multiple attempts]"
+				resp := summarizeToolTrail(msgs, loopMsg)
+				if a.onResponseSegment != nil && resp != "" {
+					a.onResponseSegment(resp)
+				}
+				msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+				return msgs, nil
+			}
+			cropped := cropLoopingMessages(msgs, userMsgIdx)
+			if len(cropped) < len(msgs) {
+				obs.Warn("reasoning n-gram: cropped looping messages",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+					"before", len(msgs), "after", len(cropped))
+				msgs = cropped
+			}
+			nudge := recoveryNgramRemind
+			if ngramRecoveryCount >= 2 {
+				nudge = recoveryNgramReplan
+			}
+			obs.Warn("reasoning n-gram repetition detected, injecting recovery nudge",
+				"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+				"recovery", ngramRecoveryCount)
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
+			continue
+		}
 
 		if len(toolCalls) == 0 {
 			// No tool calls: either a final text response, or the model emitting EOS
@@ -1062,7 +1115,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 
 		// Deduplicate: if every tool call in this turn was already executed with
-		// the same arguments, the model is stuck in a loop — treat as terminal.
+		// the same arguments, the model is stuck in a loop.  Nudge it to change
+		// approach (matching MiMo-Code's repeated-step nudge) instead of
+		// terminating immediately.  Only terminate after max recovery attempts.
 		allSeen := true
 		for _, tc := range toolCalls {
 			key := tc.Function.Name + "\x00" + tc.Function.Arguments
@@ -1072,21 +1127,33 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			}
 		}
 		if allSeen {
-			if resp == "" {
-				// The model is stuck repeating a tool call it already made, and
-				// gave no text alongside the repeat. Without this fallback the
-				// turn would end with a blank assistant message — no error, no
-				// summary, nothing for the user or a later "resume" to go on.
-				obs.Warn("loop detected: repeated tool call with empty response",
+			duplicateRecoveryCount++
+			if duplicateRecoveryCount > textLoopMaxRecovery {
+				obs.Warn("duplicate tool call: max recovery exceeded, terminating turn",
 					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-				resp = summarizeToolTrail(msgs, resp)
+				loopMsg := "[turn terminated: the model kept repeating the same tool call and could not self-recover after multiple attempts]"
+				resp := summarizeToolTrail(msgs, loopMsg)
+				if a.onResponseSegment != nil && resp != "" {
+					a.onResponseSegment(resp)
+				}
+				msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+				return msgs, nil
 			}
-			if a.onResponseSegment != nil && resp != "" {
-				a.onResponseSegment(resp)
+			obs.Warn("duplicate tool call detected, injecting recovery nudge",
+				"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+				"recovery", duplicateRecoveryCount)
+			cropped := cropLoopingMessages(msgs, userMsgIdx)
+			if len(cropped) < len(msgs) {
+				msgs = cropped
 			}
-			msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
-			return msgs, nil
+			nudge := recoveryDuplicateToolMild
+			if duplicateRecoveryCount >= 2 {
+				nudge = recoveryDuplicateToolStrong
+			}
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
+			continue
 		}
+		duplicateRecoveryCount = 0
 		for _, tc := range toolCalls {
 			executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
 		}
@@ -1110,7 +1177,8 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			if streak.recoveryCount >= 3 {
 				obs.Warn("loop streak: max recovery exceeded, terminating turn",
 					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-				resp := summarizeToolTrail(msgs, "")
+				loopMsg := "[turn terminated: the model was stuck repeating the same reasoning/tool-call pattern and could not self-recover after multiple attempts]"
+				resp := summarizeToolTrail(msgs, loopMsg)
 				if a.onResponseSegment != nil && resp != "" {
 					a.onResponseSegment(resp)
 				}
@@ -1138,6 +1206,28 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			msgs = append(msgs, Message{Role: "user", Content: nudge})
 		} else {
 			streak.recoveryCount = 0
+			ngram.Reset()
+			ngramRecoveryCount = 0
+		}
+
+		// Text-loop detection: if the model's output text (not reasoning)
+		// is identical across consecutive steps, inject a recovery nudge.
+		// This catches a different failure mode than the reasoning streak
+		// tracker — the model repeating its visible answer rather than
+		// its thinking.
+		if resp != "" && textLoop.recordStep(resp) {
+			textLoop.reset()
+			nudge := recoveryNudgeMild
+			if streak.recoveryCount >= 2 {
+				nudge = recoveryNudgeStrong
+			}
+			obs.Warn("text loop detected, injecting recovery nudge",
+				"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
+			cropped := cropLoopingMessages(msgs, userMsgIdx)
+			if len(cropped) < len(msgs) {
+				msgs = cropped
+			}
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
 		}
 	}
 
@@ -1867,12 +1957,24 @@ func (a *Agent) scanSSE(
 				if a.onThinking != nil {
 					a.onThinking(choice.Delta.ReasoningContent)
 				}
+				if a.reasoningNgram != nil && a.reasoningNgram.Feed(choice.Delta.ReasoningContent) {
+					a.reasoningNgramTriggered = true
+					// Cut the stream immediately — don't wait for the
+					// server to finish sending.  The remaining tokens
+					// are wasted work from a model stuck in a loop.
+					// httpResp.Body.Close() (deferred in streamCompletion)
+					// will reset the connection.
+					break
+				}
 			}
 			processContentToken(choice.Delta.Content, det, textBuf, out)
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 			if choice.FinishReason != "" {
 				finishReason = choice.FinishReason
 			}
+		}
+		if a.reasoningNgramTriggered {
+			break
 		}
 	}
 	if err := scanner.Err(); err != nil {

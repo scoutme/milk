@@ -595,6 +595,14 @@ func execOverLoop(ec *execContext, s workflow.Stage) error {
 		sections = []Section{{Label: s.Over, Index: 1}}
 	}
 	label := strings.ToLower(s.Over)
+	// Push a parent path segment so that individual iterations appear as
+	// dynamic children in the progress tree (sprint_loop[1], sprint_loop[2],
+	// … under sprint_loop). Without this, the panel's matchingActiveNode
+	// collapses all iterations into the single static sprint_loop node and
+	// only the current/last sprint is visible.
+	ec.pushPath(s.ID)
+	ec.reportProgress("")
+	defer ec.popPath()
 	for _, sec := range sections {
 		ec.vars[label] = sec.Index
 		ec.vars[label+"_section"] = sec.Body

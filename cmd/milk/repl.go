@@ -629,6 +629,14 @@ type model struct {
 	colorizeForce     bool   // if true, bypass cache on next render
 	colorizeLinesSeen int    // new lines since last full re-colorize
 
+	// Per-turn colorization cache: stores colorized output for each completed
+	// turn (splitTurns segments ending with "\n\n"). Completed turns never
+	// change, so their cached colorized output remains valid across streaming
+	// updates. Only the last (incomplete) turn is re-colorized on cache miss.
+	// This makes full re-colorization O(last turn) instead of O(full transcript).
+	turnColorCache []string // colorized output per completed turn
+	turnRawCache   []string // raw text per completed turn (cache key)
+
 	// hintDebounceGen is incremented on every keystroke that triggers a hint
 	// rebuild. hintDebounceMsg carries the gen value at dispatch time; any
 	// message whose gen no longer matches is a stale firing and is dropped.
@@ -2281,10 +2289,17 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 
 	// If we're collecting designer disambiguation answers, send them to the workflow.
 	if m.pendingWorkflowQuestions != "" {
-		m.appendTranscript(promptLabel(m.st) + input + "\n")
+		// Don't send empty answers — they create empty checkpoint entries
+		// that replay badly on resume.  Treat bare Enter as "continue".
+		answer := input
+		if strings.TrimSpace(answer) == "" {
+			answer = "continue"
+		}
+		m.appendTranscript(promptLabel(m.st) + answer + "\n")
 		if m.workflowAnswersCh != nil {
-			m.workflowAnswersCh <- input
-			close(m.workflowAnswersCh)
+			m.workflowAnswersCh <- answer
+			// Don't close the channel — it's reused for subsequent
+			// user_checkpoint stages in the same workflow run.
 			m.workflowAnswersCh = nil
 		}
 		m.pendingWorkflowQuestions = ""

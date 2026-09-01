@@ -156,27 +156,37 @@ The colon-separated convention allows prefix queries — `SessionTokensByRolePre
 
 ## Loop detection
 
-Milk detects when an LLM agent gets stuck in a loop — repeating the same phrase/tool-call within a turn, or producing identical responses across turns. This prevents runaway token consumption when the user doesn't interrupt.
+Milk detects when an LLM agent gets stuck in a loop — repeating the same phrase/tool-call within a turn, or producing identical responses across turns. This prevents runaway token consumption when the user doesn't interrupt. Four complementary systems work together:
 
-### Signals
+### Agent-internal detectors (`internal/agent/local/`)
+
+| Detector | Catches | Recovery |
+|---|---|---|
+| **Streak tracker** (`loop_streak.go`) | Same reasoning hash or tool-call signature across consecutive iterations | Crop + nudge → strong nudge → terminate |
+| **Streaming n-gram** (`reasoning_ngram.go`) | Periodic reasoning repetition during streaming | **Cuts stream immediately** + crop + nudge → terminate |
+| **Text-loop tracker** (`loop_streak.go`) | Same output text across consecutive steps | Crop + nudge → terminate |
+| **Duplicate tool calls** (`local.go`) | Model re-issues a tool call already executed | Nudge → strong nudge → terminate |
+
+### TUI-level signals (`internal/loop/detector.go`)
 
 | Signal | Scope | What it catches | Default threshold |
 |---|---|---|---|
 | **chunk_repetition** | Intra-turn | Same text repeating in streaming output (consecutive, or scattered for chunks ≥40 runes) | 5 occurrences in 50-chunk window |
-| **reasoning_chunk_repetition** | Intra-turn | Same text repeating in streaming reasoning/thinking output | 10 occurrences in 50-chunk window |
-| **response_repetition** | Cross-turn | Identical/near-identical responses across turns | 3 consecutive similar responses |
-| **reasoning_repetition** | Cross-turn | Identical/near-identical reasoning text across turns | 6 consecutive similar responses |
+| **reasoning_chunk_flood** | Intra-turn | Too many reasoning chunks without content output | 5000 chunks |
 | **token_velocity** | Cross-turn | Rapid token consumption without progress | 300k tokens in 60s window |
-| **tool_call_echo** | Cross-turn | Same tool+args in consecutive turns | 3 consecutive turns |
 | **silent_burn** | Per-turn | High input tokens, near-zero output | 20k input tokens |
 | **turn_flood** | Session | Excessive turns without user input | 10 consecutive non-user turns |
 
+Note: consecutive reasoning chunk repetition was removed from TUI signals — now handled by the streaming n-gram detector which cuts the stream immediately.
+
 ### How it works
 
-1. **Intra-turn**: `FeedChunk()` is called for every streaming `chunkMsg`. A ring buffer tracks the last 50 chunks. When the same text appears 5+ times consecutively (or recurs anywhere in the window, for chunks ≥40 runes), `SignalChunkRepetition` fires (confidence 0.9) and the turn is auto-interrupted via `cancelTurn()`.
-2. **Cross-turn**: `Feed()` is called after each turn completes. It checks response similarity (trigram Jaccard), token velocity, tool call patterns, and turn count.
-3. **Status bar**: Shows `⚠ loop — auto-interrupted` or `⚠ <signal>` when a signal fires.
-4. **Transcript**: Shows `[⚠ loop detected: <signal> (confidence N%)]` for high-confidence signals.
+1. **Streaming n-gram**: During reasoning streaming, every `reasoning_content` delta feeds a sliding 500-token window. When a block of 4+ tokens repeats 10+ times consecutively, the stream is cut immediately and a recovery nudge is injected.
+2. **Streak tracker**: After each tool-calling iteration, the reasoning text (truncated to 500 chars, normalised) is hashed. Three consecutive identical hashes trigger crop + nudge.
+3. **Duplicate tool calls**: After each iteration, tool calls are checked against previously executed calls. Exact matches trigger a nudge (not termination), matching MiMo-Code's approach.
+4. **TUI-level**: `FeedChunk()` is called for every streaming chunk. A ring buffer tracks the last 50 chunks. Cross-turn signals fire after each turn completes.
+5. **Status bar**: Shows `⚠ loop — auto-interrupted` or `⚠ <signal>` when a signal fires.
+6. **Transcript**: Shows `[⚠ loop detected: <signal> (confidence N%)]` for high-confidence signals.
 
 ### Configuration
 
@@ -187,7 +197,7 @@ Milk detects when an LLM agent gets stuck in a loop — repeating the same phras
     "chunk_repetition_threshold": 5,
     "chunk_window_size": 50,
     "chunk_repetition_min_scattered_length": 40,
-    "reasoning_chunk_repetition_threshold": 10,
+    "reasoning_chunk_flood_threshold": 5000,
     "max_consecutive_similar_responses": 3,
     "response_similarity_threshold": 0.85,
     "reasoning_max_consecutive_similar_responses": 6,
