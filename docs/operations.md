@@ -227,4 +227,15 @@ When an agent calls `edit_file`/`write_file` (primary) or `Edit`/`Write` (Claude
 
 ## Keyboard shortcuts
 
-See the [keyboard shortcuts reference in README.md](../README.md#interactive-mode).
+| Shortcut | Action |
+|---|---|
+| **Enter** | Submit prompt / accept tab completion |
+| **Tab** | Cycle slash-command and @-path completions |
+| **Shift-Tab** | Reverse cycle completions |
+| **Ctrl-C** | Copy selection → clear input → cancel workflow/turn → quit (double press) |
+| **Ctrl-D** | Quit (when input is empty) |
+| **Ctrl-R** | Search backward in transcript |
+| **Ctrl-S** | Search forward in transcript |
+| **Ctrl-Left/Right** | Word navigation |
+| **Shift-Arrows** | Text selection (transcript and input) |
+| **Ctrl-X** | Cut selected input text |
