@@ -241,6 +241,9 @@ func (m model) handleColorizeCmd(arg string) model {
 		if validModes[arg] {
 			m.colorizeMode = ParseColorizeMode(arg)
 			m.colorizeForce = true
+			// Mode change invalidates per-turn colorization cache.
+			m.turnColorCache = nil
+			m.turnRawCache = nil
 		}
 	}
 	m.appendTranscript(output + "\n")
