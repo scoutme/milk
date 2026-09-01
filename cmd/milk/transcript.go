@@ -14,8 +14,9 @@ import (
 
 // colorizeLineThresh is the number of new lines that must accumulate before
 // a mid-stream re-colorization is triggered. Keeps chroma/glamour from running
-// on every individual streamed token.
-const colorizeLineThresh = 8
+// on every individual streamed token. With per-turn caching, full re-colorize
+// is O(last turn) not O(transcript), so a higher threshold is affordable.
+const colorizeLineThresh = 32
 
 // appendTranscript adds text to both transcript variants and refreshes the viewport.
 // Sticky-bottom: only auto-scrolls when already at the bottom.
@@ -115,14 +116,7 @@ func (m *model) wrappedTranscript() string {
 		m.colorizeLinesSeen += newLines
 	}
 
-	// Pre-colored content (e.g. a tool diff or dim-wrapped hint) written straight
-	// into the transcript carries its own raw ANSI, so re-wrapping just the new
-	// suffix here — independent from the cached prefix — risks a boundary that
-	// doesn't line up with the caller's escape runs. Force a full re-colorize in
-	// that case instead of trusting the fast path.
-	newSuffixHasANSI := txGrew > 0 && strings.IndexByte(raw[m.colorizeTransLen:], 0x1B) >= 0
-
-	if !m.colorizeForce && !vpChanged && !newSuffixHasANSI && m.colorizeCached != "" && m.colorizeLinesSeen < colorizeLineThresh {
+	if !m.colorizeForce && !vpChanged && m.colorizeCached != "" && m.colorizeLinesSeen < colorizeLineThresh {
 		// Return cached result — append plain-wrapped new text as a fast suffix
 		// so the user sees new content immediately even without re-colorizing.
 		if txGrew > 0 {
@@ -141,10 +135,12 @@ func (m *model) wrappedTranscript() string {
 		return m.applySelectionHighlight(m.colorizeCached)
 	}
 
-	// Full re-colorize: colorize on the raw (unwrapped) transcript so that
-	// multi-line constructs like tables are detected on intact rows, then
-	// word-wrap the colorized output. Wrapping before colorization would break
-	// long table rows mid-cell, preventing table detection entirely.
+	// Full re-colorize with per-turn caching: colorize on the raw (unwrapped)
+	// transcript so that multi-line constructs like tables are detected on intact
+	// rows, then word-wrap the colorized output. Completed turns (segments
+	// ending with "\n\n") never change, so their colorized output is cached in
+	// turnColorCache/turnRawCache. Only the last (incomplete) turn is re-colorized
+	// on each cache miss, making this O(last turn) instead of O(full transcript).
 	//
 	// Content streams into the transcript byte-by-byte (internal/tags.TagWriter/
 	// PerceptWriter must scan one byte at a time to detect tags across chunk
@@ -152,16 +148,46 @@ func (m *model) wrappedTranscript() string {
 	// lone ESC, or "ESC[" with no terminating 'm' yet — even for text a caller
 	// wrote as one complete string. Clip the cached boundary to just before any
 	// such dangling escape so colorizeCached/colorizeTransLen never commit to a
-	// cut point mid-sequence; the incomplete tail stays in the "new" region,
-	// where newSuffixHasANSI keeps forcing a full re-colorize until it resolves.
+	// cut point mid-sequence; the incomplete tail stays in the "new" region.
 	effLen := txLen
 	if idx := danglingEscapeStart(raw); idx >= 0 {
 		effLen = idx
 	}
 	m.colorizeForce = false
 	m.colorizeLinesSeen = 0
-	colorized := colorizeTranscriptWrapped(raw[:effLen], m.colorizeMode)
-	wrapped := ansi.Wrap(expandTabsForWrap(colorized), vw, "")
+
+	// Split into turns and colorize with per-turn caching.
+	segments := splitTurns(raw[:effLen])
+	var colorized strings.Builder
+	for i, seg := range segments {
+		if i < len(segments)-1 {
+			// Completed turn (followed by another segment): check per-turn cache.
+			if i < len(m.turnColorCache) && i < len(m.turnRawCache) && m.turnRawCache[i] == seg {
+				colorized.WriteString(m.turnColorCache[i])
+			} else {
+				result := colorizeSingle(seg, m.colorizeMode)
+				if i < len(m.turnColorCache) {
+					m.turnColorCache[i] = result
+					m.turnRawCache[i] = seg
+				} else {
+					m.turnColorCache = append(m.turnColorCache, result)
+					m.turnRawCache = append(m.turnRawCache, seg)
+				}
+				colorized.WriteString(result)
+			}
+		} else {
+			// Last (incomplete) turn: always re-colorize.
+			colorized.WriteString(colorizeSingle(seg, m.colorizeMode))
+		}
+	}
+	// Trim completed turns from cache if transcript shrank (shouldn't happen
+	// in normal operation, but defensive).
+	if len(m.turnColorCache) > len(segments)-1 && len(segments) > 0 {
+		m.turnColorCache = m.turnColorCache[:len(segments)-1]
+		m.turnRawCache = m.turnRawCache[:len(segments)-1]
+	}
+
+	wrapped := ansi.Wrap(expandTabsForWrap(colorized.String()), vw, "")
 
 	// Update cache.
 	m.colorizeCached = wrapped

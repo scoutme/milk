@@ -43,7 +43,7 @@ type Config struct {
 	// but applied to thinking/reasoning stream chunks, not final output. Higher
 	// default threshold — reasoning naturally repeats phrases more than final
 	// answers do, so it needs more slack before it's treated as a stuck loop.
-	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold"` // default 10
+	ReasoningChunkRepetitionThreshold int `json:"reasoning_chunk_repetition_threshold"` // default 10; used by scattered reasoning detection only
 
 	// Reasoning chunk flood (intra-turn): fires when the total number of
 	// reasoning chunks exceeds this threshold within a single turn, even if
@@ -123,7 +123,7 @@ const (
 	SignalSilentBurn
 	SignalTurnFlood
 	SignalChunkRepetition                   // intra-turn: same chunk text repeating
-	SignalReasoningChunkRepetition          // intra-turn: same reasoning/thinking chunk text repeating
+	_                                       // was SignalReasoningChunkRepetition — now handled by streaming n-gram detector
 	SignalReasoningRepetition               // cross-turn: reasoning text repeating across turns
 	SignalScatteredChunkRepetition          // intra-turn: same long chunk text recurring without adjacency
 	SignalScatteredReasoningChunkRepetition // intra-turn: same long reasoning chunk text recurring without adjacency
@@ -144,8 +144,6 @@ func (s Signal) String() string {
 		return "turn_flood"
 	case SignalChunkRepetition:
 		return "chunk_repetition"
-	case SignalReasoningChunkRepetition:
-		return "reasoning_chunk_repetition"
 	case SignalReasoningRepetition:
 		return "reasoning_repetition"
 	case SignalScatteredChunkRepetition:
@@ -194,13 +192,11 @@ type Detector struct {
 	// within the window, adjacency not required — see chunkScatter docs).
 	chunkScatter scatterState
 
-	// Reasoning counterparts — same shape as the chunk fields above, fed from
-	// thinking/reasoning stream chunks and checked against separate (higher)
-	// thresholds.
-	firedReasonChunk    bool
-	consecReasonRepeat  int
-	lastReasonChunkText string
-	reasonScatter       scatterState
+	// Reasoning scattered-repeat tracking (same long reasoning chunk text
+	// recurring within the window, adjacency not required).  Consecutive
+	// reasoning repetition is now handled by the streaming n-gram detector
+	// in agent/local/reasoning_ngram.go.
+	reasonScatter scatterState
 
 	// Reasoning chunk flood: total count of reasoning chunks in the current
 	// turn. Fires once when ReasoningChunkFloodThreshold is exceeded.
@@ -310,9 +306,6 @@ func (d *Detector) Reset() {
 	d.consecRepeat = 0
 	d.lastChunkText = ""
 	d.chunkScatter.reset()
-	d.firedReasonChunk = false
-	d.consecReasonRepeat = 0
-	d.lastReasonChunkText = ""
 	d.reasonScatter.reset()
 	d.reasonChunkCount = 0
 	d.firedReasonFlood = false
@@ -326,9 +319,6 @@ func (d *Detector) ResetTurn() {
 	d.consecRepeat = 0
 	d.lastChunkText = ""
 	d.chunkScatter.reset()
-	d.firedReasonChunk = false
-	d.consecReasonRepeat = 0
-	d.lastReasonChunkText = ""
 	d.reasonScatter.reset()
 	d.reasonChunkCount = 0
 	d.firedReasonFlood = false
@@ -439,30 +429,6 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 
 	var verdicts []Verdict
 
-	if trimmed == d.lastReasonChunkText {
-		d.consecReasonRepeat++
-	} else {
-		d.consecReasonRepeat = 1
-		d.lastReasonChunkText = trimmed
-		d.firedReasonChunk = false
-	}
-	slog.Default().Debug("loop: FeedReasoningChunk",
-		"consec", d.consecReasonRepeat,
-		"threshold", d.cfg.ReasoningChunkRepetitionThreshold,
-		"chunk", truncateForDisplay(trimmed),
-	)
-	if !d.firedReasonChunk && d.consecReasonRepeat >= d.cfg.ReasoningChunkRepetitionThreshold {
-		d.firedReasonChunk = true
-		v := Verdict{
-			Signal:          SignalReasoningChunkRepetition,
-			Confidence:      0.9,
-			Message:         fmt.Sprintf("reasoning repeating %d×: %q", d.consecReasonRepeat, truncateForDisplay(trimmed)),
-			ShouldInterrupt: true,
-		}
-		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
-		verdicts = append(verdicts, v)
-	}
-
 	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
 		count := d.reasonScatter.feed(d.cfg.ChunkWindowSize, trimmed)
 		slog.Default().Debug("loop: FeedReasoningChunk scattered",
@@ -476,7 +442,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 				Signal:          SignalScatteredReasoningChunkRepetition,
 				Confidence:      0.8,
 				Message:         fmt.Sprintf("reasoning phrase recurring %d×: %q", count, truncateForDisplay(trimmed)),
-				ShouldInterrupt: true,
+				ShouldInterrupt: false,
 			}
 			slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 			verdicts = append(verdicts, v)
