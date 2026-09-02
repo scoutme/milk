@@ -1,6 +1,15 @@
 package local
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// numRe matches standalone integers and floats so the tokenizer can
+// normalise them to a placeholder.  This lets the detector catch
+// patterns like "line 1517 … correct" / "line 1523 … correct" where
+// the structure repeats but the numbers change each cycle.
+var numRe = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
 
 // reasoningNgramMonitor detects periodic repetition in streaming reasoning
 // content.  It accumulates tokens in a sliding window and checks for blocks
@@ -19,7 +28,7 @@ type reasoningNgramMonitor struct {
 }
 
 const (
-	defaultNgramWindowSize  = 500
+	defaultNgramWindowSize  = 1000
 	defaultNgramBlockSize   = 4
 	defaultNgramThreshold   = 3
 	defaultNgramMinDistinct = 3
@@ -35,8 +44,13 @@ func newReasoningNgramMonitor() *reasoningNgramMonitor {
 }
 
 // tokenize splits text into lowercase tokens for n-gram analysis.
+// Numbers (integers and floats) are replaced with a <NUM> placeholder
+// so that structurally identical reasoning with different numeric
+// literals (line counts, coordinates, cooldown values, …) still
+// matches as the same repeating block.
 func tokenize(text string) []string {
 	text = strings.ToLower(text)
+	text = numRe.ReplaceAllString(text, "<NUM>")
 	text = strings.Join(strings.Fields(text), " ")
 	parts := strings.Split(text, " ")
 	out := make([]string, 0, len(parts))
