@@ -62,8 +62,13 @@ func tokenize(text string) []string {
 	return out
 }
 
-// Feed appends new reasoning text and returns true if periodic repetition is
-// detected within the sliding window.
+// Feed appends new reasoning text and returns true if repetition is
+// detected within the sliding window.  Two detection methods are used:
+//  1. detectConsecutiveRepeat — catches back-to-back periodic blocks
+//     (e.g. "A B C D A B C D A B C D")
+//  2. detectRepeatedNgram — catches the same n-gram appearing multiple
+//     times anywhere in the window, even with other content between
+//     occurrences (e.g. "A B C ... X Y Z ... A B C ... P Q R ... A B C")
 func (m *reasoningNgramMonitor) Feed(text string) bool {
 	if text == "" {
 		return false
@@ -73,7 +78,8 @@ func (m *reasoningNgramMonitor) Feed(text string) bool {
 	if len(m.tokens) > m.windowSize {
 		m.tokens = m.tokens[len(m.tokens)-m.windowSize:]
 	}
-	return detectConsecutiveRepeat(m.tokens, m.blockSize, m.threshold, m.minDistinct)
+	return detectConsecutiveRepeat(m.tokens, m.blockSize, m.threshold, m.minDistinct) ||
+		detectRepeatedNgram(m.tokens, m.blockSize, m.threshold)
 }
 
 // Reset clears the accumulated tokens.
@@ -120,6 +126,27 @@ func detectConsecutiveRepeat(tokens []string, minBlockSize, threshold, minDistin
 			} else {
 				run = 0
 			}
+		}
+	}
+	return false
+}
+
+// detectRepeatedNgram counts n-gram occurrences across the entire window.
+// Unlike detectConsecutiveRepeat, it catches repetition even when the
+// repeated blocks are separated by other content.  This handles the
+// "thinking in circles" pattern where the model repeats the same
+// conclusions with different filler between them.
+func detectRepeatedNgram(tokens []string, n, threshold int) bool {
+	if len(tokens) < n || threshold < 2 {
+		return false
+	}
+	counts := make(map[string]int)
+	for i := 0; i <= len(tokens)-n; i++ {
+		// Build a compact key from the n-gram.
+		key := strings.Join(tokens[i:i+n], "\x00")
+		counts[key]++
+		if counts[key] >= threshold {
+			return true
 		}
 	}
 	return false

@@ -157,6 +157,42 @@ func TestReasoningNgramMonitor_NumberNormalizedLoop(t *testing.T) {
 	t.Error("expected n-gram monitor to detect number-normalized loop after 5 cycles")
 }
 
+func TestDetectRepeatedNgram_SpacedOut(t *testing.T) {
+	// Simulate "thinking in circles" — same conclusions with filler between.
+	// Block A = 20 tokens, filler = 100 unique tokens, repeated 4 times.
+	block := make([]string, 20)
+	for i := range block {
+		block[i] = fmt.Sprintf("conclusion_%d", i)
+	}
+	filler := make([]string, 100)
+	for i := range filler {
+		filler[i] = fmt.Sprintf("filler_%d", i)
+	}
+	tokens := make([]string, 0, 480)
+	for i := 0; i < 4; i++ {
+		tokens = append(tokens, block...)
+		tokens = append(tokens, filler...)
+	}
+	if !detectRepeatedNgram(tokens, 20, 3) {
+		t.Error("expected detection of spaced-out 20-token block repeated 4 times")
+	}
+}
+
+func TestReasoningNgramMonitor_SpacedOutLoop(t *testing.T) {
+	// Real-world pattern: model repeats conclusions with varying filler.
+	block := "OK I'm going to write the summary now the code is clean and ready "
+	filler1 := "let me check the types and make sure everything compiles correctly "
+	filler2 := "actually I should also verify the tests pass and the build succeeds "
+	m := newReasoningNgramMonitor()
+	for i := 0; i < 5; i++ {
+		text := block + filler1 + block + filler2
+		if m.Feed(text) {
+			return
+		}
+	}
+	t.Error("expected n-gram monitor to detect spaced-out loop after 5 cycles")
+}
+
 func TestNormalisedHash_Truncation(t *testing.T) {
 	// Two long texts that share the first 500+ chars but differ after should
 	// hash identically because normalisedHash truncates to streakHashPrefixLen.
