@@ -130,6 +130,6 @@ tasks:
   site:deploy:
     desc: Deploy website to FTP (requires FTP_PASS env var)
     cmds:
-      - lftp -u 2657051@aruba.it,"$FTP_PASS" ftp.milkai.dev -e "set ssl:verify-certificate no; set ftp:prefer-ascii no; set net:timeout 30; mirror -R --delete --verbose --no-perms --parallel=4 website/site/ /www.milkai.dev; quit"
+      - python3 scripts/deploy-ftp.py
     deps:
       - site:build
