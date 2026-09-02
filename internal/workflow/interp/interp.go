@@ -448,6 +448,41 @@ var markerLineRE = func(marker string) *regexp.Regexp {
 	return regexp.MustCompile(`(?mi)^[ \t]*` + regexp.QuoteMeta(marker) + `[ \t]*$`)
 }
 
+// isTerminatedTurn reports whether the agent's output indicates a turn that
+// was forcibly terminated by the agent's loop detection (empty completions,
+// duplicate tool calls, reasoning n-gram repetition). These turns produce
+// bracketed diagnostic messages instead of a normal response with a verdict
+// keyword, causing ParseVerdict to return "unknown" and the workflow to retry
+// blindly — often hitting the same loop again.
+func isTerminatedTurn(out string) bool {
+	s := strings.ToLower(out)
+	return strings.Contains(s, "[turn terminated") ||
+		strings.Contains(s, "turn ended without a final summary")
+}
+
+// maxRenderedPromptChars is the hard cap for a fully rendered prompt after
+// template expansion. Prompts exceeding this are truncated head+tail. This
+// catches cases where multiple moderate-sized template variables combine into
+// an oversized prompt. The value is chosen to fit comfortably within a 128K
+// token context window (~30K chars ≈ ~15K tokens), leaving ample room for
+// the agent's tool-call loop.
+const maxRenderedPromptChars = 30000
+
+// turnRecoveryPrompt is prepended to the original prompt when retrying a
+// terminated turn. It tells the agent that its previous attempt was killed
+// for looping and instructs it to take a different, more concise approach.
+const turnRecoveryPrompt = `<system-reminder>
+CRITICAL: Your previous attempt at this task was terminated because you got stuck
+in a repetition loop (reading the same files or repeating the same reasoning).
+You MUST NOT repeat the same approach. Instead:
+1. Do NOT re-read files you already examined — work from what you know.
+2. Be concise. Write code directly instead of analyzing at length.
+3. If you are unsure what to do, state your blocker briefly and stop.
+4. End your response with a verdict line (good_to_go, needs_refinement, or sprint_done).
+</system-reminder>
+
+`
+
 func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	if outcome, ok, err := tryReplay(ec, s); ok {
 		return outcome, err
@@ -469,14 +504,48 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	defer ec.popPath()
 	ec.reportProgress(s.Role)
 
-	prompt, err := renderTemplate(s.ID+".prompt", s.Prompt, ec.vars)
+	// Context growth management: truncate large template variables before
+	// rendering the prompt. This prevents massive spec documents (e.g. a
+	// 2000-line plan) from filling the agent's context window and causing
+	// repetition loops. Each variable is capped at sectionCharBudget
+	// (~12K chars); the tail is preserved since verdict instructions
+	// typically live at the end of the document.
+	truncatedVars := truncateLargeVarsWithBudget(ec.vars)
+	prompt, err := renderTemplate(s.ID+".prompt", s.Prompt, truncatedVars)
 	if err != nil {
 		return "", fmt.Errorf("workflow: stage %q: %w", s.ID, err)
 	}
+	// Also cap the total rendered prompt to prevent combinatorial bloat
+	// from multiple moderate-sized variables.
+	prompt = truncatePromptSections(prompt, maxRenderedPromptChars)
 	out, err := workflow.Turn(ec.ctx, runner, prompt, ec.cfg.Send)
 	if err != nil {
 		return "", fmt.Errorf("workflow: stage %q: %w", s.ID, err)
 	}
+
+	// Automatic recovery for terminated turns: when the agent's loop
+	// detection kills a turn (empty completions, duplicate tool calls,
+	// reasoning n-gram repetition), the output is a bracketed diagnostic
+	// message with no verdict keyword. Instead of letting ParseVerdict
+	// return "unknown" and retrying blindly (which hits the same loop),
+	// treat the terminated turn as a "break" — the workflow moves on
+	// with whatever partial output exists. This prevents the workflow
+	// from getting stuck in a cycle of terminated turns.
+	if isTerminatedTurn(out) {
+		if ec.cfg.Send != nil {
+			ec.cfg.Send(workflow.WorkflowChunkMsg{Text: fmt.Sprintf(
+				"\n[turn at stage %q was terminated by loop detection — advancing workflow with partial output]\n", s.ID)})
+		}
+		// Save the partial output so downstream stages can work with it.
+		if s.SaveAs != "" {
+			ec.vars[s.SaveAs] = summarizeLongOutput(out, sectionCharBudget)
+		}
+		ec.completeActivePath()
+		ec.reportProgress("")
+		ec.recordLeaf(TraceEntry{StageID: s.ID, SaveAs: s.SaveAs, Value: out, Outcome: "break"})
+		return "break", nil
+	}
+
 	if s.EmptyOutputFallback == "git_diff" && strings.TrimSpace(out) == "" {
 		out = gitDiffSummary()
 	}
@@ -489,7 +558,11 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	}
 
 	if s.SaveAs != "" {
-		ec.vars[s.SaveAs] = out
+		// Truncate large outputs before saving as template variables.
+		// A generator's output (e.g. sprint_output) can be very large when
+		// the model is confused or looping. Capping it prevents the next
+		// stage's prompt from blowing up when it injects {{.sprint_output}}.
+		ec.vars[s.SaveAs] = summarizeLongOutput(out, sectionCharBudget)
 	}
 
 	if len(s.Verdict) == 0 {

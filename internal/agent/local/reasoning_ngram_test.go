@@ -12,14 +12,14 @@ func TestReasoningNgramMonitor_DetectsPeriodicRepetition(t *testing.T) {
 	// Each cycle has slightly different content after the common prefix, but
 	// the token-level periodic structure is the same.
 	cycle := "OK I'm done let me write up my findings actually wait let me check one more thing the acceptance criteria says "
-	// Feed enough cycles to exceed threshold (default 10).
-	for i := 0; i < 12; i++ {
+	// Feed enough cycles to exceed threshold (default 5).
+	for i := 0; i < 8; i++ {
 		if m.Feed(cycle) {
 			// Detected at cycle i+1 — that's fine, as long as it triggers.
 			return
 		}
 	}
-	t.Error("expected n-gram monitor to detect periodic repetition after 12 cycles")
+	t.Error("expected n-gram monitor to detect periodic repetition after 25 cycles")
 }
 
 func TestReasoningNgramMonitor_NoFalsePositiveOnUniqueText(t *testing.T) {
@@ -184,13 +184,13 @@ func TestReasoningNgramMonitor_SpacedOutLoop(t *testing.T) {
 	filler1 := "let me check the types and make sure everything compiles correctly "
 	filler2 := "actually I should also verify the tests pass and the build succeeds "
 	m := newReasoningNgramMonitor()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 8; i++ {
 		text := block + filler1 + block + filler2
 		if m.Feed(text) {
 			return
 		}
 	}
-	t.Error("expected n-gram monitor to detect spaced-out loop after 5 cycles")
+	t.Error("expected n-gram monitor to detect spaced-out loop after 8 cycles")
 }
 
 func TestNormalisedHash_Truncation(t *testing.T) {

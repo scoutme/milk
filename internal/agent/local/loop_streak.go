@@ -232,6 +232,36 @@ const (
 	textLoopPrefixLen    = 200
 )
 
+// duplicateToolMaxRecovery is the number of consecutive all-duplicate tool
+// batches allowed before terminating the turn. Separate from textLoopMaxRecovery
+// because duplicate tool calls are a weaker signal — re-reading a file after
+// an edit (read-edit-verify pattern) is legitimate and should not terminate
+// after just 3 repetitions. MiMo-Code uses a similar distinction between
+// text-loop (strong signal, low threshold) and tool-duplicate (weaker signal,
+// higher threshold).
+const duplicateToolMaxRecovery = 5
+
+// ngramMaxRecovery is the number of n-gram repetition detections allowed
+// before terminating the turn. Matches MiMo-Code's TEXT_NGRAM_MAX_RECOVERY.
+const ngramMaxRecovery = 2
+
+// emptyCompletionMaxRecovery is the number of consecutive empty completions
+// (reasoning-only, no content or tool calls) allowed before terminating.
+// The model is stuck in a thinking loop — it produces reasoning but never
+// acts on it. Set high enough to allow one legitimate empty completion
+// (e.g. model finishes with reasoning-only summary) before intervening.
+const emptyCompletionMaxRecovery = 3
+
+// recoveryEmptyCompletion is injected when the model produces empty
+// completions repeatedly. It tells the model to stop thinking and act.
+const recoveryEmptyCompletion = `<system-reminder>
+CRITICAL: Your last response contained only reasoning — no content and no tool calls.
+You are stuck in a thinking loop. STOP reasoning and take action NOW:
+1. Call a tool to make progress, OR
+2. Write your final answer to the user.
+Do NOT produce more reasoning without acting on it.
+</system-reminder>`
+
 // normalizeForTextLoop lowercases, collapses whitespace, strips leading
 // phrases, and truncates — matching MiMo-Code's normalizeForLoopDetection.
 func normalizeForTextLoop(text string) string {
