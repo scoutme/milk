@@ -119,6 +119,44 @@ func TestDetectConsecutiveRepeat_200TokenBlock4x(t *testing.T) {
 	}
 }
 
+func TestTokenize_NumberNormalization(t *testing.T) {
+	// Numbers should be replaced with <NUM> so structurally identical
+	// reasoning with different numeric literals matches.
+	tokens := tokenize("line 1517 the renderentity function uses entity.type === 'bat' - correct.")
+	if tokens[1] != "<NUM>" {
+		t.Errorf("expected <NUM>, got %q", tokens[1])
+	}
+	// Two lines that differ only in the number should tokenize identically.
+	a := tokenize("1517 the renderentity function uses entity.type === 'bat' - correct.")
+	b := tokenize("1523 the renderentity function uses entity.type === 'bat' - correct.")
+	if len(a) != len(b) {
+		t.Fatalf("token counts differ: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("token %d differs: %q vs %q", i, a[i], b[i])
+		}
+	}
+}
+
+func TestReasoningNgramMonitor_NumberNormalizedLoop(t *testing.T) {
+	// Simulate the real-world loop: 6 entity types enumerated with
+	// incrementing line numbers, repeated 4 times.
+	cycle := "1517. the renderentity function uses entity.type === 'bat' - correct. " +
+		"1518. the renderentity function uses entity.type === 'spider' - correct. " +
+		"1519. the renderentity function uses entity.type === 'player' - correct. " +
+		"1520. the renderentity function uses entity.type === 'goblin' - correct. " +
+		"1521. the renderentity function uses entity.type === 'skeleton' - correct. " +
+		"1522. the renderentity function uses entity.type === 'wolf' - correct. "
+	m := newReasoningNgramMonitor()
+	for i := 0; i < 5; i++ {
+		if m.Feed(cycle) {
+			return
+		}
+	}
+	t.Error("expected n-gram monitor to detect number-normalized loop after 5 cycles")
+}
+
 func TestNormalisedHash_Truncation(t *testing.T) {
 	// Two long texts that share the first 500+ chars but differ after should
 	// hash identically because normalisedHash truncates to streakHashPrefixLen.
