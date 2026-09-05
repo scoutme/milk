@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
@@ -336,5 +337,58 @@ func TestRun_BackgroundAgentGuidance_OnlyWhenManagerSet(t *testing.T) {
 	mu.Unlock()
 	if !strings.Contains(withMgr, "spawn_background_agent") {
 		t.Errorf("expected background-agent guidance once a Manager is set, got prompt: %q", withMgr)
+	}
+}
+
+// TestRunBackgroundTask_PermissionGatedToolDeniesInsteadOfHanging verifies
+// the fix for a real incident: background jobs used to inherit the parent's
+// interactive permAsk callback, which blocks synchronously on a plain
+// channel receive with no timeout or context-awareness. A background job
+// calling a permission-gated tool (bash, write_file, ...) would show an
+// unattributed "Allow? [Y/n]" prompt the user had no reason to expect, hang
+// forever waiting for an answer, and permanently hold its concurrency slot.
+// cloneForBackground no longer copies permAsk, so this must deny instead —
+// fast, no hang — and let the model react to the denial.
+func TestRunBackgroundTask_PermissionGatedToolDeniesInsteadOfHanging(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	never := make(chan struct{}) // never closed
+	agent := New(srv.URL, "test-model")
+	agent.WithPermissions(nil, func(tool, summary string) bool {
+		<-never // would hang forever if a background job ever called this
+		return true
+	})
+
+	done := make(chan struct{})
+	var resp string
+	var runErr error
+	go func() {
+		var out strings.Builder
+		resp, _, runErr = agent.RunBackgroundTask(context.Background(), "/tmp", "run ls", &out)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunBackgroundTask hung — permAsk was called from a background job")
+	}
+	if runErr != nil {
+		t.Fatalf("RunBackgroundTask returned error: %v", runErr)
+	}
+	if resp != "done" {
+		t.Errorf("expected the model to react to the denial and finish normally with %q, got %q", "done", resp)
 	}
 }

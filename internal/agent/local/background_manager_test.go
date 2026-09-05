@@ -198,3 +198,66 @@ func TestManager_ActiveCount(t *testing.T) {
 		t.Errorf("expected ActiveCount=0 after completion, got %d", got)
 	}
 }
+
+// TestManager_JobTimeout_TerminatesAndFreesSlot verifies the fix for a real
+// incident: a background job that never returns on its own (there, an
+// unattributed interactive permission prompt no one knew to answer) must
+// still eventually reach JobFailed, fire onDone, and free its concurrency
+// slot — not hold it forever. run() here simulates "stuck" by blocking on a
+// channel that's never closed, checking only ctx.Done() (as a real stuck
+// network call would, since http.NewRequestWithContext respects context
+// cancellation) rather than the plain channel receive that caused the real
+// incident (readLineLabeled's <-respCh, which is exactly why permAsk is no
+// longer wired into background jobs at all — see cloneForBackground).
+func TestManager_JobTimeout_TerminatesAndFreesSlot(t *testing.T) {
+	mgr := NewManager(context.Background(), 1)
+	mgr.SetJobTimeout(30 * time.Millisecond)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	mgr.SetOnDone(func(j *Job) { wg.Done() })
+
+	never := make(chan struct{})
+	mgr.Spawn("stuck", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		select {
+		case <-never:
+			return "ok", session.TokenUsage{}, nil
+		case <-ctx.Done():
+			return "", session.TokenUsage{}, ctx.Err()
+		}
+	})
+
+	select {
+	case <-waitGroupDone(&wg):
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never reached a terminal state — timeout did not fire")
+	}
+
+	jobs := mgr.Drain()
+	if len(jobs) != 1 || jobs[0].Status != JobFailed {
+		t.Fatalf("expected exactly 1 JobFailed, got %+v", jobs)
+	}
+
+	// The concurrency slot must be free again — a second job should start
+	// immediately rather than queuing behind the "stuck" one forever.
+	wg.Add(1)
+	started := make(chan struct{})
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		close(started)
+		return "ok", session.TokenUsage{}, nil
+	})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("second job never started — the stuck job's slot was never freed")
+	}
+	wg.Wait()
+}
+
+func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+	return ch
+}

@@ -49,14 +49,27 @@ type Job struct {
 // Manager holds one context for its own lifetime instead, supplied at
 // construction (typically the session/TUI-root context, not any turn's).
 type Manager struct {
-	mu      sync.Mutex
-	baseCtx context.Context
-	sem     chan struct{}
-	jobs    map[string]*Job
-	pending []*Job
-	onDone  func(*Job)
-	nextID  int
+	mu         sync.Mutex
+	baseCtx    context.Context
+	sem        chan struct{}
+	jobs       map[string]*Job
+	pending    []*Job
+	onDone     func(*Job)
+	nextID     int
+	jobTimeout time.Duration
 }
+
+// defaultJobTimeout bounds how long a single job may run once it starts
+// executing (not counting time spent queued for a concurrency slot). This
+// is a deliberate hard-stop, not a retry: a job that runs this long is far
+// more likely stuck than making real progress on a task meant to be narrow
+// and self-contained (ADR-0043), and a permanently stuck job would
+// otherwise hold its concurrency slot forever, degrading max_background_agents
+// for the rest of the session. Terminating cleanly guarantees the Manager's
+// core promise — every job eventually reaches JobCompleted or JobFailed and
+// fires onDone — holds even when a job's own execution never would on its
+// own (a hung network call, or any future bug in the tool loop).
+const defaultJobTimeout = 10 * time.Minute
 
 // NewManager returns a Manager allowing at most maxConcurrent jobs to
 // actually execute (queue past that) at once, running jobs under baseCtx —
@@ -67,9 +80,10 @@ func NewManager(baseCtx context.Context, maxConcurrent int) *Manager {
 		maxConcurrent = 1
 	}
 	return &Manager{
-		baseCtx: baseCtx,
-		sem:     make(chan struct{}, maxConcurrent),
-		jobs:    make(map[string]*Job),
+		baseCtx:    baseCtx,
+		sem:        make(chan struct{}, maxConcurrent),
+		jobs:       make(map[string]*Job),
+		jobTimeout: defaultJobTimeout,
 	}
 }
 
@@ -83,11 +97,22 @@ func (m *Manager) SetOnDone(fn func(*Job)) {
 	m.mu.Unlock()
 }
 
+// SetJobTimeout overrides the per-job execution timeout (see Spawn). Tests
+// use this to avoid waiting out defaultJobTimeout for real; production
+// code generally has no reason to call it.
+func (m *Manager) SetJobTimeout(d time.Duration) {
+	m.mu.Lock()
+	m.jobTimeout = d
+	m.mu.Unlock()
+}
+
 // Spawn launches run in a goroutine and returns immediately with a Job
 // handle in JobRunning status. run does not start executing until a
 // concurrency slot is free — Spawn itself never blocks the caller waiting
-// for one, the queued job's own goroutine does. run receives the Manager's
-// own baseCtx, not any context belonging to the turn that called Spawn.
+// for one, the queued job's own goroutine does. run receives a context
+// derived from the Manager's own baseCtx (not any context belonging to the
+// turn that called Spawn), bounded by the Manager's jobTimeout once it
+// starts executing.
 func (m *Manager) Spawn(label, task, role, model string, run func(context.Context) (string, session.TokenUsage, error)) *Job {
 	m.mu.Lock()
 	m.nextID++
@@ -101,6 +126,7 @@ func (m *Manager) Spawn(label, task, role, model string, run func(context.Contex
 		StartedAt: time.Now(),
 	}
 	m.jobs[job.ID] = job
+	timeout := m.jobTimeout
 	m.mu.Unlock()
 
 	go func() {
@@ -112,7 +138,9 @@ func (m *Manager) Spawn(label, task, role, model string, run func(context.Contex
 		}
 		defer func() { <-m.sem }()
 
-		result, tokens, err := run(m.baseCtx)
+		jobCtx, cancel := context.WithTimeout(m.baseCtx, timeout)
+		defer cancel()
+		result, tokens, err := run(jobCtx)
 		m.finish(job, result, tokens, err)
 	}()
 

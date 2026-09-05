@@ -1386,17 +1386,26 @@ func (a *Agent) cloneForBackground() *Agent {
 		escalationName:   a.escalationName, // read-only after construction; used for the usage.Agent role tag
 		skipPerms:        a.skipPerms,
 		permStore:        a.permStore, // shared, but already designed for concurrent access (concurrent tool-call batches use it today)
-		permAsk:          a.permAsk,
-		client:           a.client, // *http.Client is safe for concurrent use by design
-		tokenCmd:         a.tokenCmd,
-		sigv4:            a.sigv4,
-		memCfg:           a.memCfg,
-		logContext:       a.logContext,
-		mcpToolSet:       a.mcpToolSet,
-		toolTimeout:      a.toolTimeout,
-		limits:           a.limits,
-		maxPayloadBytes:  a.maxPayloadBytes,
-		promptCaching:    a.promptCaching,
+		// permAsk deliberately NOT copied. It blocks synchronously on a
+		// plain channel receive (readLineLabeled's <-respCh in cmd/milk)
+		// with no context-awareness at all — a background job asking an
+		// unattributed "Allow? [Y/n]" the user has no reason to expect
+		// would hang forever waiting for a human who doesn't know to
+		// answer it, permanently holding its Manager concurrency slot.
+		// With permAsk nil, checkPermission denies cleanly instead of
+		// asking: already-granted tools (via the shared permStore above,
+		// or skipPerms) still work; anything else fails fast with a
+		// tool-result error the model can react to, never hangs.
+		client:          a.client, // *http.Client is safe for concurrent use by design
+		tokenCmd:        a.tokenCmd,
+		sigv4:           a.sigv4,
+		memCfg:          a.memCfg,
+		logContext:      a.logContext,
+		mcpToolSet:      a.mcpToolSet,
+		toolTimeout:     a.toolTimeout,
+		limits:          a.limits,
+		maxPayloadBytes: a.maxPayloadBytes,
+		promptCaching:   a.promptCaching,
 	}
 }
 
