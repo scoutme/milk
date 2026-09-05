@@ -1037,6 +1037,16 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
+	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx)
+}
+
+// runToolLoop is the iterative tool-calling core shared by Run (a full,
+// session-attached turn) and RunBackgroundTask (a scoped, stateless
+// background job spawned via spawn_background_agent — see ADR-0043). Callers
+// are responsible for building msgs (including the system prompt and the
+// leading user message at userMsgIdx) and the tools schema list; this method
+// owns only the streaming/tool-dispatch/loop-detection loop itself.
+func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int) ([]Message, error) {
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection
@@ -1244,6 +1254,70 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: lastReasoningText})
 	return msgs, nil
+}
+
+// backgroundSystemPrompt returns the system prompt for a background job
+// spawned via spawn_background_agent (ADR-0043): a scoped, self-contained
+// research task with no awareness of any parent conversation.
+func backgroundSystemPrompt(cwd string) string {
+	base := "You are a background research agent forked to answer one self-contained question. " +
+		"You have no knowledge of any parent conversation beyond the task given to you. " +
+		"Investigate using your tools and produce a concise, complete written answer — this is the only thing that will be reported back."
+	if cwd == "" {
+		return base
+	}
+	return base + "\n\nWorking directory: " + cwd
+}
+
+// RunBackgroundTask runs a scoped, stateless background job spawned via the
+// spawn_background_agent tool (ADR-0043): a fresh tool loop with no session
+// recording and no memory/percept injection. Depth is capped at 1 — the
+// tool list omits agent_<name>, spawn_background_agent (neither is ever
+// added to a background job's schema list in the first place, since this
+// method builds it independently of Run's), and escalate (filtered out
+// below, since it is otherwise unconditionally present).
+//
+// Token usage is accumulated locally rather than fed to a.onTokens, so a
+// background job's tokens are never mis-attributed to the spawning agent's
+// own "primary"/"escalation" session totals — the caller (the job manager,
+// via dispatch.go) is responsible for recording the returned usage under
+// the "<role>:subagent" convention once the job completes.
+func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.Writer) (string, session.TokenUsage, error) {
+	prevOnTokens := a.onTokens
+	usage := session.TokenUsage{Model: a.model, Agent: agentRoleForMetrics(a.escalationName) + ":subagent"}
+	a.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
+		usage.Prompt += prompt
+		usage.Completion += completion
+		usage.CacheRead += cacheRead
+		usage.CacheCreation += cacheCreation
+	}
+	defer func() { a.onTokens = prevOnTokens }()
+
+	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+	if a.limits != nil {
+		bgLimits.IncludedTools = a.limits.IncludedTools
+		bgLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+	}
+	bgSess := &session.Session{CWD: cwd}
+	tools := schemas(nil, a.otelDir, bgSess, nil, nil, bgLimits)
+	if a.mcpToolSet != nil {
+		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: backgroundSystemPrompt(cwd)},
+		{Role: "user", Content: task},
+	}
+	userMsgIdx := len(msgs) - 1
+
+	resultMsgs, err := a.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx)
+	if err != nil {
+		return "", usage, err
+	}
+	if len(resultMsgs) == 0 {
+		return "", usage, nil
+	}
+	return resultMsgs[len(resultMsgs)-1].Content, usage, nil
 }
 
 // toolNeedsPermission reports whether a tool requires user approval before execution.
