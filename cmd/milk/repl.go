@@ -215,6 +215,14 @@ type backgroundJobDoneMsg struct{ job *local.Job }
 // be dispatched) generates a response on their own.
 type backgroundBatchDoneMsg struct{}
 
+// backgroundUserJobDoneMsg is sent when a user-initiated background job
+// (spawned via the busy-key "press Enter again" flow, not a tool call)
+// finishes. Unlike backgroundBatchDoneMsg, this fires per job rather than
+// waiting for a whole wave — there's nothing to consolidate; the user forked
+// off one specific side-question and the result should reach the main agent
+// as soon as it's free, not held back for unrelated jobs still running.
+type backgroundUserJobDoneMsg struct{}
+
 // directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
 	err     error
@@ -505,10 +513,22 @@ type model struct {
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
 
-	// pendingBackgroundFollowup is set when a spawn_background_agent wave
-	// finishes (backgroundBatchDoneMsg) while busy or otherwise blocked, so
-	// handleAgentDone can retry the auto-follow-up once idle again.
+	// pendingBackgroundFollowup is set when an agent-initiated
+	// spawn_background_agent wave finishes (backgroundBatchDoneMsg) while
+	// busy or otherwise blocked, so handleAgentDone can retry the
+	// auto-follow-up once idle again. Only fires once every job in the
+	// wave has finished (ActiveCount reaches 0) — the calling agent
+	// designed a consolidated, multi-part wave meant to be reported
+	// together.
 	pendingBackgroundFollowup bool
+	// pendingUserBackgroundFollowup is the equivalent for a user-initiated
+	// spawn (armed via the busy-key "press Enter again" flow below, not a
+	// tool call): there is no "wave" to consolidate, so this fires as soon
+	// as the model goes idle regardless of whether other jobs — agent- or
+	// user-initiated — are still running. Deliver what's ready rather than
+	// waiting on unrelated work the user didn't ask this particular
+	// request to wait for.
+	pendingUserBackgroundFollowup bool
 
 	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
@@ -574,8 +594,16 @@ type model struct {
 	panelSelDragging   bool
 	panelSelText       string
 
-	copyFeedback   string // transient "[copied N chars]" shown in status bar
-	busyHint       string // transient "agent is responding" shown in status bar
+	copyFeedback string // transient "[copied N chars]" shown in status bar
+	busyHint     string // transient "agent is responding" shown in status bar
+	// busySpawnArmed is true while busyHint is specifically the "press
+	// Enter again to spawn a background agent" prompt (as opposed to e.g.
+	// the slash-command-unavailable variant) — the next plain Enter while
+	// still armed spawns a background agent from the current textarea
+	// content instead of just re-showing the hint. Cleared by
+	// busyHintClearMsg (the same 3s timer as busyHint), by actually
+	// spawning, or by any other busyHint being set instead.
+	busySpawnArmed bool
 	credRefreshing bool   // true while any background credential refresh is running
 	credLabel      string // which credential is being refreshed (e.g. "AWS", "token")
 	credStatus     string // non-empty after refresh completes: last result message
@@ -810,9 +838,19 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.handleSlashInput(cmd, rest)
 			}
 			m.busyHint = cmd + " unavailable while agent is responding"
+			m.busySpawnArmed = false
 			return m, busyHintClearCmd()
 		}
-		m.busyHint = "agent is responding — Ctrl+C to interrupt"
+		if m.busySpawnArmed && input != "" {
+			return m.spawnUserBackgroundAgent(input)
+		}
+		if input == "" {
+			m.busyHint = "agent is responding — Ctrl+C to interrupt"
+			m.busySpawnArmed = false
+			return m, busyHintClearCmd()
+		}
+		m.busyHint = "agent is working — press Enter again to spawn a background agent with this"
+		m.busySpawnArmed = true
 		return m, busyHintClearCmd()
 	case "tab":
 		// Tab completion not available while busy — ignore silently.
@@ -967,8 +1005,11 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 	m.syncLayout()
 
+	if m.pendingUserBackgroundFollowup {
+		return m.maybeAutoFollowupBackgroundJobs(false)
+	}
 	if m.pendingBackgroundFollowup {
-		return m.maybeAutoFollowupBackgroundJobs()
+		return m.maybeAutoFollowupBackgroundJobs(true)
 	}
 	if len(m.st.pendingRemoteInputs) > 0 {
 		next := m.st.pendingRemoteInputs[0]
@@ -1662,6 +1703,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case busyHintClearMsg:
 		m.busyHint = ""
+		m.busySpawnArmed = false
 		return m, nil
 
 	case credRefreshReadyMsg:
@@ -1743,7 +1785,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case backgroundBatchDoneMsg:
-		return m.maybeAutoFollowupBackgroundJobs()
+		return m.maybeAutoFollowupBackgroundJobs(true)
+
+	case backgroundUserJobDoneMsg:
+		return m.maybeAutoFollowupBackgroundJobs(false)
 
 	case configReloadMsg:
 		if msg.err != nil {
@@ -2372,27 +2417,96 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 // it up; this text only needs to point the model at reacting to them.
 const backgroundFollowupPrompt = "(Background research agents have finished — review their results above and continue.)"
 
-// maybeAutoFollowupBackgroundJobs checks whether every spawn_background_agent
-// job from the most recent wave has finished and, if the TUI is idle, submits
-// backgroundFollowupPrompt as a real turn so the agent actually produces the
-// consolidated response it usually promises — rather than leaving the
-// results sitting in the Manager's queue until the user happens to send
-// another message. Called both when a wave first finishes
-// (backgroundBatchDoneMsg) and again after any turn completes
-// (handleAgentDone), in case the wave finished while busy.
-func (m model) maybeAutoFollowupBackgroundJobs() (tea.Model, tea.Cmd) {
+// spawnUserBackgroundAgent spawns a background research job (ADR-0043) from
+// text the user typed while the model was busy — the confirming second
+// Enter press while busySpawnArmed (see handleBusyKey). Unlike an
+// agent-initiated spawn_background_agent tool call, there is no
+// requirement that the currently-busy role itself be local-backed (the
+// in-flight turn could be running on claude-cli, which has no Manager at
+// all) — the job just needs any inference-server-backed agent to fork from,
+// so this prefers the escalation agent's local backend (generally the more
+// capable one) and falls back to primary's.
+func (m model) spawnUserBackgroundAgent(task string) (tea.Model, tea.Cmd) {
+	m.ta.Reset()
+	m.busyHint = ""
+	m.busySpawnArmed = false
+	m.syncLayout()
+
 	mgr := m.agents.backgroundMgr
-	if mgr == nil || mgr.ActiveCount() > 0 {
-		// Nothing to do yet, or a newer wave started in the meantime —
-		// wait for that wave's own completion signal instead.
+	agent := m.agents.escalationLocal
+	modelName := m.st.cfg.EscalationAgentConfig().Model
+	if modelName == "" {
+		modelName = m.st.cfg.EscalationAgentConfig().Name
+	}
+	if agent == nil {
+		agent = m.agents.local
+		modelName = m.st.cfg.ActiveAgent().Model
+		if modelName == "" {
+			modelName = m.st.cfg.ActiveAgent().Name
+		}
+	}
+	if mgr == nil || agent == nil {
+		m.appendTranscript("\n" + dimWrap("⚙ background agent unavailable — no inference-server-backed agent configured") + "\n")
+		return m, nil
+	}
+
+	label := task
+	if len(label) > 60 {
+		label = label[:57] + "..."
+	}
+	cwd := m.st.cwd
+	job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context) (string, session.TokenUsage, error) {
+		return agent.RunBackgroundTask(ctx, cwd, task, io.Discard)
+	})
+	m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ spawned background agent %s (%q)", job.ID, label)) + "\n")
+	m.syncLayout()
+	return m, nil
+}
+
+// maybeAutoFollowupBackgroundJobs delivers currently-drainable
+// spawn_background_agent results as a real follow-up turn once the TUI is
+// idle, so the agent actually produces the consolidated response it usually
+// promises — rather than leaving results sitting in the Manager's queue
+// until the user happens to send another message.
+//
+// waitForWholeWave distinguishes the two callers:
+//   - true (agent-initiated, via the spawn_background_agent tool call and
+//     backgroundBatchDoneMsg): the calling agent designed a consolidated,
+//     multi-part wave meant to be reported together, so this only fires
+//     once every currently-outstanding job has finished (ActiveCount == 0).
+//   - false (user-initiated, via the busy-key "press Enter again to spawn"
+//     flow and backgroundUserJobDoneMsg): there is no "wave" to
+//     consolidate — the user forked off one specific side-question while
+//     waiting on something else, so this fires as soon as the model is
+//     idle regardless of whether other jobs (agent- or user-initiated) are
+//     still running. Delivering it promptly matters more than batching it
+//     with unrelated work the user never asked this request to wait for.
+//
+// Called both when a job/wave first finishes and again after any turn
+// completes (handleAgentDone), in case it finished while busy.
+func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model, tea.Cmd) {
+	mgr := m.agents.backgroundMgr
+	if mgr == nil {
+		m.pendingBackgroundFollowup = false
+		m.pendingUserBackgroundFollowup = false
+		return m, nil
+	}
+	if waitForWholeWave && mgr.ActiveCount() > 0 {
+		// A newer wave started in the meantime — wait for that wave's own
+		// completion signal instead.
 		m.pendingBackgroundFollowup = false
 		return m, nil
 	}
 	if m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil {
-		m.pendingBackgroundFollowup = true
+		if waitForWholeWave {
+			m.pendingBackgroundFollowup = true
+		} else {
+			m.pendingUserBackgroundFollowup = true
+		}
 		return m, nil
 	}
 	m.pendingBackgroundFollowup = false
+	m.pendingUserBackgroundFollowup = false
 	return m.submitInput(backgroundFollowupPrompt, dim("[background]")+" ")
 }
 
@@ -3290,6 +3404,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if agents.backgroundMgr != nil {
 		agents.backgroundMgr.SetOnDone(func(j *local.Job) {
 			p.Send(backgroundJobDoneMsg{job: j})
+			// User-initiated jobs (Role == "user", tagged by the busy-key
+			// spawn flow) have no "wave" to consolidate — deliver as soon
+			// as the model is free rather than waiting for
+			// SetOnBatchDone, which only fires once every job (agent- or
+			// user-initiated) is done.
+			if j.Role == "user" {
+				p.Send(backgroundUserJobDoneMsg{})
+			}
 		})
 		// And, once the whole wave has finished, actually trigger a
 		// follow-up turn (see maybeAutoFollowupBackgroundJobs) — without

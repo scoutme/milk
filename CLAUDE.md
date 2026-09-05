@@ -145,6 +145,7 @@ Token usage is stored in the session `Tokens` map keyed by `"model\x00role"`. Th
 | `escalation:subagent` | Subagent spawned by the escalation agent |
 | `escalation:workflow` | Background workflow run by the escalation agent |
 | `primary:subagent` / `escalation:subagent` | `spawn_background_agent` job (ADR-0043), tagged by the spawning agent's own role — the same suffix as Claude Code's subagents, but recorded directly by milk rather than parsed from a subprocess's stream JSON |
+| `user:subagent` | A background job the *user* spawned directly (pressing Enter again while busy — see ADR-0043's TUI section), not an agent's own tool call — there is no agent role to tag it with, so it gets its own bucket rather than being miscategorized under `primary` or `escalation` |
 
 The colon-separated convention allows prefix queries — `SessionTokensByRolePrefix("escalation")` matches all escalation-related roles (main turns, Claude Code's own subagents/workflows, and any spawn_background_agent jobs an escalation-role local agent ran).
 

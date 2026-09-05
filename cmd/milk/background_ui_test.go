@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
@@ -168,4 +169,109 @@ func TestMaybeAutoFollowup_ActiveJobsRemain_DoesNotDispatch(t *testing.T) {
 	if m2.pendingBackgroundFollowup {
 		t.Error("expected the stale pending flag to be cleared, not retried, for a wave that hasn't finished yet")
 	}
+}
+
+// TestHandleBusyKey_SecondEnterSpawnsBackgroundAgent verifies the new
+// busy-key flow: the first Enter while busy just arms a hint (does not
+// touch the textarea), and a second Enter while still armed spawns a
+// background job from whatever is currently in the textarea instead of
+// just re-showing the hint.
+func TestHandleBusyKey_SecondEnterSpawnsBackgroundAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	mgr := local.NewManager(context.Background(), 3)
+	escAgent := local.New("http://127.0.0.1:1", "esc-model")
+	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr, escalationLocal: escAgent}, nil)
+	m.busy = true
+	m.ta.SetValue("dig into the physics module")
+
+	// First Enter: arms the hint, leaves the textarea untouched.
+	updated, _ := m.handleBusyKey(teaKeyEnter())
+	m2 := updated.(model)
+	if !m2.busySpawnArmed {
+		t.Fatal("expected the first Enter to arm the spawn hint")
+	}
+	if m2.ta.Value() != "dig into the physics module" {
+		t.Errorf("expected the textarea to survive the first Enter, got %q", m2.ta.Value())
+	}
+
+	// Second Enter: spawns.
+	updated2, _ := m2.handleBusyKey(teaKeyEnter())
+	m3 := updated2.(model)
+	if m3.busySpawnArmed {
+		t.Error("expected busySpawnArmed to be cleared after spawning")
+	}
+	if m3.ta.Value() != "" {
+		t.Errorf("expected the textarea to be cleared after spawning, got %q", m3.ta.Value())
+	}
+	if !strings.Contains(m3.transcript.String(), "spawned background agent") {
+		t.Errorf("expected a transcript line confirming the spawn, got %q", m3.transcript.String())
+	}
+	if got := mgr.ActiveCount(); got != 1 {
+		t.Errorf("expected 1 active job after spawning, got %d", got)
+	}
+}
+
+// TestHandleBusyKey_EmptyInputDoesNotArm verifies pressing Enter with
+// nothing typed falls back to the plain "interrupt" hint rather than
+// arming a spawn that has nothing to spawn from.
+func TestHandleBusyKey_EmptyInputDoesNotArm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+	m.busy = true
+
+	updated, _ := m.handleBusyKey(teaKeyEnter())
+	m2 := updated.(model)
+	if m2.busySpawnArmed {
+		t.Error("expected empty input not to arm the spawn hint")
+	}
+	if !strings.Contains(m2.busyHint, "Ctrl+C") {
+		t.Errorf("expected the plain interrupt hint, got %q", m2.busyHint)
+	}
+}
+
+// TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning verifies
+// the key difference from the agent-wave case: a user-initiated job's
+// result should reach the main agent as soon as it's free, even while
+// other jobs (agent- or user-initiated) are still running — there is no
+// "wave" to wait for.
+func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	mgr := local.NewManager(context.Background(), 2)
+	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
+
+	release := make(chan struct{})
+	mgr.Spawn("still running", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		<-release
+		return "ok", session.TokenUsage{}, nil
+	})
+	defer close(release)
+
+	updated, cmd := m.Update(backgroundUserJobDoneMsg{})
+	m2 := updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected the user-job follow-up to dispatch even with another job still running")
+	}
+	if m2.pendingUserBackgroundFollowup {
+		t.Error("expected pendingUserBackgroundFollowup to be cleared once dispatched")
+	}
+}
+
+func teaKeyEnter() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyEnter}
 }
