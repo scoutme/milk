@@ -164,8 +164,12 @@ Milk detects when an LLM agent gets stuck in a loop — repeating the same phras
 |---|---|---|
 | **Streak tracker** (`loop_streak.go`) | Same reasoning hash or tool-call signature across consecutive iterations | Crop + nudge → strong nudge → terminate |
 | **Streaming n-gram** (`reasoning_ngram.go`) | Periodic reasoning repetition during streaming | **Cuts stream immediately** + crop + nudge → terminate |
-| **Text-loop tracker** (`loop_streak.go`) | Same output text across consecutive steps | Crop + nudge → terminate |
+| **Text-loop tracker** (`loop_streak.go`) | Same output text across consecutive steps | Crop + nudge → strong nudge → terminate |
 | **Duplicate tool calls** (`local.go`) | Model re-issues a tool call already executed | Nudge → strong nudge → terminate |
+
+Escalation mechanics (crop → mild nudge → strong nudge → terminate) are consolidated in one shared helper (`loopRecoveryAction` in `loop_streak.go`) called by all four detectors, rather than each re-implementing it — this is what fixed the text-loop tracker's termination path above, which previously had no working counter of its own.
+
+**Workflow-role scoping**: when an agent is executing a workflow step (`workflowRole == true`), the streak tracker, streaming n-gram, and text-loop tracker are all skipped — reasoning and output text legitimately repeat across workflow passes, and the workflow interpreter (`internal/workflow/interp`) handles recovery for those at a higher level (see `isTerminatedTurn`). Duplicate tool calls are **not** skipped for workflow role: a literal repeat of a write-tool call with identical arguments has no legitimate cross-pass explanation, so it's caught early regardless of caller. Critically, the n-gram monitor's mid-stream *feed* is gated by workflow role too, not just its Run-loop recovery handling — feeding it and ignoring the trigger would still cut every subsequent stream in the turn with no recovery, since the monitor's window is never reset.
 
 ### TUI-level signals (`internal/loop/detector.go`)
 
@@ -181,7 +185,7 @@ Note: consecutive reasoning chunk repetition was removed from TUI signals — no
 
 ### How it works
 
-1. **Streaming n-gram**: During reasoning streaming, every `reasoning_content` delta feeds a sliding 500-token window. When a block of 4+ tokens repeats 10+ times consecutively, the stream is cut immediately and a recovery nudge is injected.
+1. **Streaming n-gram**: During reasoning streaming, every `reasoning_content` delta feeds a sliding 1000-token window. Two independent checks run: a block of 4+ tokens repeating 5+ times **consecutively** (verbatim back-to-back loop — an unambiguous signal, so the threshold is low), or any 4+ token block recurring 20+ times **within a 200-token span** anywhere in the window (a weaker, "thinking in circles" signal — a phrase can legitimately recur many times across a long analysis, so it needs more repetitions bounded by distance before it counts as a loop). Either check cuts the stream immediately and injects a recovery nudge.
 2. **Streak tracker**: After each tool-calling iteration, the reasoning text (truncated to 500 chars, normalised) is hashed. Three consecutive identical hashes trigger crop + nudge.
 3. **Duplicate tool calls**: After each iteration, tool calls are checked against previously executed calls. Exact matches trigger a nudge (not termination), matching MiMo-Code's approach.
 4. **TUI-level**: `FeedChunk()` is called for every streaming chunk. A ring buffer tracks the last 50 chunks. Cross-turn signals fire after each turn completes.

@@ -20,26 +20,40 @@ var numRe = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
 //
 // Ported from MiMo-Code's TextNgramMonitor (text-ngram-detection.ts).
 type reasoningNgramMonitor struct {
-	tokens      []string
-	windowSize  int
-	blockSize   int // min period length in tokens
-	threshold   int // consecutive repetitions to trigger
-	minDistinct int // min distinct tokens in a repeating block
+	tokens               []string
+	windowSize           int
+	blockSize            int // min period length in tokens
+	consecutiveThreshold int // back-to-back repetitions to trigger detectConsecutiveRepeat
+	spacedThreshold      int // occurrences within maxSpan to trigger detectRepeatedNgram
+	minDistinct          int // min distinct tokens in a repeating block
+	maxSpan              int // max token distance between first and last occurrence for non-consecutive detection
 }
 
 const (
-	defaultNgramWindowSize  = 1000
-	defaultNgramBlockSize   = 4
-	defaultNgramThreshold   = 5
-	defaultNgramMinDistinct = 3
+	defaultNgramWindowSize = 1000
+	defaultNgramBlockSize  = 4
+	// defaultNgramConsecutiveThreshold is low: back-to-back repetition is an
+	// unambiguous signal (no legitimate reason for the same block to repeat
+	// immediately), so it should fire fast to bound wasted tokens.
+	defaultNgramConsecutiveThreshold = 5
+	// defaultNgramSpacedThreshold is high, matching MiMo-Code's
+	// Flag.MIMOCODE_TEXT_REPEAT_THRESHOLD: occurrences spread across the
+	// window are a weaker signal (a phrase can legitimately recur many
+	// times while the model makes real progress), so it needs more
+	// repetitions — bounded by maxSpan — before it's treated as a loop.
+	defaultNgramSpacedThreshold = 20
+	defaultNgramMinDistinct     = 3
+	defaultNgramMaxSpan         = 200 // max token distance between first and last occurrence
 )
 
 func newReasoningNgramMonitor() *reasoningNgramMonitor {
 	return &reasoningNgramMonitor{
-		windowSize:  defaultNgramWindowSize,
-		blockSize:   defaultNgramBlockSize,
-		threshold:   defaultNgramThreshold,
-		minDistinct: defaultNgramMinDistinct,
+		windowSize:           defaultNgramWindowSize,
+		blockSize:            defaultNgramBlockSize,
+		consecutiveThreshold: defaultNgramConsecutiveThreshold,
+		spacedThreshold:      defaultNgramSpacedThreshold,
+		minDistinct:          defaultNgramMinDistinct,
+		maxSpan:              defaultNgramMaxSpan,
 	}
 }
 
@@ -78,8 +92,8 @@ func (m *reasoningNgramMonitor) Feed(text string) bool {
 	if len(m.tokens) > m.windowSize {
 		m.tokens = m.tokens[len(m.tokens)-m.windowSize:]
 	}
-	return detectConsecutiveRepeat(m.tokens, m.blockSize, m.threshold, m.minDistinct) ||
-		detectRepeatedNgram(m.tokens, m.blockSize, m.threshold)
+	return detectConsecutiveRepeat(m.tokens, m.blockSize, m.consecutiveThreshold, m.minDistinct) ||
+		detectRepeatedNgram(m.tokens, m.blockSize, m.spacedThreshold, m.maxSpan)
 }
 
 // Reset clears the accumulated tokens.
@@ -131,22 +145,33 @@ func detectConsecutiveRepeat(tokens []string, minBlockSize, threshold, minDistin
 	return false
 }
 
-// detectRepeatedNgram counts n-gram occurrences across the entire window.
-// Unlike detectConsecutiveRepeat, it catches repetition even when the
-// repeated blocks are separated by other content.  This handles the
-// "thinking in circles" pattern where the model repeats the same
-// conclusions with different filler between them.
-func detectRepeatedNgram(tokens []string, n, threshold int) bool {
+// detectRepeatedNgram checks whether any n-gram appears at least threshold
+// times within a maxSpan-wide sub-window.  Unlike a raw occurrence counter,
+// this prevents false positives when a phrase legitimately appears many times
+// spread across a large reasoning window (e.g. "terrain mesh" referenced in
+// different contexts 200+ tokens apart).
+//
+// For each n-gram, the last threshold positions are tracked.  When the span
+// between the oldest and newest of those positions is ≤ maxSpan, the
+// repetitions are close enough to constitute a real loop.
+func detectRepeatedNgram(tokens []string, n, threshold, maxSpan int) bool {
 	if len(tokens) < n || threshold < 2 {
 		return false
 	}
-	counts := make(map[string]int)
+	positions := make(map[string][]int)
 	for i := 0; i <= len(tokens)-n; i++ {
-		// Build a compact key from the n-gram.
 		key := strings.Join(tokens[i:i+n], "\x00")
-		counts[key]++
-		if counts[key] >= threshold {
-			return true
+		pos := positions[key]
+		pos = append(pos, i)
+		// Keep only the last threshold positions to bound memory.
+		if len(pos) > threshold {
+			pos = pos[len(pos)-threshold:]
+		}
+		positions[key] = pos
+		if len(pos) >= threshold {
+			if pos[len(pos)-1]-pos[0] <= maxSpan {
+				return true
+			}
 		}
 	}
 	return false

@@ -1042,7 +1042,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	var streak streakState       // reasoning/tool-call loop detection
 	var textLoop textLoopTracker // output-text loop detection
 	var duplicateRecoveryCount int
-	var emptyCompletionCount int
+	var textLoopRecoveryCount int
 	ngram := newReasoningNgramMonitor()
 	ngramRecoveryCount := 0
 	a.reasoningNgram = ngram
@@ -1064,39 +1064,22 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		// the n-gram monitor flagged it during streaming.  Uses a separate
 		// recovery counter and n-gram-specific prompts (emphasise "vary your
 		// wording" rather than "change tool").
-		// Skipped for workflow executors: reasoning naturally repeats when
-		// the model works on the same problem across workflow passes. The
-		// workflow interpreter handles recovery at a higher level.
-		if a.reasoningNgramTriggered && !a.workflowRole {
+		// a.reasoningNgramTriggered can never be true here for workflow
+		// executors: the monitor is never fed for them (see scanSSE) because
+		// reasoning naturally repeats when the model works on the same
+		// problem across workflow passes.
+		if a.reasoningNgramTriggered {
 			a.reasoningNgramTriggered = false
 			ngram.Reset()
 			ngramRecoveryCount++
-			if ngramRecoveryCount > ngramMaxRecovery {
-				obs.Warn("reasoning n-gram: max recovery exceeded, terminating turn",
-					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-				loopMsg := "[turn terminated: the model was stuck in a reasoning repetition loop and could not self-recover after multiple attempts]"
-				resp := summarizeToolTrail(msgs, loopMsg)
-				if a.onResponseSegment != nil && resp != "" {
-					a.onResponseSegment(resp)
-				}
-				msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+			var terminated bool
+			msgs, terminated = a.loopRecoveryAction(msgs, userMsgIdx, ngramRecoveryCount, ngramMaxRecovery,
+				recoveryNgramRemind, recoveryNgramReplan,
+				"the model was stuck in a reasoning repetition loop and could not self-recover after multiple attempts",
+				"reasoning n-gram", reasoningText)
+			if terminated {
 				return msgs, nil
 			}
-			cropped := cropLoopingMessages(msgs, userMsgIdx)
-			if len(cropped) < len(msgs) {
-				obs.Warn("reasoning n-gram: cropped looping messages",
-					"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-					"before", len(msgs), "after", len(cropped))
-				msgs = cropped
-			}
-			nudge := recoveryNgramRemind
-			if ngramRecoveryCount >= 2 {
-				nudge = recoveryNgramReplan
-			}
-			obs.Warn("reasoning n-gram repetition detected, injecting recovery nudge",
-				"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-				"recovery", ngramRecoveryCount)
-			msgs = append(msgs, Message{Role: "user", Content: nudge})
 			continue
 		}
 
@@ -1108,42 +1091,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 				// digest of this turn's tool calls and their results (msgs already
 				// holds the full trajectory) so the turn still persists to session
 				// history with something useful to resume from, instead of the
-				// blank/near-blank text streamCompletion returned.
+				// blank/near-blank text streamCompletion returned. A
+				// reasoning-only completion after real tool activity is a
+				// legitimate terminal state (the model finished with only a
+				// summary), not a loop — it falls through to the same
+				// terminal return as any other final response, below.
 				resp = summarizeToolTrail(msgs, resp)
-
-				// Empty-completion loop detection: when the model repeatedly
-				// produces reasoning-only output with no content or tool calls,
-				// it's stuck in a thinking loop. Inject a recovery nudge to
-				// break out. After max attempts, terminate the turn.
-				// Only triggers when the model has already made tool calls this
-				// turn (i.e., it was working and got stuck). A first-turn
-				// reasoning-only completion is a legitimate "thinking out loud"
-				// response, not a loop.
-				if !a.workflowRole && len(msgs) > userMsgIdx+2 {
-					emptyCompletionCount++
-					if emptyCompletionCount > emptyCompletionMaxRecovery {
-						obs.Warn("empty completion: max recovery exceeded, terminating turn",
-							"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-						loopMsg := "[turn terminated: the model kept producing empty completions (reasoning only, no content or tool calls) and could not self-recover]"
-						resp = summarizeToolTrail(msgs, loopMsg)
-						msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
-						return msgs, nil
-					}
-					// Only intervene after 2+ consecutive empty completions.
-					// A single empty completion after tool calls is legitimate
-					// (model finished with a reasoning-only summary).
-					if emptyCompletionCount >= 2 {
-						obs.Warn("empty completion loop detected, injecting recovery nudge",
-							"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-							"count", emptyCompletionCount)
-						cropped := cropLoopingMessages(msgs, userMsgIdx)
-						if len(cropped) < len(msgs) {
-							msgs = cropped
-						}
-						msgs = append(msgs, Message{Role: "user", Content: recoveryEmptyCompletion})
-						continue
-					}
-				}
 			}
 			if a.onResponseSegment != nil && resp != "" {
 				a.onResponseSegment(resp)
@@ -1157,60 +1110,43 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		// approach (matching MiMo-Code's repeated-step nudge) instead of
 		// terminating immediately.  Only terminate after max recovery attempts.
 		//
-		// Skipped for workflow executors: the workflow interpreter handles
-		// retries at a higher level (verdict parsing, terminated-turn recovery).
+		// Applies to workflow executors too: a literal repeat of a write-tool
+		// call with identical arguments is unambiguous evidence of a stuck
+		// loop in any calling context — unlike the reasoning-based detectors
+		// below, it has no legitimate cross-pass false-positive case.
 		// Read-only tools (read_file, list_dir, grep, glob) are excluded from
 		// duplicate detection — re-reading is always legitimate (read-edit-verify,
 		// cross-referencing, context refresh). Only write/mutate tools are tracked.
-		allSeen := false
-		if !a.workflowRole {
-			allSeen = true
-			hasWriteTool := false
-			for _, tc := range toolCalls {
-				switch tc.Function.Name {
-				case "read_file", "list_dir", "grep", "glob", "current_need":
-					continue
-				}
-				hasWriteTool = true
-				key := tc.Function.Name + "\x00" + tc.Function.Arguments
-				if !executedKeys[key] {
-					allSeen = false
-					break
-				}
+		allSeen := true
+		hasWriteTool := false
+		for _, tc := range toolCalls {
+			switch tc.Function.Name {
+			case "read_file", "list_dir", "grep", "glob", "current_need":
+				continue
 			}
-			if !hasWriteTool {
-				allSeen = false // pure read batches are never duplicates
+			hasWriteTool = true
+			key := tc.Function.Name + "\x00" + tc.Function.Arguments
+			if !executedKeys[key] {
+				allSeen = false
+				break
 			}
+		}
+		if !hasWriteTool {
+			allSeen = false // pure read batches are never duplicates
 		}
 		if allSeen {
 			duplicateRecoveryCount++
-			if duplicateRecoveryCount > duplicateToolMaxRecovery {
-				obs.Warn("duplicate tool call: max recovery exceeded, terminating turn",
-					"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-				loopMsg := "[turn terminated: the model kept repeating the same tool call and could not self-recover after multiple attempts]"
-				resp := summarizeToolTrail(msgs, loopMsg)
-				if a.onResponseSegment != nil && resp != "" {
-					a.onResponseSegment(resp)
-				}
-				msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+			var terminated bool
+			msgs, terminated = a.loopRecoveryAction(msgs, userMsgIdx, duplicateRecoveryCount, duplicateToolMaxRecovery,
+				recoveryDuplicateToolMild, recoveryDuplicateToolStrong,
+				"the model kept repeating the same tool call and could not self-recover after multiple attempts",
+				"duplicate tool call", reasoningText)
+			if terminated {
 				return msgs, nil
 			}
-			obs.Warn("duplicate tool call detected, injecting recovery nudge",
-				"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-				"recovery", duplicateRecoveryCount)
-			cropped := cropLoopingMessages(msgs, userMsgIdx)
-			if len(cropped) < len(msgs) {
-				msgs = cropped
-			}
-			nudge := recoveryDuplicateToolMild
-			if duplicateRecoveryCount >= 3 {
-				nudge = recoveryDuplicateToolStrong
-			}
-			msgs = append(msgs, Message{Role: "user", Content: nudge})
 			continue
 		}
 		duplicateRecoveryCount = 0
-		emptyCompletionCount = 0 // model produced tool calls — not stuck in thinking loop
 		for _, tc := range toolCalls {
 			// Skip read-only tools — re-reading files is always legitimate
 			// (read-edit-verify pattern, cross-referencing, etc.). Only
@@ -1246,32 +1182,14 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		if !a.workflowRole {
 			if key := stepKeyFromIteration(reasoningText, toolCalls); streak.tracker.recordStep(key) {
 				streak.recoveryCount++
-				if streak.recoveryCount >= 3 {
-					obs.Warn("loop streak: max recovery exceeded, terminating turn",
-						"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-					loopMsg := "[turn terminated: the model was stuck repeating the same reasoning/tool-call pattern and could not self-recover after multiple attempts]"
-					resp := summarizeToolTrail(msgs, loopMsg)
-					if a.onResponseSegment != nil && resp != "" {
-						a.onResponseSegment(resp)
-					}
-					msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+				var terminated bool
+				msgs, terminated = a.loopRecoveryAction(msgs, userMsgIdx, streak.recoveryCount, 2,
+					recoveryNudgeMild, recoveryNudgeStrong,
+					"the model was stuck repeating the same reasoning/tool-call pattern and could not self-recover after multiple attempts",
+					"loop streak", reasoningText)
+				if terminated {
 					return msgs, nil
 				}
-				cropped := cropLoopingMessages(msgs, userMsgIdx)
-				if len(cropped) < len(msgs) {
-					obs.Warn("loop streak: cropped looping messages",
-						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-						"before", len(msgs), "after", len(cropped))
-					msgs = cropped
-				}
-				nudge := recoveryNudgeMild
-				if streak.recoveryCount >= 2 {
-					nudge = recoveryNudgeStrong
-				}
-				obs.Warn("loop streak detected, injecting recovery nudge",
-					"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
-					"recovery", streak.recoveryCount)
-				msgs = append(msgs, Message{Role: "user", Content: nudge})
 			} else {
 				streak.recoveryCount = 0
 				ngram.Reset()
@@ -1286,21 +1204,29 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 
 		// Text-loop detection: if the model's output text (not reasoning)
 		// is identical across consecutive steps, inject a recovery nudge.
+		// textLoop.recordStep is a self-maintaining rolling window (it
+		// trims to the last textLoopTriggerCount entries itself) — it must
+		// NOT be reset here after firing. Doing so would clear the window,
+		// making the very next call return false and immediately zero
+		// textLoopRecoveryCount in the else branch below, so the count
+		// could never advance past 1 and the turn would nudge forever
+		// instead of ever terminating.
 		// Skipped for workflow executors: the workflow interpreter handles
 		// retries and recovery at a higher level.
-		if !a.workflowRole && resp != "" && textLoop.recordStep(resp) {
-			textLoop.reset()
-			nudge := recoveryNudgeMild
-			if streak.recoveryCount >= 2 {
-				nudge = recoveryNudgeStrong
+		if !a.workflowRole && resp != "" {
+			if textLoop.recordStep(resp) {
+				textLoopRecoveryCount++
+				var terminated bool
+				msgs, terminated = a.loopRecoveryAction(msgs, userMsgIdx, textLoopRecoveryCount, textLoopMaxRecovery,
+					recoveryNudgeMild, recoveryNudgeStrong,
+					"the model kept repeating identical output text and could not self-recover after multiple attempts",
+					"text loop", reasoningText)
+				if terminated {
+					return msgs, nil
+				}
+			} else {
+				textLoopRecoveryCount = 0
 			}
-			obs.Warn("text loop detected, injecting recovery nudge",
-				"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
-			cropped := cropLoopingMessages(msgs, userMsgIdx)
-			if len(cropped) < len(msgs) {
-				msgs = cropped
-			}
-			msgs = append(msgs, Message{Role: "user", Content: nudge})
 		}
 	}
 
@@ -2057,13 +1983,20 @@ func (a *Agent) scanSSE(
 				if a.onThinking != nil {
 					a.onThinking(choice.Delta.ReasoningContent)
 				}
-				if a.reasoningNgram != nil && a.reasoningNgram.Feed(choice.Delta.ReasoningContent) {
+				// workflowRole is excluded: reasoning naturally repeats when the
+				// model works on the same problem across workflow passes, and
+				// the Run loop below never consumes a.reasoningNgramTriggered
+				// for workflowRole agents — feeding it here anyway would cut
+				// every subsequent stream in the turn with no recovery, since
+				// the monitor's window is never reset.
+				if !a.workflowRole && a.reasoningNgram != nil && a.reasoningNgram.Feed(choice.Delta.ReasoningContent) {
 					a.reasoningNgramTriggered = true
 					// Cut the stream immediately — don't wait for the
 					// server to finish sending.  The remaining tokens
 					// are wasted work from a model stuck in a loop.
 					// httpResp.Body.Close() (deferred in streamCompletion)
 					// will reset the connection.
+					fmt.Fprintln(out, "\n[⚠ reasoning repetition detected — stream cut]")
 					break
 				}
 			}
