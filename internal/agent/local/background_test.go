@@ -275,3 +275,66 @@ func TestDispatchOneTool_SpawnBackgroundAgent(t *testing.T) {
 		t.Errorf("expected job label %q, got %q", "investigate X", jobs[0].Label)
 	}
 }
+
+// requestSystemPrompt extracts the system message content from a captured
+// chat-completions request body.
+func requestSystemPrompt(body []byte) string {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// TestRun_BackgroundAgentGuidance_OnlyWhenManagerSet verifies the system
+// prompt mentions spawn_background_agent only when a Manager is actually
+// wired — otherwise the prompt would reference a tool the model doesn't
+// have.
+func TestRun_BackgroundAgentGuidance_OnlyWhenManagerSet(t *testing.T) {
+	var mu sync.Mutex
+	var gotPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPrompt = requestSystemPrompt(body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	sess := &session.Session{}
+	var out strings.Builder
+	if _, err := agent.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	mu.Lock()
+	withoutMgr := gotPrompt
+	mu.Unlock()
+	if strings.Contains(withoutMgr, "spawn_background_agent") {
+		t.Errorf("did not expect background-agent guidance without a Manager, got prompt: %q", withoutMgr)
+	}
+
+	agent.SetBackgroundManager(NewManager(context.Background(), 3))
+	if _, err := agent.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	mu.Lock()
+	withMgr := gotPrompt
+	mu.Unlock()
+	if !strings.Contains(withMgr, "spawn_background_agent") {
+		t.Errorf("expected background-agent guidance once a Manager is set, got prompt: %q", withMgr)
+	}
+}

@@ -810,6 +810,14 @@ const systemPromptSharedFull = `Additional guidance:
 - Use find_files to locate files by name or extension before attempting to read them by guessed path.
 - If a bash command returns a non-zero exit code, diagnose the error before retrying.`
 
+// backgroundAgentGuidance is appended to the system prompt whenever
+// spawn_background_agent is available (a.backgroundManager != nil, checked
+// at the call site rather than threaded through buildSystemPrompt — see
+// Run). Modeled on Claude Code's own fork/Task tool discipline: prefer
+// forking over reading everything into your own context, and don't guess
+// at a result before the completion notification actually arrives.
+const backgroundAgentGuidance = `When a task requires reading or searching through a large amount of code, or answering several independent questions, prefer spawn_background_agent for each independent question rather than reading everything into your own context. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime.`
+
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
 // escalationName is non-empty when this agent is acting as the escalation target.
@@ -1017,6 +1025,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 
 	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier)
+	if a.backgroundManager != nil {
+		systemPrompt += "\n\n" + backgroundAgentGuidance
+	}
 	if a.customPrompt != "" {
 		systemPrompt = a.customPrompt + "\n\n" + systemPrompt
 	}
