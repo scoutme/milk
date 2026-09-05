@@ -198,6 +198,14 @@ type reasoningPromotedMsg struct{}
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
+// backgroundJobDoneMsg is sent immediately when a spawn_background_agent job
+// (ADR-0043) completes or fails — independent of, and typically well before,
+// the turn-boundary path (drainBackgroundJobs) that injects the same result
+// into the next turn's context. This is purely the live-notification path:
+// it lets the transcript/status bar reflect completion as soon as it
+// happens, without waiting for the user's next input.
+type backgroundJobDoneMsg struct{ job *local.Job }
+
 // directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
 	err     error
@@ -1705,6 +1713,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case memoryRefreshMsg:
 		if m.panelMemory {
 			return m, memoryPollTick()
+		}
+		return m, nil
+
+	case backgroundJobDoneMsg:
+		j := msg.job
+		if j.Err != nil {
+			m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ background agent %q failed: %v", j.Label, j.Err)) + "\n")
+		} else {
+			m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ background agent %q completed", j.Label)) + "\n")
 		}
 		return m, nil
 
@@ -3216,6 +3233,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Notify the TUI as soon as each background job (ADR-0043) completes,
+	// independent of the turn-boundary drain path.
+	if agents.backgroundMgr != nil {
+		agents.backgroundMgr.SetOnDone(func(j *local.Job) {
+			p.Send(backgroundJobDoneMsg{job: j})
+		})
+	}
 
 	// Wire task store redraw: when tasks change, send a tick to trigger View().
 	if taskStore != nil {

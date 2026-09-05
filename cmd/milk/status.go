@@ -105,6 +105,11 @@ func (m *model) statusBar() string {
 	if n := len(m.pendingAttachments); n > 0 {
 		left += dim(fmt.Sprintf(" [%d attached]", n))
 	}
+	if m.agents.backgroundMgr != nil {
+		if n := m.agents.backgroundMgr.ActiveCount(); n > 0 {
+			left += dim(" [⚙ " + pluralize(n, "background agent") + " running]")
+		}
+	}
 	if m.quitPending {
 		left += yellow(" [press ctrl+c again to exit]")
 	} else if m.loopInterrupt {
