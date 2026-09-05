@@ -54,12 +54,13 @@ A background job runs the full built-in tool loop (`read_file`, `grep`, `find_fi
 - Unlike `RunToolCall`: runs the normal iterative tool-call loop (`executeToolCalls`) until the model produces a final answer or `maxIter` is hit.
 - Uses a new "background sub-agent" system-prompt branch (alongside the existing primary/escalation branches in `buildSystemPrompt`) that frames the task as a scoped, self-contained research job with no awareness of the parent conversation.
 - Tool list excludes `agent_<name>`, `spawn_background_agent`, and `escalate` — no recursive forking, no chaining to other tool-agents, no self-escalation. This mirrors ADR-0034's existing "no recursive tool-agent chaining" decision.
+- Runs on an independent clone of the calling `*Agent` (`cloneForBackground`, built from an explicit field list of known-stable configuration — not `c := *a`), not the instance itself. A job runs in its own goroutine and can still be executing when the parent starts its own next turn on the same `*Agent`; several fields are mutated in place on the instance during a turn (`reasoningNgram`, `detectedFormat`, `pendingImageParts`, …), and even a shallow struct copy racily reads all of them at once against the parent's concurrent writes.
 
 ### 3. Background job manager
 
-A new small manager (package/location TBD in the implementation plan) tracks in-flight jobs:
+A new small manager (`internal/agent/local.Manager`) tracks in-flight jobs:
 
-- `Spawn(ctx, task, label string) *Job` launches the scoped run in a goroutine and returns immediately with a `Job` handle (id, label, status).
+- `Spawn(label, task, role, model string, run func(context.Context) (string, session.TokenUsage, error)) *Job` launches the scoped run in a goroutine and returns immediately with a `Job` handle (id, label, status). `Spawn` takes no per-call context — `run` receives the Manager's own long-lived context, supplied once at construction. A per-call context (the spawning turn's) would be wrong here: the TUI cancels each turn's context the instant that turn returns, which happens almost immediately after `Spawn` itself returns — a job needs to survive past that, since its entire purpose is to keep running across whatever later turns eventually drain it.
 - Bounded concurrency: a semaphore sized by `max_background_agents` (config, default 3) prevents runaway fan-out from a single turn or across turns.
 - Depth is capped at 1: a background job's own tool list has no `spawn_background_agent`, so it cannot itself fork (see §2) — this is the fork-bomb guard.
 - On completion, the job stores its result text, token usage, and end time; it does not push itself into any conversation on its own — delivery is pull-based (see §4).

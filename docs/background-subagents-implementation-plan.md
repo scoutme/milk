@@ -52,20 +52,23 @@ This is a companion feature to ADR-0034 (Agent-as-Tool): that ADR lets an agent 
 
    type Manager struct {
        mu       sync.Mutex
+       baseCtx  context.Context // supplied at construction; NOT any turn's context — see below
        sem      chan struct{}
        jobs     map[string]*Job
        pending  []*Job // completed, not yet drained
        onDone   func(*Job) // optional immediate-notify hook (TUI), called off the holder's goroutine
    }
 
-   func NewManager(maxConcurrent int) *Manager
+   func NewManager(baseCtx context.Context, maxConcurrent int) *Manager
    func (m *Manager) SetOnDone(fn func(*Job))
-   func (m *Manager) Spawn(ctx context.Context, label, task, role, model string, run func(context.Context) (string, TokenUsage, error)) *Job
+   func (m *Manager) Spawn(label, task, role, model string, run func(context.Context) (string, TokenUsage, error)) *Job
    func (m *Manager) Drain() []*Job // returns and clears pending completed jobs
    func (m *Manager) ActiveCount() int
    ```
-2. `Spawn` generates an ID (`job_<n>`), acquires a semaphore slot in a goroutine (so `Spawn` itself never blocks the caller — if the semaphore is full, the job sits queued inside the goroutine, not on the caller's stack), runs `run(ctx)`, records status/result/tokens/EndedAt, appends to `pending`, and invokes `onDone` if set.
-3. Tests: concurrent spawns respect `maxConcurrent` (use a channel-gated fake `run` to assert no more than N execute simultaneously); `Drain` returns and clears; failed `run` sets `JobFailed` + `Err`; `onDone` fires exactly once per job.
+
+   **Deviation from the original sketch, found during implementation:** `Spawn` does not take a per-call `ctx`. The TUI cancels each turn's context the instant that turn's `runTurn` call returns (`repl.go`'s `defer cancel()` immediately after starting it) — which happens almost immediately after `Spawn` returns, since `Spawn` itself is fast. A job spawned mid-turn must survive past that instant; its entire purpose is to keep running across whatever later turns eventually drain it. `run` receives the Manager's own `baseCtx` (supplied once at construction — the session/TUI-root context) instead.
+2. `Spawn` generates an ID (`job_<n>`), acquires a semaphore slot in a goroutine (so `Spawn` itself never blocks the caller — if the semaphore is full, the job sits queued inside the goroutine, not on the caller's stack), runs `run(m.baseCtx)`, records status/result/tokens/EndedAt, appends to `pending`, and invokes `onDone` if set.
+3. Tests: concurrent spawns respect `maxConcurrent` (use a channel-gated fake `run` to assert no more than N execute simultaneously); `Drain` returns and clears; failed `run` sets `JobFailed` + `Err`; `onDone` fires exactly once per job; a job outlives a caller-side context cancelled right after `Spawn` returns (regression test for the deviation above).
 
 ---
 
@@ -75,14 +78,16 @@ This is a companion feature to ADR-0034 (Agent-as-Tool): that ADR lets an agent 
 
 1. Add a new system-prompt branch alongside the existing primary/escalation branches in `buildSystemPrompt` (local.go:809, branches at :833-869): a `background` role variant —
    > "You are a background research agent forked to answer one self-contained question. You have no knowledge of any parent conversation beyond the task given to you. Investigate using your tools and produce a concise, complete written answer — this is the only thing that will be reported back."
-2. Add `RunBackgroundTask(ctx context.Context, task string, out io.Writer) (string, TokenUsage, error)` on `*Agent`:
+2. Add `RunBackgroundTask(ctx context.Context, cwd, task string, out io.Writer) (string, session.TokenUsage, error)` on `*Agent`:
    - Builds a fresh message list: `[{role: "system", content: <background prompt>}, {role: "user", content: task}]`.
-   - Runs the existing iterative tool loop (`Run`'s inner loop / `executeToolCalls`), reusing built-in tool dispatch, but:
-     - No session/history threading — this call owns its own message slice, not the caller's.
-     - No memory/percept injection.
-     - Tool schema list excludes `agent_<name>*`, `spawn_background_agent`, and `escalate` (filter in the `schemas()` call for this mode — add a `excludeToolAgents bool` / `mode` parameter).
+   - Runs the existing iterative tool loop, factored out of `Run` into a shared `runToolLoop(msgs, tools, ...)` method so both paths reuse the same loop-detection/tool-dispatch code instead of duplicating it.
+   - No session/history threading — this call owns its own message slice, not the caller's.
+   - No memory/percept injection.
+   - Tool schema list omits `agent_<name>*` and `spawn_background_agent` structurally (this method builds the list independently of `Run`'s, which is the only place either gets added) and excludes `escalate` via the existing `IncludedTools`/`ExcludedTools` limits mechanism rather than new filtering code.
    - Returns the final assistant text, accumulated token usage, and any error.
-3. Tests: verify a background run's tool list omits `escalate`/`agent_*`/`spawn_background_agent`; verify no calls to session-recording hooks occur (use a fake session spy); verify `maxIter` still applies.
+
+   **Deviation, found during implementation:** operates on `a.cloneForBackground()`, not `a` directly. A background job runs in its own goroutine and can easily still be running when the parent starts its own next turn on the same `*Agent` — `Run`/`runToolLoop`/`scanSSE` mutate several fields in place on the instance (`reasoningNgram`, `reasoningNgramTriggered`, `detectedFormat`, `pendingImageParts`), and reading them (even to reassign) races the parent's concurrent writes. `cloneForBackground` builds the clone from an explicit field list of known-stable configuration rather than `c := *a`, so it never reads the racy fields at all. Verified with a `-race` regression test.
+3. Tests: verify a background run's tool list omits `escalate`/`agent_*`/`spawn_background_agent`; verify token usage is accumulated locally rather than fed to the parent's `onTokens`; verify `maxIter` still applies; verify no data race running concurrently with the parent's own `Run()` call (`-race`, `-count=30`+).
 
 ---
 
@@ -90,23 +95,27 @@ This is a companion feature to ADR-0034 (Agent-as-Tool): that ADR lets an agent 
 
 **Files:** `internal/agent/local/tools.go`, `internal/agent/local/local.go`, `cmd/milk/dispatch.go`
 
-1. Add the `spawn_background_agent` schema (per ADR-0043 §1) to `schemas()`, gated the same way `agent_*` tools are — omitted entirely when building the background-mode tool list from Phase 3 (depth cap).
-2. Add a `*Manager` field on `Agent` (set via `SetBackgroundManager(m *Manager)`, mirroring `SetToolAgentDispatcher`) and a `roleName string` already available for prompt building — reuse it to tag jobs.
-3. In `dispatchOneTool` (local.go:1532), add a case for `spawn_background_agent`:
+1. Add `spawnBackgroundAgentSchema()` (per ADR-0043 §1), appended at `Run`'s tool-list call site only when `a.backgroundManager != nil` — mirrors the existing conditional append of `a.mcpToolSet.Schemas(ctx)` right next to it. Never appended when `RunBackgroundTask` builds a background job's own tool list (Phase 3), which is what actually enforces the depth-1 cap.
+2. Add a `backgroundManager *Manager` field on `Agent`, set via `SetBackgroundManager(m *Manager)` (mirroring `SetToolAgentDispatcher`). No separate `roleName` field needed — `agentRoleForMetrics(a.escalationName)` (already used for token-metric role tagging) doubles as the job's role tag.
+3. In `dispatchOneTool`, add a case for `spawn_background_agent`:
    ```go
-   case "spawn_background_agent":
-       var args struct{ Task, Label string }
+   if tc.Function.Name == "spawn_background_agent" && a.backgroundManager != nil {
+       var args struct{ Task, Label string `json:"task"` `json:"label"` }
        json.Unmarshal([]byte(tc.Function.Arguments), &args)
-       job := a.backgroundManager.Spawn(ctx, args.Label, args.Task, a.roleName, a.model,
-           func(jctx context.Context) (string, TokenUsage, error) {
-               return a.RunBackgroundTask(jctx, args.Task, io.Discard)
+       cwd := ""
+       if sess != nil { cwd = sess.CWD }
+       role := agentRoleForMetrics(a.escalationName)
+       job := a.backgroundManager.Spawn(args.Label, args.Task, role, a.model,
+           func(jobCtx context.Context) (string, session.TokenUsage, error) {
+               return a.RunBackgroundTask(jobCtx, cwd, args.Task, io.Discard)
            })
-       return fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label), nil
+       return "Spawned background agent " + job.ID + " (...). You will be notified when it completes."
+   }
    ```
-   This runs inside the per-tool-call goroutine already used by `executeToolCalls`'s batch (local.go:1471-1479), but returns immediately since `Spawn` itself doesn't block — no change needed to the batching/`WaitGroup` logic.
-4. In `dispatch.go`, construct one `*Manager` per session (sized via `cfg.EffectiveMaxBackgroundAgents()`), wire it into whichever runner(s) are localRunner instances for that session (both primary and escalation, if both are local-backed), and call `SetOnDone` with a hook that sends a `BackgroundJobMsg` to the TUI program (Phase 6) immediately on completion.
-5. At the start of `runPrimary`/`runEscalation`, before building this turn's context, call `mgr.Drain()` and prepend any completed jobs' results as a synthetic context block (same injection point as percepts) — format per ADR-0043 §4.
-6. Record tokens for each drained job via `sess.AddTokensFull(job.Model, job.Role+":subagent", job.Tokens)` and mirror into OTel via `obs.RecordTokens`/`obs.AccumulateCacheTokens`, matching the existing `escalation:subagent` recording at dispatch.go:354-364.
+   `Spawn` takes no `ctx` (see Phase 2's deviation note) — the job runs under the Manager's own `baseCtx`, not this call's, so it survives past this turn ending. Returns immediately since `Spawn` itself doesn't block — no change needed to `executeToolCalls`'s batching/`WaitGroup` logic.
+4. Construct one `*local.Manager` per session in `runREPL` (sized via `cfg.EffectiveMaxBackgroundAgents()`, using the session/TUI-root `ctx` — not any turn's — per Phase 2's deviation note), stored on `dispatchAgents.backgroundMgr` so it survives `buildTUIAgents` rebuilding the underlying `*local.Agent` copies every turn. `buildTUIAgents` re-attaches the same `*Manager` via `SetBackgroundManager` onto each turn's fresh copy. `SetOnDone` is wired right after `tea.NewProgram` (where the `*tea.Program` reference first exists) to send a `backgroundJobDoneMsg` (Phase 6) immediately on completion.
+5. `drainBackgroundJobs(ctx, mgr, sess) string` (new helper in `dispatch.go`) drains the manager, records each job's tokens, and formats completed/failed jobs into a block. Called at the start of `runPrimaryWithSession`/`runEscalationWithSession`, prepended to a separate `dispatchPrompt` variable — not the plain `prompt`, which stays the user's actual text for `RecordNeed`/percept-matching/session bookkeeping. `runEscalation`/`runEscalationWithSession` gained a new `mgr *local.Manager` parameter threaded through every call site (self-escalation from `runPrimary`, single-prompt CLI mode passes `nil`, the main TUI turn path, two test files) — no special-casing by role.
+6. Record tokens for each drained job via `sess.AddTokensFull(job.Model, job.Role+":subagent", job.Tokens.Prompt, job.Tokens.Completion, job.Tokens.CacheRead, job.Tokens.CacheCreation)` and mirror into OTel via `obs.RecordTokens`/`obs.AccumulateCacheTokens`, matching the existing `escalation:subagent` recording pattern in `dispatch.go`.
 
 ---
 
@@ -122,12 +131,12 @@ This is a companion feature to ADR-0034 (Agent-as-Tool): that ADR lets an agent 
 
 ### Phase 6 — TUI surfacing
 
-**Files:** `cmd/milk/repl.go`, new `cmd/milk/panel_background.go` (or extend `panel_workflow.go`)
+**Files:** `cmd/milk/repl.go`, `cmd/milk/status.go`
 
-1. Define `BackgroundJobMsg{Job *local.Job}` (or a slimmed view struct) as a `tea.Msg`, sent via `p.Send(...)` from the manager's `onDone` hook (Phase 4.4).
-2. `repl.go`'s `Update` handles `BackgroundJobMsg`: appends a transcript line (`⚙ background agent "<label>" completed`) and updates a small in-memory slice of recent job statuses for the status bar count.
-3. Status bar: while `ActiveCount() > 0`, render `⚙ N background agents running` next to the existing loop-detection indicator.
-4. Optional: repurpose the currently-unused `panelTasks`/`tasksOffset` scaffolding (repl.go:495-496, `regionTasks` at :997-1017) as the background-jobs panel rather than leaving it dead, following the same render pattern as `buildWorkflowPanelLines`/`renderStageTree` in `panel_workflow.go` but as a flat list (id, label, status, elapsed) instead of a stage tree.
+1. `backgroundJobDoneMsg{job *local.Job}` as a `tea.Msg`, sent via `p.Send(...)` from the manager's `onDone` hook — wired right after `st.program = p` in `runREPL` (the earliest point a `*tea.Program` reference exists), mirroring the existing `taskStore.SetOnChange` → `p.Send(memoryRefreshMsg{})` pattern immediately below it.
+2. `repl.go`'s `Update` handles `backgroundJobDoneMsg`: appends a transcript line (`⚙ background agent "<label>" completed` / `failed: <err>`) via the existing `appendTranscript` helper. No separate in-memory status slice needed for the status-bar count — that reads `ActiveCount()` directly (item 3).
+3. Status bar (`status.go`): a standalone `if m.agents.backgroundMgr != nil { if n := ...ActiveCount(); n > 0 { ... } }` block renders `[⚙ N background agent(s) running]`, alongside — not part of the mutually-exclusive loop/perm/selection `else if` chain, since it's independent information.
+4. **Skipped** (marked optional in the original plan): repurposing the dead `panelTasks`/`tasksOffset` scaffolding into a full background-jobs panel. The transcript line + status bar count already deliver the "you are notified when it completes" promise; a dedicated panel remains a reasonable follow-up but wasn't needed for this pass.
 
 ---
 

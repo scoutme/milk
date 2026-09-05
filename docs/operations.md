@@ -157,6 +157,18 @@ A lightweight task tracker for the primary agent (HTTP/Bedrock backends only —
 
 ---
 
+## Background sub-agents
+
+`spawn_background_agent` (ADR-0043 — see [docs/tooling.md](tooling.md#spawn_background_agent--forking-yourself-for-background-research) for the tool itself) forks an inference-server-backed agent to research a self-contained question asynchronously, one job per call, tracked for the life of the session by a per-session job manager.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_background_agents` | `3` | Maximum number of background jobs allowed to actually execute concurrently per session; further calls queue rather than block the spawning turn. Non-positive values fall back to the default. |
+
+Completed/failed jobs surface twice: immediately in the TUI transcript and status bar (`⚙ N background agent(s) running`) as each one finishes, and again — this time as context — prepended to whichever turn next runs after that (primary or escalation, whichever is dispatched).
+
+---
+
 ## Live configuration reload
 
 milk watches `~/.milk/config.json` while the TUI is running; a save from another terminal is parsed and applied to in-memory state within ~200ms. `/reload` forces an immediate re-parse (useful after a symlink swap or atomic editor replace).

@@ -264,6 +264,10 @@ Default visibility of thinking/reasoning tokens; see [/think](#interactive-mode)
 
 Ordered list of editor commands tried by `/config open` and `/open`; first found on `$PATH` wins. Env vars (`$EDITOR`, `$VISUAL`) are expanded before lookup. Default: `["$EDITOR", "$VISUAL", "nano", "vim", "vi"]`.
 
+### `max_background_agents` field
+
+Maximum concurrent `spawn_background_agent` jobs (ADR-0043) per session; non-positive or unset falls back to `3`. See [docs/operations.md — Background sub-agents](operations.md#background-sub-agents).
+
 ```json
 "config_editors": ["code --wait", "$EDITOR", "nano"]
 ```
