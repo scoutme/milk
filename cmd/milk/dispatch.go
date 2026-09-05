@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/scoutme/milk/internal/agent/claude"
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
@@ -16,6 +18,38 @@ import (
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
+
+// drainBackgroundJobs collects results from any spawn_background_agent jobs
+// (ADR-0043) that completed since the last turn, records their token usage
+// under the "<role>:subagent" convention (mirroring the escalation:subagent/
+// escalation:workflow recording below), and returns a synthetic context
+// block to prepend to the next dispatch prompt — or "" when nothing
+// completed or mgr is nil (e.g. single-prompt CLI mode has no manager).
+func drainBackgroundJobs(ctx context.Context, mgr *local.Manager, sess *session.Session) string {
+	if mgr == nil {
+		return ""
+	}
+	jobs := mgr.Drain()
+	if len(jobs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, j := range jobs {
+		role := j.Role + ":subagent"
+		obs.RecordTokens(ctx, j.Model, role, j.Tokens.Prompt, j.Tokens.Completion)
+		obs.AccumulateCacheTokens(j.Model, role, j.Tokens.CacheRead, j.Tokens.CacheCreation)
+		sess.AddTokensFull(j.Model, role, j.Tokens.Prompt, j.Tokens.Completion, j.Tokens.CacheRead, j.Tokens.CacheCreation)
+		if j.Err != nil {
+			fmt.Fprintf(&b, "[background agent %q failed: %v]\n", j.Label, j.Err)
+			continue
+		}
+		fmt.Fprintf(&b, "[background agent %q completed: %s]\n", j.Label, j.Result)
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
 
 // executeWithRetry wraps runner.Execute with the same transient network/stream
 // error retry (HTTP/2 stream reset or GOAWAY) that workflow turns already get
@@ -92,6 +126,15 @@ func runPrimaryWithSession(
 	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
+	var mgr *local.Manager
+	if da != nil {
+		mgr = da.backgroundMgr
+	}
+	// dispatchPrompt, not prompt, carries any completed background-job
+	// results (ADR-0043) — prompt itself stays the user's actual text for
+	// RecordNeed/percept-matching/session bookkeeping below.
+	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + prompt
+
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
 
@@ -147,7 +190,7 @@ func runPrimaryWithSession(
 	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RolePrimary, ctxMode,
 		sess.PrimarySessionID, nonce,
 		perceptsForAgent(cfg, mem, prompt, false), true,
-		prompt, cbs, aw)
+		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
 		return err
@@ -196,11 +239,11 @@ func runPrimaryWithSession(
 		session.Save(sess) //nolint:errcheck
 
 		if escalationRunner != nil {
-			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, onResponse, onSegment)
+			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, mgr, onResponse, onSegment)
 		}
 		// Fallback: build CLI escalation runner on-demand.
 		cliEsc := buildFallbackCLIRunner(cfg)
-		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, onResponse, onSegment)
+		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, mgr, onResponse, onSegment)
 	}
 
 	logStateTransition(sess, session.StateRouting, agentName+" primary done")
@@ -219,17 +262,19 @@ func runEscalation(
 	mem *memory.Store,
 	prompt string,
 	out io.Writer,
+	mgr *local.Manager,
 	onResponse func(string),
 	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, onResponse, onSegment, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, mgr, onResponse, onSegment, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
 // sessionContent is the compact version stored in session history (may include
 // attachment placeholders instead of raw file data). prompt is the full content
-// sent to the agent.
+// sent to the agent. mgr is the session's spawn_background_agent job manager
+// (ADR-0043); nil where none exists (e.g. single-prompt CLI mode).
 func runEscalationWithSession(
 	ctx context.Context,
 	cfg config.Config,
@@ -241,10 +286,15 @@ func runEscalationWithSession(
 	sessionContent string,
 	imageContextFile string,
 	out io.Writer,
+	mgr *local.Manager,
 	onResponse func(string),
 	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
+	// dispatchPrompt, not prompt, carries any completed background-job
+	// results (ADR-0043) — prompt itself stays the user's actual text for
+	// percept-matching/session bookkeeping below.
+	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + prompt
 	escAC := cfg.EscalationAgentConfig()
 	agentName := runner.Name()
 
@@ -327,7 +377,7 @@ func runEscalationWithSession(
 	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RoleEscalation, ctxMode,
 		sess.EscalationSessionID, nonce,
 		perceptsForAgent(cfg, mem, prompt, true), injectInstructions,
-		prompt, cbs, aw)
+		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
 		return err

@@ -490,7 +490,7 @@ func spawnBackgroundAgentSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
-			"name": "spawn_background_agent",
+			"name":        "spawn_background_agent",
 			"description": "Fork an independent copy of yourself to research a narrow, self-contained question in the background — reading files, grepping, running commands — without using up your own context. You are notified with a summary when it completes; you do not block on it and must not fabricate a result before that.",
 			"parameters": map[string]any{
 				"type": "object",

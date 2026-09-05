@@ -73,6 +73,13 @@ type dispatchAgents struct {
 	// build mcpToolSets/mcpServers for each agent name, so refreshMCPForRole
 	// can skip rebuilding when nothing has actually changed.
 	mcpServersSeen map[string][]config.MCPServerConfig
+	// backgroundMgr tracks spawn_background_agent jobs (ADR-0043) across
+	// however many turns this session runs. Constructed once per session
+	// (not per turn — buildTUIAgents re-wires the same *Manager onto each
+	// turn's freshly-copied local.Agent) with a base context that outlives
+	// any single turn's cancellable context. Nil when the active agent
+	// config doesn't support it (e.g. no local provider available yet).
+	backgroundMgr *local.Manager
 }
 
 // refreshMCPToolSets rebuilds the MCP toolset for the primary and escalation
@@ -2596,6 +2603,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
+		tuiLocalAgent.SetBackgroundManager(agents.backgroundMgr)
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
@@ -2608,6 +2616,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
+		tuiEscLocal.SetBackgroundManager(agents.backgroundMgr)
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
@@ -2770,7 +2779,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	case router.TargetEscalation:
 		imageCtxFile := st.pendingImageContextFile
 		st.pendingImageContextFile = ""
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, onResponse, onSegment, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, agents.backgroundMgr, onResponse, onSegment, pw)
 		// CLI image temp files are no longer needed after the turn.
 		cleanupCLIImageFiles(st)
 	}
@@ -3126,6 +3135,10 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		escalationAvail:   escalationAvail,
 		mcpToolSets:       mcpToolSets,
 		mcpServersSeen:    mcpServersSeen,
+		// Constructed once per session, not per turn (ADR-0043): ctx here is
+		// the session/TUI-root context, not any single turn's cancellable
+		// one — see the Manager doc comment for why that distinction matters.
+		backgroundMgr: local.NewManager(ctx, cfg.EffectiveMaxBackgroundAgents()),
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)

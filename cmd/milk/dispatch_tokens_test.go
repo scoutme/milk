@@ -126,7 +126,7 @@ func TestRunEscalationWithSession_TokenAccountingOrder(t *testing.T) {
 	var out bytes.Buffer
 
 	if err := runEscalationWithSession(context.Background(), config.Config{}, sess, runner, "brief", nil,
-		"hi", "hi", "", &out, nil, nil); err != nil {
+		"hi", "hi", "", &out, nil, nil, nil); err != nil {
 		t.Fatalf("runEscalationWithSession returned error: %v", err)
 	}
 

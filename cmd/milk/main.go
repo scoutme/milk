@@ -224,7 +224,7 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil)
 	case router.TargetEscalation:
-		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil)
+		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
