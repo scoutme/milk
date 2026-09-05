@@ -123,8 +123,7 @@ This is a companion feature to ADR-0034 (Agent-as-Tool): that ADR lets an agent 
 
 **Files:** `internal/agent/local/local.go` (primary/escalation branches, local.go:833-869)
 
-1. Add a short paragraph to both the primary and escalation prompt branches (since both can be inference-server-backed):
-   > "When a task requires reading or searching through a large amount of code or many independent things, prefer `spawn_background_agent` for each independent question rather than reading everything into your own context. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime."
+1. Add a short paragraph, appended at `Run`'s call site (only when `a.backgroundManager != nil`) rather than threaded through `buildSystemPrompt`'s role branches — see `backgroundAgentGuidance` in `local.go`. Revised after live-verifying the feature in a real session (escalation agent had the tool available but never called it): leads with context economy as the reason, and explicitly tells the caller to keep each spawned task narrow and pass it concrete pointers (file paths, what's already been ruled out) rather than a vague question — a vague or overly broad task wastes real tokens/latency rediscovering things the caller already knew, which undermines the "smaller tasks" framing as much as an oversized result would. Deliberately does **not** add a hard cap on job result length or a tighter iteration budget for background jobs — both would silently degrade a job's actual capability for a problem that's really about prompting the caller well, not about enforcing a budget.
 2. No test beyond a prompt-snapshot/contains-substring check, consistent with how other prompt branches are tested (if any existing test does this — check `local_test.go` conventions first).
 
 ---

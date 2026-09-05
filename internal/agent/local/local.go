@@ -816,7 +816,7 @@ const systemPromptSharedFull = `Additional guidance:
 // Run). Modeled on Claude Code's own fork/Task tool discipline: prefer
 // forking over reading everything into your own context, and don't guess
 // at a result before the completion notification actually arrives.
-const backgroundAgentGuidance = `When a task requires reading or searching through a large amount of code, or answering several independent questions, prefer spawn_background_agent for each independent question rather than reading everything into your own context. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime.`
+const backgroundAgentGuidance = `spawn_background_agent's main value is keeping your own context small: delegate research to a forked copy of yourself instead of reading a large amount of code or exploring many files directly yourself. Keep each spawned task narrow and self-contained, and give it concrete pointers — specific file paths, what you've already ruled out, exactly what question it should answer — so it doesn't waste work rediscovering things you already know; it has no access to your conversation. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime.`
 
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
