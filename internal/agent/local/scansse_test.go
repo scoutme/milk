@@ -3,6 +3,7 @@ package local
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -82,5 +83,76 @@ func TestScanSSE_NativeToolCallWithNullContinuationFields(t *testing.T) {
 	}
 	if got := toolCalls[0].Function.Arguments; got != `{"command": "cd /home/scoutme/altworkspace/milk && git status --short"}` {
 		t.Fatalf("expected assembled arguments, got %q", got)
+	}
+}
+
+// repeatingReasoningSSE builds an SSE stream of n identical reasoning_content
+// deltas — enough to trip the n-gram monitor's consecutive-repeat detector —
+// followed by a clean finish.
+func repeatingReasoningSSE(cycle string, n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, `data: {"choices":[{"delta":{"reasoning_content":%q}}]}`+"\n", cycle)
+	}
+	b.WriteString(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n")
+	b.WriteString("data: [DONE]\n")
+	return b.String()
+}
+
+// TestScanSSE_NgramNotFedForWorkflowRole verifies the fix for a real bug:
+// the reasoning n-gram monitor's Feed call must be gated by workflowRole,
+// not just its recovery handling in Run(). Before this fix, a workflow-role
+// agent's stream was still cut mid-reasoning by the monitor (Run() just
+// never consumed the trigger to recover), which meant every subsequent
+// stream in the turn would be truncated too, since the monitor's window was
+// never reset for that role.
+func TestScanSSE_NgramNotFedForWorkflowRole(t *testing.T) {
+	cycle := "OK I'm done let me write up my findings actually wait let me check one more thing "
+	sse := repeatingReasoningSSE(cycle, 10) // well past consecutiveThreshold=5
+
+	a := &Agent{workflowRole: true}
+	a.reasoningNgram = newReasoningNgramMonitor()
+	scanner := bufio.NewScanner(strings.NewReader(sse))
+	det := NewStreamDetector(ToolFormatUnknown)
+	var textBuf strings.Builder
+
+	_, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	if err != nil {
+		t.Fatalf("scanSSE returned error: %v", err)
+	}
+	if a.reasoningNgramTriggered {
+		t.Error("expected reasoningNgramTriggered to stay false for a workflow-role agent")
+	}
+	if finishReason != "stop" {
+		t.Errorf("expected the stream to run to completion (finish_reason=stop), got %q — it was cut short", finishReason)
+	}
+	wantLen := len(strings.Repeat(cycle, 10))
+	if len(reasoningText) != wantLen {
+		t.Errorf("expected full reasoning text (%d chars) to be streamed, got %d chars — stream was cut", wantLen, len(reasoningText))
+	}
+}
+
+// TestScanSSE_NgramCutsStreamForNonWorkflowRole is the control for the test
+// above: the same repeating pattern IS cut short when workflowRole is false.
+func TestScanSSE_NgramCutsStreamForNonWorkflowRole(t *testing.T) {
+	cycle := "OK I'm done let me write up my findings actually wait let me check one more thing "
+	sse := repeatingReasoningSSE(cycle, 10)
+
+	a := &Agent{}
+	a.reasoningNgram = newReasoningNgramMonitor()
+	scanner := bufio.NewScanner(strings.NewReader(sse))
+	det := NewStreamDetector(ToolFormatUnknown)
+	var textBuf strings.Builder
+
+	_, _, _, _, reasoningText, _, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	if err != nil {
+		t.Fatalf("scanSSE returned error: %v", err)
+	}
+	if !a.reasoningNgramTriggered {
+		t.Error("expected reasoningNgramTriggered to be set for a non-workflow-role agent")
+	}
+	wantLen := len(strings.Repeat(cycle, 10))
+	if len(reasoningText) >= wantLen {
+		t.Errorf("expected the stream to be cut short before all %d chars arrived, got %d chars", wantLen, len(reasoningText))
 	}
 }

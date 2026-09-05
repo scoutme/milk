@@ -12,14 +12,14 @@ func TestReasoningNgramMonitor_DetectsPeriodicRepetition(t *testing.T) {
 	// Each cycle has slightly different content after the common prefix, but
 	// the token-level periodic structure is the same.
 	cycle := "OK I'm done let me write up my findings actually wait let me check one more thing the acceptance criteria says "
-	// Feed enough cycles to exceed threshold (default 10).
-	for i := 0; i < 12; i++ {
+	// Back-to-back repetition should trigger fast (consecutiveThreshold=5).
+	for i := 0; i < 10; i++ {
 		if m.Feed(cycle) {
 			// Detected at cycle i+1 — that's fine, as long as it triggers.
 			return
 		}
 	}
-	t.Error("expected n-gram monitor to detect periodic repetition after 12 cycles")
+	t.Error("expected n-gram monitor to detect periodic repetition after 10 cycles")
 }
 
 func TestReasoningNgramMonitor_NoFalsePositiveOnUniqueText(t *testing.T) {
@@ -42,7 +42,7 @@ func TestReasoningNgramMonitor_NoFalsePositiveOnUniqueText(t *testing.T) {
 func TestReasoningNgramMonitor_Reset(t *testing.T) {
 	m := newReasoningNgramMonitor()
 	cycle := "I'm done let me write findings actually wait check again "
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 10; i++ {
 		m.Feed(cycle)
 	}
 	m.Reset()
@@ -141,7 +141,7 @@ func TestTokenize_NumberNormalization(t *testing.T) {
 
 func TestReasoningNgramMonitor_NumberNormalizedLoop(t *testing.T) {
 	// Simulate the real-world loop: 6 entity types enumerated with
-	// incrementing line numbers, repeated 4 times.
+	// incrementing line numbers, repeated back-to-back.
 	cycle := "1517. the renderentity function uses entity.type === 'bat' - correct. " +
 		"1518. the renderentity function uses entity.type === 'spider' - correct. " +
 		"1519. the renderentity function uses entity.type === 'player' - correct. " +
@@ -149,48 +149,76 @@ func TestReasoningNgramMonitor_NumberNormalizedLoop(t *testing.T) {
 		"1521. the renderentity function uses entity.type === 'skeleton' - correct. " +
 		"1522. the renderentity function uses entity.type === 'wolf' - correct. "
 	m := newReasoningNgramMonitor()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		if m.Feed(cycle) {
 			return
 		}
 	}
-	t.Error("expected n-gram monitor to detect number-normalized loop after 5 cycles")
+	t.Error("expected n-gram monitor to detect number-normalized loop after 10 cycles")
 }
 
 func TestDetectRepeatedNgram_SpacedOut(t *testing.T) {
 	// Simulate "thinking in circles" — same conclusions with filler between.
-	// Block A = 20 tokens, filler = 100 unique tokens, repeated 4 times.
+	// Block A = 20 tokens, filler = 50 unique tokens, repeated 4 times.
+	// Total span for 3 occurrences: (20+50)*2 = 140 tokens, within maxSpan=200.
 	block := make([]string, 20)
 	for i := range block {
 		block[i] = fmt.Sprintf("conclusion_%d", i)
 	}
-	filler := make([]string, 100)
+	filler := make([]string, 50)
 	for i := range filler {
 		filler[i] = fmt.Sprintf("filler_%d", i)
 	}
-	tokens := make([]string, 0, 480)
+	tokens := make([]string, 0, 280)
 	for i := 0; i < 4; i++ {
 		tokens = append(tokens, block...)
 		tokens = append(tokens, filler...)
 	}
-	if !detectRepeatedNgram(tokens, 20, 3) {
-		t.Error("expected detection of spaced-out 20-token block repeated 4 times")
+	if !detectRepeatedNgram(tokens, 20, 3, 200) {
+		t.Error("expected detection of spaced-out 20-token block repeated 4 times within span")
+	}
+}
+
+func TestDetectRepeatedNgram_WideSpacingNoFalsePositive(t *testing.T) {
+	// Same n-gram appears many times but spread across a large window.
+	// This is NOT a loop — the model is legitimately referencing the same
+	// concept while making progress. The span between occurrences exceeds
+	// maxSpan, so it should NOT trigger.
+	block := make([]string, 4)
+	for i := range block {
+		block[i] = fmt.Sprintf("terrain_mesh_%d", i)
+	}
+	filler := make([]string, 150)
+	for i := range filler {
+		filler[i] = fmt.Sprintf("progress_%d", i)
+	}
+	tokens := make([]string, 0, 800)
+	for i := 0; i < 5; i++ {
+		tokens = append(tokens, block...)
+		tokens = append(tokens, filler...)
+	}
+	// 5 occurrences at positions 0, 154, 308, 462, 616.
+	// Span of last 5: 616 > maxSpan=200. Should NOT trigger.
+	if detectRepeatedNgram(tokens, 4, 5, 200) {
+		t.Error("should not trigger when occurrences are spread beyond maxSpan")
 	}
 }
 
 func TestReasoningNgramMonitor_SpacedOutLoop(t *testing.T) {
 	// Real-world pattern: model repeats conclusions with varying filler.
-	block := "OK I'm going to write the summary now the code is clean and ready "
-	filler1 := "let me check the types and make sure everything compiles correctly "
-	filler2 := "actually I should also verify the tests pass and the build succeeds "
+	// Short cycles (~10 tokens each) so 20 repetitions fit within the
+	// 1000-token window and the 200-token maxSpan for n-gram detection.
+	block := "write summary now code is clean ready "
+	filler1 := "check types compile "
+	filler2 := "verify tests pass "
 	m := newReasoningNgramMonitor()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 25; i++ {
 		text := block + filler1 + block + filler2
 		if m.Feed(text) {
 			return
 		}
 	}
-	t.Error("expected n-gram monitor to detect spaced-out loop after 5 cycles")
+	t.Error("expected n-gram monitor to detect spaced-out loop after 25 cycles")
 }
 
 func TestNormalisedHash_Truncation(t *testing.T) {

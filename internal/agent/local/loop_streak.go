@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/scoutme/milk/internal/obs"
 )
 
 // loopStreakTracker detects when the model repeats the same reasoning or
@@ -148,6 +150,46 @@ type streakState struct {
 	recoveryCount int
 }
 
+// loopRecoveryAction is the shared escalation mechanics for every intra-turn
+// loop detector: crop the looping tail from context, then either inject a
+// nudge (mild on the first attempt, strong from the second) or, once
+// recoveryCount exceeds maxRecovery, terminate the turn with a diagnostic
+// summary in place of a real response.
+//
+// Consolidating this in one place (rather than each detector re-implementing
+// crop+nudge+terminate independently) removes the risk of detectors drifting
+// out of sync — see the ngramRecoveryCount history in the caller for a case
+// where that already happened.
+func (a *Agent) loopRecoveryAction(msgs []Message, userMsgIdx int, recoveryCount, maxRecovery int, mildNudge, strongNudge, terminateReason, detectorName, reasoningText string) (newMsgs []Message, terminated bool) {
+	if recoveryCount > maxRecovery {
+		obs.Warn(detectorName+": max recovery exceeded, terminating turn",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName))
+		loopMsg := "[turn terminated: " + terminateReason + "]"
+		resp := summarizeToolTrail(msgs, loopMsg)
+		if a.onResponseSegment != nil && resp != "" {
+			a.onResponseSegment(resp)
+		}
+		msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+		return msgs, true
+	}
+	cropped := cropLoopingMessages(msgs, userMsgIdx)
+	if len(cropped) < len(msgs) {
+		obs.Warn(detectorName+": cropped looping messages",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"before", len(msgs), "after", len(cropped))
+		msgs = cropped
+	}
+	nudge := mildNudge
+	if recoveryCount >= 2 {
+		nudge = strongNudge
+	}
+	obs.Warn(detectorName+" detected, injecting recovery nudge",
+		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		"recovery", recoveryCount)
+	msgs = append(msgs, Message{Role: "user", Content: nudge})
+	return msgs, false
+}
+
 // cropLoopingMessages removes consecutive assistant+tool-result message
 // groups from the tail of msgs that match the given step key, preserving the
 // user message that started the turn (at startIdx). Returns the cropped
@@ -231,6 +273,19 @@ const (
 	textLoopMaxRecovery  = 2
 	textLoopPrefixLen    = 200
 )
+
+// duplicateToolMaxRecovery is the number of consecutive all-duplicate tool
+// batches allowed before terminating the turn. Separate from textLoopMaxRecovery
+// because duplicate tool calls are a weaker signal — re-reading a file after
+// an edit (read-edit-verify pattern) is legitimate and should not terminate
+// after just 3 repetitions. MiMo-Code uses a similar distinction between
+// text-loop (strong signal, low threshold) and tool-duplicate (weaker signal,
+// higher threshold).
+const duplicateToolMaxRecovery = 5
+
+// ngramMaxRecovery is the number of n-gram repetition detections allowed
+// before terminating the turn. Matches MiMo-Code's TEXT_NGRAM_MAX_RECOVERY.
+const ngramMaxRecovery = 2
 
 // normalizeForTextLoop lowercases, collapses whitespace, strips leading
 // phrases, and truncates — matching MiMo-Code's normalizeForLoopDetection.
