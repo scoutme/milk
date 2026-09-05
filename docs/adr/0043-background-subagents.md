@@ -78,6 +78,7 @@ A new small manager (`internal/agent/local.Manager`) tracks in-flight jobs:
 - Status bar shows a live count while jobs are running (e.g. `⚙ 2 background agents running`), analogous to existing loop-detection warnings.
 - On completion, a transcript line is printed so the user sees the job land, distinct from the next turn's synthetic injection block.
 - Reuses the `tea.Program.Send`-driven live-update pattern already used by the workflow engine's `ProgressMsg` (`internal/workflow/workflow.go`, rendered by `panel_workflow.go`), generalized to arbitrary background jobs rather than only `/workflow`-driven pipelines.
+- **Auto-follow-up, added after live-verifying the feature**: an escalation agent routinely tells the user "I'll follow up automatically when they finish" after spawning a wave — but the per-job notification above is passive (just a transcript line) and the turn-boundary drain only runs if some *other* turn happens to be dispatched. Without an explicit trigger, that promise is never actually kept: results sit in the Manager's queue indefinitely if the user doesn't send anything further. `Manager.SetOnBatchDone` fires once when the last job of a wave finishes (distinct from the per-job hook — firing per-job would produce one redundant follow-up turn per job instead of one consolidated turn for the wave); `cmd/milk` submits a synthetic prompt through the same dispatch path a real user turn takes if idle, or defers to the next turn-completion if busy — mirroring the existing pattern for queued Telegram remote-oversight input.
 
 ### 6. Scope
 
