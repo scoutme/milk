@@ -49,14 +49,16 @@ type Job struct {
 // Manager holds one context for its own lifetime instead, supplied at
 // construction (typically the session/TUI-root context, not any turn's).
 type Manager struct {
-	mu         sync.Mutex
-	baseCtx    context.Context
-	sem        chan struct{}
-	jobs       map[string]*Job
-	pending    []*Job
-	onDone     func(*Job)
-	nextID     int
-	jobTimeout time.Duration
+	mu            sync.Mutex
+	baseCtx       context.Context
+	sem           chan struct{}
+	jobs          map[string]*Job
+	pending       []*Job
+	onDone        func(*Job)
+	onBatchDone   func()
+	batchSignaled bool
+	nextID        int
+	jobTimeout    time.Duration
 }
 
 // defaultJobTimeout bounds how long a single job may run once it starts
@@ -94,6 +96,24 @@ func NewManager(baseCtx context.Context, maxConcurrent int) *Manager {
 func (m *Manager) SetOnDone(fn func(*Job)) {
 	m.mu.Lock()
 	m.onDone = fn
+	m.mu.Unlock()
+}
+
+// SetOnBatchDone registers a callback fired exactly once when the last
+// currently-outstanding job finishes (ActiveCount reaches 0) — i.e. once
+// per "wave" of spawn_background_agent calls, not once per job. The flag
+// guarding this resets on the next Drain, so a later wave can signal again.
+// Without an explicit "the whole batch is done" signal distinct from
+// per-job SetOnDone, nothing ever proactively turns "results are ready"
+// into an actual response: the turn-boundary drain path (drainBackgroundJobs
+// in cmd/milk/dispatch.go) only runs when a turn happens to be dispatched
+// for some other reason — e.g. the user typing again — and per-job SetOnDone
+// only appends a transcript line, it doesn't generate a real response
+// either. This is the hook cmd/milk uses to actually dispatch a follow-up
+// turn automatically once every spawned job has finished.
+func (m *Manager) SetOnBatchDone(fn func()) {
+	m.mu.Lock()
+	m.onBatchDone = fn
 	m.mu.Unlock()
 }
 
@@ -160,19 +180,36 @@ func (m *Manager) finish(job *Job, result string, tokens session.TokenUsage, err
 	}
 	m.pending = append(m.pending, job)
 	onDone := m.onDone
+
+	// Fire onBatchDone at most once per wave: guarded by batchSignaled so a
+	// second job finishing microseconds after the one that already saw
+	// ActiveCount hit 0 can't also see 0 and signal a second time (both
+	// reads happen under m.mu, so they're serialized relative to each
+	// other regardless of how close together the two jobs actually
+	// finished). Drain resets the guard for the next wave.
+	var fireBatchDone func()
+	if m.onBatchDone != nil && !m.batchSignaled && m.activeCountLocked() == 0 {
+		m.batchSignaled = true
+		fireBatchDone = m.onBatchDone
+	}
 	m.mu.Unlock()
 
 	if onDone != nil {
 		onDone(job)
 	}
+	if fireBatchDone != nil {
+		fireBatchDone()
+	}
 }
 
 // Drain returns all jobs that have completed or failed since the last Drain
 // call, and clears the pending list. This is the turn-boundary path: callers
-// inject each returned job's result into the next turn's context.
+// inject each returned job's result into the next turn's context. Also
+// resets the SetOnBatchDone guard so the next wave of jobs can signal again.
 func (m *Manager) Drain() []*Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.batchSignaled = false
 	if len(m.pending) == 0 {
 		return nil
 	}
@@ -186,6 +223,11 @@ func (m *Manager) Drain() []*Job {
 func (m *Manager) ActiveCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.activeCountLocked()
+}
+
+// activeCountLocked is ActiveCount's body, callable when m.mu is already held.
+func (m *Manager) activeCountLocked() int {
 	n := 0
 	for _, j := range m.jobs {
 		if j.Status == JobRunning {

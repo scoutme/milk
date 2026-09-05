@@ -253,6 +253,70 @@ func TestManager_JobTimeout_TerminatesAndFreesSlot(t *testing.T) {
 	wg.Wait()
 }
 
+// TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes verifies the fix for
+// a real UX gap: an agent promising "I'll follow up automatically when they
+// finish" had nothing that actually did — SetOnDone only drives a passive
+// transcript line, and the turn-boundary drain path only runs if some other
+// turn happens to be dispatched. onBatchDone is the signal cmd/milk uses to
+// actually trigger a follow-up turn. Must fire exactly once for the whole
+// wave, not once per job.
+func TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes(t *testing.T) {
+	mgr := NewManager(context.Background(), 3)
+	var batchCalls atomic.Int32
+	mgr.SetOnBatchDone(func() { batchCalls.Add(1) })
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	mgr.SetOnDone(func(j *Job) { wg.Done() })
+
+	release := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+			<-release
+			return "ok", session.TokenUsage{}, nil
+		})
+	}
+	if got := batchCalls.Load(); got != 0 {
+		t.Fatalf("expected onBatchDone not to fire while jobs are still running, got %d calls", got)
+	}
+	close(release)
+	wg.Wait()
+
+	if got := batchCalls.Load(); got != 1 {
+		t.Errorf("expected onBatchDone to fire exactly once for the whole wave, got %d calls", got)
+	}
+}
+
+// TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave verifies Drain
+// resets the guard so a second wave of jobs can signal again.
+func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
+	mgr := NewManager(context.Background(), 3)
+	var batchCalls atomic.Int32
+	mgr.SetOnBatchDone(func() { batchCalls.Add(1) })
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	mgr.SetOnDone(func(j *Job) { wg.Done() })
+	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		return "ok", session.TokenUsage{}, nil
+	})
+	wg.Wait()
+	if got := batchCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 call after first wave, got %d", got)
+	}
+
+	mgr.Drain()
+
+	wg.Add(1)
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		return "ok", session.TokenUsage{}, nil
+	})
+	wg.Wait()
+	if got := batchCalls.Load(); got != 2 {
+		t.Errorf("expected onBatchDone to fire again for the second wave after Drain, got %d total calls", got)
+	}
+}
+
 func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 	ch := make(chan struct{})
 	go func() {

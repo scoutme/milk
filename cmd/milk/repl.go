@@ -206,6 +206,15 @@ type agentDoneMsg struct{ err error }
 // happens, without waiting for the user's next input.
 type backgroundJobDoneMsg struct{ job *local.Job }
 
+// backgroundBatchDoneMsg is sent exactly once when the last currently-
+// outstanding spawn_background_agent job finishes (Manager.SetOnBatchDone —
+// ActiveCount reaches 0), i.e. once per wave rather than once per job. This
+// is what actually turns "results are ready" into a real follow-up turn:
+// neither backgroundJobDoneMsg (a passive transcript line) nor the
+// turn-boundary drain path (which only runs when some other turn happens to
+// be dispatched) generates a response on their own.
+type backgroundBatchDoneMsg struct{}
+
 // directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
 	err     error
@@ -495,6 +504,11 @@ type model struct {
 	// cancelTurn cancels the context of the running agent turn; nil when idle.
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
+
+	// pendingBackgroundFollowup is set when a spawn_background_agent wave
+	// finishes (backgroundBatchDoneMsg) while busy or otherwise blocked, so
+	// handleAgentDone can retry the auto-follow-up once idle again.
+	pendingBackgroundFollowup bool
 
 	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
@@ -953,6 +967,9 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 	m.syncLayout()
 
+	if m.pendingBackgroundFollowup {
+		return m.maybeAutoFollowupBackgroundJobs()
+	}
 	if len(m.st.pendingRemoteInputs) > 0 {
 		next := m.st.pendingRemoteInputs[0]
 		m.st.pendingRemoteInputs = m.st.pendingRemoteInputs[1:]
@@ -1725,6 +1742,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case backgroundBatchDoneMsg:
+		return m.maybeAutoFollowupBackgroundJobs()
+
 	case configReloadMsg:
 		if msg.err != nil {
 			m.appendTranscript(fmt.Sprintf("%s config reload error: %v\n", milkTag(), msg.err))
@@ -2343,6 +2363,37 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	return m.submitInput(input, promptLabel(m.st))
+}
+
+// backgroundFollowupPrompt is the synthetic input used to trigger a real
+// follow-up turn once a whole wave of spawn_background_agent jobs has
+// finished (ADR-0043). It carries no content of its own — drainBackgroundJobs
+// (dispatch.go) prepends the actual drained results to whatever turn picks
+// it up; this text only needs to point the model at reacting to them.
+const backgroundFollowupPrompt = "(Background research agents have finished — review their results above and continue.)"
+
+// maybeAutoFollowupBackgroundJobs checks whether every spawn_background_agent
+// job from the most recent wave has finished and, if the TUI is idle, submits
+// backgroundFollowupPrompt as a real turn so the agent actually produces the
+// consolidated response it usually promises — rather than leaving the
+// results sitting in the Manager's queue until the user happens to send
+// another message. Called both when a wave first finishes
+// (backgroundBatchDoneMsg) and again after any turn completes
+// (handleAgentDone), in case the wave finished while busy.
+func (m model) maybeAutoFollowupBackgroundJobs() (tea.Model, tea.Cmd) {
+	mgr := m.agents.backgroundMgr
+	if mgr == nil || mgr.ActiveCount() > 0 {
+		// Nothing to do yet, or a newer wave started in the meantime —
+		// wait for that wave's own completion signal instead.
+		m.pendingBackgroundFollowup = false
+		return m, nil
+	}
+	if m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil {
+		m.pendingBackgroundFollowup = true
+		return m, nil
+	}
+	m.pendingBackgroundFollowup = false
+	return m.submitInput(backgroundFollowupPrompt, dim("[background]")+" ")
 }
 
 // submitInput handles a finalised user input string from any source (keyboard,
@@ -3239,6 +3290,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	if agents.backgroundMgr != nil {
 		agents.backgroundMgr.SetOnDone(func(j *local.Job) {
 			p.Send(backgroundJobDoneMsg{job: j})
+		})
+		// And, once the whole wave has finished, actually trigger a
+		// follow-up turn (see maybeAutoFollowupBackgroundJobs) — without
+		// this, "I'll follow up automatically" is never true: results just
+		// sit in the Manager's queue until some other turn happens to be
+		// dispatched.
+		agents.backgroundMgr.SetOnBatchDone(func() {
+			p.Send(backgroundBatchDoneMsg{})
 		})
 	}
 
