@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/scoutme/milk/internal/agent/local"
 )
 
 // panelRegion identifies which side panel (if any) a screen column falls in.
@@ -19,13 +20,14 @@ const (
 	regionNone panelRegion = iota
 	regionMemory
 	regionTasks
+	regionBackground
 	regionWorkflow
 )
 
 // regionAt maps an absolute terminal column to the panel region it falls in
 // (regionNone for the main viewport) and the column offset within that
 // region's own rendered width, in the same left-to-right order the panels are
-// joined in View(): viewport, memory, tasks, workflow.
+// joined in View(): viewport, memory, tasks, background, workflow.
 func (m *model) regionAt(x int) (panelRegion, int) {
 	off := m.mainWidth()
 	if x < off {
@@ -42,6 +44,12 @@ func (m *model) regionAt(x int) (panelRegion, int) {
 			return regionTasks, x - off
 		}
 		off += tasksPanelWidth
+	}
+	if m.panelBackground {
+		if x < off+backgroundPanelWidth {
+			return regionBackground, x - off
+		}
+		off += backgroundPanelWidth
 	}
 	if m.workflowPanelVisible() {
 		if x < off+workflowPanelWidth {
@@ -75,6 +83,12 @@ func (m *model) panelMaxOffset(region panelRegion, h int) int {
 		total = len(buildPanelLines(m.mem, memoryPanelInner, m.currentSessionBricks()))
 	case regionTasks:
 		total = len(buildTasksPanelLines(m.taskStore, tasksPanelInner))
+	case regionBackground:
+		var jobs []local.Job
+		if m.agents.backgroundMgr != nil {
+			jobs = m.agents.backgroundMgr.Jobs()
+		}
+		total = len(buildBackgroundPanelLines(jobs, backgroundPanelInner))
 	case regionWorkflow:
 		total = len(buildWorkflowPanelLines(m.workflowState, workflowPanelContentWidth-2))
 	default:

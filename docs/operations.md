@@ -165,7 +165,7 @@ A lightweight task tracker for the primary agent (HTTP/Bedrock backends only —
 |---|---|---|
 | `max_background_agents` | `3` | Maximum number of background jobs allowed to actually execute concurrently per session; further calls queue rather than block the spawning turn. Non-positive values fall back to the default. |
 
-Completed/failed jobs surface twice: immediately in the TUI transcript and status bar (`⚙ N background agent(s) running`) as each one finishes, and again — this time as context — prepended to whichever turn next runs after that (primary or escalation, whichever is dispatched).
+Completed/failed jobs surface three ways: immediately in the TUI transcript and status bar (`⚙ N background agent(s) running`) as each one finishes; a live list in the background-agents panel (`/panel background` or **F4** — label, status, elapsed time; mirrors the tasks/memory panels); and, once the model is next free, an actual follow-up turn the agent produces automatically — no further input needed. Agent-initiated waves (the `spawn_background_agent` tool call) wait for every job in the wave to finish before that follow-up fires, so a multi-part research plan gets one consolidated report; a job the *user* spawns directly (pressing Enter again while the model is busy — same 3s window as the existing busy hint) delivers as soon as the model is free instead, since there's no wave to consolidate it with.
 
 ---
 
@@ -251,3 +251,4 @@ When an agent calls `edit_file`/`write_file` (primary) or `Edit`/`Write` (Claude
 | **Ctrl-Left/Right** | Word navigation |
 | **Shift-Arrows** | Text selection (transcript and input) |
 | **Ctrl-X** | Cut selected input text |
+| **F1 / F2 / F3 / F4** | Show/hide the memory / tasks / workflow / background-agents panel — same effect as `/panel <name>`. Works in any mode, including mid-turn. |

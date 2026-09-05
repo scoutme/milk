@@ -545,6 +545,10 @@ type model struct {
 	tasksOffset int
 	taskStore   *tasks.Store
 
+	// background-agents panel (ADR-0043)
+	panelBackground  bool
+	backgroundOffset int
+
 	// pending /forget confirmation
 	pendingForget *forgetState
 
@@ -1071,6 +1075,10 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.tasksOffset > 0 {
 				m.tasksOffset--
 			}
+		case regionBackground:
+			if m.backgroundOffset > 0 {
+				m.backgroundOffset--
+			}
 		case regionWorkflow:
 			if m.workflowPanelOffset > 0 {
 				m.workflowPanelOffset--
@@ -1088,6 +1096,10 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case regionTasks:
 			if m.tasksOffset < m.panelMaxOffset(regionTasks, h) {
 				m.tasksOffset++
+			}
+		case regionBackground:
+			if m.backgroundOffset < m.panelMaxOffset(regionBackground, h) {
+				m.backgroundOffset++
 			}
 		case regionWorkflow:
 			if m.workflowPanelOffset < m.panelMaxOffset(regionWorkflow, h) {
@@ -1345,6 +1357,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.ptyPane != nil {
 			return m.handlePTYKey(msg)
+		}
+		// F1-F4: global panel show/hide shortcuts, available in any other
+		// mode (busy, permission prompt, wizards, ...) — none of them
+		// otherwise use function keys, and toggling how much of the
+		// screen a panel takes doesn't conflict with anything in-progress.
+		// Same effect as /panel <name>; having three-plus panels
+		// (memory/tasks/background, plus workflow) competing for space
+		// makes a quick toggle worth more than typing the command out.
+		switch msg.String() {
+		case "f1":
+			return m.handlePanelCmd("memory")
+		case "f2":
+			return m.handlePanelCmd("tasks")
+		case "f3":
+			return m.handlePanelCmd("workflow")
+		case "f4":
+			return m.handlePanelCmd("background")
 		}
 		if m.pendingDirectBash != nil {
 			return m.handleDirectBashKey(msg)

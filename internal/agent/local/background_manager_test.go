@@ -317,6 +317,38 @@ func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
 	}
 }
 
+// TestManager_Jobs_SnapshotOrderedOldestFirst_SurvivesDrain verifies Jobs()
+// is a side-effect-free snapshot (unlike Drain), safe to call on every
+// render, ordered oldest-first, and unaffected by Drain clearing the
+// separate pending-delivery queue.
+func TestManager_Jobs_SnapshotOrderedOldestFirst_SurvivesDrain(t *testing.T) {
+	mgr := NewManager(context.Background(), 3)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	mgr.SetOnDone(func(j *Job) { wg.Done() })
+
+	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		return "a", session.TokenUsage{}, nil
+	})
+	time.Sleep(2 * time.Millisecond) // ensure a distinct, later StartedAt
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		return "b", session.TokenUsage{}, nil
+	})
+	wg.Wait()
+
+	jobs := mgr.Jobs()
+	if len(jobs) != 2 || jobs[0].Label != "first" || jobs[1].Label != "second" {
+		t.Fatalf("expected [first, second] oldest-first, got %+v", jobs)
+	}
+
+	mgr.Drain()
+
+	jobsAfterDrain := mgr.Jobs()
+	if len(jobsAfterDrain) != 2 {
+		t.Errorf("expected Jobs() to still list both jobs after Drain (Drain only clears pending delivery), got %d", len(jobsAfterDrain))
+	}
+}
+
 func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 	ch := make(chan struct{})
 	go func() {

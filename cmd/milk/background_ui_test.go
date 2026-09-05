@@ -275,3 +275,52 @@ func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T
 func teaKeyEnter() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyEnter}
 }
+
+// TestF4TogglesBackgroundPanel verifies the global F1-F4 panel shortcuts:
+// F4 toggles the background-agents panel the same way /panel background
+// does, and works regardless of busy state (toggling how much screen space
+// a panel takes doesn't conflict with an in-flight turn).
+func TestF4TogglesBackgroundPanel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+	m.busy = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF4})
+	m2 := updated.(model)
+	if !m2.panelBackground {
+		t.Fatal("expected F4 to open the background panel")
+	}
+	if !strings.Contains(m2.transcript.String(), "background agents panel: on") {
+		t.Errorf("expected a confirmation line, got %q", m2.transcript.String())
+	}
+
+	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF4})
+	m3 := updated2.(model)
+	if m3.panelBackground {
+		t.Error("expected a second F4 to close it again")
+	}
+}
+
+// TestPanelCommand_Background verifies /panel background toggles the same
+// field F4 does — the shortcut and the slash command are two paths to the
+// same state.
+func TestPanelCommand_Background(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+
+	updated, _ := m.handlePanelCmd("background")
+	m2 := updated.(model)
+	if !m2.panelBackground {
+		t.Fatal("expected /panel background to open the panel")
+	}
+}

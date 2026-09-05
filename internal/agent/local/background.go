@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -235,4 +236,25 @@ func (m *Manager) activeCountLocked() int {
 		}
 	}
 	return n
+}
+
+// Jobs returns a snapshot of every job the Manager knows about (running,
+// completed, or failed — including ones already Drain()ed, since Drain only
+// clears the pending-delivery queue, not the job registry), oldest first.
+// For display (e.g. a background-jobs panel) rather than delivery — unlike
+// Drain, calling this has no side effects and can be called on every render.
+//
+// Returns values, not pointers: finish() mutates a Job's fields under m.mu
+// from whichever goroutine ran it, so handing out live pointers would let a
+// renderer on the UI goroutine race that write. A snapshot copy under the
+// same lock is race-free and cheap — Job has no fields that need a deep copy.
+func (m *Manager) Jobs() []Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Job, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		out = append(out, *j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].StartedAt.Before(out[k].StartedAt) })
+	return out
 }
