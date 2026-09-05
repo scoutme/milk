@@ -259,6 +259,10 @@ type Agent struct {
 	toolAgentEntries []config.AgentToolEntry
 	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
 	toolAgentDispatcher ToolAgentDispatcher
+	// backgroundManager, when set, makes spawn_background_agent available
+	// (ADR-0043) and receives its calls. nil for background jobs themselves
+	// (RunBackgroundTask never sets it), enforcing the depth-1 fork cap.
+	backgroundManager *Manager
 	// onToolUse is called just before each tool is dispatched, with the tool name
 	// and a short human-readable summary of its key argument.
 	onToolUse func(name, summary string)
@@ -403,6 +407,12 @@ func (a *Agent) SetTermWidth(w int) {
 // issues an agent_* tool call.
 func (a *Agent) SetToolAgentDispatcher(fn ToolAgentDispatcher) {
 	a.toolAgentDispatcher = fn
+}
+
+// SetBackgroundManager makes spawn_background_agent available to this agent
+// (ADR-0043) and routes its calls to m. Passing nil disables the tool again.
+func (a *Agent) SetBackgroundManager(m *Manager) {
+	a.backgroundManager = m
 }
 
 // WithTagCallbacks returns a shallow copy of the agent configured to intercept
@@ -1027,6 +1037,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
 	}
+	if a.backgroundManager != nil {
+		tools = append(tools, spawnBackgroundAgentSchema())
+	}
 
 	if a.tagNonce != "" {
 		if a.onNeed != nil {
@@ -1283,25 +1296,35 @@ func backgroundSystemPrompt(cwd string) string {
 // via dispatch.go) is responsible for recording the returned usage under
 // the "<role>:subagent" convention once the job completes.
 func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.Writer) (string, session.TokenUsage, error) {
-	prevOnTokens := a.onTokens
-	usage := session.TokenUsage{Model: a.model, Agent: agentRoleForMetrics(a.escalationName) + ":subagent"}
-	a.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
+	// Operate on an isolated clone, not a directly. A background job is
+	// spawned into its own goroutine (see Manager.Spawn) and can easily
+	// still be running when the parent agent starts its very next turn on
+	// the same *Agent — mutating shared fields like onTokens or
+	// reasoningNgram directly on a would race with that turn. Cloning gives
+	// every field its own memory; reassignments below only ever touch bg's
+	// copy. cloneForBackground additionally silences bg's live-UI callbacks
+	// so this job's internal tool activity never surfaces in the parent's
+	// transcript — only its final distilled result does, once the caller
+	// drains the completed Job.
+	bg := a.cloneForBackground()
+
+	usage := session.TokenUsage{Model: bg.model, Agent: agentRoleForMetrics(bg.escalationName) + ":subagent"}
+	bg.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
 		usage.Prompt += prompt
 		usage.Completion += completion
 		usage.CacheRead += cacheRead
 		usage.CacheCreation += cacheCreation
 	}
-	defer func() { a.onTokens = prevOnTokens }()
 
 	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate"}}
-	if a.limits != nil {
-		bgLimits.IncludedTools = a.limits.IncludedTools
-		bgLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+	if bg.limits != nil {
+		bgLimits.IncludedTools = bg.limits.IncludedTools
+		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate")
 	}
 	bgSess := &session.Session{CWD: cwd}
-	tools := schemas(nil, a.otelDir, bgSess, nil, nil, bgLimits)
-	if a.mcpToolSet != nil {
-		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
+	tools := schemas(nil, bg.otelDir, bgSess, nil, nil, bgLimits)
+	if bg.mcpToolSet != nil {
+		tools = append(tools, bg.mcpToolSet.Schemas(ctx)...)
 	}
 
 	msgs := []Message{
@@ -1310,7 +1333,7 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 	}
 	userMsgIdx := len(msgs) - 1
 
-	resultMsgs, err := a.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx)
+	resultMsgs, err := bg.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx)
 	if err != nil {
 		return "", usage, err
 	}
@@ -1318,6 +1341,52 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 		return "", usage, nil
 	}
 	return resultMsgs[len(resultMsgs)-1].Content, usage, nil
+}
+
+// cloneForBackground returns an independent Agent for a spawn_background_agent
+// job (ADR-0043) to run concurrently on its own goroutine, built from an
+// explicit field list rather than `c := *a`.
+//
+// This matters, not just for style: a plain struct copy reads every field of
+// a in one operation, including ones Run/runToolLoop/scanSSE mutate in place
+// on the instance itself (reasoningNgram, reasoningNgramTriggered,
+// detectedFormat, pendingImageParts) — exactly the fields a concurrently
+// running parent turn on the same *Agent would be writing at that moment.
+// Reading them at all, even just to immediately overwrite them afterward,
+// already races. Naming only the fields known to be stable configuration
+// (set once, before Run is ever called) avoids ever reading the mutable
+// ones from a.
+//
+// Fields intentionally left at zero value: everything above, plus every
+// live-UI/session-adjacent callback (onToolUse, onResponseSegment, ...) —
+// a background job's internal tool activity must never surface in the
+// parent conversation's transcript or status bar — and workflowRole, so a
+// background job spawned from a workflow step still gets full loop
+// detection (it is not itself a workflow step in the interpreter's sense).
+func (a *Agent) cloneForBackground() *Agent {
+	return &Agent{
+		baseURL:          a.baseURL,
+		model:            a.model,
+		chatPath:         a.chatPath,
+		otelDir:          a.otelDir,
+		skipHealthCheck:  a.skipHealthCheck,
+		useBedrockNative: a.useBedrockNative,
+		useResponsesAPI:  a.useResponsesAPI,
+		escalationName:   a.escalationName, // read-only after construction; used for the usage.Agent role tag
+		skipPerms:        a.skipPerms,
+		permStore:        a.permStore, // shared, but already designed for concurrent access (concurrent tool-call batches use it today)
+		permAsk:          a.permAsk,
+		client:           a.client, // *http.Client is safe for concurrent use by design
+		tokenCmd:         a.tokenCmd,
+		sigv4:            a.sigv4,
+		memCfg:           a.memCfg,
+		logContext:       a.logContext,
+		mcpToolSet:       a.mcpToolSet,
+		toolTimeout:      a.toolTimeout,
+		limits:           a.limits,
+		maxPayloadBytes:  a.maxPayloadBytes,
+		promptCaching:    a.promptCaching,
+	}
 }
 
 // toolNeedsPermission reports whether a tool requires user approval before execution.
@@ -1558,6 +1627,28 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
 			attribute.String("agent", agentName),
 		)
+		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+	}
+
+	// spawn_background_agent (ADR-0043): Spawn returns immediately — the job
+	// runs under the Manager's own long-lived context, not this call's ctx,
+	// so it survives past this turn ending. See Manager's doc comment.
+	if tc.Function.Name == "spawn_background_agent" && a.backgroundManager != nil {
+		var args struct {
+			Task  string `json:"task"`
+			Label string `json:"label"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+		cwd := ""
+		if sess != nil {
+			cwd = sess.CWD
+		}
+		role := agentRoleForMetrics(a.escalationName)
+		job := a.backgroundManager.Spawn(args.Label, args.Task, role, a.model,
+			func(jobCtx context.Context) (string, session.TokenUsage, error) {
+				return a.RunBackgroundTask(jobCtx, cwd, args.Task, io.Discard)
+			})
+		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 	}
 

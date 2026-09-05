@@ -482,6 +482,28 @@ func AgentToolSchemas(entries []config.AgentToolEntry) []map[string]any {
 	return result
 }
 
+// spawnBackgroundAgentSchema is the schema for the spawn_background_agent
+// tool (ADR-0043). Only appended at Run's call site when a.backgroundManager
+// is set — never when building a background job's own tool list (Phase 3),
+// which enforces the depth-1 fork cap structurally rather than by filtering.
+func spawnBackgroundAgentSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": "spawn_background_agent",
+			"description": "Fork an independent copy of yourself to research a narrow, self-contained question in the background — reading files, grepping, running commands — without using up your own context. You are notified with a summary when it completes; you do not block on it and must not fabricate a result before that.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task":  map[string]any{"type": "string", "description": "The self-contained question or task for the background agent. Include everything it needs — it does not see your conversation."},
+					"label": map[string]any{"type": "string", "description": `Short human-readable label for status display, e.g. "analyze level-gen code".`},
+				},
+				"required": []string{"task", "label"},
+			},
+		},
+	}
+}
+
 func currentNeedSchema() map[string]any {
 	return map[string]any{
 		"type": "function",

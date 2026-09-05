@@ -170,3 +170,108 @@ func TestRunBackgroundTask_RespectsMaxIterations(t *testing.T) {
 		t.Errorf("expected exactly MaxToolIterations=3 requests, got %d", n.Load())
 	}
 }
+
+// TestRunBackgroundTask_ConcurrentWithParentRun_NoRace verifies the fix for
+// a real bug: a background job (run in its own goroutine, per Manager.Spawn)
+// used to mutate the parent *Agent's shared fields (onTokens, reasoningNgram,
+// ...) directly, which would race the moment the parent started its own next
+// turn on the same Agent while the job was still in flight. RunBackgroundTask
+// now clones before touching any of that state. Run this test with -race.
+func TestRunBackgroundTask_ConcurrentWithParentRun_NoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"thinking a bit"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	var parentTokenCalls atomic.Int32
+	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		parentTokenCalls.Add(1)
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var out strings.Builder
+		if _, _, err := agent.RunBackgroundTask(context.Background(), "/tmp", "investigate", &out); err != nil {
+			t.Errorf("RunBackgroundTask returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		var out strings.Builder
+		sess := &session.Session{}
+		if _, err := agent.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+			t.Errorf("Run returned error: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	if parentTokenCalls.Load() == 0 {
+		t.Error("expected the parent's real onTokens callback to fire for its own Run() call")
+	}
+}
+
+// TestDispatchOneTool_SpawnBackgroundAgent is the end-to-end wiring test: a
+// model-issued spawn_background_agent tool call returns an immediate
+// acknowledgement (not the eventual result) and the job actually runs to
+// completion via the wired Manager.
+func TestDispatchOneTool_SpawnBackgroundAgent(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc1","function":{"name":"spawn_background_agent","arguments":"{\"task\":\"investigate X\",\"label\":\"investigate X\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	mgr := NewManager(context.Background(), 3)
+	agent.SetBackgroundManager(mgr)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	mgr.SetOnDone(func(j *Job) { wg.Done() })
+
+	sess := &session.Session{CWD: "/tmp"}
+	var out strings.Builder
+	history, err := agent.Run(context.Background(), nil, "please investigate", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	found := false
+	for _, m := range history {
+		if m.Role == "tool" && strings.Contains(m.Content, "Spawned background agent") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a tool result acknowledging the spawn (not the eventual result), got history: %+v", history)
+	}
+
+	wg.Wait()
+	jobs := mgr.Drain()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 completed job, got %d", len(jobs))
+	}
+	if jobs[0].Result != "done" {
+		t.Errorf("expected job result %q, got %q", "done", jobs[0].Result)
+	}
+	if jobs[0].Role != "primary" {
+		t.Errorf("expected job role %q, got %q", "primary", jobs[0].Role)
+	}
+	if jobs[0].Label != "investigate X" {
+		t.Errorf("expected job label %q, got %q", "investigate X", jobs[0].Label)
+	}
+}

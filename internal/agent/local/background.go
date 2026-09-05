@@ -40,8 +40,17 @@ type Job struct {
 // bounded by a semaphore so a single turn (or a burst of turns) can't fan out
 // unbounded background work; jobs queue for a slot inside their own
 // goroutine rather than blocking the caller of Spawn.
+//
+// Spawn intentionally does not take a per-call context. The TUI cancels each
+// turn's context the instant that turn's runTurn call returns (see
+// cmd/milk/repl.go's `defer cancel()` immediately after starting it) — a job
+// spawned mid-turn must survive past that instant, since its entire purpose
+// is to keep running across whatever later turns eventually drain it. The
+// Manager holds one context for its own lifetime instead, supplied at
+// construction (typically the session/TUI-root context, not any turn's).
 type Manager struct {
 	mu      sync.Mutex
+	baseCtx context.Context
 	sem     chan struct{}
 	jobs    map[string]*Job
 	pending []*Job
@@ -50,15 +59,17 @@ type Manager struct {
 }
 
 // NewManager returns a Manager allowing at most maxConcurrent jobs to
-// actually execute (queue past that) at once. maxConcurrent <= 0 is treated
-// as 1.
-func NewManager(maxConcurrent int) *Manager {
+// actually execute (queue past that) at once, running jobs under baseCtx —
+// which should outlive individual turns (see the Manager doc comment).
+// maxConcurrent <= 0 is treated as 1.
+func NewManager(baseCtx context.Context, maxConcurrent int) *Manager {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
 	return &Manager{
-		sem:  make(chan struct{}, maxConcurrent),
-		jobs: make(map[string]*Job),
+		baseCtx: baseCtx,
+		sem:     make(chan struct{}, maxConcurrent),
+		jobs:    make(map[string]*Job),
 	}
 }
 
@@ -75,8 +86,9 @@ func (m *Manager) SetOnDone(fn func(*Job)) {
 // Spawn launches run in a goroutine and returns immediately with a Job
 // handle in JobRunning status. run does not start executing until a
 // concurrency slot is free — Spawn itself never blocks the caller waiting
-// for one, the queued job's own goroutine does.
-func (m *Manager) Spawn(ctx context.Context, label, task, role, model string, run func(context.Context) (string, session.TokenUsage, error)) *Job {
+// for one, the queued job's own goroutine does. run receives the Manager's
+// own baseCtx, not any context belonging to the turn that called Spawn.
+func (m *Manager) Spawn(label, task, role, model string, run func(context.Context) (string, session.TokenUsage, error)) *Job {
 	m.mu.Lock()
 	m.nextID++
 	job := &Job{
@@ -94,13 +106,13 @@ func (m *Manager) Spawn(ctx context.Context, label, task, role, model string, ru
 	go func() {
 		select {
 		case m.sem <- struct{}{}:
-		case <-ctx.Done():
-			m.finish(job, "", session.TokenUsage{}, ctx.Err())
+		case <-m.baseCtx.Done():
+			m.finish(job, "", session.TokenUsage{}, m.baseCtx.Err())
 			return
 		}
 		defer func() { <-m.sem }()
 
-		result, tokens, err := run(ctx)
+		result, tokens, err := run(m.baseCtx)
 		m.finish(job, result, tokens, err)
 	}()
 
