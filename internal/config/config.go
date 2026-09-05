@@ -435,6 +435,11 @@ type Config struct {
 	// Per-agent entries in AgentConfig.Tools shadow or extend this list.
 	AgentTools []AgentToolEntry `json:"agent_tools,omitempty"`
 
+	// MaxBackgroundAgents bounds how many spawn_background_agent jobs (see
+	// ADR-0043) may run concurrently per session, across however many turns
+	// spawn them. Defaults to 3 when unset or non-positive.
+	MaxBackgroundAgents int `json:"max_background_agents,omitempty"`
+
 	DefaultRoute string     `json:"default_route,omitempty"`
 	Rules        Rules      `json:"rules"`
 	Otel         OtelConfig `json:"otel"`
@@ -776,6 +781,16 @@ func (c Config) ContextBudget() int {
 		return 12000
 	}
 	return c.ContextBudgetChars
+}
+
+// EffectiveMaxBackgroundAgents returns the configured concurrent
+// spawn_background_agent limit (see ADR-0043), falling back to 3 when unset
+// or non-positive.
+func (c Config) EffectiveMaxBackgroundAgents() int {
+	if c.MaxBackgroundAgents <= 0 {
+		return 3
+	}
+	return c.MaxBackgroundAgents
 }
 
 // MemoryReinjectionTurnThreshold returns the escalation-turn interval for

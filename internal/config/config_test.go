@@ -630,6 +630,27 @@ func TestEffectiveToolAgents_UnknownAgentDropped(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxBackgroundAgents_DefaultsWhenUnset(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.EffectiveMaxBackgroundAgents(); got != 3 {
+		t.Errorf("expected default 3, got %d", got)
+	}
+}
+
+func TestEffectiveMaxBackgroundAgents_ExplicitValueHonored(t *testing.T) {
+	cfg := Config{MaxBackgroundAgents: 7}
+	if got := cfg.EffectiveMaxBackgroundAgents(); got != 7 {
+		t.Errorf("expected 7, got %d", got)
+	}
+}
+
+func TestEffectiveMaxBackgroundAgents_NonPositiveFallsBackToDefault(t *testing.T) {
+	cfg := Config{MaxBackgroundAgents: -1}
+	if got := cfg.EffectiveMaxBackgroundAgents(); got != 3 {
+		t.Errorf("expected non-positive value to fall back to default 3, got %d", got)
+	}
+}
+
 // --- Sprint 4: context_window_tokens auto-derivation tests ---
 
 func TestAgentContextWindowTokens_Unset(t *testing.T) {
