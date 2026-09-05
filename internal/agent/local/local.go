@@ -1900,6 +1900,55 @@ func toolArgSummary(args map[string]any) string {
 	return ""
 }
 
+// dropOldestDroppableUnit removes the oldest droppable content from msgs for
+// the payload-size trim below and reports whether anything was removed.
+//
+// Two phases, chosen by how many "user"-role messages remain:
+//   - More than one: a prior turn exists before the current one (session
+//     history is always clean [user, assistant] pairs — tool-call internals
+//     are never persisted across turns). Drop the oldest one whole, from its
+//     user message up to (not including) the next one.
+//   - Exactly one (only the current turn's own starting user message is
+//     left): drop the oldest assistant message after it together with
+//     every "tool"-role message immediately following that assistant
+//     message (its tool results), as one atomic group.
+//
+// Either way, the system prompt (index 0) and the current turn's own user
+// message are never touched. This matters: a turn's own tool-loop can
+// easily be the only content left once prior history is exhausted (a
+// background job's turn — ADR-0043 — starts with nothing else), and it has
+// only one user message total. The previous version of this trim assumed
+// it could always find a "user"-role message to stop at while walking
+// forward from the front; once that assumption broke, it kept dropping
+// until only the system prompt and whatever the last message happened to
+// be were left — which, mid-tool-loop, is a "tool"-role result with no
+// preceding assistant message carrying its tool_call_id anymore, an
+// invalid conversation shape most chat-completions APIs reject outright.
+func dropOldestDroppableUnit(msgs []Message) ([]Message, bool) {
+	var userIdxs []int
+	for i, m := range msgs {
+		if m.Role == "user" {
+			userIdxs = append(userIdxs, i)
+		}
+	}
+	if len(userIdxs) == 0 {
+		return msgs, false
+	}
+	if len(userIdxs) > 1 {
+		start, end := userIdxs[0], userIdxs[1]
+		return append(append([]Message{}, msgs[:start]...), msgs[end:]...), true
+	}
+	p := userIdxs[0] + 1
+	if p >= len(msgs) {
+		return msgs, false
+	}
+	end := p + 1
+	for end < len(msgs) && msgs[end].Role == "tool" {
+		end++
+	}
+	return append(append([]Message{}, msgs[:p]...), msgs[end:]...), true
+}
+
 // streamCompletion sends a chat completion request and streams the response.
 // Routes to the Bedrock Converse streaming API when useBedrockNative is set;
 // otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
@@ -1928,29 +1977,23 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	}
 
 	// Pre-flight payload size check: when the marshaled body exceeds the
-	// configured max (default 900KB), progressively trim the oldest history
-	// messages and re-marshal to avoid 413 errors from reverse proxies.
+	// configured max (default 900KB), progressively trim the oldest content
+	// and re-marshal to avoid 413 errors from reverse proxies.
 	if a.maxPayloadBytes > 0 && len(body) > a.maxPayloadBytes {
 		obs.Warn("payload exceeds limit, trimming history",
 			"size_bytes", len(body), "limit_bytes", a.maxPayloadBytes,
 			"messages_before", len(msgs),
 		)
-		// Preserve system prompt (index 0) and current user message (last).
-		// Trim from the oldest history messages first.
-		for len(msgs) > 2 { // at least system + user
-			// Drop the next oldest history message (index 1).
-			msgs = append(msgs[:1], msgs[2:]...)
-			// Skip any consecutive non-user messages after the dropped one.
-			for len(msgs) > 2 && msgs[1].Role != "user" {
-				msgs = append(msgs[:1], msgs[2:]...)
+		for len(body) > a.maxPayloadBytes {
+			next, ok := dropOldestDroppableUnit(msgs)
+			if !ok {
+				break
 			}
+			msgs = next
 			req.Messages = msgs
 			body, err = json.Marshal(req)
 			if err != nil {
 				return "", "", nil, false, "", err
-			}
-			if len(body) <= a.maxPayloadBytes {
-				break
 			}
 		}
 		obs.Warn("payload after trimming",
