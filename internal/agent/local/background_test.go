@@ -340,6 +340,59 @@ func TestRun_BackgroundAgentGuidance_OnlyWhenManagerSet(t *testing.T) {
 	}
 }
 
+// stubTaskStore is a minimal TaskStore satisfying the local.TaskStore
+// interface for tests that only need a.taskStore != nil.
+type stubTaskStore struct{}
+
+func (stubTaskStore) Create(string, []string) (TaskEntry, error) { return TaskEntry{}, nil }
+func (stubTaskStore) Update(string, string, string) error        { return nil }
+func (stubTaskStore) Complete(string) error                      { return nil }
+func (stubTaskStore) List(bool) ([]TaskEntry, error)             { return nil, nil }
+
+// TestRun_TaskToolGuidance_OnlyWhenTaskStoreSet mirrors
+// TestRun_BackgroundAgentGuidance_OnlyWhenManagerSet: bare tool availability
+// doesn't reliably get used without guidance on when it's expected, so
+// taskToolGuidance must appear in the system prompt exactly when a task
+// store is wired up, and not otherwise.
+func TestRun_TaskToolGuidance_OnlyWhenTaskStoreSet(t *testing.T) {
+	var mu sync.Mutex
+	var gotPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPrompt = requestSystemPrompt(body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	sess := &session.Session{}
+	var out strings.Builder
+	if _, err := agent.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	mu.Lock()
+	withoutStore := gotPrompt
+	mu.Unlock()
+	if strings.Contains(withoutStore, "create_task") {
+		t.Errorf("did not expect task-tool guidance without a task store, got prompt: %q", withoutStore)
+	}
+
+	agentWithTasks := agent.WithTaskStore(stubTaskStore{})
+	if _, err := agentWithTasks.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	mu.Lock()
+	withStore := gotPrompt
+	mu.Unlock()
+	if !strings.Contains(withStore, "create_task") {
+		t.Errorf("expected task-tool guidance once a task store is set, got prompt: %q", withStore)
+	}
+}
+
 // TestRunBackgroundTask_PermissionGatedToolDeniesInsteadOfHanging verifies
 // the fix for a real incident: background jobs used to inherit the parent's
 // interactive permAsk callback, which blocks synchronously on a plain

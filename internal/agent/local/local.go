@@ -818,6 +818,15 @@ const systemPromptSharedFull = `Additional guidance:
 // at a result before the completion notification actually arrives.
 const backgroundAgentGuidance = `spawn_background_agent's main value is keeping your own context small: delegate research to a forked copy of yourself instead of reading a large amount of code or exploring many files directly yourself. Keep each spawned task narrow and self-contained, and give it concrete pointers — specific file paths, what you've already ruled out, exactly what question it should answer — so it doesn't waste work rediscovering things you already know; it has no access to your conversation. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime.`
 
+// taskToolGuidance is appended to the system prompt whenever the task tools
+// are available (a.taskStore != nil, checked at the call site the same way
+// as backgroundAgentGuidance — see Run). Bare tool availability alone
+// doesn't reliably get used without being told when it's expected — the
+// same reasoning behind Claude Code's own TodoWrite guidance — so this
+// spells out the "when" as well as an explicit "skip it" case, to avoid
+// overcorrecting into creating a task for every trivial request.
+const taskToolGuidance = `create_task/update_task/list_tasks/complete_task track multi-step work outside your own context — unlike your conversation history, tasks survive context trimming, fresh-start resets, and hand-offs between primary and escalation. Use them for a request that will span several turns or tool calls: break the work into tasks up front, mark each in_progress/done as you go, and call list_tasks if you need to recover what's left. Skip them for anything you can finish in one turn — creating a task for a trivial, single-step request just adds noise.`
+
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
 // escalationName is non-empty when this agent is acting as the escalation target.
@@ -1048,6 +1057,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier)
 	if a.backgroundManager != nil {
 		systemPrompt += "\n\n" + backgroundAgentGuidance
+	}
+	if a.taskStore != nil {
+		systemPrompt += "\n\n" + taskToolGuidance
 	}
 	if a.customPrompt != "" {
 		systemPrompt = a.customPrompt + "\n\n" + systemPrompt
