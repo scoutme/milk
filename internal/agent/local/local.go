@@ -956,7 +956,28 @@ func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
 	return false
 }
 
+// BackgroundFollowupPrompt is the synthetic input cmd/milk submits to
+// trigger a real follow-up turn once a spawn_background_agent wave or job
+// has finished (ADR-0043) — see maybeAutoFollowupBackgroundJobs. Exported so
+// the dispatch site and syntheticPrompts below always reference the exact
+// same string; a mismatch would silently defeat the whitelist.
+const BackgroundFollowupPrompt = "(Background research agents have finished — review their results above and continue.)"
+
+// syntheticPrompts are milk-generated prompts that must never trip
+// isRepeatedPrompt below. That check exists to catch a human repeating
+// themselves out of frustration and escalate on their behalf — but a fixed,
+// milk-generated string recurring across multiple completed background-agent
+// waves looks identical to that pattern from the outside, and would trigger
+// a bogus self-escalation that has nothing to do with the user actually
+// repeating anything.
+var syntheticPrompts = map[string]bool{
+	BackgroundFollowupPrompt: true,
+}
+
 func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns int) bool {
+	if syntheticPrompts[userPrompt] {
+		return false
+	}
 	norm := normalizePrompt(userPrompt)
 	if len(norm) < minRepeatCheckLen && len(strings.Fields(norm)) < minRepeatCheckWords {
 		return false

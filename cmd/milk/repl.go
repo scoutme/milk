@@ -2444,7 +2444,15 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 // finished (ADR-0043). It carries no content of its own — drainBackgroundJobs
 // (dispatch.go) prepends the actual drained results to whatever turn picks
 // it up; this text only needs to point the model at reacting to them.
-const backgroundFollowupPrompt = "(Background research agents have finished — review their results above and continue.)"
+//
+// Aliases local.BackgroundFollowupPrompt rather than defining its own text:
+// Run's isRepeatedPrompt whitelist exempts that exact string from the
+// repeated-prompt escalation signal (a fixed synthetic prompt recurring
+// across multiple completed waves looks identical to a human repeating
+// themselves out of frustration, and would otherwise trigger a bogus
+// self-escalation). Defining a second, textually-identical constant here
+// would risk the two drifting apart if either ever gets edited alone.
+const backgroundFollowupPrompt = local.BackgroundFollowupPrompt
 
 // spawnUserBackgroundAgent spawns a background research job (ADR-0043) from
 // text the user typed while the model was busy — the confirming second
