@@ -1066,50 +1066,23 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	region, regionX := m.regionAt(ev.X)
 	switch ev.Button {
 	case tea.MouseButtonWheelUp:
-		switch region {
-		case regionMemory:
-			if m.panelOffset > 0 {
-				m.panelOffset--
+		if p := m.panelOffsetPtr(region); p != nil {
+			if *p > 0 {
+				*p--
 			}
-		case regionTasks:
-			if m.tasksOffset > 0 {
-				m.tasksOffset--
-			}
-		case regionBackground:
-			if m.backgroundOffset > 0 {
-				m.backgroundOffset--
-			}
-		case regionWorkflow:
-			if m.workflowPanelOffset > 0 {
-				m.workflowPanelOffset--
-			}
-		default:
+		} else {
 			m.vp.ScrollUp(3)
 		}
 	case tea.MouseButtonWheelDown:
-		h := m.viewportHeight()
-		switch region {
-		case regionMemory:
-			if m.panelOffset < m.panelMaxOffset(regionMemory, h) {
-				m.panelOffset++
+		if p := m.panelOffsetPtr(region); p != nil {
+			if *p < m.panelMaxOffset(region, m.viewportHeight()) {
+				*p++
 			}
-		case regionTasks:
-			if m.tasksOffset < m.panelMaxOffset(regionTasks, h) {
-				m.tasksOffset++
-			}
-		case regionBackground:
-			if m.backgroundOffset < m.panelMaxOffset(regionBackground, h) {
-				m.backgroundOffset++
-			}
-		case regionWorkflow:
-			if m.workflowPanelOffset < m.panelMaxOffset(regionWorkflow, h) {
-				m.workflowPanelOffset++
-			}
-		default:
+		} else {
 			m.vp.ScrollDown(3)
 		}
 	case tea.MouseButtonLeft:
-		if region == regionMemory || region == regionWorkflow {
+		if region != regionNone {
 			return m.handlePanelMouse(region, regionX, ev)
 		}
 		// Only handle events inside the viewport area (rows 2..height-2).
@@ -1371,9 +1344,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f2":
 			return m.handlePanelCmd("tasks")
 		case "f3":
-			return m.handlePanelCmd("workflow")
-		case "f4":
 			return m.handlePanelCmd("background")
+		case "f4":
+			return m.handlePanelCmd("workflow")
 		}
 		if m.pendingDirectBash != nil {
 			return m.handleDirectBashKey(msg)

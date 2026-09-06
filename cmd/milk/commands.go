@@ -1298,7 +1298,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|workflow|background (or F1/F2/F3/F4)\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|background|workflow (or F1/F2/F3/F4)\n")
 		return m, nil
 	}
 }

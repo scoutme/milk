@@ -277,10 +277,41 @@ func teaKeyEnter() tea.KeyMsg {
 }
 
 // TestF4TogglesBackgroundPanel verifies the global F1-F4 panel shortcuts:
-// F4 toggles the background-agents panel the same way /panel background
+// F3 toggles the background-agents panel the same way /panel background
 // does, and works regardless of busy state (toggling how much screen space
-// a panel takes doesn't conflict with an in-flight turn).
-func TestF4TogglesBackgroundPanel(t *testing.T) {
+// a panel takes doesn't conflict with an in-flight turn). F1-F4 follow the
+// same left-to-right order panels are joined in View(): memory, tasks,
+// background, workflow.
+func TestF3TogglesBackgroundPanel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+	m.busy = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF3})
+	m2 := updated.(model)
+	if !m2.panelBackground {
+		t.Fatal("expected F3 to open the background panel")
+	}
+	if !strings.Contains(m2.transcript.String(), "background agents panel: on") {
+		t.Errorf("expected a confirmation line, got %q", m2.transcript.String())
+	}
+
+	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF3})
+	m3 := updated2.(model)
+	if m3.panelBackground {
+		t.Error("expected a second F3 to close it again")
+	}
+}
+
+// TestF4TogglesWorkflowPanel covers the other half of the F1-F4 reordering:
+// F4 now maps to the workflow panel (last in View()'s join order), not
+// background.
+func TestF4TogglesWorkflowPanel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sess, err := session.New("/repo", "")
 	if err != nil {
@@ -292,16 +323,13 @@ func TestF4TogglesBackgroundPanel(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF4})
 	m2 := updated.(model)
-	if !m2.panelBackground {
-		t.Fatal("expected F4 to open the background panel")
-	}
-	if !strings.Contains(m2.transcript.String(), "background agents panel: on") {
-		t.Errorf("expected a confirmation line, got %q", m2.transcript.String())
+	if !m2.workflowPanelOpen {
+		t.Fatal("expected F4 to open the workflow panel")
 	}
 
 	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF4})
 	m3 := updated2.(model)
-	if m3.panelBackground {
+	if m3.workflowPanelOpen {
 		t.Error("expected a second F4 to close it again")
 	}
 }

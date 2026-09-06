@@ -222,11 +222,13 @@ func (m model) View() string {
 	}
 	if m.panelTasks {
 		tpanel := m.renderTasksPanel(vpH)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel)
+		tbar := m.renderTasksPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel, tbar)
 	}
 	if m.panelBackground {
 		bgpanel := m.renderBackgroundPanel(vpH)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, bgpanel)
+		bgbar := m.renderBackgroundPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, bgpanel, bgbar)
 	}
 	if m.workflowPanelVisible() {
 		wpanel := m.renderWorkflowPanel(vpH)

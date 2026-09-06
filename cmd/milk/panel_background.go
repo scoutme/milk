@@ -9,54 +9,31 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 )
 
-const backgroundPanelWidth = 33 // 32 inner + 1 scrollbar column
+const backgroundPanelWidth = 33 // 32 inner + 1 right scrollbar column
 const backgroundPanelInner = 32
 
 // renderBackgroundPanel returns a vertical panel string of exactly h lines
-// and backgroundPanelInner columns, listing every spawn_background_agent
-// job (ADR-0043) this session has spawned — agent- and user-initiated alike.
+// and backgroundPanelInner columns (scrollbar rendered separately by
+// renderBackgroundPanelScrollbar), listing every spawn_background_agent job
+// (ADR-0043) this session has spawned — agent- and user-initiated alike.
+// Body shared with every other side panel — see renderSidePanel.
 func (m *model) renderBackgroundPanel(h int) string {
-	inner := backgroundPanelInner
-	if !isTTY {
-		return strings.Repeat("\n", h)
-	}
+	return m.renderSidePanel(regionBackground, h)
+}
 
-	var jobs []local.Job
-	if m.agents.backgroundMgr != nil {
-		jobs = m.agents.backgroundMgr.Jobs()
-	}
-	all := buildBackgroundPanelLines(jobs, inner)
-	total := len(all)
-
-	maxOffset := max(total-h, 0)
-	if m.backgroundOffset > maxOffset {
-		m.backgroundOffset = maxOffset
-	}
-
-	lines := all[m.backgroundOffset:]
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	lines = lines[:h]
-
-	var rows []string
-	for _, line := range lines {
-		lineW := utf8.RuneCountInString(stripANSI(line))
-		if lineW < inner {
-			line += strings.Repeat(" ", inner-lineW)
-		}
-		rows = append(rows, line)
-	}
-	return strings.Join(rows, "\n")
+// renderBackgroundPanelScrollbar returns a 1-column string of h lines: a dim
+// │ track with a ▌ thumb when the panel content overflows, or a blank column
+// otherwise. Shared with every other side panel — see renderSidePanelScrollbar.
+func (m *model) renderBackgroundPanelScrollbar(h int) string {
+	return m.renderSidePanelScrollbar(regionBackground, h)
 }
 
 func buildBackgroundPanelLines(jobs []local.Job, inner int) []string {
 	var lines []string
 	addLine := func(s string) { lines = append(lines, s) }
-	hr := func() { addLine(stylePanelSection.Render(strings.Repeat("─", inner))) }
 
 	addLine(stylePanelTitle.Render("background agents"))
-	hr()
+	addLine("")
 
 	if len(jobs) == 0 {
 		addLine(dim("(none)"))

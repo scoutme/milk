@@ -7,7 +7,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/scoutme/milk/internal/agent/local"
 )
 
 // panelRegion identifies which side panel (if any) a screen column falls in.
@@ -61,11 +60,8 @@ func (m *model) regionAt(x int) (panelRegion, int) {
 
 // panelScrollOffset returns the current scroll offset for a panel region.
 func (m *model) panelScrollOffset(region panelRegion) int {
-	switch region {
-	case regionMemory:
-		return m.panelOffset
-	case regionWorkflow:
-		return m.workflowPanelOffset
+	if p := m.panelOffsetPtr(region); p != nil {
+		return *p
 	}
 	return 0
 }
@@ -77,34 +73,17 @@ func (m *model) panelScrollOffset(region panelRegion) int {
 // value-receiver model) must clamp against this themselves, since View() runs
 // on a throwaway copy and any clamping done there never reaches real state.
 func (m *model) panelMaxOffset(region panelRegion, h int) int {
-	var total int
-	switch region {
-	case regionMemory:
-		total = len(buildPanelLines(m.mem, memoryPanelInner, m.currentSessionBricks()))
-	case regionTasks:
-		total = len(buildTasksPanelLines(m.taskStore, tasksPanelInner))
-	case regionBackground:
-		var jobs []local.Job
-		if m.agents.backgroundMgr != nil {
-			jobs = m.agents.backgroundMgr.Jobs()
-		}
-		total = len(buildBackgroundPanelLines(jobs, backgroundPanelInner))
-	case regionWorkflow:
-		total = len(buildWorkflowPanelLines(m.workflowState, workflowPanelContentWidth-2))
-	default:
-		return 0
-	}
-	return max(total-h, 0)
+	all, _ := m.sidePanelLines(region)
+	return max(len(all)-h, 0)
 }
 
 // panelContentCol maps a column offset within a panel's rendered width
 // (regionX, 0-based from the panel's leftmost screen column) to the column
-// index into that panel's plain content lines. The workflow panel reserves
-// its first 2 columns for a left border + padding; the memory panel has none.
-func panelContentCol(region panelRegion, regionX int) int {
-	if region == regionWorkflow {
-		regionX -= 2
-	}
+// index into that panel's plain content lines. No panel reserves any
+// left-side columns (border/padding lives, if at all, on the right as the
+// scrollbar column, which is not part of any region's own width), so this is
+// currently just a defensive clamp.
+func panelContentCol(_ panelRegion, regionX int) int {
 	if regionX < 0 {
 		regionX = 0
 	}
@@ -115,20 +94,16 @@ func panelContentCol(region panelRegion, regionX int) int {
 // region that currently owns the active panel selection, matching the line
 // indices used by panelSelAnchorLine/panelSelEndLine.
 func (m *model) panelSelLines() []string {
-	switch m.panelSelRegion {
-	case regionMemory:
-		return buildPanelLines(m.mem, memoryPanelInner, m.currentSessionBricks())
-	case regionWorkflow:
-		return buildWorkflowPanelLines(m.workflowState, workflowPanelContentWidth-2)
-	}
-	return nil
+	lines, _ := m.sidePanelLines(m.panelSelRegion)
+	return lines
 }
 
-// handlePanelMouse handles left-button mouse events over the memory or
-// workflow side panels: a click that starts and ends on the same cell runs
-// the memory panel's percept/brick detail lookup (double-click for details);
-// any drag selects panel text for copying, scoped to that panel's own lines
-// so the selection never crosses into the transcript or another panel.
+// handlePanelMouse handles left-button mouse events over any side panel: a
+// click that starts and ends on the same cell runs the memory panel's
+// percept/brick detail lookup (double-click for details; a no-op for every
+// other panel); any drag selects panel text for copying, scoped to that
+// panel's own lines so the selection never crosses into the transcript or
+// another panel.
 func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 	const panelRowStart = 2 // same header offset as the main viewport
 	lineIdx := m.panelScrollOffset(region) + (ev.Y - panelRowStart)
@@ -215,7 +190,7 @@ func (m *model) handleMemoryPanelClick(lineIdx int) {
 	}
 }
 
-// clearPanelSelection resets the memory/workflow panel selection state.
+// clearPanelSelection resets the side-panel selection state.
 func (m *model) clearPanelSelection() {
 	m.panelSelRegion = regionNone
 	m.panelSelAnchorLine = -1
