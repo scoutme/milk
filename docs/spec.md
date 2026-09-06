@@ -268,6 +268,10 @@ Ordered list of editor commands tried by `/config open` and `/open`; first found
 
 Maximum concurrent `spawn_background_agent` jobs (ADR-0043) per session; non-positive or unset falls back to `3`. See [docs/operations.md — Background sub-agents](operations.md#background-sub-agents).
 
+### `background_agent_timeout_minutes` field
+
+Per-job hard timeout for a `spawn_background_agent` job (ADR-0043), in minutes, once it starts executing; non-positive or unset falls back to `20`. See [docs/operations.md — Background sub-agents](operations.md#background-sub-agents).
+
 ```json
 "config_editors": ["code --wait", "$EDITOR", "nano"]
 ```
