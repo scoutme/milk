@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestActiveAgent_ByName(t *testing.T) {
@@ -648,6 +649,27 @@ func TestEffectiveMaxBackgroundAgents_NonPositiveFallsBackToDefault(t *testing.T
 	cfg := Config{MaxBackgroundAgents: -1}
 	if got := cfg.EffectiveMaxBackgroundAgents(); got != 3 {
 		t.Errorf("expected non-positive value to fall back to default 3, got %d", got)
+	}
+}
+
+func TestEffectiveBackgroundAgentTimeout_DefaultsWhenUnset(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.EffectiveBackgroundAgentTimeout(); got != 20*time.Minute {
+		t.Errorf("expected default 20m, got %v", got)
+	}
+}
+
+func TestEffectiveBackgroundAgentTimeout_ExplicitValueHonored(t *testing.T) {
+	cfg := Config{BackgroundAgentTimeoutMinutes: 45}
+	if got := cfg.EffectiveBackgroundAgentTimeout(); got != 45*time.Minute {
+		t.Errorf("expected 45m, got %v", got)
+	}
+}
+
+func TestEffectiveBackgroundAgentTimeout_NonPositiveFallsBackToDefault(t *testing.T) {
+	cfg := Config{BackgroundAgentTimeoutMinutes: -1}
+	if got := cfg.EffectiveBackgroundAgentTimeout(); got != 20*time.Minute {
+		t.Errorf("expected non-positive value to fall back to default 20m, got %v", got)
 	}
 }
 

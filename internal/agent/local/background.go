@@ -64,15 +64,24 @@ type Manager struct {
 
 // defaultJobTimeout bounds how long a single job may run once it starts
 // executing (not counting time spent queued for a concurrency slot). This
-// is a deliberate hard-stop, not a retry: a job that runs this long is far
-// more likely stuck than making real progress on a task meant to be narrow
-// and self-contained (ADR-0043), and a permanently stuck job would
-// otherwise hold its concurrency slot forever, degrading max_background_agents
-// for the rest of the session. Terminating cleanly guarantees the Manager's
-// core promise — every job eventually reaches JobCompleted or JobFailed and
-// fires onDone — holds even when a job's own execution never would on its
-// own (a hung network call, or any future bug in the tool loop).
-const defaultJobTimeout = 10 * time.Minute
+// is a deliberate hard-stop, not a retry, and a broad backstop rather than
+// the primary defense against a stuck job: the loop-detection suite (streak
+// tracker, streaming n-gram monitor, text-loop tracker, duplicate-tool-call
+// detection) already runs on a background job exactly as it would on a
+// normal turn — cloneForBackground leaves workflowRole false specifically
+// so none of the workflow-role skip conditions apply — so an actually-stuck
+// job (repeating itself, re-issuing the same tool call) gets caught and
+// terminated by that well before this fires. What this timeout guards
+// against is different: a job that's genuinely still making progress but
+// on a slow path (a heavy reasoning model, a large multi-file analysis)
+// with no upper bound at all, which would otherwise hold its concurrency
+// slot forever, degrading max_background_agents for the rest of the
+// session. Set generously for that reason, live-verified against a task
+// that was still issuing new tool-loop requests 8+ minutes in. Overridable
+// per-Config via EffectiveBackgroundAgentTimeout (see cmd/milk's Manager
+// construction site) — production code calling SetJobTimeout is expected,
+// not just tests.
+const defaultJobTimeout = 20 * time.Minute
 
 // NewManager returns a Manager allowing at most maxConcurrent jobs to
 // actually execute (queue past that) at once, running jobs under baseCtx —
@@ -118,9 +127,10 @@ func (m *Manager) SetOnBatchDone(fn func()) {
 	m.mu.Unlock()
 }
 
-// SetJobTimeout overrides the per-job execution timeout (see Spawn). Tests
-// use this to avoid waiting out defaultJobTimeout for real; production
-// code generally has no reason to call it.
+// SetJobTimeout overrides the per-job execution timeout (see Spawn). Called
+// in production from cmd/milk's Manager construction site with the
+// configured (or default) value from Config.EffectiveBackgroundAgentTimeout;
+// tests also use it directly to avoid waiting out the real default.
 func (m *Manager) SetJobTimeout(d time.Duration) {
 	m.mu.Lock()
 	m.jobTimeout = d

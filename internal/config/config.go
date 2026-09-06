@@ -440,6 +440,16 @@ type Config struct {
 	// spawn them. Defaults to 3 when unset or non-positive.
 	MaxBackgroundAgents int `json:"max_background_agents,omitempty"`
 
+	// BackgroundAgentTimeoutMinutes bounds how long a single
+	// spawn_background_agent job (ADR-0043) may run once it starts
+	// executing before being terminated as failed. Defaults to 20 minutes
+	// when unset or non-positive — generous on purpose, since loop
+	// detection (not this timeout) is the primary defense against a job
+	// that's actually stuck; this only needs to catch one that's still
+	// making real progress but never finishing (see
+	// internal/agent/local's defaultJobTimeout doc comment).
+	BackgroundAgentTimeoutMinutes int `json:"background_agent_timeout_minutes,omitempty"`
+
 	DefaultRoute string     `json:"default_route,omitempty"`
 	Rules        Rules      `json:"rules"`
 	Otel         OtelConfig `json:"otel"`
@@ -791,6 +801,19 @@ func (c Config) EffectiveMaxBackgroundAgents() int {
 		return 3
 	}
 	return c.MaxBackgroundAgents
+}
+
+// EffectiveBackgroundAgentTimeout returns the configured per-job
+// spawn_background_agent timeout (see ADR-0043), falling back to 20 minutes
+// when unset or non-positive — must match internal/agent/local's
+// defaultJobTimeout; config can't import that package (it would create an
+// import cycle, since internal/agent/local already imports internal/config
+// for AgentLimits), so the fallback is duplicated here rather than shared.
+func (c Config) EffectiveBackgroundAgentTimeout() time.Duration {
+	if c.BackgroundAgentTimeoutMinutes <= 0 {
+		return 20 * time.Minute
+	}
+	return time.Duration(c.BackgroundAgentTimeoutMinutes) * time.Minute
 }
 
 // MemoryReinjectionTurnThreshold returns the escalation-turn interval for

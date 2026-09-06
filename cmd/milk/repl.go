@@ -3332,6 +3332,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		// one — see the Manager doc comment for why that distinction matters.
 		backgroundMgr: local.NewManager(ctx, cfg.EffectiveMaxBackgroundAgents()),
 	}
+	agents.backgroundMgr.SetJobTimeout(cfg.EffectiveBackgroundAgentTimeout())
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.taskStore = taskStore
