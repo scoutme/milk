@@ -3,7 +3,6 @@ package obs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -81,7 +80,7 @@ func RecordDuration(ctx context.Context, meterName, instrument string, elapsed t
 	m := Meter(meterName)
 	h, err := m.Float64Histogram(instrument, withUnit("ms"))
 	if err != nil {
-		slog.Default().Warn("obs: histogram init failed", "instrument", instrument, "err", err)
+		Warn("obs: histogram init failed", "instrument", instrument, "err", err)
 		return
 	}
 	h.Record(ctx, float64(elapsed.Milliseconds()), withAttrs(attrs...))
@@ -100,7 +99,7 @@ func Add(ctx context.Context, meterName, instrument string, n int64, attrs ...at
 	m := Meter(meterName)
 	c, err := m.Int64Counter(instrument)
 	if err != nil {
-		slog.Default().Warn("obs: counter init failed", "instrument", instrument, "err", err)
+		Warn("obs: counter init failed", "instrument", instrument, "err", err)
 		return
 	}
 	c.Add(ctx, n, withAttrs(attrs...))
@@ -134,7 +133,7 @@ func RecordScore(ctx context.Context, score float64) {
 	m := Meter(instrumentationScope)
 	h, err := m.Float64Histogram("milk.router.score")
 	if err != nil {
-		slog.Default().Warn("obs: histogram init failed", "instrument", "milk.router.score", "err", err)
+		Warn("obs: histogram init failed", "instrument", "milk.router.score", "err", err)
 		return
 	}
 	h.Record(ctx, score)
@@ -148,6 +147,6 @@ func SetGauge(ctx context.Context, meterName, instrument string, value int64, at
 		withInt64Callback(ctx, value, attrs...),
 	)
 	if err != nil {
-		slog.Default().Warn("obs: gauge init failed", "instrument", instrument, "err", err)
+		Warn("obs: gauge init failed", "instrument", instrument, "err", err)
 	}
 }

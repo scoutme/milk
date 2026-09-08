@@ -5,11 +5,27 @@ package loop
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 )
+
+// logger receives this package's diagnostic output. Defaults to a discard
+// handler — never slog.Default(), which writes straight to os.Stderr and
+// bleeds raw log lines into the bubbletea alt-screen TUI. Callers that want
+// these messages in milk's own log file call SetLogger (see cmd/milk/main.go,
+// right after obs.Init) — internal/loop cannot import internal/obs directly
+// without creating an import cycle (obs -> config -> loop).
+var logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// SetLogger redirects this package's diagnostic output to l. A nil l is a no-op.
+func SetLogger(l *slog.Logger) {
+	if l != nil {
+		logger = l
+	}
+}
 
 // Config controls loop detection thresholds. Zero values use defaults.
 type Config struct {
@@ -276,19 +292,19 @@ func (d *Detector) Feed(turn TurnSummary) []Verdict {
 	var verdicts []Verdict
 
 	if v := d.checkTokenVelocity(); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		logger.Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkSilentBurn(turn); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		logger.Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 	if v := d.checkTurnFlood(); v != nil {
-		slog.Default().Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		logger.Warn("loop: SIGNAL FIRED (cross-turn)", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, *v)
 	}
 
-	slog.Default().Debug("loop: Feed cross-turn",
+	logger.Debug("loop: Feed cross-turn",
 		"history_len", len(d.history),
 		"verdicts", len(verdicts),
 		"input_tokens", turn.InputTokens,
@@ -370,7 +386,7 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 		d.lastChunkText = trimmed
 		d.firedChunk = false
 	}
-	slog.Default().Debug("loop: FeedChunk",
+	logger.Debug("loop: FeedChunk",
 		"consec", d.consecRepeat,
 		"threshold", d.cfg.ChunkRepetitionThreshold,
 		"chunk", truncateForDisplay(trimmed),
@@ -383,13 +399,13 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 			Message:         fmt.Sprintf("chunk repeating %d×: %q", d.consecRepeat, truncateForDisplay(trimmed)),
 			ShouldInterrupt: true,
 		}
-		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		logger.Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, v)
 	}
 
 	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
 		count := d.chunkScatter.feed(d.cfg.ChunkWindowSize, trimmed)
-		slog.Default().Debug("loop: FeedChunk scattered",
+		logger.Debug("loop: FeedChunk scattered",
 			"scatter_count", count,
 			"scatter_threshold", d.cfg.ChunkRepetitionThreshold,
 			"min_len", d.cfg.ChunkRepetitionMinScatteredLength,
@@ -403,7 +419,7 @@ func (d *Detector) FeedChunk(text string) []Verdict {
 				Message:         fmt.Sprintf("phrase recurring %d× in recent output: %q", count, truncateForDisplay(trimmed)),
 				ShouldInterrupt: true,
 			}
-			slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+			logger.Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 			verdicts = append(verdicts, v)
 		}
 	}
@@ -431,7 +447,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 
 	if len([]rune(trimmed)) >= d.cfg.ChunkRepetitionMinScatteredLength {
 		count := d.reasonScatter.feed(d.cfg.ChunkWindowSize, trimmed)
-		slog.Default().Debug("loop: FeedReasoningChunk scattered",
+		logger.Debug("loop: FeedReasoningChunk scattered",
 			"scatter_count", count,
 			"scatter_threshold", d.cfg.ReasoningChunkRepetitionThreshold,
 			"chunk", truncateForDisplay(trimmed),
@@ -444,7 +460,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 				Message:         fmt.Sprintf("reasoning phrase recurring %d×: %q", count, truncateForDisplay(trimmed)),
 				ShouldInterrupt: false,
 			}
-			slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+			logger.Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 			verdicts = append(verdicts, v)
 		}
 	}
@@ -454,7 +470,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 	// cycles through many short, varied reasoning fragments that individually
 	// evade both consecutive and scattered repetition detectors.
 	d.reasonChunkCount++
-	slog.Default().Debug("loop: FeedReasoningChunk flood_count",
+	logger.Debug("loop: FeedReasoningChunk flood_count",
 		"count", d.reasonChunkCount,
 		"threshold", d.cfg.ReasoningChunkFloodThreshold,
 	)
@@ -467,7 +483,7 @@ func (d *Detector) FeedReasoningChunk(text string) []Verdict {
 			Message:         fmt.Sprintf("reasoning chunk flood: %d chunks in single turn", d.reasonChunkCount),
 			ShouldInterrupt: false, // medium confidence — warn only
 		}
-		slog.Default().Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
+		logger.Warn("loop: SIGNAL FIRED", "signal", v.Signal, "confidence", v.Confidence, "interrupt", v.ShouldInterrupt, "message", v.Message)
 		verdicts = append(verdicts, v)
 	}
 

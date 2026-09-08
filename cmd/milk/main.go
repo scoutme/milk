@@ -29,6 +29,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
+	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
@@ -679,6 +680,11 @@ func initObs(cfg config.Config) (shutdown func(context.Context) error) {
 		fmt.Fprintf(os.Stderr, "%s warning: OTel init failed: %v\n", milkTag(), err)
 		return func(context.Context) error { return nil }
 	}
+	// internal/loop can't import internal/obs directly (import cycle via
+	// internal/config), so hand it the same log sink explicitly — otherwise
+	// its diagnostics fall back to slog.Default() and bleed raw log lines
+	// into the TUI's alt-screen.
+	loop.SetLogger(obs.Logger())
 	return shutdown
 }
 

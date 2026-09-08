@@ -3,7 +3,6 @@ package loop
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -169,7 +168,7 @@ func (m *TryBestMonitor) recordEdit(toolName, argsJSON, result string, exitOK bo
 			Message:  fmt.Sprintf("near-identical edits to %s (%d similar prior edits)", path, similarCount),
 			FilePath: path,
 		}
-		slog.Default().Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
+		logger.Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
 		return v
 	}
 	return nil
@@ -209,7 +208,7 @@ func (m *TryBestMonitor) recordBash(argsJSON, result string, exitOK bool) *TryBe
 			Signal:  TryBestBashRetry,
 			Message: fmt.Sprintf("bash command retried %d times without success: %s", m.bashRetryCount+1, truncateStr(cmd, 80)),
 		}
-		slog.Default().Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
+		logger.Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
 		return v
 	}
 
@@ -247,7 +246,7 @@ func (m *TryBestMonitor) CheckActionStreak() *TryBestVerdict {
 			Signal:  TryBestActionStreak,
 			Message: fmt.Sprintf("%d consecutive non-progressing %s actions", m.actionStreak, m.actionKind),
 		}
-		slog.Default().Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
+		logger.Warn("try_best: SIGNAL FIRED", "signal", v.Signal, "message", v.Message)
 		return v
 	}
 	return nil
