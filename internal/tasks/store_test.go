@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestStore_CreateAndList(t *testing.T) {
@@ -167,5 +168,39 @@ func TestStore_UpdateNotFound(t *testing.T) {
 	s, _ := New(t.TempDir(), "sess")
 	if err := s.Update("nonexistent", StatusDone, ""); err == nil {
 		t.Error("expected error for unknown task ID, got nil")
+	}
+}
+
+// TestStore_OnChangeMustNotHoldLock guards against a real deadlock: in the
+// TUI, onChange typically calls tea.Program.Send, which blocks until
+// bubbletea's single event-loop goroutine is ready to receive it — and that
+// same goroutine calls View() (which, if the tasks panel is open, calls back
+// into Store.List()) immediately after every Update(). If onChange fired
+// while a mutator still held s.mu, that re-entrant List() call would block
+// forever waiting for a lock that can only be released after onChange
+// returns, which can't happen until the event loop is free to receive —
+// which it never will be, since it's stuck in that same List() call. This
+// simulates exactly that re-entrancy (onChange calling back into the store)
+// and asserts it completes promptly instead of hanging.
+func TestStore_OnChangeMustNotHoldLock(t *testing.T) {
+	s, _ := New(t.TempDir(), "sess")
+	s.SetOnChange(func() {
+		if _, err := s.List(ListOpts{}); err != nil {
+			t.Errorf("re-entrant List from onChange: %v", err)
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := s.Create("t1", nil); err != nil {
+			t.Errorf("Create: %v", err)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Create deadlocked: onChange must not run while s.mu is held")
 	}
 }

@@ -42,3 +42,4 @@
 * [40. Log Rotation and Simplification](0040-log-rotation-and-simplification.md)
 * [41. Time-Based CurrentNeed Expiry](0041-stale-currentneed-expiry.md)
 * [42. Preserve `reasoning_content` Across Multi-Turn Tool Calls](0042-preserve-reasoning-content.md)
+* [43. Background Sub-Agents for the Local Agent's Tool Loop](0043-background-subagents.md)

@@ -49,9 +49,11 @@ type CallResult struct {
 
 // ContentItem is one element of a tool call result.
 type ContentItem struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-	// image/audio/resource fields omitted — milk only surfaces text to the LLM
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`     // base64-encoded, for type=="image"
+	MimeType string `json:"mimeType,omitempty"` // e.g. "image/png", for type=="image"
+	// audio/resource fields omitted — milk does not surface those to the LLM
 }
 
 // Text returns the concatenated text of all text-type content items.
@@ -63,6 +65,22 @@ func (r CallResult) Text() string {
 		}
 	}
 	return sb.String()
+}
+
+// Images returns a data: URI (suitable for an OpenAI vision "image_url" part)
+// for each image-type content item that carries data.
+func (r CallResult) Images() []string {
+	var images []string
+	for _, c := range r.Content {
+		if c.Type == "image" && c.Data != "" {
+			mime := c.MimeType
+			if mime == "" {
+				mime = "image/png"
+			}
+			images = append(images, "data:"+mime+";base64,"+c.Data)
+		}
+	}
+	return images
 }
 
 // jsonrpcRequest is a JSON-RPC 2.0 request object.

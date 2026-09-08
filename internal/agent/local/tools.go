@@ -456,6 +456,21 @@ func sanitiseAgentToolName(name string) string {
 	return "agent_" + safe
 }
 
+// ResolveAgentToolName maps a dispatched tool-call name (e.g. "agent_mimo_local")
+// back to the original config agent name (e.g. "mimo-local") by matching against
+// entries' own sanitised names — the reverse of sanitiseAgentToolName isn't a pure
+// string operation (it's lossy: hyphens, spaces, and other separators all collapse
+// to "_"), so a naive prefix-strip of "agent_" recovers the sanitised form, not the
+// original name. Returns ("", false) when toolName doesn't match any entry.
+func ResolveAgentToolName(entries []config.AgentToolEntry, toolName string) (string, bool) {
+	for _, e := range entries {
+		if sanitiseAgentToolName(e.Agent) == toolName {
+			return e.Agent, true
+		}
+	}
+	return "", false
+}
+
 // AgentToolSchemas produces OpenAI function-call schema entries for the given
 // agent tool entries. Returns an empty (non-nil) slice when entries is empty.
 func AgentToolSchemas(entries []config.AgentToolEntry) []map[string]any {
@@ -480,6 +495,28 @@ func AgentToolSchemas(entries []config.AgentToolEntry) []map[string]any {
 		})
 	}
 	return result
+}
+
+// spawnBackgroundAgentSchema is the schema for the spawn_background_agent
+// tool (ADR-0043). Only appended at Run's call site when a.backgroundManager
+// is set — never when building a background job's own tool list (Phase 3),
+// which enforces the depth-1 fork cap structurally rather than by filtering.
+func spawnBackgroundAgentSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "spawn_background_agent",
+			"description": "Fork an independent copy of yourself to research a narrow, self-contained question in the background — reading files, grepping, running commands — without using up your own context. You are notified with a summary when it completes; you do not block on it and must not fabricate a result before that.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task":  map[string]any{"type": "string", "description": "The self-contained question or task for the background agent. Include everything it needs — it does not see your conversation."},
+					"label": map[string]any{"type": "string", "description": `Short human-readable label for status display, e.g. "analyze level-gen code".`},
+				},
+				"required": []string{"task", "label"},
+			},
+		},
+	}
 }
 
 func currentNeedSchema() map[string]any {

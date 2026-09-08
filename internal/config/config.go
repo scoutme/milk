@@ -147,6 +147,14 @@ type AgentConfig struct {
 	// (no Bedrock agent was available during development). See docs/providers.md.
 	PromptCaching bool `json:"prompt_caching,omitempty"`
 
+	// Vision declares that this agent's model accepts image input (an
+	// "image_url" content part). Opt-in and off by default: sending an image
+	// part to an endpoint that doesn't support vision is a hard API error
+	// ("No endpoints found that support image input"), not a graceful no-op.
+	// Gates the automatic image attached when an MCP tool result contains one
+	// (e.g. a screenshot); does not affect the user-initiated /attach path.
+	Vision bool `json:"vision,omitempty"`
+
 	// RunCmd is an optional shell command that starts the inference server when
 	// it is not already reachable. milk runs this command in the background on
 	// startup (and on-demand when the agent is first used) if a Ping to the URL
@@ -434,6 +442,21 @@ type Config struct {
 	// AgentTools is the global list of peer agents available as tools to all agents.
 	// Per-agent entries in AgentConfig.Tools shadow or extend this list.
 	AgentTools []AgentToolEntry `json:"agent_tools,omitempty"`
+
+	// MaxBackgroundAgents bounds how many spawn_background_agent jobs (see
+	// ADR-0043) may run concurrently per session, across however many turns
+	// spawn them. Defaults to 3 when unset or non-positive.
+	MaxBackgroundAgents int `json:"max_background_agents,omitempty"`
+
+	// BackgroundAgentTimeoutMinutes bounds how long a single
+	// spawn_background_agent job (ADR-0043) may run once it starts
+	// executing before being terminated as failed. Defaults to 20 minutes
+	// when unset or non-positive — generous on purpose, since loop
+	// detection (not this timeout) is the primary defense against a job
+	// that's actually stuck; this only needs to catch one that's still
+	// making real progress but never finishing (see
+	// internal/agent/local's defaultJobTimeout doc comment).
+	BackgroundAgentTimeoutMinutes int `json:"background_agent_timeout_minutes,omitempty"`
 
 	DefaultRoute string     `json:"default_route,omitempty"`
 	Rules        Rules      `json:"rules"`
@@ -776,6 +799,29 @@ func (c Config) ContextBudget() int {
 		return 12000
 	}
 	return c.ContextBudgetChars
+}
+
+// EffectiveMaxBackgroundAgents returns the configured concurrent
+// spawn_background_agent limit (see ADR-0043), falling back to 3 when unset
+// or non-positive.
+func (c Config) EffectiveMaxBackgroundAgents() int {
+	if c.MaxBackgroundAgents <= 0 {
+		return 3
+	}
+	return c.MaxBackgroundAgents
+}
+
+// EffectiveBackgroundAgentTimeout returns the configured per-job
+// spawn_background_agent timeout (see ADR-0043), falling back to 20 minutes
+// when unset or non-positive — must match internal/agent/local's
+// defaultJobTimeout; config can't import that package (it would create an
+// import cycle, since internal/agent/local already imports internal/config
+// for AgentLimits), so the fallback is duplicated here rather than shared.
+func (c Config) EffectiveBackgroundAgentTimeout() time.Duration {
+	if c.BackgroundAgentTimeoutMinutes <= 0 {
+		return 20 * time.Minute
+	}
+	return time.Duration(c.BackgroundAgentTimeoutMinutes) * time.Minute
 }
 
 // MemoryReinjectionTurnThreshold returns the escalation-turn interval for

@@ -61,6 +61,15 @@ func (s *Store) SetOnChange(fn func()) {
 
 // Create adds a new task to the session store and returns the new Task.
 func (s *Store) Create(title string, tags []string) (Task, error) {
+	t, err := s.createLocked(title, tags)
+	if err != nil {
+		return Task{}, err
+	}
+	s.notify()
+	return t, nil
+}
+
+func (s *Store) createLocked(title string, tags []string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := Task{
@@ -80,13 +89,20 @@ func (s *Store) Create(title string, tags []string) (Task, error) {
 	if err := s.writeSession(tasks); err != nil {
 		return Task{}, err
 	}
-	s.notify()
 	return t, nil
 }
 
 // Update sets the status (and optionally title) of a task by ID.
 // It searches session tasks first, then global tasks.
 func (s *Store) Update(id, status, title string) error {
+	if err := s.updateLocked(id, status, title); err != nil {
+		return err
+	}
+	s.notify()
+	return nil
+}
+
+func (s *Store) updateLocked(id, status, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Try session tasks first.
@@ -101,11 +117,7 @@ func (s *Store) Update(id, status, title string) error {
 				tasks[i].Title = title
 			}
 			tasks[i].UpdatedAt = time.Now()
-			if err := s.writeSession(tasks); err != nil {
-				return err
-			}
-			s.notify()
-			return nil
+			return s.writeSession(tasks)
 		}
 	}
 	// Try global tasks.
@@ -120,11 +132,7 @@ func (s *Store) Update(id, status, title string) error {
 				global[i].Title = title
 			}
 			global[i].UpdatedAt = time.Now()
-			if err := s.writeGlobal(global); err != nil {
-				return err
-			}
-			s.notify()
-			return nil
+			return s.writeGlobal(global)
 		}
 	}
 	return fmt.Errorf("task %q not found", id)
@@ -137,6 +145,14 @@ func (s *Store) Complete(id string) error {
 
 // Delete removes a task by ID from session or global store.
 func (s *Store) Delete(id string) error {
+	if err := s.deleteLocked(id); err != nil {
+		return err
+	}
+	s.notify()
+	return nil
+}
+
+func (s *Store) deleteLocked(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tasks, err := s.readSession()
@@ -153,11 +169,7 @@ func (s *Store) Delete(id string) error {
 		filtered = append(filtered, t)
 	}
 	if deleted {
-		if err := s.writeSession(filtered); err != nil {
-			return err
-		}
-		s.notify()
-		return nil
+		return s.writeSession(filtered)
 	}
 	global, err := s.readGlobal()
 	if err != nil {
@@ -172,17 +184,21 @@ func (s *Store) Delete(id string) error {
 		filteredG = append(filteredG, t)
 	}
 	if deleted {
-		if err := s.writeGlobal(filteredG); err != nil {
-			return err
-		}
-		s.notify()
-		return nil
+		return s.writeGlobal(filteredG)
 	}
 	return fmt.Errorf("task %q not found", id)
 }
 
 // Promote moves a session task to the global store so it survives session end.
 func (s *Store) Promote(id string) error {
+	if err := s.promoteLocked(id); err != nil {
+		return err
+	}
+	s.notify()
+	return nil
+}
+
+func (s *Store) promoteLocked(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tasks, err := s.readSession()
@@ -210,11 +226,7 @@ func (s *Store) Promote(id string) error {
 	if err := s.writeGlobal(global); err != nil {
 		return err
 	}
-	if err := s.writeSession(remaining); err != nil {
-		return err
-	}
-	s.notify()
-	return nil
+	return s.writeSession(remaining)
 }
 
 // ListOpts controls what List returns.
@@ -279,9 +291,22 @@ func (s *Store) writeGlobal(tasks []Task) error {
 	return writeTasks(s.globalPath(), tasks)
 }
 
+// notify invokes the registered onChange callback, if any. Called by the
+// public Create/Update/Delete/Promote wrappers only after their *Locked
+// helper has returned and s.mu has been released — onChange typically ends
+// up calling tea.Program.Send, which blocks until bubbletea's event-loop
+// goroutine is ready to receive it; that goroutine also calls View() (and,
+// if the tasks panel is open, back into Store.List(), which needs s.mu)
+// right after every Update(), so calling onChange while still holding s.mu
+// deadlocks the whole program. s.onChange itself is read under a brief lock
+// since it's a plain field guarded by s.mu, but the callback is invoked
+// unlocked.
 func (s *Store) notify() {
-	if s.onChange != nil {
-		s.onChange()
+	s.mu.Lock()
+	cb := s.onChange
+	s.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 }
 

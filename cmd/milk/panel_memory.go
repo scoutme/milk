@@ -37,44 +37,10 @@ var (
 )
 
 // renderMemoryPanel returns a vertical panel string of exactly h lines and
-// memoryPanelInner columns (32 chars; scrollbar is rendered separately via renderPanelScrollbar).
+// memoryPanelInner columns (scrollbar is rendered separately via renderPanelScrollbar).
+// Body shared with every other side panel — see renderSidePanel.
 func (m *model) renderMemoryPanel(h int) string {
-	inner := memoryPanelInner
-	if !isTTY {
-		return strings.Repeat("\n", h)
-	}
-
-	bricks := m.currentSessionBricks()
-	all := buildPanelLines(m.mem, inner, bricks)
-	total := len(all)
-
-	// Clamp offset so we never scroll past the last screenful.
-	maxOffset := max(total-h, 0)
-	if m.panelOffset > maxOffset {
-		m.panelOffset = maxOffset
-	}
-
-	if m.panelSelRegion == regionMemory {
-		all = applyPanelSelectionHighlight(all, m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
-	}
-
-	// Slice the visible window.
-	lines := all[m.panelOffset:]
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	lines = lines[:h]
-
-	// Pad each row to exactly inner cols (no scrollbar — that's a separate column).
-	var rows []string
-	for _, line := range lines {
-		lineW := utf8.RuneCountInString(stripANSI(line))
-		if lineW < inner {
-			line += strings.Repeat(" ", inner-lineW)
-		}
-		rows = append(rows, line)
-	}
-	return strings.Join(rows, "\n")
+	return m.renderSidePanel(regionMemory, h)
 }
 
 // currentSessionBricks builds a sessionBricks snapshot from the current model state,
@@ -99,41 +65,9 @@ func (m *model) currentSessionBricks() sessionBricks {
 
 // renderPanelScrollbar returns a 1-column string of h lines: a dim │ track with
 // a ▌ thumb when the panel content overflows, or a blank column otherwise.
+// Shared with every other side panel — see renderSidePanelScrollbar.
 func (m *model) renderPanelScrollbar(h int) string {
-	bricks := m.currentSessionBricks()
-	all := buildPanelLines(m.mem, memoryPanelInner, bricks)
-	total := len(all)
-	needsBar := total > h
-
-	var rows []string
-	if !needsBar {
-		for range h {
-			rows = append(rows, " ")
-		}
-		return strings.Join(rows, "\n")
-	}
-
-	thumbTop, thumbBot := scrollThumb(h, total, m.panelOffset)
-	for i := range h {
-		if i >= thumbTop && i <= thumbBot {
-			rows = append(rows, dim("▌"))
-		} else {
-			rows = append(rows, dim("│"))
-		}
-	}
-	return strings.Join(rows, "\n")
-}
-
-// scrollThumb computes the inclusive [top, bot] row indices of the scroll thumb
-// within a viewport of height h showing content of length total starting at offset.
-func scrollThumb(h, total, offset int) (top, bot int) {
-	thumbH := max(h*h/total, 1)
-	top = offset * (h - thumbH) / (total - h)
-	bot = top + thumbH - 1
-	if bot >= h {
-		bot = h - 1
-	}
-	return top, bot
+	return m.renderSidePanelScrollbar(regionMemory, h)
 }
 
 func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []string {

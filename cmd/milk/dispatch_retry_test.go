@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/net/http2"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
@@ -55,7 +56,7 @@ func (r *flakyExecRunner) Execute(
 	return r.res, nil
 }
 
-func (r *flakyExecRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
+func (r *flakyExecRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ []local.ContentPart, _ io.Writer) (string, error) {
 	return "", nil
 }
 

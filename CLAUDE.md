@@ -49,6 +49,7 @@ eval/                          # `milk eval` subcommand — harness, adapters (c
 - **Single inference server instance**: same server handles both router classification and local coding/tool tasks
 - **Escalation agent**: any `agents` entry can be the escalation target — set `escalation_agent` to its name. Defaults to the built-in `claude-cli` entry. Use `/agent switch <name> as escalation` to change it at runtime.
 - **Claude via CLI subprocess**: `claude --print --output-format stream-json`, not direct API. Configured as `provider: "claude-cli"` in `agents`.
+- **Background sub-agents** (ADR-0043): any inference-server-backed agent (primary or escalation — the deciding factor is provider, not role) can call `spawn_background_agent` to fork an independent copy of itself for a self-contained research task with its own tool loop, running asynchronously via `internal/agent/local.Manager` and reporting back on the next turn (`dispatch.go`'s `drainBackgroundJobs`) plus immediately in the TUI. The local-agent analogue of Claude Code's own fork/Task tool; `claude-cli` needs no equivalent since it already has that natively.
 - **Context handoff**: local transcript passed via two `--append-system-prompt-file` flags (static instructions + dynamic summary) for the CLI path; local providers receive a `BuildDynamicContext` orientation block as a prepended system message. Both paths inject percepts. On stale returning escalations (topic switched or ≥`returning_fresh_start_local_turns` local turns since last escalation, default 8), CLI drops `--resume` and local providers scope history to post-escalation turns only.
 - **ESCALATION_WAITING state**: once the escalation agent asks a follow-up, next turn bypasses router → `--resume`
 - **Self-escalation**: local model can call `escalate(reason)` as a function call
@@ -143,8 +144,10 @@ Token usage is stored in the session `Tokens` map keyed by `"model\x00role"`. Th
 | `escalation` | Main escalation agent (Claude Code) |
 | `escalation:subagent` | Subagent spawned by the escalation agent |
 | `escalation:workflow` | Background workflow run by the escalation agent |
+| `primary:subagent` / `escalation:subagent` | `spawn_background_agent` job (ADR-0043), tagged by the spawning agent's own role — the same suffix as Claude Code's subagents, but recorded directly by milk rather than parsed from a subprocess's stream JSON |
+| `user:subagent` | A background job the *user* spawned directly (pressing Enter again while busy — see ADR-0043's TUI section), not an agent's own tool call — there is no agent role to tag it with, so it gets its own bucket rather than being miscategorized under `primary` or `escalation` |
 
-The colon-separated convention allows prefix queries — `SessionTokensByRolePrefix("escalation")` matches all three escalation-related roles.
+The colon-separated convention allows prefix queries — `SessionTokensByRolePrefix("escalation")` matches all escalation-related roles (main turns, Claude Code's own subagents/workflows, and any spawn_background_agent jobs an escalation-role local agent ran).
 
 ### How it works
 
@@ -153,6 +156,7 @@ The colon-separated convention allows prefix queries — `SessionTokensByRolePre
 3. `FormatTokenUsage` in the TUI displays each role string as its own row in the `/usage` table.
 4. The eval harness (`adapter_claude.go`) captures subagent/workflow tokens from the transcript JSONL.
 5. Graceful degradation: when Claude Code does not provide subagent/workflow data, all tokens are attributed to the main `escalation` role as before.
+6. `spawn_background_agent` jobs (ADR-0043) follow the same `<role>:subagent` convention but are recorded directly by `dispatch.go`'s `drainBackgroundJobs` when a job completes, not parsed from anything — see [docs/adr/0043-background-subagents.md](docs/adr/0043-background-subagents.md).
 
 ## Loop detection
 

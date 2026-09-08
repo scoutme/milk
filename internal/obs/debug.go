@@ -100,6 +100,18 @@ func Warn(msg string, args ...any) {
 	}
 }
 
+// Logger returns the package-level milk-log logger, for packages that can't
+// import obs directly (e.g. internal/loop, which internal/config already
+// imports, so obs -> loop would cycle) but still want their diagnostics in
+// milk's own log file instead of falling back to slog.Default()'s stderr.
+// Returns a discard logger when logging is disabled/not yet initialized.
+func Logger() *slog.Logger {
+	if milkLogger == nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return milkLogger
+}
+
 // DebugCtx emits a debug-level message with context to the milk log.
 func DebugCtx(ctx context.Context, msg string, args ...any) {
 	if milkLogger != nil {

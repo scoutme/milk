@@ -73,6 +73,13 @@ type dispatchAgents struct {
 	// build mcpToolSets/mcpServers for each agent name, so refreshMCPForRole
 	// can skip rebuilding when nothing has actually changed.
 	mcpServersSeen map[string][]config.MCPServerConfig
+	// backgroundMgr tracks spawn_background_agent jobs (ADR-0043) across
+	// however many turns this session runs. Constructed once per session
+	// (not per turn — buildTUIAgents re-wires the same *Manager onto each
+	// turn's freshly-copied local.Agent) with a base context that outlives
+	// any single turn's cancellable context. Nil when the active agent
+	// config doesn't support it (e.g. no local provider available yet).
+	backgroundMgr *local.Manager
 }
 
 // refreshMCPToolSets rebuilds the MCP toolset for the primary and escalation
@@ -190,6 +197,31 @@ type reasoningPromotedMsg struct{}
 
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
+
+// backgroundJobDoneMsg is sent immediately when a spawn_background_agent job
+// (ADR-0043) completes or fails — independent of, and typically well before,
+// the turn-boundary path (drainBackgroundJobs) that injects the same result
+// into the next turn's context. This is purely the live-notification path:
+// it lets the transcript/status bar reflect completion as soon as it
+// happens, without waiting for the user's next input.
+type backgroundJobDoneMsg struct{ job *local.Job }
+
+// backgroundBatchDoneMsg is sent exactly once when the last currently-
+// outstanding spawn_background_agent job finishes (Manager.SetOnBatchDone —
+// ActiveCount reaches 0), i.e. once per wave rather than once per job. This
+// is what actually turns "results are ready" into a real follow-up turn:
+// neither backgroundJobDoneMsg (a passive transcript line) nor the
+// turn-boundary drain path (which only runs when some other turn happens to
+// be dispatched) generates a response on their own.
+type backgroundBatchDoneMsg struct{}
+
+// backgroundUserJobDoneMsg is sent when a user-initiated background job
+// (spawned via the busy-key "press Enter again" flow, not a tool call)
+// finishes. Unlike backgroundBatchDoneMsg, this fires per job rather than
+// waiting for a whole wave — there's nothing to consolidate; the user forked
+// off one specific side-question and the result should reach the main agent
+// as soon as it's free, not held back for unrelated jobs still running.
+type backgroundUserJobDoneMsg struct{}
 
 // directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
@@ -481,6 +513,23 @@ type model struct {
 	cancelTurn  context.CancelFunc
 	interrupted bool // set when user cancels a turn via ctrl+c
 
+	// pendingBackgroundFollowup is set when an agent-initiated
+	// spawn_background_agent wave finishes (backgroundBatchDoneMsg) while
+	// busy or otherwise blocked, so handleAgentDone can retry the
+	// auto-follow-up once idle again. Only fires once every job in the
+	// wave has finished (ActiveCount reaches 0) — the calling agent
+	// designed a consolidated, multi-part wave meant to be reported
+	// together.
+	pendingBackgroundFollowup bool
+	// pendingUserBackgroundFollowup is the equivalent for a user-initiated
+	// spawn (armed via the busy-key "press Enter again" flow below, not a
+	// tool call): there is no "wave" to consolidate, so this fires as soon
+	// as the model goes idle regardless of whether other jobs — agent- or
+	// user-initiated — are still running. Deliver what's ready rather than
+	// waiting on unrelated work the user didn't ask this particular
+	// request to wait for.
+	pendingUserBackgroundFollowup bool
+
 	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
 
@@ -495,6 +544,10 @@ type model struct {
 	panelTasks  bool
 	tasksOffset int
 	taskStore   *tasks.Store
+
+	// background-agents panel (ADR-0043)
+	panelBackground  bool
+	backgroundOffset int
 
 	// pending /forget confirmation
 	pendingForget *forgetState
@@ -545,8 +598,16 @@ type model struct {
 	panelSelDragging   bool
 	panelSelText       string
 
-	copyFeedback   string // transient "[copied N chars]" shown in status bar
-	busyHint       string // transient "agent is responding" shown in status bar
+	copyFeedback string // transient "[copied N chars]" shown in status bar
+	busyHint     string // transient "agent is responding" shown in status bar
+	// busySpawnArmed is true while busyHint is specifically the "press
+	// Enter again to spawn a background agent" prompt (as opposed to e.g.
+	// the slash-command-unavailable variant) — the next plain Enter while
+	// still armed spawns a background agent from the current textarea
+	// content instead of just re-showing the hint. Cleared by
+	// busyHintClearMsg (the same 3s timer as busyHint), by actually
+	// spawning, or by any other busyHint being set instead.
+	busySpawnArmed bool
 	credRefreshing bool   // true while any background credential refresh is running
 	credLabel      string // which credential is being refreshed (e.g. "AWS", "token")
 	credStatus     string // non-empty after refresh completes: last result message
@@ -781,9 +842,19 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.handleSlashInput(cmd, rest)
 			}
 			m.busyHint = cmd + " unavailable while agent is responding"
+			m.busySpawnArmed = false
 			return m, busyHintClearCmd()
 		}
-		m.busyHint = "agent is responding — Ctrl+C to interrupt"
+		if m.busySpawnArmed && input != "" {
+			return m.spawnUserBackgroundAgent(input)
+		}
+		if input == "" {
+			m.busyHint = "agent is responding — Ctrl+C to interrupt"
+			m.busySpawnArmed = false
+			return m, busyHintClearCmd()
+		}
+		m.busyHint = "agent is working — press Enter again to spawn a background agent with this"
+		m.busySpawnArmed = true
 		return m, busyHintClearCmd()
 	case "tab":
 		// Tab completion not available while busy — ignore silently.
@@ -938,6 +1009,12 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 	m.syncLayout()
 
+	if m.pendingUserBackgroundFollowup {
+		return m.maybeAutoFollowupBackgroundJobs(false)
+	}
+	if m.pendingBackgroundFollowup {
+		return m.maybeAutoFollowupBackgroundJobs(true)
+	}
 	if len(m.st.pendingRemoteInputs) > 0 {
 		next := m.st.pendingRemoteInputs[0]
 		m.st.pendingRemoteInputs = m.st.pendingRemoteInputs[1:]
@@ -989,42 +1066,23 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	region, regionX := m.regionAt(ev.X)
 	switch ev.Button {
 	case tea.MouseButtonWheelUp:
-		switch region {
-		case regionMemory:
-			if m.panelOffset > 0 {
-				m.panelOffset--
+		if p := m.panelOffsetPtr(region); p != nil {
+			if *p > 0 {
+				*p--
 			}
-		case regionTasks:
-			if m.tasksOffset > 0 {
-				m.tasksOffset--
-			}
-		case regionWorkflow:
-			if m.workflowPanelOffset > 0 {
-				m.workflowPanelOffset--
-			}
-		default:
+		} else {
 			m.vp.ScrollUp(3)
 		}
 	case tea.MouseButtonWheelDown:
-		h := m.viewportHeight()
-		switch region {
-		case regionMemory:
-			if m.panelOffset < m.panelMaxOffset(regionMemory, h) {
-				m.panelOffset++
+		if p := m.panelOffsetPtr(region); p != nil {
+			if *p < m.panelMaxOffset(region, m.viewportHeight()) {
+				*p++
 			}
-		case regionTasks:
-			if m.tasksOffset < m.panelMaxOffset(regionTasks, h) {
-				m.tasksOffset++
-			}
-		case regionWorkflow:
-			if m.workflowPanelOffset < m.panelMaxOffset(regionWorkflow, h) {
-				m.workflowPanelOffset++
-			}
-		default:
+		} else {
 			m.vp.ScrollDown(3)
 		}
 	case tea.MouseButtonLeft:
-		if region == regionMemory || region == regionWorkflow {
+		if region != regionNone {
 			return m.handlePanelMouse(region, regionX, ev)
 		}
 		// Only handle events inside the viewport area (rows 2..height-2).
@@ -1272,6 +1330,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.ptyPane != nil {
 			return m.handlePTYKey(msg)
+		}
+		// F1-F4: global panel show/hide shortcuts, available in any other
+		// mode (busy, permission prompt, wizards, ...) — none of them
+		// otherwise use function keys, and toggling how much of the
+		// screen a panel takes doesn't conflict with anything in-progress.
+		// Same effect as /panel <name>; having three-plus panels
+		// (memory/tasks/background, plus workflow) competing for space
+		// makes a quick toggle worth more than typing the command out.
+		switch msg.String() {
+		case "f1":
+			return m.handlePanelCmd("memory")
+		case "f2":
+			return m.handlePanelCmd("tasks")
+		case "f3":
+			return m.handlePanelCmd("background")
+		case "f4":
+			return m.handlePanelCmd("workflow")
 		}
 		if m.pendingDirectBash != nil {
 			return m.handleDirectBashKey(msg)
@@ -1630,6 +1705,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case busyHintClearMsg:
 		m.busyHint = ""
+		m.busySpawnArmed = false
 		return m, nil
 
 	case credRefreshReadyMsg:
@@ -1700,6 +1776,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, memoryPollTick()
 		}
 		return m, nil
+
+	case backgroundJobDoneMsg:
+		j := msg.job
+		if j.Err != nil {
+			m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ background agent %q failed: %v", j.Label, j.Err)) + "\n")
+		} else {
+			m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ background agent %q completed", j.Label)) + "\n")
+		}
+		return m, nil
+
+	case backgroundBatchDoneMsg:
+		return m.maybeAutoFollowupBackgroundJobs(true)
+
+	case backgroundUserJobDoneMsg:
+		return m.maybeAutoFollowupBackgroundJobs(false)
 
 	case configReloadMsg:
 		if msg.err != nil {
@@ -2321,6 +2412,114 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	return m.submitInput(input, promptLabel(m.st))
 }
 
+// backgroundFollowupPrompt is the synthetic input used to trigger a real
+// follow-up turn once a whole wave of spawn_background_agent jobs has
+// finished (ADR-0043). It carries no content of its own — drainBackgroundJobs
+// (dispatch.go) prepends the actual drained results to whatever turn picks
+// it up; this text only needs to point the model at reacting to them.
+//
+// Aliases local.BackgroundFollowupPrompt rather than defining its own text:
+// Run's isRepeatedPrompt whitelist exempts that exact string from the
+// repeated-prompt escalation signal (a fixed synthetic prompt recurring
+// across multiple completed waves looks identical to a human repeating
+// themselves out of frustration, and would otherwise trigger a bogus
+// self-escalation). Defining a second, textually-identical constant here
+// would risk the two drifting apart if either ever gets edited alone.
+const backgroundFollowupPrompt = local.BackgroundFollowupPrompt
+
+// spawnUserBackgroundAgent spawns a background research job (ADR-0043) from
+// text the user typed while the model was busy — the confirming second
+// Enter press while busySpawnArmed (see handleBusyKey). Unlike an
+// agent-initiated spawn_background_agent tool call, there is no
+// requirement that the currently-busy role itself be local-backed (the
+// in-flight turn could be running on claude-cli, which has no Manager at
+// all) — the job just needs any inference-server-backed agent to fork from,
+// so this prefers the escalation agent's local backend (generally the more
+// capable one) and falls back to primary's.
+func (m model) spawnUserBackgroundAgent(task string) (tea.Model, tea.Cmd) {
+	m.ta.Reset()
+	m.busyHint = ""
+	m.busySpawnArmed = false
+	m.syncLayout()
+
+	mgr := m.agents.backgroundMgr
+	agent := m.agents.escalationLocal
+	modelName := m.st.cfg.EscalationAgentConfig().Model
+	if modelName == "" {
+		modelName = m.st.cfg.EscalationAgentConfig().Name
+	}
+	if agent == nil {
+		agent = m.agents.local
+		modelName = m.st.cfg.ActiveAgent().Model
+		if modelName == "" {
+			modelName = m.st.cfg.ActiveAgent().Name
+		}
+	}
+	if mgr == nil || agent == nil {
+		m.appendTranscript("\n" + dimWrap("⚙ background agent unavailable — no inference-server-backed agent configured") + "\n")
+		return m, nil
+	}
+
+	label := task
+	if len(label) > 60 {
+		label = label[:57] + "..."
+	}
+	cwd := m.st.cwd
+	job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context) (string, session.TokenUsage, error) {
+		return agent.RunBackgroundTask(ctx, cwd, task, io.Discard)
+	})
+	m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ spawned background agent %s (%q)", job.ID, label)) + "\n")
+	m.syncLayout()
+	return m, nil
+}
+
+// maybeAutoFollowupBackgroundJobs delivers currently-drainable
+// spawn_background_agent results as a real follow-up turn once the TUI is
+// idle, so the agent actually produces the consolidated response it usually
+// promises — rather than leaving results sitting in the Manager's queue
+// until the user happens to send another message.
+//
+// waitForWholeWave distinguishes the two callers:
+//   - true (agent-initiated, via the spawn_background_agent tool call and
+//     backgroundBatchDoneMsg): the calling agent designed a consolidated,
+//     multi-part wave meant to be reported together, so this only fires
+//     once every currently-outstanding job has finished (ActiveCount == 0).
+//   - false (user-initiated, via the busy-key "press Enter again to spawn"
+//     flow and backgroundUserJobDoneMsg): there is no "wave" to
+//     consolidate — the user forked off one specific side-question while
+//     waiting on something else, so this fires as soon as the model is
+//     idle regardless of whether other jobs (agent- or user-initiated) are
+//     still running. Delivering it promptly matters more than batching it
+//     with unrelated work the user never asked this request to wait for.
+//
+// Called both when a job/wave first finishes and again after any turn
+// completes (handleAgentDone), in case it finished while busy.
+func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model, tea.Cmd) {
+	mgr := m.agents.backgroundMgr
+	if mgr == nil {
+		m.pendingBackgroundFollowup = false
+		m.pendingUserBackgroundFollowup = false
+		return m, nil
+	}
+	if waitForWholeWave && mgr.ActiveCount() > 0 {
+		// A newer wave started in the meantime — wait for that wave's own
+		// completion signal instead.
+		m.pendingBackgroundFollowup = false
+		return m, nil
+	}
+	if m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil {
+		if waitForWholeWave {
+			m.pendingBackgroundFollowup = true
+		} else {
+			m.pendingUserBackgroundFollowup = true
+		}
+		return m, nil
+	}
+	m.pendingBackgroundFollowup = false
+	m.pendingUserBackgroundFollowup = false
+	return m.submitInput(backgroundFollowupPrompt, dim("[background]")+" ")
+}
+
 // submitInput handles a finalised user input string from any source (keyboard,
 // Telegram, etc.). label is the transcript echo prefix.
 func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
@@ -2419,7 +2618,13 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		for _, a := range attachments {
 			fmt.Fprintf(&ph, " %s", attachmentPlaceholder(a))
 			if a.isImage() {
-				// Local agent: multipart image_url content part (base64 data URI).
+				// Local-provider agent (primary and/or escalation): multipart
+				// image_url content part (base64 data URI) — wired below into
+				// whichever *local.Agent(s) are set. A local escalation agent
+				// used to only get this same image dumped as a raw base64 text
+				// blob (see the removed inline-text branch this replaced) —
+				// which it can't actually see as an image, so it confabulated
+				// a plausible-sounding description instead of reading it.
 				imageParts = append(imageParts, local.ContentPart{
 					Type:     "image_url",
 					ImageURL: &local.ImageURLPart{URL: attachmentDataURI(a)},
@@ -2443,9 +2648,6 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					if !written {
 						fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
 					}
-				} else {
-					// Non-CLI escalation (local HTTP, subprocess): inline base64 data URI.
-					fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
 				}
 			} else {
 				textBlocks.WriteString(attachmentContextBlock(a))
@@ -2484,9 +2686,17 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, _ := m.buildTUIAgents(send, ir0)
 
-	// Wire image parts into the primary local agent so it sends a multipart payload.
-	if len(imageParts) > 0 && tuiAgents.local != nil {
-		tuiAgents.local.SetPendingImageParts(imageParts)
+	// Wire image parts into both local agents so whichever one the router picks
+	// this turn sends a multipart vision payload — routing isn't decided until
+	// runTurn below, and only escalationLocal's own pendingImageParts (not
+	// primary's) reaches a local escalation agent's Run() call.
+	if len(imageParts) > 0 {
+		if tuiAgents.local != nil {
+			tuiAgents.local.SetPendingImageParts(imageParts)
+		}
+		if tuiAgents.escalationLocal != nil {
+			tuiAgents.escalationLocal.SetPendingImageParts(imageParts)
+		}
 	}
 
 	// Capture input chars for the live token estimate in the status bar.
@@ -2596,6 +2806,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
+		tuiLocalAgent.SetBackgroundManager(agents.backgroundMgr)
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
@@ -2608,6 +2819,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithOnReasoningPromoted(func() { send(reasoningPromotedMsg{}) })
+		tuiEscLocal.SetBackgroundManager(agents.backgroundMgr)
 		tuiAgents.escalationLocal = tuiEscLocal
 		tuiAgents.escalation = newLocalRunner(tuiEscLocal, agents.escalation.Name())
 	}
@@ -2770,7 +2982,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 	case router.TargetEscalation:
 		imageCtxFile := st.pendingImageContextFile
 		st.pendingImageContextFile = ""
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, onResponse, onSegment, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, agents, onResponse, onSegment, pw)
 		// CLI image temp files are no longer needed after the turn.
 		cleanupCLIImageFiles(st)
 	}
@@ -3126,7 +3338,12 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		escalationAvail:   escalationAvail,
 		mcpToolSets:       mcpToolSets,
 		mcpServersSeen:    mcpServersSeen,
+		// Constructed once per session, not per turn (ADR-0043): ctx here is
+		// the session/TUI-root context, not any single turn's cancellable
+		// one — see the Manager doc comment for why that distinction matters.
+		backgroundMgr: local.NewManager(ctx, cfg.EffectiveMaxBackgroundAgents()),
 	}
+	agents.backgroundMgr.SetJobTimeout(cfg.EffectiveBackgroundAgentTimeout())
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.taskStore = taskStore
@@ -3203,6 +3420,30 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Notify the TUI as soon as each background job (ADR-0043) completes,
+	// independent of the turn-boundary drain path.
+	if agents.backgroundMgr != nil {
+		agents.backgroundMgr.SetOnDone(func(j *local.Job) {
+			p.Send(backgroundJobDoneMsg{job: j})
+			// User-initiated jobs (Role == "user", tagged by the busy-key
+			// spawn flow) have no "wave" to consolidate — deliver as soon
+			// as the model is free rather than waiting for
+			// SetOnBatchDone, which only fires once every job (agent- or
+			// user-initiated) is done.
+			if j.Role == "user" {
+				p.Send(backgroundUserJobDoneMsg{})
+			}
+		})
+		// And, once the whole wave has finished, actually trigger a
+		// follow-up turn (see maybeAutoFollowupBackgroundJobs) — without
+		// this, "I'll follow up automatically" is never true: results just
+		// sit in the Manager's queue until some other turn happens to be
+		// dispatched.
+		agents.backgroundMgr.SetOnBatchDone(func() {
+			p.Send(backgroundBatchDoneMsg{})
+		})
+	}
 
 	// Wire task store redraw: when tasks change, send a tick to trigger View().
 	if taskStore != nil {

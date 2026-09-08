@@ -191,6 +191,7 @@ type streamChunk struct {
 		CompletionTokens    int64 `json:"completion_tokens"`
 		PromptTokensDetails *struct {
 			CachedTokens int64 `json:"cached_tokens"`
+			ImageTokens  int64 `json:"image_tokens"`
 		} `json:"prompt_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
@@ -216,7 +217,11 @@ func agentRoleForMetrics(escalationName string) string {
 
 // ToolAgentDispatcher is called when the agent issues an agent_* tool call.
 // agentName is the unsanitised agent name (e.g. "aider", not "agent_aider").
-type ToolAgentDispatcher func(ctx context.Context, agentName, request string, out io.Writer) (string, error)
+// images, when non-empty, are images the calling agent itself couldn't attach
+// (not vision-configured) that it is forwarding for the target tool-agent to
+// see instead — the target's own vision configuration still gates whether it
+// actually attaches them or drops them with a note.
+type ToolAgentDispatcher func(ctx context.Context, agentName, request string, images []ContentPart, out io.Writer) (string, error)
 
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
 // or the AWS Bedrock Converse API when useBedrockNative is true.
@@ -232,6 +237,7 @@ type Agent struct {
 	selfName         string // this agent's own name (e.g. "gemma-local"), injected into the system prompt
 	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
 	workflowRole     bool   // true when acting as a workflow step executor: neutral system prompt, no escalation framing
+	isToolAgent      bool   // true when invoked stateless via RunToolCall (agent-as-tool): no escalate tool — there's no session/runner for it to escalate into
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
 	permStore        *PermStore
 	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
@@ -259,6 +265,10 @@ type Agent struct {
 	toolAgentEntries []config.AgentToolEntry
 	// toolAgentDispatcher is called when the agent issues an agent_* tool call.
 	toolAgentDispatcher ToolAgentDispatcher
+	// backgroundManager, when set, makes spawn_background_agent available
+	// (ADR-0043) and receives its calls. nil for background jobs themselves
+	// (RunBackgroundTask never sets it), enforcing the depth-1 fork cap.
+	backgroundManager *Manager
 	// onToolUse is called just before each tool is dispatched, with the tool name
 	// and a short human-readable summary of its key argument.
 	onToolUse func(name, summary string)
@@ -311,6 +321,11 @@ type Agent struct {
 	// (AgentConfig.PromptCaching). Only meaningful when useBedrockNative is
 	// true; ignored otherwise. EXPERIMENTAL — see AgentConfig.PromptCaching.
 	promptCaching bool
+	// supportsVision mirrors AgentConfig.Vision — gates whether an MCP tool
+	// result's image content (e.g. a screenshot) is attached to a follow-up
+	// message. False by default: an unsupported endpoint hard-errors the
+	// whole turn rather than ignoring the image part.
+	supportsVision bool
 	// tryBest is an optional tool-level loop detector that tracks near-identical
 	// edits, retried failing bash commands, and non-progressing action streaks.
 	// When non-nil, RecordToolCall is called after each tool completes and
@@ -345,7 +360,7 @@ type TryBestVerdict struct {
 // interface to avoid an import cycle between internal/agent/local and internal/mcp.
 type mcpToolSet interface {
 	Schemas(ctx context.Context) []map[string]any
-	Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool)
+	Dispatch(ctx context.Context, toolName, argsJSON string) (string, []string, bool)
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -383,6 +398,18 @@ func (a *Agent) WithToolAgentEntries(entries []config.AgentToolEntry) *Agent {
 	return &copy
 }
 
+// WithToolAgentRole returns a shallow copy of the agent marked as a stateless
+// tool-agent (invoked via RunToolCall by a peer agent's agent_<name> call).
+// This excludes the "escalate" tool from its schema: there is no session or
+// escalation runner behind a one-shot tool call for it to escalate into, so
+// exposing the tool would let the model request an escalation that can only
+// hard-fail the whole call (mirrors RunBackgroundTask's bgLimits pattern).
+func (a *Agent) WithToolAgentRole() *Agent {
+	copy := *a
+	copy.isToolAgent = true
+	return &copy
+}
+
 // WithMCPToolSet returns a shallow copy of the agent configured with the given
 // MCP tool set. The tool set's Schemas() are appended to the agent's tool list
 // and its Dispatch() is called for any mcp_* tool name before falling through
@@ -403,6 +430,12 @@ func (a *Agent) SetTermWidth(w int) {
 // issues an agent_* tool call.
 func (a *Agent) SetToolAgentDispatcher(fn ToolAgentDispatcher) {
 	a.toolAgentDispatcher = fn
+}
+
+// SetBackgroundManager makes spawn_background_agent available to this agent
+// (ADR-0043) and routes its calls to m. Passing nil disables the tool again.
+func (a *Agent) SetBackgroundManager(m *Manager) {
+	a.backgroundManager = m
 }
 
 // WithTagCallbacks returns a shallow copy of the agent configured to intercept
@@ -582,6 +615,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:           ac.Limits,
 			systemPromptTier: ac.SystemPromptTier,
 			promptCaching:    ac.PromptCaching,
+			supportsVision:   ac.Vision,
 			maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 		}
 	case "", "local":
@@ -633,6 +667,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		client:           &http.Client{Transport: transport},
 		limits:           ac.Limits,
 		systemPromptTier: ac.SystemPromptTier,
+		supportsVision:   ac.Vision,
 		maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 	}
 }
@@ -771,7 +806,7 @@ const systemPromptShared = `Rules:
   - User states a preference, decision, or fact → call record_memory NOW.
   - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. Strip any leading "#" from the ID before passing it. Never say "done" or confirm the action without actually calling the tool.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
-**MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session.
+**MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session. Only summarize a goal the user actually stated in words — never invent or infer one from an image/attachment alone. If the user's turn has no accompanying text stating a goal (e.g. an image-only paste), leave current_need unchanged.
 - Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.
 - The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
@@ -799,6 +834,23 @@ const systemPromptSharedFull = `Additional guidance:
 - When searching for a symbol or pattern, prefer grep with recursive=true over a sequence of individual read_file calls.
 - Use find_files to locate files by name or extension before attempting to read them by guessed path.
 - If a bash command returns a non-zero exit code, diagnose the error before retrying.`
+
+// backgroundAgentGuidance is appended to the system prompt whenever
+// spawn_background_agent is available (a.backgroundManager != nil, checked
+// at the call site rather than threaded through buildSystemPrompt — see
+// Run). Modeled on Claude Code's own fork/Task tool discipline: prefer
+// forking over reading everything into your own context, and don't guess
+// at a result before the completion notification actually arrives.
+const backgroundAgentGuidance = `spawn_background_agent's main value is keeping your own context small: delegate research to a forked copy of yourself instead of reading a large amount of code or exploring many files directly yourself. Keep each spawned task narrow and self-contained, and give it concrete pointers — specific file paths, what you've already ruled out, exactly what question it should answer — so it doesn't waste work rediscovering things you already know; it has no access to your conversation. You will be told when each one finishes — do not guess or fabricate its result before that, and do not poll; continue other work or respond to the user in the meantime.`
+
+// taskToolGuidance is appended to the system prompt whenever the task tools
+// are available (a.taskStore != nil, checked at the call site the same way
+// as backgroundAgentGuidance — see Run). Bare tool availability alone
+// doesn't reliably get used without being told when it's expected — the
+// same reasoning behind Claude Code's own TodoWrite guidance — so this
+// spells out the "when" as well as an explicit "skip it" case, to avoid
+// overcorrecting into creating a task for every trivial request.
+const taskToolGuidance = `create_task/update_task/list_tasks/complete_task track multi-step work outside your own context — unlike your conversation history, tasks survive context trimming, fresh-start resets, and hand-offs between primary and escalation. Use them for a request that will span several turns or tool calls: break the work into tasks up front, mark each in_progress/done as you go, and call list_tasks if you need to recover what's left. Skip them for anything you can finish in one turn — creating a task for a trivial, single-step request just adds noise.`
 
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
@@ -938,7 +990,28 @@ func (a *Agent) shouldInjectMemoryInstruction(sess *session.Session) bool {
 	return false
 }
 
+// BackgroundFollowupPrompt is the synthetic input cmd/milk submits to
+// trigger a real follow-up turn once a spawn_background_agent wave or job
+// has finished (ADR-0043) — see maybeAutoFollowupBackgroundJobs. Exported so
+// the dispatch site and syntheticPrompts below always reference the exact
+// same string; a mismatch would silently defeat the whitelist.
+const BackgroundFollowupPrompt = "(Background research agents have finished — review their results above and continue.)"
+
+// syntheticPrompts are milk-generated prompts that must never trip
+// isRepeatedPrompt below. That check exists to catch a human repeating
+// themselves out of frustration and escalate on their behalf — but a fixed,
+// milk-generated string recurring across multiple completed background-agent
+// waves looks identical to that pattern from the outside, and would trigger
+// a bogus self-escalation that has nothing to do with the user actually
+// repeating anything.
+var syntheticPrompts = map[string]bool{
+	BackgroundFollowupPrompt: true,
+}
+
 func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns int) bool {
+	if syntheticPrompts[userPrompt] {
+		return false
+	}
 	norm := normalizePrompt(userPrompt)
 	if len(norm) < minRepeatCheckLen && len(strings.Fields(norm)) < minRepeatCheckWords {
 		return false
@@ -1007,6 +1080,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 
 	systemPrompt := buildSystemPrompt(sess.CWD, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier)
+	if a.backgroundManager != nil {
+		systemPrompt += "\n\n" + backgroundAgentGuidance
+	}
+	if a.taskStore != nil {
+		systemPrompt += "\n\n" + taskToolGuidance
+	}
 	if a.customPrompt != "" {
 		systemPrompt = a.customPrompt + "\n\n" + systemPrompt
 	}
@@ -1015,17 +1094,50 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
+	// Consumed once, up front, regardless of path below — pendingImages is a
+	// local copy from here on, so it never leaks into a later, unrelated turn.
+	pendingImages := a.pendingImageParts
+	a.pendingImageParts = nil
+
 	userMsg := Message{Role: "user", Content: userPrompt}
-	if len(a.pendingImageParts) > 0 {
-		// Build a multipart message: text part + image parts.
-		userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, a.pendingImageParts...)
-		a.pendingImageParts = nil // consume once
+	if len(pendingImages) > 0 {
+		if a.supportsVision {
+			// Build a multipart message: text part + image parts.
+			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, pendingImages...)
+		} else if len(a.toolAgentEntries) > 0 {
+			// Sending an image_url part to a non-vision endpoint is a hard API
+			// error ("No endpoints found that support image input"), not a
+			// graceful no-op. This agent has tool-agents available, though —
+			// keep pendingImages around (passed to executeToolCalls below) so
+			// an agent_<name> call this turn can forward them to a
+			// vision-capable tool-agent instead of the model trying (and
+			// failing) to see them itself.
+			userMsg.Content = userPrompt + fmt.Sprintf(
+				"\n\n<system-reminder>%d image attachment(s) are pending. This agent (%s) is not configured for vision input and cannot see them directly — call one of your agent_* tool-agents (if any is vision-capable) and the image(s) will be forwarded to it automatically.</system-reminder>",
+				len(pendingImages), a.model)
+		} else {
+			userMsg.Content = userPrompt + fmt.Sprintf(
+				"\n\n<system-reminder>%d image attachment(s) were dropped — this agent (%s) is not configured for vision input. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input.</system-reminder>",
+				len(pendingImages), a.model)
+			pendingImages = nil // nothing can use them this turn — don't forward stale images to an unrelated later tool call
+		}
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
-	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, a.limits)
+	effLimits := a.limits
+	if a.isToolAgent {
+		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+		if a.limits != nil {
+			effLimits.IncludedTools = a.limits.IncludedTools
+			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+		}
+	}
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, effLimits)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
+	}
+	if a.backgroundManager != nil {
+		tools = append(tools, spawnBackgroundAgentSchema())
 	}
 
 	if a.tagNonce != "" {
@@ -1037,6 +1149,19 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
+	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages)
+}
+
+// runToolLoop is the iterative tool-calling core shared by Run (a full,
+// session-attached turn) and RunBackgroundTask (a scoped, stateless
+// background job spawned via spawn_background_agent — see ADR-0043). Callers
+// are responsible for building msgs (including the system prompt and the
+// leading user message at userMsgIdx) and the tools schema list; this method
+// owns only the streaming/tool-dispatch/loop-detection loop itself.
+// pendingImages carries images the caller's own turn couldn't attach directly
+// (non-vision agent) for a possible agent_<name> tool-agent call to forward;
+// nil for RunBackgroundTask, which has no image-attachment path of its own.
+func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int, pendingImages []ContentPart) ([]Message, error) {
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection
@@ -1163,7 +1288,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 
 		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText)
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
 		if esc != nil {
 			return msgs, esc
 		}
@@ -1244,6 +1369,135 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: lastReasoningText})
 	return msgs, nil
+}
+
+// backgroundSystemPrompt returns the system prompt for a background job
+// spawned via spawn_background_agent (ADR-0043): a scoped, self-contained
+// research task with no awareness of any parent conversation.
+func backgroundSystemPrompt(cwd string) string {
+	base := "You are a background research agent forked to answer one self-contained question. " +
+		"You have no knowledge of any parent conversation beyond the task given to you. " +
+		"Investigate using your tools and produce a concise, complete written answer — this is the only thing that will be reported back."
+	if cwd == "" {
+		return base
+	}
+	return base + "\n\nWorking directory: " + cwd
+}
+
+// RunBackgroundTask runs a scoped, stateless background job spawned via the
+// spawn_background_agent tool (ADR-0043): a fresh tool loop with no session
+// recording and no memory/percept injection. Depth is capped at 1 — the
+// tool list omits agent_<name>, spawn_background_agent (neither is ever
+// added to a background job's schema list in the first place, since this
+// method builds it independently of Run's), and escalate (filtered out
+// below, since it is otherwise unconditionally present).
+//
+// Token usage is accumulated locally rather than fed to a.onTokens, so a
+// background job's tokens are never mis-attributed to the spawning agent's
+// own "primary"/"escalation" session totals — the caller (the job manager,
+// via dispatch.go) is responsible for recording the returned usage under
+// the "<role>:subagent" convention once the job completes.
+func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.Writer) (string, session.TokenUsage, error) {
+	// Operate on an isolated clone, not a directly. A background job is
+	// spawned into its own goroutine (see Manager.Spawn) and can easily
+	// still be running when the parent agent starts its very next turn on
+	// the same *Agent — mutating shared fields like onTokens or
+	// reasoningNgram directly on a would race with that turn. Cloning gives
+	// every field its own memory; reassignments below only ever touch bg's
+	// copy. cloneForBackground additionally silences bg's live-UI callbacks
+	// so this job's internal tool activity never surfaces in the parent's
+	// transcript — only its final distilled result does, once the caller
+	// drains the completed Job.
+	bg := a.cloneForBackground()
+
+	usage := session.TokenUsage{Model: bg.model, Agent: agentRoleForMetrics(bg.escalationName) + ":subagent"}
+	bg.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
+		usage.Prompt += prompt
+		usage.Completion += completion
+		usage.CacheRead += cacheRead
+		usage.CacheCreation += cacheCreation
+	}
+
+	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+	if bg.limits != nil {
+		bgLimits.IncludedTools = bg.limits.IncludedTools
+		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate")
+	}
+	bgSess := &session.Session{CWD: cwd}
+	tools := schemas(nil, bg.otelDir, bgSess, nil, nil, bgLimits)
+	if bg.mcpToolSet != nil {
+		tools = append(tools, bg.mcpToolSet.Schemas(ctx)...)
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: backgroundSystemPrompt(cwd)},
+		{Role: "user", Content: task},
+	}
+	userMsgIdx := len(msgs) - 1
+
+	resultMsgs, err := bg.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx, nil)
+	if err != nil {
+		return "", usage, err
+	}
+	if len(resultMsgs) == 0 {
+		return "", usage, nil
+	}
+	return resultMsgs[len(resultMsgs)-1].Content, usage, nil
+}
+
+// cloneForBackground returns an independent Agent for a spawn_background_agent
+// job (ADR-0043) to run concurrently on its own goroutine, built from an
+// explicit field list rather than `c := *a`.
+//
+// This matters, not just for style: a plain struct copy reads every field of
+// a in one operation, including ones Run/runToolLoop/scanSSE mutate in place
+// on the instance itself (reasoningNgram, reasoningNgramTriggered,
+// detectedFormat, pendingImageParts) — exactly the fields a concurrently
+// running parent turn on the same *Agent would be writing at that moment.
+// Reading them at all, even just to immediately overwrite them afterward,
+// already races. Naming only the fields known to be stable configuration
+// (set once, before Run is ever called) avoids ever reading the mutable
+// ones from a.
+//
+// Fields intentionally left at zero value: everything above, plus every
+// live-UI/session-adjacent callback (onToolUse, onResponseSegment, ...) —
+// a background job's internal tool activity must never surface in the
+// parent conversation's transcript or status bar — and workflowRole, so a
+// background job spawned from a workflow step still gets full loop
+// detection (it is not itself a workflow step in the interpreter's sense).
+func (a *Agent) cloneForBackground() *Agent {
+	return &Agent{
+		baseURL:          a.baseURL,
+		model:            a.model,
+		chatPath:         a.chatPath,
+		otelDir:          a.otelDir,
+		skipHealthCheck:  a.skipHealthCheck,
+		useBedrockNative: a.useBedrockNative,
+		useResponsesAPI:  a.useResponsesAPI,
+		escalationName:   a.escalationName, // read-only after construction; used for the usage.Agent role tag
+		skipPerms:        a.skipPerms,
+		permStore:        a.permStore, // shared, but already designed for concurrent access (concurrent tool-call batches use it today)
+		// permAsk deliberately NOT copied. It blocks synchronously on a
+		// plain channel receive (readLineLabeled's <-respCh in cmd/milk)
+		// with no context-awareness at all — a background job asking an
+		// unattributed "Allow? [Y/n]" the user has no reason to expect
+		// would hang forever waiting for a human who doesn't know to
+		// answer it, permanently holding its Manager concurrency slot.
+		// With permAsk nil, checkPermission denies cleanly instead of
+		// asking: already-granted tools (via the shared permStore above,
+		// or skipPerms) still work; anything else fails fast with a
+		// tool-result error the model can react to, never hangs.
+		client:          a.client, // *http.Client is safe for concurrent use by design
+		tokenCmd:        a.tokenCmd,
+		sigv4:           a.sigv4,
+		memCfg:          a.memCfg,
+		logContext:      a.logContext,
+		mcpToolSet:      a.mcpToolSet,
+		toolTimeout:     a.toolTimeout,
+		limits:          a.limits,
+		maxPayloadBytes: a.maxPayloadBytes,
+		promptCaching:   a.promptCaching,
+	}
 }
 
 // toolNeedsPermission reports whether a tool requires user approval before execution.
@@ -1360,9 +1614,13 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
+	// executeToolCalls turns these into a synthetic follow-up user message,
+	// since tool-role content must stay plain text on the OpenAI-compat wire.
+	images []string
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string) ([]Message, *EscalationSignal) {
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls, ReasoningContent: reasoningContent})
 
 	// Pre-print tool hints and collect permission decisions synchronously (before
@@ -1405,7 +1663,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		wg.Add(1)
 		go func(i int, tc toolCall) {
 			defer wg.Done()
-			outcome := a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem)
+			outcome := a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem, pendingImages)
 			outcomes[i] = outcome
 		}(i, tc)
 	}
@@ -1444,8 +1702,22 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 	}
 
 	// Collect results in order; stop on first escalation signal.
-	for _, outcome := range outcomes {
+	for i, outcome := range outcomes {
 		msgs = append(msgs, outcome.msg)
+		if len(outcome.images) > 0 {
+			if a.supportsVision {
+				parts := make([]ContentPart, 0, len(outcome.images)+1)
+				parts = append(parts, ContentPart{Type: "text", Text: fmt.Sprintf("[image result from tool %q]", toolCalls[i].Function.Name)})
+				for _, img := range outcome.images {
+					parts = append(parts, ContentPart{Type: "image_url", ImageURL: &ImageURLPart{URL: img}})
+				}
+				msgs = append(msgs, Message{Role: "user", ContentParts: parts})
+			} else {
+				msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf(
+					"<system-reminder>Tool %q returned an image, but this agent (%s) is not configured for vision input — the image was dropped. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input, or switch to a vision-capable agent to view it.</system-reminder>",
+					toolCalls[i].Function.Name, a.model)})
+			}
+		}
 		if outcome.escalate {
 			return msgs, &EscalationSignal{Reason: outcome.reason}
 		}
@@ -1455,7 +1727,9 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 
 // dispatchOneTool executes a single tool call and returns its outcome.
 // deniedResult is non-empty when checkPermission already rejected the tool.
-func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) toolCallOutcome {
+// pendingImages, when non-empty, are forwarded to an agent_<name> tool-agent
+// call — see the "not vision-configured but has tool-agents" branch in Run.
+func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, pendingImages []ContentPart) toolCallOutcome {
 	// Per-tool context: inherits turn cancellation and adds optional per-tool timeout.
 	toolCtx := ctx
 	if a.toolTimeout > 0 {
@@ -1470,9 +1744,16 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			Request string `json:"request"`
 		}
 		json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
-		agentName := tc.Function.Name[len("agent_"):]
+		agentName, ok := ResolveAgentToolName(a.toolAgentEntries, tc.Function.Name)
+		if !ok {
+			// Defensive fallback: sanitiseAgentToolName wasn't matched against any
+			// known entry (e.g. stale tool list). Strip the prefix as a best guess
+			// rather than failing outright — the dispatcher will report "not found"
+			// if this guess is wrong too.
+			agentName = tc.Function.Name[len("agent_"):]
+		}
 		fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
-		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
+		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, pendingImages, out)
 		if err != nil {
 			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
 				attribute.String("agent", agentName),
@@ -1484,6 +1765,28 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_calls",
 			attribute.String("agent", agentName),
 		)
+		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+	}
+
+	// spawn_background_agent (ADR-0043): Spawn returns immediately — the job
+	// runs under the Manager's own long-lived context, not this call's ctx,
+	// so it survives past this turn ending. See Manager's doc comment.
+	if tc.Function.Name == "spawn_background_agent" && a.backgroundManager != nil {
+		var args struct {
+			Task  string `json:"task"`
+			Label string `json:"label"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+		cwd := ""
+		if sess != nil {
+			cwd = sess.CWD
+		}
+		role := agentRoleForMetrics(a.escalationName)
+		job := a.backgroundManager.Spawn(args.Label, args.Task, role, a.model,
+			func(jobCtx context.Context) (string, session.TokenUsage, error) {
+				return a.RunBackgroundTask(jobCtx, cwd, args.Task, io.Discard)
+			})
+		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 	}
 
@@ -1508,7 +1811,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 
 	// MCP tools dispatched before built-ins.
 	if a.mcpToolSet != nil {
-		if mcpResult, ok := a.mcpToolSet.Dispatch(toolCtx, tc.Function.Name, tc.Function.Arguments); ok {
+		if mcpResult, images, ok := a.mcpToolSet.Dispatch(toolCtx, tc.Function.Name, tc.Function.Arguments); ok {
 			agentRole := agentRoleForMetrics(a.escalationName)
 			obs.Inc(toolCtx, inferenceScope, "milk.tools.calls",
 				attribute.String("name", tc.Function.Name),
@@ -1518,7 +1821,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 				attribute.String("name", tc.Function.Name),
 				attribute.String("outcome", "mcp"),
 			)
-			return toolCallOutcome{msg: Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID}}
+			return toolCallOutcome{msg: Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID}, images: images}
 		}
 	}
 
@@ -1724,9 +2027,93 @@ func toolArgSummary(args map[string]any) string {
 	return ""
 }
 
+// dropOldestDroppableUnit removes the oldest droppable content from msgs for
+// the payload-size trim below and reports whether anything was removed.
+//
+// Two phases, chosen by how many "user"-role messages remain:
+//   - More than one: a prior turn exists before the current one (session
+//     history is always clean [user, assistant] pairs — tool-call internals
+//     are never persisted across turns). Drop the oldest one whole, from its
+//     user message up to (not including) the next one.
+//   - Exactly one (only the current turn's own starting user message is
+//     left): drop the oldest assistant message after it together with
+//     every "tool"-role message immediately following that assistant
+//     message (its tool results), as one atomic group.
+//
+// Either way, the system prompt (index 0) and the current turn's own user
+// message are never touched. This matters: a turn's own tool-loop can
+// easily be the only content left once prior history is exhausted (a
+// background job's turn — ADR-0043 — starts with nothing else), and it has
+// only one user message total. The previous version of this trim assumed
+// it could always find a "user"-role message to stop at while walking
+// forward from the front; once that assumption broke, it kept dropping
+// until only the system prompt and whatever the last message happened to
+// be were left — which, mid-tool-loop, is a "tool"-role result with no
+// preceding assistant message carrying its tool_call_id anymore, an
+// invalid conversation shape most chat-completions APIs reject outright.
+func dropOldestDroppableUnit(msgs []Message) ([]Message, bool) {
+	var userIdxs []int
+	for i, m := range msgs {
+		if m.Role == "user" {
+			userIdxs = append(userIdxs, i)
+		}
+	}
+	if len(userIdxs) == 0 {
+		return msgs, false
+	}
+	if len(userIdxs) > 1 {
+		start, end := userIdxs[0], userIdxs[1]
+		return append(append([]Message{}, msgs[:start]...), msgs[end:]...), true
+	}
+	p := userIdxs[0] + 1
+	if p >= len(msgs) {
+		return msgs, false
+	}
+	end := p + 1
+	for end < len(msgs) && msgs[end].Role == "tool" {
+		end++
+	}
+	return append(append([]Message{}, msgs[:p]...), msgs[end:]...), true
+}
+
+// imageRetryAttempts caps how many times streamCompletion retries a request
+// containing an image when the response indicates the backend didn't
+// actually process it (usage.prompt_tokens_details.image_tokens missing/0).
+// Observed live against xiaomimimo's mimo-v2.5: a byte-identical replay of a
+// request that silently dropped the image succeeded immediately — this is
+// backend flakiness, not a deterministic per-request failure, so a small
+// retry count clears it in practice without masking a persistent problem.
+const imageRetryAttempts = 3
+
+// messagesContainImage reports whether any message carries an image_url
+// content part — used to decide whether streamCompletion's image-drop retry
+// applies at all (retrying a text-only request on missing image_tokens would
+// be nonsensical: there's no image for the field to describe).
+func messagesContainImage(msgs []Message) bool {
+	for _, m := range msgs {
+		for _, p := range m.ContentParts {
+			if p.Type == "image_url" && p.ImageURL != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // streamCompletion sends a chat completion request and streams the response.
 // Routes to the Bedrock Converse streaming API when useBedrockNative is set;
 // otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
+//
+// When msgs contains an image, the backend has been observed (live, against
+// xiaomimimo's mimo-v2.5) to sometimes accept a well-formed image_url part
+// and respond as if no image were given at all — no error, just a silent
+// drop, detectable only via the absence of usage.prompt_tokens_details.
+// image_tokens in the response. A byte-identical replay of the same failing
+// request succeeded, confirming this is backend flakiness rather than
+// something wrong with the request itself. For image-bearing requests only,
+// each non-final attempt is buffered rather than streamed live to out: if the
+// backend dropped the image, the user must never see the resulting
+// non-answer, only the eventually-accepted response.
 func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, error) {
 	if a.useBedrockNative {
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
@@ -1734,6 +2121,45 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if a.useResponsesAPI {
 		return a.responsesStreamCompletion(ctx, msgs, tools, out)
 	}
+	maxAttempts := 1
+	if messagesContainImage(msgs) {
+		maxAttempts = imageRetryAttempts
+	}
+	var (
+		text, fallbackRaw, reasoningText string
+		tcs                              []toolCall
+		emptyFallback                    bool
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		final := attempt == maxAttempts
+		attemptOut := out
+		var buf *bytes.Buffer
+		if !final {
+			buf = &bytes.Buffer{}
+			attemptOut = buf
+		}
+		t, fr, tc, ef, rt, imageTokens, err := a.streamCompletionOnce(ctx, msgs, tools, attemptOut)
+		if err != nil {
+			return "", "", nil, false, "", err
+		}
+		text, fallbackRaw, tcs, emptyFallback, reasoningText = t, fr, tc, ef, rt
+		if final || imageTokens > 0 {
+			if buf != nil {
+				io.Copy(out, buf) //nolint:errcheck
+			}
+			return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
+		}
+		obs.Warn("image request returned no image_tokens usage — backend likely dropped the image, retrying",
+			"model", a.model, "attempt", attempt, "max_attempts", maxAttempts)
+	}
+	return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
+}
+
+// streamCompletionOnce is the actual single-attempt request/stream/parse
+// implementation streamCompletion loops over. imageTokens is
+// usage.prompt_tokens_details.image_tokens from the final usage chunk — see
+// streamCompletion's doc comment for why callers care.
+func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, int64, error) {
 	req := chatRequest{
 		Model:    a.model,
 		Messages: msgs,
@@ -1748,33 +2174,27 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 
 	// Pre-flight payload size check: when the marshaled body exceeds the
-	// configured max (default 900KB), progressively trim the oldest history
-	// messages and re-marshal to avoid 413 errors from reverse proxies.
+	// configured max (default 900KB), progressively trim the oldest content
+	// and re-marshal to avoid 413 errors from reverse proxies.
 	if a.maxPayloadBytes > 0 && len(body) > a.maxPayloadBytes {
 		obs.Warn("payload exceeds limit, trimming history",
 			"size_bytes", len(body), "limit_bytes", a.maxPayloadBytes,
 			"messages_before", len(msgs),
 		)
-		// Preserve system prompt (index 0) and current user message (last).
-		// Trim from the oldest history messages first.
-		for len(msgs) > 2 { // at least system + user
-			// Drop the next oldest history message (index 1).
-			msgs = append(msgs[:1], msgs[2:]...)
-			// Skip any consecutive non-user messages after the dropped one.
-			for len(msgs) > 2 && msgs[1].Role != "user" {
-				msgs = append(msgs[:1], msgs[2:]...)
+		for len(body) > a.maxPayloadBytes {
+			next, ok := dropOldestDroppableUnit(msgs)
+			if !ok {
+				break
 			}
+			msgs = next
 			req.Messages = msgs
 			body, err = json.Marshal(req)
 			if err != nil {
-				return "", "", nil, false, "", err
-			}
-			if len(body) <= a.maxPayloadBytes {
-				break
+				return "", "", nil, false, "", 0, err
 			}
 		}
 		obs.Warn("payload after trimming",
@@ -1789,7 +2209,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -1801,7 +2221,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, "", fmt.Errorf("inference server unreachable: %w", err)
+		return "", "", nil, false, "", 0, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -1812,7 +2232,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, "", fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, "", 0, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -1822,9 +2242,9 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 	// det.RawBlock() == "" already implies there is no usable block content
 	// regardless of whether the detector is still formally InBlock() — a
@@ -1886,7 +2306,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		a.detectedFormat = det.Format
 	}
 	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
-	return text, fallbackRaw, tcs, emptyFallback, reasoningText, err
+	return text, fallbackRaw, tcs, emptyFallback, reasoningText, imageTokens, err
 }
 
 // classifyStreamResult interprets what the stream produced and returns the
@@ -1937,15 +2357,20 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 // usage.prompt_tokens_details.cached_tokens field (OpenAI's automatic prompt
 // caching, mirrored by other OpenAI-compatible providers). cacheRead is 0 when
 // the field is absent, matching every provider that doesn't report it.
+// imageTokens (from usage.prompt_tokens_details.image_tokens) is 0 both when
+// the field is absent and when a request containing an image got a response
+// that didn't actually process it — streamCompletion uses that ambiguity
+// together with knowing whether the request had an image to decide whether
+// to retry (see messagesContainImage).
 func (a *Agent) scanSSE(
 	scanner *bufio.Scanner,
 	det *StreamDetector,
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, int64, int64, int64, string, string, error) {
+) ([]toolCall, int64, int64, int64, int64, string, string, error) {
 	dbg := a.debugLog
-	var promptTokens, completionTokens, cacheRead int64
+	var promptTokens, completionTokens, cacheRead, imageTokens int64
 	var reasoningBuf strings.Builder
 	var finishReason string
 	for scanner.Scan() {
@@ -1975,6 +2400,7 @@ func (a *Agent) scanSSE(
 			completionTokens = chunk.Usage.CompletionTokens
 			if chunk.Usage.PromptTokensDetails != nil {
 				cacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+				imageTokens = chunk.Usage.PromptTokensDetails.ImageTokens
 			}
 		}
 		for _, choice := range chunk.Choices {
@@ -2011,9 +2437,9 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, 0, 0, "", "", err
+		return nil, 0, 0, 0, 0, "", "", err
 	}
-	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, reasoningBuf.String(), finishReason, nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {

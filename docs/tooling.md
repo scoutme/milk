@@ -27,8 +27,13 @@ The primary agent (HTTP or Bedrock backends) has these tools available with no c
 | `current_need(goal)` | one-sentence goal | ok — same effect as the user typing `/need <goal>` |
 | `export_session(format, output_path)` | `"text"`\|`"json"`, optional file path | transcript inline, or written to `output_path` |
 | `milk_config_help(topic)` | e.g. `"mcp add"`, `"agent add"` | a section of milk's own embedded reference docs — lets the agent look up how to manage milk's own config instead of guessing the schema; omit `topic` to list what's available. Backed by `internal/selfdocs`, which indexes `docs/spec.md`/`providers.md`/`workflows.md`/`tooling.md`/`operations.md` by heading — same content this site is built from |
+| `spawn_background_agent(task, label)` | self-contained task description + short display label | an immediate acknowledgement (job ID) — the eventual result arrives asynchronously, injected into the agent's next turn and shown live in the TUI. See [ADR-0043](adr/0043-background-subagents.md) |
 
 Self-escalation (`escalate(reason)`) is covered in [docs/workflows.md](workflows.md#routing). Memory tools (`get_memory`, `list_memory`, `forget_memory`) and task tools (`create_task`, `update_task`, `list_tasks`, `complete_task`) are covered in [docs/operations.md](operations.md).
+
+### `spawn_background_agent` — forking yourself for background research
+
+Unlike Agent-as-Tool below (which calls a *different*, specifically configured peer agent synchronously with no tool loop), `spawn_background_agent` forks the *calling* agent's own config — same model, same built-in tools — to research a self-contained question asynchronously, with its own full tool loop, without spending the caller's own context. Only available when the calling agent is backed by an inference-server provider (not `claude-cli`, which already has an equivalent fork/Task tool natively, and not subprocess agents, which don't use milk's tool loop at all). A forked job cannot itself spawn further background agents (depth is capped at 1), and its internal tool activity never appears in the live transcript — only its final result does, once drained. Concurrency is bounded per session by `max_background_agents` (default 3; see [docs/operations.md](operations.md)).
 
 Restrict or extend the set per agent with `limits.included_tools` / `limits.excluded_tools` — see [docs/providers.md — Per-agent limit overrides](providers.md#per-agent-limit-overrides).
 

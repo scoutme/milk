@@ -3,19 +3,11 @@ package main
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/scoutme/milk/internal/workflow"
 )
 
-const workflowPanelWidth = 31        // total incl. 1 scrollbar column (used to size the main area)
-const workflowPanelContentWidth = 30 // border + padding + inner content, excl. scrollbar
-
-var styleWorkflowPanel = lipgloss.NewStyle().
-	BorderStyle(lipgloss.NormalBorder()).
-	BorderLeft(true).
-	BorderForeground(lipgloss.AdaptiveColor{Light: "#AAA", Dark: "#555"}).
-	PaddingLeft(1)
+const workflowPanelWidth = 33 // 32 inner + 1 right scrollbar column (used to size the main area)
+const workflowPanelInner = 32
 
 // buildWorkflowPanelLines returns the full (unwindowed, unpadded) content
 // lines for the workflow panel. Scrolling and highlighting both operate on
@@ -324,71 +316,19 @@ func buildGenericWorkflowPanelLines(st *workflow.State, inner int) []string {
 	return lines
 }
 
-// renderWorkflowPanel renders the workflow progress panel into exactly h lines,
-// scrolled to m.workflowPanelOffset (clamped so it never scrolls past the last
-// screenful) and with any active panel-text selection highlighted.
+// renderWorkflowPanel renders the workflow progress panel into exactly h
+// lines, scrolled to m.workflowPanelOffset (clamped so it never scrolls past
+// the last screenful) and with any active panel-text selection highlighted.
+// Body shared with every other side panel — see renderSidePanel.
 func (m *model) renderWorkflowPanel(h int) string {
-	inner := workflowPanelContentWidth - 2 // left border + padding
-
-	all := buildWorkflowPanelLines(m.workflowState, inner)
-	total := len(all)
-
-	maxOffset := max(total-h, 0)
-	if m.workflowPanelOffset > maxOffset {
-		m.workflowPanelOffset = maxOffset
-	}
-
-	if m.panelSelRegion == regionWorkflow {
-		all = applyPanelSelectionHighlight(all, m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
-	}
-
-	// Pad or trim to exactly h lines.
-	lines := all[m.workflowPanelOffset:]
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	lines = lines[:h]
-
-	// Pre-pad each line to exactly inner cols so lipgloss does not re-wrap when
-	// the style is rendered — Width() on a bordered style triggers cellbuf.Wrap,
-	// which adds lines and makes the panel taller than h.
-	var rows []string
-	for _, line := range lines {
-		lineW := len([]rune(stripANSI(line)))
-		if lineW < inner {
-			line += strings.Repeat(" ", inner-lineW)
-		}
-		rows = append(rows, line)
-	}
-	content := strings.Join(rows, "\n")
-	return styleWorkflowPanel.Render(content)
+	return m.renderSidePanel(regionWorkflow, h)
 }
 
 // renderWorkflowPanelScrollbar returns a 1-column string of h lines: a dim │
 // track with a ▌ thumb when the panel content overflows, or a blank column
-// otherwise. Mirrors renderPanelScrollbar for the memory panel.
+// otherwise. Shared with every other side panel — see renderSidePanelScrollbar.
 func (m *model) renderWorkflowPanelScrollbar(h int) string {
-	inner := workflowPanelContentWidth - 2
-	total := len(buildWorkflowPanelLines(m.workflowState, inner))
-	needsBar := total > h
-
-	var rows []string
-	if !needsBar {
-		for range h {
-			rows = append(rows, " ")
-		}
-		return strings.Join(rows, "\n")
-	}
-
-	thumbTop, thumbBot := scrollThumb(h, total, m.workflowPanelOffset)
-	for i := range h {
-		if i >= thumbTop && i <= thumbBot {
-			rows = append(rows, dim("▌"))
-		} else {
-			rows = append(rows, dim("│"))
-		}
-	}
-	return strings.Join(rows, "\n")
+	return m.renderSidePanelScrollbar(regionWorkflow, h)
 }
 
 // wordWrapPanel wraps s into lines of at most maxWidth visible characters.
@@ -415,7 +355,7 @@ func wordWrapPanel(s string, maxWidth int) []string {
 
 // workflowPanelLineCount returns the number of content lines the panel would occupy.
 func workflowPanelLineCount(st *workflow.State) int {
-	return len(buildWorkflowPanelLines(st, workflowPanelContentWidth-2))
+	return len(buildWorkflowPanelLines(st, workflowPanelInner))
 }
 
 func truncatePanel(s string, maxWidth int) string {

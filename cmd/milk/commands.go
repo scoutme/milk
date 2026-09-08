@@ -1288,8 +1288,17 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + " workflow panel: off\n")
 		}
 		return m, nil
+	case "background":
+		m.panelBackground = !m.panelBackground
+		m.syncLayout()
+		if m.panelBackground {
+			m.appendTranscript(milkTag() + " background agents panel: on\n")
+		} else {
+			m.appendTranscript(milkTag() + " background agents panel: off\n")
+		}
+		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|workflow\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|background|workflow (or F1/F2/F3/F4)\n")
 		return m, nil
 	}
 }

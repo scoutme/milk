@@ -10,6 +10,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/agent/smolagent"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/mcp"
 )
 
 // findAgentByName looks up an agent config by name in cfg.Agents.
@@ -32,8 +33,16 @@ func findAgentByName(cfg config.Config, name string) (config.AgentConfig, bool) 
 // The agent config MUST have dangerously_skip_permissions: true; buildToolRunner
 // returns an error when that flag is absent to prevent silent hangs.
 //
+// existingMCP, when non-nil, is an already-connected ToolSet for ac.Name to reuse
+// instead of opening a second, independent connection — important for stdio
+// servers like blender-mcp, whose backing Blender addon socket typically only
+// accepts one client. It comes from the caller's live mcpToolSets cache (i.e.
+// ac is also currently serving as primary or escalation in this session); when
+// ac isn't currently active in either role (or there is no such cache, e.g.
+// single-prompt CLI mode), existingMCP is nil and a fresh connection is opened.
+//
 // No session callbacks are wired — RunToolCall passes nil for session everywhere.
-func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config) (TurnRunner, error) {
+func buildToolRunner(ctx context.Context, ac config.AgentConfig, cfg config.Config, existingMCP *mcp.ToolSet) (TurnRunner, error) {
 	if ac.IsCLI() {
 		if !ac.DangerouslySkipPermissions {
 			return nil, fmt.Errorf(
@@ -50,7 +59,11 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 		cliAgt := newCLIAgent(ac)
 		// Zero permContext and nil newInput — headless; permissions handled by
 		// --dangerously-skip-permissions which is already set on the agent above.
-		return newCLIRunner(cliAgt, name, permContext{}, nil), nil
+		r := newCLIRunner(cliAgt, name, permContext{}, nil)
+		if servers := cfg.EffectiveMCPServers(ac.Name); len(servers) > 0 {
+			r = r.withMCPServers(servers)
+		}
+		return r, nil
 	}
 
 	name := ac.Name
@@ -78,7 +91,13 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 	}
 
 	freshAC := applyFreshAWSCreds(cfg, ac)
-	la := local.NewFromConfig(freshAC)
+	la := local.NewFromConfig(freshAC).WithToolAgentRole()
+
+	if existingMCP != nil {
+		la = la.WithMCPToolSet(existingMCP)
+	} else {
+		la = attachMCPToolSet(ctx, cfg, ac.Name, la)
+	}
 
 	if od, err := config.OtelDir(); err == nil {
 		la.WithOtelDir(od)
@@ -91,7 +110,7 @@ func buildToolRunner(_ context.Context, ac config.AgentConfig, cfg config.Config
 			la.WithPermissions(lp, nil)
 		}
 	}
-	la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
 
 	if dbg, err := openLocalDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open tool-agent debug log: %v\n", milkTag(), err)
@@ -115,7 +134,11 @@ func getOrBuildToolRunner(ctx context.Context, agentName string, cfg config.Conf
 	if !ok {
 		return nil, fmt.Errorf("tool-agent %q not found in config", agentName)
 	}
-	tr, err := buildToolRunner(ctx, ac, cfg)
+	var existingMCP *mcp.ToolSet
+	if da.mcpToolSets != nil {
+		existingMCP = da.mcpToolSets[agentName]
+	}
+	tr, err := buildToolRunner(ctx, ac, cfg, existingMCP)
 	if err != nil {
 		return nil, err
 	}

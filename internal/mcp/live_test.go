@@ -88,7 +88,7 @@ func TestLiveUKBToolSet(t *testing.T) {
 	}
 
 	// Verify dispatch works for a known tool (get_domain_catalog with no args)
-	result, ok := ts.Dispatch(ctx, "mcp_ukb_get_domain_catalog", "{}")
+	result, _, ok := ts.Dispatch(ctx, "mcp_ukb_get_domain_catalog", "{}")
 	if !ok {
 		t.Fatal("Dispatch: tool not found")
 	}

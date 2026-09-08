@@ -98,21 +98,20 @@ func TestApplyPanelSelectionHighlight_DoesNotMutateInput(t *testing.T) {
 
 // --- panelContentCol ---
 
-func TestPanelContentCol_MemoryHasNoOffset(t *testing.T) {
-	if got := panelContentCol(regionMemory, 5); got != 5 {
-		t.Errorf("memory panel: got %d, want 5", got)
+func TestPanelContentCol_IsIdentity(t *testing.T) {
+	// No panel reserves left-side columns (border/padding lives on the right
+	// as the scrollbar column, outside any region's own width), so this is a
+	// pass-through for every region.
+	for _, region := range []panelRegion{regionMemory, regionTasks, regionBackground, regionWorkflow} {
+		if got := panelContentCol(region, 5); got != 5 {
+			t.Errorf("region %v: got %d, want 5", region, got)
+		}
 	}
 }
 
-func TestPanelContentCol_WorkflowSubtractsBorderAndPadding(t *testing.T) {
-	if got := panelContentCol(regionWorkflow, 5); got != 3 {
-		t.Errorf("workflow panel: got %d, want 3", got)
-	}
-}
-
-func TestPanelContentCol_WorkflowClampsAtZero(t *testing.T) {
-	if got := panelContentCol(regionWorkflow, 1); got != 0 {
-		t.Errorf("workflow panel border click: got %d, want 0", got)
+func TestPanelContentCol_ClampsNegativeToZero(t *testing.T) {
+	if got := panelContentCol(regionMemory, -1); got != 0 {
+		t.Errorf("got %d, want 0", got)
 	}
 }
 
@@ -168,7 +167,7 @@ func TestRegionAt_PastLastPanelIsNone(t *testing.T) {
 
 func TestRegionAt_WorkflowHiddenWhenTooNarrow(t *testing.T) {
 	m := &model{width: 60, workflowPanelOpen: true}
-	// width 60 < 0 (no memory panel) + workflowPanelWidth(31) + 40 = 71 -> hidden.
+	// width 60 < 0 (no memory panel) + workflowPanelWidth(33) + 40 = 73 -> hidden.
 	if m.workflowPanelVisible() {
 		t.Fatal("expected workflow panel hidden at width 60")
 	}
@@ -181,15 +180,50 @@ func TestRegionAt_WorkflowHiddenWhenTooNarrow(t *testing.T) {
 // --- panelScrollOffset ---
 
 func TestPanelScrollOffset(t *testing.T) {
-	m := &model{panelOffset: 3, workflowPanelOffset: 7}
+	m := &model{panelOffset: 3, tasksOffset: 5, backgroundOffset: 9, workflowPanelOffset: 7}
 	if got := m.panelScrollOffset(regionMemory); got != 3 {
 		t.Errorf("memory offset: got %d, want 3", got)
+	}
+	if got := m.panelScrollOffset(regionTasks); got != 5 {
+		t.Errorf("tasks offset: got %d, want 5", got)
+	}
+	if got := m.panelScrollOffset(regionBackground); got != 9 {
+		t.Errorf("background offset: got %d, want 9", got)
 	}
 	if got := m.panelScrollOffset(regionWorkflow); got != 7 {
 		t.Errorf("workflow offset: got %d, want 7", got)
 	}
 	if got := m.panelScrollOffset(regionNone); got != 0 {
 		t.Errorf("regionNone offset: got %d, want 0", got)
+	}
+}
+
+// TestPanelOffsetPtr_MutatesPersistedField guards the parity fix that made
+// wheel scrolling and click-selection identical across all four side panels:
+// panelOffsetPtr must return a pointer into the model's own field, not a copy,
+// so mutating through it (as handleMouse's wheel cases do) actually persists.
+func TestPanelOffsetPtr_MutatesPersistedField(t *testing.T) {
+	m := &model{}
+	for _, tc := range []struct {
+		region panelRegion
+		get    func() int
+	}{
+		{regionMemory, func() int { return m.panelOffset }},
+		{regionTasks, func() int { return m.tasksOffset }},
+		{regionBackground, func() int { return m.backgroundOffset }},
+		{regionWorkflow, func() int { return m.workflowPanelOffset }},
+	} {
+		p := m.panelOffsetPtr(tc.region)
+		if p == nil {
+			t.Fatalf("region %v: expected non-nil pointer", tc.region)
+		}
+		*p = 42
+		if got := tc.get(); got != 42 {
+			t.Errorf("region %v: field not mutated through pointer, got %d", tc.region, got)
+		}
+	}
+	if m.panelOffsetPtr(regionNone) != nil {
+		t.Error("regionNone: expected nil pointer")
 	}
 }
 
@@ -205,7 +239,7 @@ func TestPanelMaxOffset_ClampsToRealContentLength(t *testing.T) {
 	m := &model{
 		workflowState: &workflow.State{WorkflowName: "dev", Role: "generator"},
 	}
-	total := len(buildWorkflowPanelLines(m.workflowState, workflowPanelContentWidth-2))
+	total := len(buildWorkflowPanelLines(m.workflowState, workflowPanelInner))
 	if got := m.panelMaxOffset(regionWorkflow, total+10); got != 0 {
 		t.Errorf("panel taller than content: got max offset %d, want 0", got)
 	}
@@ -365,5 +399,51 @@ func TestHandlePanelMouse_SwitchingRegionClearsPriorSelection(t *testing.T) {
 	}
 	if m.panelSelText != "" {
 		t.Errorf("expected the workflow panel's stale selection text cleared, got %q", m.panelSelText)
+	}
+}
+
+// --- handlePanelMouse: parity — tasks and background must select just like
+// memory and workflow (previously they were excluded from click/drag
+// handling entirely). ---
+
+func TestHandlePanelMouse_DragSelectsText_Tasks(t *testing.T) {
+	m := &model{} // nil taskStore still yields a few placeholder content lines
+	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 2, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionMotion})
+	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionRelease})
+	if m.panelSelRegion != regionTasks {
+		t.Errorf("expected panelSelRegion=regionTasks after drag, got %v", m.panelSelRegion)
+	}
+	if m.panelSelText == "" {
+		t.Error("expected non-empty panelSelText after a drag selection on the tasks panel")
+	}
+}
+
+func TestHandlePanelMouse_DragSelectsText_Background(t *testing.T) {
+	m := &model{} // nil backgroundMgr still yields a few placeholder content lines
+	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 2, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionMotion})
+	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionRelease})
+	if m.panelSelRegion != regionBackground {
+		t.Errorf("expected panelSelRegion=regionBackground after drag, got %v", m.panelSelRegion)
+	}
+	if m.panelSelText == "" {
+		t.Error("expected non-empty panelSelText after a drag selection on the background panel")
+	}
+}
+
+// TestHandleMouse_LeftClickRoutesAnySidePanelToHandlePanelMouse guards the
+// generalization of handleMouse's MouseButtonLeft case from
+// "region == regionMemory || region == regionWorkflow" to "region !=
+// regionNone" — tasks and background must reach handlePanelMouse exactly
+// like memory and workflow do, not just scroll.
+func TestHandleMouse_LeftClickRoutesAnySidePanelToHandlePanelMouse(t *testing.T) {
+	m := &model{width: 200, height: 40, panelTasks: true}
+	mw := m.mainWidth()
+	// First column inside the tasks panel region.
+	_, cmd := m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: mw, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}))
+	_ = cmd
+	if m.panelSelRegion != regionTasks {
+		t.Errorf("expected a left click inside the tasks panel to start a tasks selection, got region=%v", m.panelSelRegion)
 	}
 }

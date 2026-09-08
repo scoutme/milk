@@ -157,6 +157,19 @@ A lightweight task tracker for the primary agent (HTTP/Bedrock backends only —
 
 ---
 
+## Background sub-agents
+
+`spawn_background_agent` (ADR-0043 — see [docs/tooling.md](tooling.md#spawn_background_agent--forking-yourself-for-background-research) for the tool itself) forks an inference-server-backed agent to research a self-contained question asynchronously, one job per call, tracked for the life of the session by a per-session job manager.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_background_agents` | `3` | Maximum number of background jobs allowed to actually execute concurrently per session; further calls queue rather than block the spawning turn. Non-positive values fall back to the default. |
+| `background_agent_timeout_minutes` | `20` | Per-job hard timeout once a job starts executing (queue time doesn't count); a job still running past this is terminated as failed, not retried. Deliberately generous: loop detection (streak tracker, streaming n-gram monitor, duplicate-tool-call detection — all run unmodified on a background job) is the actual defense against a job that's *stuck*; this timeout only needs to catch one that's genuinely still working but never finishing. Non-positive values fall back to the default. |
+
+Completed/failed jobs surface three ways: immediately in the TUI transcript and status bar (`⚙ N background agent(s) running`) as each one finishes; a live list in the background-agents panel (`/panel background` or **F3** — label, status, elapsed time; mirrors the tasks/memory panels); and, once the model is next free, an actual follow-up turn the agent produces automatically — no further input needed. Agent-initiated waves (the `spawn_background_agent` tool call) wait for every job in the wave to finish before that follow-up fires, so a multi-part research plan gets one consolidated report; a job the *user* spawns directly (pressing Enter again while the model is busy — same 3s window as the existing busy hint) delivers as soon as the model is free instead, since there's no wave to consolidate it with.
+
+---
+
 ## Live configuration reload
 
 milk watches `~/.milk/config.json` while the TUI is running; a save from another terminal is parsed and applied to in-memory state within ~200ms. `/reload` forces an immediate re-parse (useful after a symlink swap or atomic editor replace).
@@ -239,3 +252,4 @@ When an agent calls `edit_file`/`write_file` (primary) or `Edit`/`Write` (Claude
 | **Ctrl-Left/Right** | Word navigation |
 | **Shift-Arrows** | Text selection (transcript and input) |
 | **Ctrl-X** | Cut selected input text |
+| **F1 / F2 / F3 / F4** | Show/hide the memory / tasks / background-agents / workflow panel — same effect as `/panel <name>`. Works in any mode, including mid-turn. |

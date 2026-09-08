@@ -18,6 +18,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
@@ -60,7 +61,7 @@ func (r *fakeTokenRunner) Execute(
 	return r.res, nil
 }
 
-func (r *fakeTokenRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
+func (r *fakeTokenRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ []local.ContentPart, _ io.Writer) (string, error) {
 	return "", nil
 }
 
@@ -126,7 +127,7 @@ func TestRunEscalationWithSession_TokenAccountingOrder(t *testing.T) {
 	var out bytes.Buffer
 
 	if err := runEscalationWithSession(context.Background(), config.Config{}, sess, runner, "brief", nil,
-		"hi", "hi", "", &out, nil, nil); err != nil {
+		"hi", "hi", "", &out, nil, nil, nil); err != nil {
 		t.Fatalf("runEscalationWithSession returned error: %v", err)
 	}
 

@@ -31,6 +31,9 @@ func (m *model) mainWidth() int {
 	if m.panelTasks {
 		w -= tasksPanelWidth
 	}
+	if m.panelBackground {
+		w -= backgroundPanelWidth
+	}
 	if m.workflowPanelVisible() {
 		w -= workflowPanelWidth
 	}
@@ -53,6 +56,9 @@ func (m *model) workflowPanelVisible() bool {
 	}
 	if m.panelTasks {
 		memW += tasksPanelWidth
+	}
+	if m.panelBackground {
+		memW += backgroundPanelWidth
 	}
 	return m.width >= memW+workflowPanelWidth+40
 }
@@ -216,7 +222,13 @@ func (m model) View() string {
 	}
 	if m.panelTasks {
 		tpanel := m.renderTasksPanel(vpH)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel)
+		tbar := m.renderTasksPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, tpanel, tbar)
+	}
+	if m.panelBackground {
+		bgpanel := m.renderBackgroundPanel(vpH)
+		bgbar := m.renderBackgroundPanelScrollbar(vpH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, mainArea, bgpanel, bgbar)
 	}
 	if m.workflowPanelVisible() {
 		wpanel := m.renderWorkflowPanel(vpH)

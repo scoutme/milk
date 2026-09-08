@@ -15,6 +15,25 @@ func TestIsRepeatedPrompt_DetectsRepeat(t *testing.T) {
 	}
 }
 
+// TestIsRepeatedPrompt_ExemptsSyntheticBackgroundFollowupPrompt verifies the
+// fix for a real bug: BackgroundFollowupPrompt (ADR-0043's auto-triggered
+// follow-up, submitted verbatim every time a background-agent wave
+// finishes) is a fixed, milk-generated string — recurring across several
+// completed waves in the same session looks identical, from history alone,
+// to a human repeating themselves out of frustration, and used to trigger a
+// bogus self-escalation that had nothing to do with the user. Immediate
+// repeats of this exact string (the case that scores highest, 1.0) must
+// never escalate.
+func TestIsRepeatedPrompt_ExemptsSyntheticBackgroundFollowupPrompt(t *testing.T) {
+	history := []Message{
+		{Role: "user", Content: BackgroundFollowupPrompt},
+		{Role: "assistant", Content: "here's the consolidated report..."},
+	}
+	if isRepeatedPrompt(history, BackgroundFollowupPrompt, 0) {
+		t.Error("want false — the synthetic follow-up prompt must be exempt from repeated-prompt escalation")
+	}
+}
+
 func TestIsRepeatedPrompt_CaseAndSpaceInsensitive(t *testing.T) {
 	history := []Message{{Role: "user", Content: "Write  a Unit Test For The Auth Module"}}
 	if !isRepeatedPrompt(history, longPrompt, 0) {
