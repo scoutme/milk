@@ -324,9 +324,28 @@ func endsWithQuestion(text string) bool {
 }
 
 func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
-	msgs := []local.Message{{Role: "user", Content: prompt}}
-	updatedMsgs, err := r.agent.Run(ctx, msgs, prompt, out, nil, nil)
+	// history must be the prior turns only, per Run's contract — a stateless
+	// tool-agent call has none. Passing prompt as history too (as this used to)
+	// made isRepeatedPrompt see the current prompt as an exact repeat of itself
+	// (score 1.0 >= the 0.9 threshold) and force-escalate on every single call.
+	//
+	// sess must be non-nil: Run unconditionally dereferences sess.CWD once past
+	// the repeated-prompt check (every other caller passes a real session; this
+	// was the only nil one, and used to never reach that line because the
+	// history bug above always escalated first). Mirrors RunBackgroundTask's
+	// bgSess := &session.Session{CWD: cwd} — a bare session for a stateless call.
+	cwd, _ := os.Getwd()
+	toolSess := &session.Session{CWD: cwd}
+	updatedMsgs, err := r.agent.Run(ctx, nil, prompt, out, toolSess, nil)
 	if err != nil {
+		// Defense in depth: WithToolAgentRole already excludes the "escalate" tool,
+		// but if one somehow still fires (e.g. a stale schema list), degrade to a
+		// clear text result instead of hard-failing the whole tool-agent call —
+		// there is no session or escalation runner behind a stateless RunToolCall
+		// for it to escalate into.
+		if esc, ok := errors.AsType[*local.EscalationSignal](err); ok {
+			return fmt.Sprintf("(this agent requested escalation instead of answering directly: %s)", esc.Reason), nil
+		}
 		return "", err
 	}
 	for i := len(updatedMsgs) - 1; i >= 0; i-- {

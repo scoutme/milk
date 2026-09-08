@@ -147,6 +147,14 @@ type AgentConfig struct {
 	// (no Bedrock agent was available during development). See docs/providers.md.
 	PromptCaching bool `json:"prompt_caching,omitempty"`
 
+	// Vision declares that this agent's model accepts image input (an
+	// "image_url" content part). Opt-in and off by default: sending an image
+	// part to an endpoint that doesn't support vision is a hard API error
+	// ("No endpoints found that support image input"), not a graceful no-op.
+	// Gates the automatic image attached when an MCP tool result contains one
+	// (e.g. a screenshot); does not affect the user-initiated /attach path.
+	Vision bool `json:"vision,omitempty"`
+
 	// RunCmd is an optional shell command that starts the inference server when
 	// it is not already reachable. milk runs this command in the background on
 	// startup (and on-demand when the agent is first used) if a Ping to the URL

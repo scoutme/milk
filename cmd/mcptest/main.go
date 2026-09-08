@@ -27,7 +27,7 @@ func main() {
 	}
 	defer ts.Close(context.Background())
 
-	raw, _ := ts.Dispatch(ctx, "mcp_ukb_svil_solve_task", `{"query":"tipi di libretti di risparmio postale","domain":"STORYTELLER","answer_mode":"answer_and_sources"}`)
+	raw, _, _ := ts.Dispatch(ctx, "mcp_ukb_svil_solve_task", `{"query":"tipi di libretti di risparmio postale","domain":"STORYTELLER","answer_mode":"answer_and_sources"}`)
 
 	// raw is {"output":"<json-string>"} — unwrap
 	var wrapper struct {

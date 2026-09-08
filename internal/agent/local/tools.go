@@ -456,6 +456,21 @@ func sanitiseAgentToolName(name string) string {
 	return "agent_" + safe
 }
 
+// ResolveAgentToolName maps a dispatched tool-call name (e.g. "agent_mimo_local")
+// back to the original config agent name (e.g. "mimo-local") by matching against
+// entries' own sanitised names — the reverse of sanitiseAgentToolName isn't a pure
+// string operation (it's lossy: hyphens, spaces, and other separators all collapse
+// to "_"), so a naive prefix-strip of "agent_" recovers the sanitised form, not the
+// original name. Returns ("", false) when toolName doesn't match any entry.
+func ResolveAgentToolName(entries []config.AgentToolEntry, toolName string) (string, bool) {
+	for _, e := range entries {
+		if sanitiseAgentToolName(e.Agent) == toolName {
+			return e.Agent, true
+		}
+	}
+	return "", false
+}
+
 // AgentToolSchemas produces OpenAI function-call schema entries for the given
 // agent tool entries. Returns an empty (non-nil) slice when entries is empty.
 func AgentToolSchemas(entries []config.AgentToolEntry) []map[string]any {

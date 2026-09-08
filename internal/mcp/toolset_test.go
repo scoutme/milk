@@ -96,7 +96,7 @@ func TestDispatch_PrefixCollisionPicksLongestMatch(t *testing.T) {
 	}
 	defer ts.Close(context.Background())
 
-	result, ok := ts.Dispatch(ctx, "mcp_cloudflare_bindings_workers_list", "{}")
+	result, _, ok := ts.Dispatch(ctx, "mcp_cloudflare_bindings_workers_list", "{}")
 	if !ok {
 		t.Fatal("Dispatch: tool not found")
 	}
@@ -108,7 +108,7 @@ func TestDispatch_PrefixCollisionPicksLongestMatch(t *testing.T) {
 	}
 
 	// The shorter server's own tool still resolves correctly.
-	result, ok = ts.Dispatch(ctx, "mcp_cloudflare_docs", "{}")
+	result, _, ok = ts.Dispatch(ctx, "mcp_cloudflare_docs", "{}")
 	if !ok {
 		t.Fatal("Dispatch: tool not found")
 	}

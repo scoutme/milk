@@ -239,11 +239,11 @@ func runPrimaryWithSession(
 		session.Save(sess) //nolint:errcheck
 
 		if escalationRunner != nil {
-			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, mgr, onResponse, onSegment)
+			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment)
 		}
 		// Fallback: build CLI escalation runner on-demand.
 		cliEsc := buildFallbackCLIRunner(cfg)
-		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, mgr, onResponse, onSegment)
+		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment)
 	}
 
 	logStateTransition(sess, session.StateRouting, agentName+" primary done")
@@ -262,19 +262,20 @@ func runEscalation(
 	mem *memory.Store,
 	prompt string,
 	out io.Writer,
-	mgr *local.Manager,
+	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, mgr, onResponse, onSegment, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, da, onResponse, onSegment, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
 // sessionContent is the compact version stored in session history (may include
 // attachment placeholders instead of raw file data). prompt is the full content
-// sent to the agent. mgr is the session's spawn_background_agent job manager
-// (ADR-0043); nil where none exists (e.g. single-prompt CLI mode).
+// sent to the agent. da provides the session's spawn_background_agent job
+// manager (ADR-0043) and tool-agent runner cache; nil where neither exists
+// (e.g. single-prompt CLI mode).
 func runEscalationWithSession(
 	ctx context.Context,
 	cfg config.Config,
@@ -286,11 +287,15 @@ func runEscalationWithSession(
 	sessionContent string,
 	imageContextFile string,
 	out io.Writer,
-	mgr *local.Manager,
+	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
 	prefixOut ...io.Writer,
 ) error {
+	var mgr *local.Manager
+	if da != nil {
+		mgr = da.backgroundMgr
+	}
 	// dispatchPrompt, not prompt, carries any completed background-job
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// percept-matching/session bookkeeping below.
@@ -372,6 +377,25 @@ func runEscalationWithSession(
 		OnResponse:        onResponse,
 		OnResponseSegment: onSegment,
 		ImageContextFile:  imageContextFile,
+	}
+
+	// Wire tool-agent dispatcher into local runners when dispatchAgents is available.
+	// Mirrors the primary-agent wiring in runPrimaryWithSession — the escalation
+	// agent is just as entitled to call peer agents as tools (e.g. a vision-capable
+	// local agent for describing a screenshot) as the primary agent is.
+	if da != nil {
+		if lr, ok := runner.(*localRunner); ok {
+			entries := cfg.EffectiveToolAgents(runner.Name())
+			lr.agent = lr.agent.WithToolAgentEntries(entries)
+			capturedDA := da
+			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, dout io.Writer) (string, error) {
+				tr, err := getOrBuildToolRunner(dctx, agentName, cfg, capturedDA)
+				if err != nil {
+					return "", err
+				}
+				return tr.RunToolCall(dctx, cfg, request, dout)
+			})
+		}
 	}
 
 	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RoleEscalation, ctxMode,

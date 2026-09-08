@@ -50,8 +50,10 @@ func (ts *ToolSet) Schemas(ctx context.Context) []map[string]any {
 }
 
 // Dispatch routes a tool call (by prefixed name) to the appropriate MCP client
-// and returns the text result. Returns ("", false) when the name doesn't match
-// any known MCP tool, so the caller can fall through to built-in tools.
+// and returns the text result plus any images the tool returned (as data:
+// URIs, for the caller to attach to a follow-up vision message). Returns
+// ("", nil, false) when the name doesn't match any known MCP tool, so the
+// caller can fall through to built-in tools.
 //
 // When multiple configured server names share a prefix (e.g. "cloudflare" and
 // "cloudflare-bindings"), a tool name can match more than one client's prefix
@@ -59,7 +61,7 @@ func (ts *ToolSet) Schemas(ctx context.Context) []map[string]any {
 // server's "mcp_cloudflare_" prefix too. The longest matching prefix (i.e. the
 // most specific server name) always wins, so the shorter server never steals
 // calls meant for a longer, more specific sibling.
-func (ts *ToolSet) Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool) {
+func (ts *ToolSet) Dispatch(ctx context.Context, toolName, argsJSON string) (string, []string, bool) {
 	var best *Client
 	var bestOrig string
 	bestPrefixLen := -1
@@ -73,17 +75,21 @@ func (ts *ToolSet) Dispatch(ctx context.Context, toolName, argsJSON string) (str
 		}
 	}
 	if best == nil {
-		return "", false
+		return "", nil, false
 	}
 	res, err := best.Call(ctx, bestOrig, argsJSON)
 	if err != nil {
-		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`, true
+		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`, nil, true
 	}
 	text := res.Text()
+	images := res.Images()
 	if res.IsError {
-		return `{"error":` + jsonQuote(text) + `}`, true
+		return `{"error":` + jsonQuote(text) + `}`, nil, true
 	}
-	return `{"output":` + jsonQuote(text) + `}`, true
+	if text == "" && len(images) > 0 {
+		text = "(image content — see attached image)"
+	}
+	return `{"output":` + jsonQuote(text) + `}`, images, true
 }
 
 // Close closes all client sessions.

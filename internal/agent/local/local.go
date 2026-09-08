@@ -232,6 +232,7 @@ type Agent struct {
 	selfName         string // this agent's own name (e.g. "gemma-local"), injected into the system prompt
 	escalationName   string // non-empty when acting as escalation target; used in the role-aware system prompt
 	workflowRole     bool   // true when acting as a workflow step executor: neutral system prompt, no escalation framing
+	isToolAgent      bool   // true when invoked stateless via RunToolCall (agent-as-tool): no escalate tool — there's no session/runner for it to escalate into
 	skipPerms        bool   // true when dangerously_skip_permissions is on: bypass all tool prompts
 	permStore        *PermStore
 	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
@@ -315,6 +316,11 @@ type Agent struct {
 	// (AgentConfig.PromptCaching). Only meaningful when useBedrockNative is
 	// true; ignored otherwise. EXPERIMENTAL — see AgentConfig.PromptCaching.
 	promptCaching bool
+	// supportsVision mirrors AgentConfig.Vision — gates whether an MCP tool
+	// result's image content (e.g. a screenshot) is attached to a follow-up
+	// message. False by default: an unsupported endpoint hard-errors the
+	// whole turn rather than ignoring the image part.
+	supportsVision bool
 	// tryBest is an optional tool-level loop detector that tracks near-identical
 	// edits, retried failing bash commands, and non-progressing action streaks.
 	// When non-nil, RecordToolCall is called after each tool completes and
@@ -349,7 +355,7 @@ type TryBestVerdict struct {
 // interface to avoid an import cycle between internal/agent/local and internal/mcp.
 type mcpToolSet interface {
 	Schemas(ctx context.Context) []map[string]any
-	Dispatch(ctx context.Context, toolName, argsJSON string) (string, bool)
+	Dispatch(ctx context.Context, toolName, argsJSON string) (string, []string, bool)
 }
 
 // AsEscalationTarget returns a shallow copy of the agent configured for the
@@ -384,6 +390,18 @@ func (a *Agent) AsWorkflowExecutor() *Agent {
 func (a *Agent) WithToolAgentEntries(entries []config.AgentToolEntry) *Agent {
 	copy := *a
 	copy.toolAgentEntries = entries
+	return &copy
+}
+
+// WithToolAgentRole returns a shallow copy of the agent marked as a stateless
+// tool-agent (invoked via RunToolCall by a peer agent's agent_<name> call).
+// This excludes the "escalate" tool from its schema: there is no session or
+// escalation runner behind a one-shot tool call for it to escalate into, so
+// exposing the tool would let the model request an escalation that can only
+// hard-fail the whole call (mirrors RunBackgroundTask's bgLimits pattern).
+func (a *Agent) WithToolAgentRole() *Agent {
+	copy := *a
+	copy.isToolAgent = true
 	return &copy
 }
 
@@ -592,6 +610,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:           ac.Limits,
 			systemPromptTier: ac.SystemPromptTier,
 			promptCaching:    ac.PromptCaching,
+			supportsVision:   ac.Vision,
 			maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 		}
 	case "", "local":
@@ -643,6 +662,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		client:           &http.Client{Transport: transport},
 		limits:           ac.Limits,
 		systemPromptTier: ac.SystemPromptTier,
+		supportsVision:   ac.Vision,
 		maxPayloadBytes:  config.DefaultMaxPayloadBytes,
 	}
 }
@@ -1077,7 +1097,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
-	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, a.limits)
+	effLimits := a.limits
+	if a.isToolAgent {
+		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+		if a.limits != nil {
+			effLimits.IncludedTools = a.limits.IncludedTools
+			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+		}
+	}
+	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, effLimits)
 	if a.mcpToolSet != nil {
 		tools = append(tools, a.mcpToolSet.Schemas(ctx)...)
 	}
@@ -1556,6 +1584,10 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
+	// executeToolCalls turns these into a synthetic follow-up user message,
+	// since tool-role content must stay plain text on the OpenAI-compat wire.
+	images []string
 }
 
 func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string) ([]Message, *EscalationSignal) {
@@ -1640,8 +1672,22 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 	}
 
 	// Collect results in order; stop on first escalation signal.
-	for _, outcome := range outcomes {
+	for i, outcome := range outcomes {
 		msgs = append(msgs, outcome.msg)
+		if len(outcome.images) > 0 {
+			if a.supportsVision {
+				parts := make([]ContentPart, 0, len(outcome.images)+1)
+				parts = append(parts, ContentPart{Type: "text", Text: fmt.Sprintf("[image result from tool %q]", toolCalls[i].Function.Name)})
+				for _, img := range outcome.images {
+					parts = append(parts, ContentPart{Type: "image_url", ImageURL: &ImageURLPart{URL: img}})
+				}
+				msgs = append(msgs, Message{Role: "user", ContentParts: parts})
+			} else {
+				msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf(
+					"<system-reminder>Tool %q returned an image, but this agent (%s) is not configured for vision input — the image was dropped. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input, or switch to a vision-capable agent to view it.</system-reminder>",
+					toolCalls[i].Function.Name, a.model)})
+			}
+		}
 		if outcome.escalate {
 			return msgs, &EscalationSignal{Reason: outcome.reason}
 		}
@@ -1666,7 +1712,14 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			Request string `json:"request"`
 		}
 		json.Unmarshal([]byte(tc.Function.Arguments), &reqArgs) //nolint:errcheck
-		agentName := tc.Function.Name[len("agent_"):]
+		agentName, ok := ResolveAgentToolName(a.toolAgentEntries, tc.Function.Name)
+		if !ok {
+			// Defensive fallback: sanitiseAgentToolName wasn't matched against any
+			// known entry (e.g. stale tool list). Strip the prefix as a best guess
+			// rather than failing outright — the dispatcher will report "not found"
+			// if this guess is wrong too.
+			agentName = tc.Function.Name[len("agent_"):]
+		}
 		fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
 		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
 		if err != nil {
@@ -1726,7 +1779,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 
 	// MCP tools dispatched before built-ins.
 	if a.mcpToolSet != nil {
-		if mcpResult, ok := a.mcpToolSet.Dispatch(toolCtx, tc.Function.Name, tc.Function.Arguments); ok {
+		if mcpResult, images, ok := a.mcpToolSet.Dispatch(toolCtx, tc.Function.Name, tc.Function.Arguments); ok {
 			agentRole := agentRoleForMetrics(a.escalationName)
 			obs.Inc(toolCtx, inferenceScope, "milk.tools.calls",
 				attribute.String("name", tc.Function.Name),
@@ -1736,7 +1789,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 				attribute.String("name", tc.Function.Name),
 				attribute.String("outcome", "mcp"),
 			)
-			return toolCallOutcome{msg: Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID}}
+			return toolCallOutcome{msg: Message{Role: "tool", Content: mcpResult, ToolCallID: tc.ID}, images: images}
 		}
 	}
 
