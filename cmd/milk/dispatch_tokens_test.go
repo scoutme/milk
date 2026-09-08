@@ -18,6 +18,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
@@ -60,7 +61,7 @@ func (r *fakeTokenRunner) Execute(
 	return r.res, nil
 }
 
-func (r *fakeTokenRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ io.Writer) (string, error) {
+func (r *fakeTokenRunner) RunToolCall(_ context.Context, _ config.Config, _ string, _ []local.ContentPart, _ io.Writer) (string, error) {
 	return "", nil
 }
 

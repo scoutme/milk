@@ -134,6 +134,25 @@ func attachmentDataURI(a PendingAttachment) string {
 	return fmt.Sprintf("data:%s;base64,%s", a.MIMEType, enc)
 }
 
+// decodeDataURI reverses attachmentDataURI: given "data:<mime>;base64,<data>",
+// returns the decoded bytes and mime type. ok is false for anything else
+// (e.g. a malformed or non-base64 URI).
+func decodeDataURI(uri string) (data []byte, mimeType string, ok bool) {
+	rest, found := strings.CutPrefix(uri, "data:")
+	if !found {
+		return nil, "", false
+	}
+	mime, b64, found := strings.Cut(rest, ";base64,")
+	if !found {
+		return nil, "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, "", false
+	}
+	return raw, mime, true
+}
+
 // isBinaryMIME reports whether mime indicates a binary (non-text) type.
 func isBinaryMIME(mime string) bool {
 	return !strings.HasPrefix(mime, "text/") &&

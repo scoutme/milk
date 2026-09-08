@@ -191,6 +191,7 @@ type streamChunk struct {
 		CompletionTokens    int64 `json:"completion_tokens"`
 		PromptTokensDetails *struct {
 			CachedTokens int64 `json:"cached_tokens"`
+			ImageTokens  int64 `json:"image_tokens"`
 		} `json:"prompt_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
@@ -216,7 +217,11 @@ func agentRoleForMetrics(escalationName string) string {
 
 // ToolAgentDispatcher is called when the agent issues an agent_* tool call.
 // agentName is the unsanitised agent name (e.g. "aider", not "agent_aider").
-type ToolAgentDispatcher func(ctx context.Context, agentName, request string, out io.Writer) (string, error)
+// images, when non-empty, are images the calling agent itself couldn't attach
+// (not vision-configured) that it is forwarding for the target tool-agent to
+// see instead — the target's own vision configuration still gates whether it
+// actually attaches them or drops them with a note.
+type ToolAgentDispatcher func(ctx context.Context, agentName, request string, images []ContentPart, out io.Writer) (string, error)
 
 // Agent is a local LLM agent backed by any OpenAI-compatible inference server,
 // or the AWS Bedrock Converse API when useBedrockNative is true.
@@ -1089,11 +1094,33 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Local HTTP agents have milk's tool dispatch loop available — record_memory and
 	// current_need are injected as tools. Tag-based instruction injection is only for
 	// external-process agents (CLI, subprocess) that cannot receive injected tools.
+	// Consumed once, up front, regardless of path below — pendingImages is a
+	// local copy from here on, so it never leaks into a later, unrelated turn.
+	pendingImages := a.pendingImageParts
+	a.pendingImageParts = nil
+
 	userMsg := Message{Role: "user", Content: userPrompt}
-	if len(a.pendingImageParts) > 0 {
-		// Build a multipart message: text part + image parts.
-		userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, a.pendingImageParts...)
-		a.pendingImageParts = nil // consume once
+	if len(pendingImages) > 0 {
+		if a.supportsVision {
+			// Build a multipart message: text part + image parts.
+			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, pendingImages...)
+		} else if len(a.toolAgentEntries) > 0 {
+			// Sending an image_url part to a non-vision endpoint is a hard API
+			// error ("No endpoints found that support image input"), not a
+			// graceful no-op. This agent has tool-agents available, though —
+			// keep pendingImages around (passed to executeToolCalls below) so
+			// an agent_<name> call this turn can forward them to a
+			// vision-capable tool-agent instead of the model trying (and
+			// failing) to see them itself.
+			userMsg.Content = userPrompt + fmt.Sprintf(
+				"\n\n<system-reminder>%d image attachment(s) are pending. This agent (%s) is not configured for vision input and cannot see them directly — call one of your agent_* tool-agents (if any is vision-capable) and the image(s) will be forwarded to it automatically.</system-reminder>",
+				len(pendingImages), a.model)
+		} else {
+			userMsg.Content = userPrompt + fmt.Sprintf(
+				"\n\n<system-reminder>%d image attachment(s) were dropped — this agent (%s) is not configured for vision input. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input.</system-reminder>",
+				len(pendingImages), a.model)
+			pendingImages = nil // nothing can use them this turn — don't forward stale images to an unrelated later tool call
+		}
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
@@ -1122,7 +1149,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
-	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx)
+	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages)
 }
 
 // runToolLoop is the iterative tool-calling core shared by Run (a full,
@@ -1131,7 +1158,10 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 // are responsible for building msgs (including the system prompt and the
 // leading user message at userMsgIdx) and the tools schema list; this method
 // owns only the streaming/tool-dispatch/loop-detection loop itself.
-func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int) ([]Message, error) {
+// pendingImages carries images the caller's own turn couldn't attach directly
+// (non-vision agent) for a possible agent_<name> tool-agent call to forward;
+// nil for RunBackgroundTask, which has no image-attachment path of its own.
+func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int, pendingImages []ContentPart) ([]Message, error) {
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection
@@ -1258,7 +1288,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		}
 
 		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText)
+		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
 		if esc != nil {
 			return msgs, esc
 		}
@@ -1405,7 +1435,7 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 	}
 	userMsgIdx := len(msgs) - 1
 
-	resultMsgs, err := bg.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx)
+	resultMsgs, err := bg.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx, nil)
 	if err != nil {
 		return "", usage, err
 	}
@@ -1590,7 +1620,7 @@ type toolCallOutcome struct {
 	images []string
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string) ([]Message, *EscalationSignal) {
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, *EscalationSignal) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls, ReasoningContent: reasoningContent})
 
 	// Pre-print tool hints and collect permission decisions synchronously (before
@@ -1633,7 +1663,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		wg.Add(1)
 		go func(i int, tc toolCall) {
 			defer wg.Done()
-			outcome := a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem)
+			outcome := a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem, pendingImages)
 			outcomes[i] = outcome
 		}(i, tc)
 	}
@@ -1697,7 +1727,9 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 
 // dispatchOneTool executes a single tool call and returns its outcome.
 // deniedResult is non-empty when checkPermission already rejected the tool.
-func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store) toolCallOutcome {
+// pendingImages, when non-empty, are forwarded to an agent_<name> tool-agent
+// call — see the "not vision-configured but has tool-agents" branch in Run.
+func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, pendingImages []ContentPart) toolCallOutcome {
 	// Per-tool context: inherits turn cancellation and adds optional per-tool timeout.
 	toolCtx := ctx
 	if a.toolTimeout > 0 {
@@ -1721,7 +1753,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			agentName = tc.Function.Name[len("agent_"):]
 		}
 		fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
-		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, out)
+		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, pendingImages, out)
 		if err != nil {
 			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
 				attribute.String("agent", agentName),
@@ -2044,9 +2076,44 @@ func dropOldestDroppableUnit(msgs []Message) ([]Message, bool) {
 	return append(append([]Message{}, msgs[:p]...), msgs[end:]...), true
 }
 
+// imageRetryAttempts caps how many times streamCompletion retries a request
+// containing an image when the response indicates the backend didn't
+// actually process it (usage.prompt_tokens_details.image_tokens missing/0).
+// Observed live against xiaomimimo's mimo-v2.5: a byte-identical replay of a
+// request that silently dropped the image succeeded immediately — this is
+// backend flakiness, not a deterministic per-request failure, so a small
+// retry count clears it in practice without masking a persistent problem.
+const imageRetryAttempts = 3
+
+// messagesContainImage reports whether any message carries an image_url
+// content part — used to decide whether streamCompletion's image-drop retry
+// applies at all (retrying a text-only request on missing image_tokens would
+// be nonsensical: there's no image for the field to describe).
+func messagesContainImage(msgs []Message) bool {
+	for _, m := range msgs {
+		for _, p := range m.ContentParts {
+			if p.Type == "image_url" && p.ImageURL != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // streamCompletion sends a chat completion request and streams the response.
 // Routes to the Bedrock Converse streaming API when useBedrockNative is set;
 // otherwise uses the OpenAI-compatible /v1/chat/completions endpoint.
+//
+// When msgs contains an image, the backend has been observed (live, against
+// xiaomimimo's mimo-v2.5) to sometimes accept a well-formed image_url part
+// and respond as if no image were given at all — no error, just a silent
+// drop, detectable only via the absence of usage.prompt_tokens_details.
+// image_tokens in the response. A byte-identical replay of the same failing
+// request succeeded, confirming this is backend flakiness rather than
+// something wrong with the request itself. For image-bearing requests only,
+// each non-final attempt is buffered rather than streamed live to out: if the
+// backend dropped the image, the user must never see the resulting
+// non-answer, only the eventually-accepted response.
 func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, error) {
 	if a.useBedrockNative {
 		return a.bedrockStreamCompletion(ctx, msgs, tools, out)
@@ -2054,6 +2121,45 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	if a.useResponsesAPI {
 		return a.responsesStreamCompletion(ctx, msgs, tools, out)
 	}
+	maxAttempts := 1
+	if messagesContainImage(msgs) {
+		maxAttempts = imageRetryAttempts
+	}
+	var (
+		text, fallbackRaw, reasoningText string
+		tcs                              []toolCall
+		emptyFallback                    bool
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		final := attempt == maxAttempts
+		attemptOut := out
+		var buf *bytes.Buffer
+		if !final {
+			buf = &bytes.Buffer{}
+			attemptOut = buf
+		}
+		t, fr, tc, ef, rt, imageTokens, err := a.streamCompletionOnce(ctx, msgs, tools, attemptOut)
+		if err != nil {
+			return "", "", nil, false, "", err
+		}
+		text, fallbackRaw, tcs, emptyFallback, reasoningText = t, fr, tc, ef, rt
+		if final || imageTokens > 0 {
+			if buf != nil {
+				io.Copy(out, buf) //nolint:errcheck
+			}
+			return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
+		}
+		obs.Warn("image request returned no image_tokens usage — backend likely dropped the image, retrying",
+			"model", a.model, "attempt", attempt, "max_attempts", maxAttempts)
+	}
+	return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
+}
+
+// streamCompletionOnce is the actual single-attempt request/stream/parse
+// implementation streamCompletion loops over. imageTokens is
+// usage.prompt_tokens_details.image_tokens from the final usage chunk — see
+// streamCompletion's doc comment for why callers care.
+func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer) (string, string, []toolCall, bool, string, int64, error) {
 	req := chatRequest{
 		Model:    a.model,
 		Messages: msgs,
@@ -2068,7 +2174,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 
 	// Pre-flight payload size check: when the marshaled body exceeds the
@@ -2088,7 +2194,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			req.Messages = msgs
 			body, err = json.Marshal(req)
 			if err != nil {
-				return "", "", nil, false, "", err
+				return "", "", nil, false, "", 0, err
 			}
 		}
 		obs.Warn("payload after trimming",
@@ -2103,7 +2209,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.inferenceURL(), bytes.NewReader(body))
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -2115,7 +2221,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, "", fmt.Errorf("inference server unreachable: %w", err)
+		return "", "", nil, false, "", 0, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -2126,7 +2232,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
-		return "", "", nil, false, "", fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
+		return "", "", nil, false, "", 0, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
 	det := NewStreamDetector(a.detectedFormat)
@@ -2136,9 +2242,9 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
 	if err != nil {
-		return "", "", nil, false, "", err
+		return "", "", nil, false, "", 0, err
 	}
 	// det.RawBlock() == "" already implies there is no usable block content
 	// regardless of whether the detector is still formally InBlock() — a
@@ -2200,7 +2306,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 		a.detectedFormat = det.Format
 	}
 	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
-	return text, fallbackRaw, tcs, emptyFallback, reasoningText, err
+	return text, fallbackRaw, tcs, emptyFallback, reasoningText, imageTokens, err
 }
 
 // classifyStreamResult interprets what the stream produced and returns the
@@ -2251,15 +2357,20 @@ func (a *Agent) classifyStreamResult(det *StreamDetector, nativeCalls []toolCall
 // usage.prompt_tokens_details.cached_tokens field (OpenAI's automatic prompt
 // caching, mirrored by other OpenAI-compatible providers). cacheRead is 0 when
 // the field is absent, matching every provider that doesn't report it.
+// imageTokens (from usage.prompt_tokens_details.image_tokens) is 0 both when
+// the field is absent and when a request containing an image got a response
+// that didn't actually process it — streamCompletion uses that ambiguity
+// together with knowing whether the request had an image to decide whether
+// to retry (see messagesContainImage).
 func (a *Agent) scanSSE(
 	scanner *bufio.Scanner,
 	det *StreamDetector,
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
-) ([]toolCall, int64, int64, int64, string, string, error) {
+) ([]toolCall, int64, int64, int64, int64, string, string, error) {
 	dbg := a.debugLog
-	var promptTokens, completionTokens, cacheRead int64
+	var promptTokens, completionTokens, cacheRead, imageTokens int64
 	var reasoningBuf strings.Builder
 	var finishReason string
 	for scanner.Scan() {
@@ -2289,6 +2400,7 @@ func (a *Agent) scanSSE(
 			completionTokens = chunk.Usage.CompletionTokens
 			if chunk.Usage.PromptTokensDetails != nil {
 				cacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+				imageTokens = chunk.Usage.PromptTokensDetails.ImageTokens
 			}
 		}
 		for _, choice := range chunk.Choices {
@@ -2325,9 +2437,9 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, 0, 0, "", "", err
+		return nil, 0, 0, 0, 0, "", "", err
 	}
-	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, reasoningBuf.String(), finishReason, nil
+	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 
 func processContentToken(token string, det *StreamDetector, textBuf *strings.Builder, out io.Writer) {

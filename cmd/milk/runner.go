@@ -137,8 +137,12 @@ type TurnRunner interface {
 		out io.Writer,
 	) (TurnResult, error)
 	// RunToolCall executes a single lightweight inference call with no session
-	// bookkeeping. Returns the agent's text response or an error.
-	RunToolCall(ctx context.Context, cfg config.Config, prompt string, out io.Writer) (string, error)
+	// bookkeeping. images are forwarded from a calling agent that couldn't
+	// attach them itself (see local.ToolAgentDispatcher); only localRunner
+	// can actually use them (via SetPendingImageParts) — cliRunner and
+	// subprocessRunner accept but ignore the parameter. Returns the agent's
+	// text response or an error.
+	RunToolCall(ctx context.Context, cfg config.Config, prompt string, images []local.ContentPart, out io.Writer) (string, error)
 }
 
 // ── localRunner ──────────────────────────────────────────────────────────────
@@ -323,7 +327,7 @@ func endsWithQuestion(text string) bool {
 	return len(last) > 0 && last[len(last)-1] == '?'
 }
 
-func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, images []local.ContentPart, out io.Writer) (string, error) {
 	// history must be the prior turns only, per Run's contract — a stateless
 	// tool-agent call has none. Passing prompt as history too (as this used to)
 	// made isRepeatedPrompt see the current prompt as an exact repeat of itself
@@ -336,6 +340,12 @@ func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt s
 	// bgSess := &session.Session{CWD: cwd} — a bare session for a stateless call.
 	cwd, _ := os.Getwd()
 	toolSess := &session.Session{CWD: cwd}
+	if len(images) > 0 {
+		// Reuses Run's own vision gate: this agent attaches them if
+		// "vision": true, otherwise drops with a note — same as any other
+		// pendingImageParts consumer.
+		r.agent.SetPendingImageParts(images)
+	}
 	updatedMsgs, err := r.agent.Run(ctx, nil, prompt, out, toolSess, nil)
 	if err != nil {
 		// Defense in depth: WithToolAgentRole already excludes the "escalate" tool,
@@ -635,9 +645,39 @@ func (r *cliRunner) Execute(
 	}, nil
 }
 
-func (r *cliRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+func (r *cliRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, images []local.ContentPart, out io.Writer) (string, error) {
 	if !r.agent.SkipPermissions() {
 		return "", errors.New("claude-cli tool-agent requires dangerously_skip_permissions: true")
+	}
+	if len(images) > 0 {
+		// claude reads @path references natively — write each forwarded image
+		// to a temp file (no persistent m.st.pendingCLIImageFiles tracking
+		// exists at this stateless-call layer, so clean up here directly).
+		var refs strings.Builder
+		for _, part := range images {
+			if part.ImageURL == nil {
+				continue
+			}
+			data, mime, ok := decodeDataURI(part.ImageURL.URL)
+			if !ok {
+				continue
+			}
+			f, err := os.CreateTemp("", "milk-toolagent-img-*"+mimeExtension(mime))
+			if err != nil {
+				continue
+			}
+			if _, err := f.Write(data); err != nil {
+				f.Close()
+				os.Remove(f.Name()) //nolint:errcheck
+				continue
+			}
+			f.Close()
+			defer os.Remove(f.Name()) //nolint:errcheck
+			fmt.Fprintf(&refs, "@%s\n", f.Name())
+		}
+		if refs.Len() > 0 {
+			prompt = refs.String() + prompt
+		}
 	}
 	// Run a fresh first-turn (no session resume) with empty context — tool calls
 	// are stateless one-shot requests, not continuation of an escalation session.
@@ -759,7 +799,13 @@ func (r *subprocessRunner) Execute(
 	}, nil
 }
 
-func (r *subprocessRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, out io.Writer) (string, error) {
+func (r *subprocessRunner) RunToolCall(ctx context.Context, _ config.Config, prompt string, images []local.ContentPart, out io.Writer) (string, error) {
+	if len(images) > 0 {
+		// No image-forwarding mechanism exists for the subprocess NDJSON
+		// protocol (aider-cli, smolagent) — say so explicitly rather than
+		// silently dropping images the caller thinks it forwarded.
+		prompt = fmt.Sprintf("(note: %d image attachment(s) could not be forwarded — this tool-agent type has no image support)\n\n%s", len(images), prompt)
+	}
 	// Subprocess agents are stateless per-call; RunFirst with empty context works directly.
 	_, res, err := r.agent.RunFirst(ctx, "", "", prompt, out)
 	if err != nil {

@@ -2618,7 +2618,13 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 		for _, a := range attachments {
 			fmt.Fprintf(&ph, " %s", attachmentPlaceholder(a))
 			if a.isImage() {
-				// Local agent: multipart image_url content part (base64 data URI).
+				// Local-provider agent (primary and/or escalation): multipart
+				// image_url content part (base64 data URI) — wired below into
+				// whichever *local.Agent(s) are set. A local escalation agent
+				// used to only get this same image dumped as a raw base64 text
+				// blob (see the removed inline-text branch this replaced) —
+				// which it can't actually see as an image, so it confabulated
+				// a plausible-sounding description instead of reading it.
 				imageParts = append(imageParts, local.ContentPart{
 					Type:     "image_url",
 					ImageURL: &local.ImageURLPart{URL: attachmentDataURI(a)},
@@ -2642,9 +2648,6 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 					if !written {
 						fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
 					}
-				} else {
-					// Non-CLI escalation (local HTTP, subprocess): inline base64 data URI.
-					fmt.Fprintf(&imgBlocks, "[attached image: %s]\n%s\n\n", a.Name, attachmentDataURI(a))
 				}
 			} else {
 				textBlocks.WriteString(attachmentContextBlock(a))
@@ -2683,9 +2686,17 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, _ := m.buildTUIAgents(send, ir0)
 
-	// Wire image parts into the primary local agent so it sends a multipart payload.
-	if len(imageParts) > 0 && tuiAgents.local != nil {
-		tuiAgents.local.SetPendingImageParts(imageParts)
+	// Wire image parts into both local agents so whichever one the router picks
+	// this turn sends a multipart vision payload — routing isn't decided until
+	// runTurn below, and only escalationLocal's own pendingImageParts (not
+	// primary's) reaches a local escalation agent's Run() call.
+	if len(imageParts) > 0 {
+		if tuiAgents.local != nil {
+			tuiAgents.local.SetPendingImageParts(imageParts)
+		}
+		if tuiAgents.escalationLocal != nil {
+			tuiAgents.escalationLocal.SetPendingImageParts(imageParts)
+		}
 	}
 
 	// Capture input chars for the live token estimate in the status bar.

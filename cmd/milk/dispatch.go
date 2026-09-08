@@ -84,6 +84,26 @@ func executeWithRetry(
 	}
 }
 
+// retryToolCall wraps a tool-agent RunToolCall with the same transient
+// network/stream error retry executeWithRetry gives ordinary turns.
+// RunToolCall had none at all — a single upstream hiccup (e.g. an HTTP/2
+// stream reset) failed the whole tool-agent call outright, with no fallback,
+// unlike primary/escalation turns which already retry through exactly this
+// error class via workflow.IsRetryableTurnError.
+func retryToolCall(ctx context.Context, fn func() (string, error)) (string, error) {
+	for attempt := 0; ; attempt++ {
+		text, err := fn()
+		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
+			return text, err
+		}
+		select {
+		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
 // runPrimary executes one primary-agent turn using runner.
 // It handles all session bookkeeping: context-mode resolution, nonce management,
 // state transitions, turn recording, token accounting, summary rebuild, and
@@ -177,12 +197,14 @@ func runPrimaryWithSession(
 			entries := cfg.EffectiveToolAgents(runner.Name())
 			lr.agent = lr.agent.WithToolAgentEntries(entries)
 			capturedDA := da
-			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, dout io.Writer) (string, error) {
+			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, images []local.ContentPart, dout io.Writer) (string, error) {
 				tr, err := getOrBuildToolRunner(dctx, agentName, cfg, capturedDA)
 				if err != nil {
 					return "", err
 				}
-				return tr.RunToolCall(dctx, cfg, request, dout)
+				return retryToolCall(dctx, func() (string, error) {
+					return tr.RunToolCall(dctx, cfg, request, images, dout)
+				})
 			})
 		}
 	}
@@ -388,12 +410,14 @@ func runEscalationWithSession(
 			entries := cfg.EffectiveToolAgents(runner.Name())
 			lr.agent = lr.agent.WithToolAgentEntries(entries)
 			capturedDA := da
-			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, dout io.Writer) (string, error) {
+			lr.agent.SetToolAgentDispatcher(func(dctx context.Context, agentName, request string, images []local.ContentPart, dout io.Writer) (string, error) {
 				tr, err := getOrBuildToolRunner(dctx, agentName, cfg, capturedDA)
 				if err != nil {
 					return "", err
 				}
-				return tr.RunToolCall(dctx, cfg, request, dout)
+				return retryToolCall(dctx, func() (string, error) {
+					return tr.RunToolCall(dctx, cfg, request, images, dout)
+				})
 			})
 		}
 	}

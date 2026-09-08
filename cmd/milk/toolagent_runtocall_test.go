@@ -49,7 +49,7 @@ func TestLocalRunner_RunToolCall_NoPanicOrFalseEscalation(t *testing.T) {
 	r := newLocalRunner(la, "test-tool-agent")
 
 	result, err := r.RunToolCall(context.Background(), config.Config{},
-		"get a blender viewport screenshot and describe what you see", io.Discard)
+		"get a blender viewport screenshot and describe what you see", nil, io.Discard)
 	if err != nil {
 		t.Fatalf("RunToolCall returned error: %v", err)
 	}

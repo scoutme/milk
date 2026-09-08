@@ -29,7 +29,7 @@ func TestScanSSE_ReasoningOnly(t *testing.T) {
 	var textBuf strings.Builder
 	var out bytes.Buffer
 
-	toolCalls, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out)
+	toolCalls, _, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out)
 	if err != nil {
 		t.Fatalf("scanSSE returned error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestScanSSE_NativeToolCallWithNullContinuationFields(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 
-	toolCalls, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	toolCalls, _, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
 	if err != nil {
 		t.Fatalf("scanSSE returned error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestScanSSE_NgramNotFedForWorkflowRole(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 
-	_, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	_, _, _, _, _, reasoningText, finishReason, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
 	if err != nil {
 		t.Fatalf("scanSSE returned error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestScanSSE_NgramCutsStreamForNonWorkflowRole(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 
-	_, _, _, _, reasoningText, _, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	_, _, _, _, _, reasoningText, _, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
 	if err != nil {
 		t.Fatalf("scanSSE returned error: %v", err)
 	}
