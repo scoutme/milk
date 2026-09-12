@@ -160,6 +160,34 @@ func TestCropLoopingMessages_PreservesNonLoopMessages(t *testing.T) {
 	}
 }
 
+func TestCropLoopingMessages_BoundedSpan(t *testing.T) {
+	// A long-running turn where every message since the original user prompt
+	// is a looping assistant/tool pair must NOT be cropped all the way back
+	// to the user message — only the last streakMaxSpan of them, so
+	// non-looping progress from earlier in the turn survives.
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "do something"},
+	}
+	const pairs = 60 // 120 messages, well beyond streakMaxSpan
+	for i := 0; i < pairs; i++ {
+		msgs = append(msgs,
+			Message{Role: "assistant", Content: "again", ToolCalls: []toolCall{{Function: toolCallFunction{Name: "bash"}}}},
+			Message{Role: "tool", Content: "result"},
+		)
+	}
+	before := len(msgs)
+	cropped := cropLoopingMessages(msgs, 1)
+	removed := before - len(cropped)
+	if removed != streakMaxSpan {
+		t.Fatalf("expected exactly streakMaxSpan (%d) messages removed, removed %d (before=%d after=%d)",
+			streakMaxSpan, removed, before, len(cropped))
+	}
+	if cropped[0].Role != "system" || cropped[1].Role != "user" {
+		t.Fatalf("expected system+user preserved at the head, got %s+%s", cropped[0].Role, cropped[1].Role)
+	}
+}
+
 func TestStableStringify(t *testing.T) {
 	s1 := stableStringify(`{"b":2,"a":1}`)
 	s2 := stableStringify(`{"a":1,"b":2}`)

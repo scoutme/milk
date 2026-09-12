@@ -33,7 +33,13 @@ type loopStreakTracker struct {
 
 const (
 	streakTriggerCount = 3
-	streakMaxSpan      = 16 // max messages to consider for cropping
+	// streakMaxSpan bounds how much of the message tail cropLoopingMessages
+	// will delete when a streak is detected. Matches MiMo-Code's
+	// LOOP_STREAK_MAX_SPAN (64) — large enough to cover a real looping run,
+	// small enough that non-looping progress from earlier in a long turn
+	// survives the crop.
+	streakMaxSpan = 64
+
 )
 
 // recoveryNudgeMild is injected as a user message when a streak is first
@@ -87,6 +93,21 @@ STOP repeating yourself and retry with a different approach:
 - If you were about to call a tool, try a different tool or different arguments
 - If you are blocked, explain what is blocking you instead of looping
 Do NOT output the same phrases again.
+</system-reminder>`
+
+// maxIterSummaryReminder is injected in place of the user's turn on the final
+// allowed tool-loop iteration, with tools disabled for that call. It forces
+// the model to produce a real closing summary in its own words instead of
+// silently exhausting the iteration budget and falling through to a
+// mechanically-assembled tool-trail dump — matching MiMo-Code's max-steps
+// behavior (force a text-only wrap-up rather than a bare cutoff).
+const maxIterSummaryReminder = `<system-reminder>
+MAXIMUM TOOL ITERATIONS REACHED for this turn. Tools are disabled for this
+response — you cannot call any more tools. Respond now with text only:
+1. What you accomplished this turn.
+2. What remains to be done.
+3. Any blocker or decision you need from the user.
+This overrides all other instructions for this response.
 </system-reminder>`
 
 // recoveryNgramReplan is injected on the second n-gram detection.
@@ -194,13 +215,22 @@ func (a *Agent) loopRecoveryAction(msgs []Message, userMsgIdx int, recoveryCount
 // groups from the tail of msgs that match the given step key, preserving the
 // user message that started the turn (at startIdx). Returns the cropped
 // slice.
+//
+// The walk-back is bounded by streakMaxSpan: on a long-running turn, the
+// contiguous assistant/tool tail can span far more than the actual looping
+// streak (everything since the last recovery nudge), and deleting all of it
+// wipes real, non-looping progress — forcing the model to rediscover work it
+// already did instead of just breaking the loop. Matches MiMo-Code's
+// LOOP_STREAK_MAX_SPAN bound on the equivalent crop.
 func cropLoopingMessages(msgs []Message, startIdx int) []Message {
 	// Walk backwards from the end, removing assistant messages and their
 	// trailing tool results as long as they belong to the looping streak.
 	// We keep at least the system prompt (index 0), the original user
-	// message (startIdx), and any pre-loop history.
+	// message (startIdx), any pre-loop history, and no more than
+	// streakMaxSpan messages of the looping tail itself.
+	floor := max(startIdx+1, len(msgs)-streakMaxSpan)
 	cropTo := len(msgs)
-	for cropTo > startIdx+1 {
+	for cropTo > floor {
 		// Check if the message at cropTo-1 is a tool result or assistant msg
 		// that's part of the loop.
 		prev := msgs[cropTo-1]
