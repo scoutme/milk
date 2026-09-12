@@ -55,6 +55,7 @@ type Manager struct {
 	sem           chan struct{}
 	jobs          map[string]*Job
 	pending       []*Job
+	onStart       func(*Job)
 	onDone        func(*Job)
 	onBatchDone   func()
 	batchSignaled bool
@@ -97,6 +98,17 @@ func NewManager(baseCtx context.Context, maxConcurrent int) *Manager {
 		jobs:       make(map[string]*Job),
 		jobTimeout: defaultJobTimeout,
 	}
+}
+
+// SetOnStart registers a callback fired exactly once per job, immediately
+// when Spawn creates it (before the job's goroutine acquires a concurrency
+// slot or starts running) — off the goroutine that called Spawn. Typically
+// wired to a live UI so a panel showing background-job activity can open as
+// soon as a job exists, rather than only once it finishes.
+func (m *Manager) SetOnStart(fn func(*Job)) {
+	m.mu.Lock()
+	m.onStart = fn
+	m.mu.Unlock()
 }
 
 // SetOnDone registers a callback fired exactly once per job, immediately on
@@ -158,7 +170,12 @@ func (m *Manager) Spawn(label, task, role, model string, run func(context.Contex
 	}
 	m.jobs[job.ID] = job
 	timeout := m.jobTimeout
+	onStart := m.onStart
 	m.mu.Unlock()
+
+	if onStart != nil {
+		onStart(job)
+	}
 
 	go func() {
 		select {

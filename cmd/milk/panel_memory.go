@@ -78,7 +78,7 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 	}
 
 	// Title
-	addLine(stylePanelTitle.Render(truncate(" memory", inner)))
+	addLine(panelTitleLine(" memory", regionMemory, inner))
 	addLine("")
 
 	if mem == nil {

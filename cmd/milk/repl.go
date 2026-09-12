@@ -198,6 +198,14 @@ type reasoningPromotedMsg struct{}
 // agentDoneMsg signals the agent goroutine finished.
 type agentDoneMsg struct{ err error }
 
+// backgroundJobStartedMsg is sent immediately when a spawn_background_agent
+// job (ADR-0043) is created — from Manager.SetOnStart, off the goroutine that
+// called Spawn (which may be a background tool-loop, not the TUI's own).
+// Used solely to auto-open the background-agents panel so its activity is
+// visible without the user having to notice and press F3 first; see
+// (*model).autoOpenBackgroundPanel.
+type backgroundJobStartedMsg struct{}
+
 // backgroundJobDoneMsg is sent immediately when a spawn_background_agent job
 // (ADR-0043) completes or fails — independent of, and typically well before,
 // the turn-boundary path (drainBackgroundJobs) that injects the same result
@@ -258,6 +266,16 @@ type quitPendingClearMsg struct{}
 
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
+
+// taskStoreChangedMsg is sent whenever the task store mutates (create,
+// update, complete, delete — Store.SetOnChange fires on all of them), off
+// whatever goroutine made the change, typically a tool call mid-turn. Used
+// to auto-open the tasks panel so newly-active task content is visible
+// without the user having to notice and press F2 first; see
+// (*model).autoOpenPanel. Bubbletea's own post-Update redraw is what
+// actually repaints the panel — this message just carries the "wake up and
+// check" signal across goroutines.
+type taskStoreChangedMsg struct{}
 
 // toolUseMsg carries the name of a tool Claude just started calling.
 type toolUseMsg struct{ name string }
@@ -533,6 +551,13 @@ type model struct {
 	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
 
+	// panelManualOverride tracks which panels the user has explicitly
+	// shown/hidden (via /panel or its F1-F4 shortcut) this session. Once a
+	// region is in here, automatic "this panel's content just became
+	// active" opens (see autoOpenPanel) skip it — the user's own choice
+	// sticks over automatic management.
+	panelManualOverride map[panelRegion]bool
+
 	// memory panel
 	panelMemory        bool
 	panelOffset        int
@@ -765,6 +790,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		showThinking:        st.cfg.ShowReasoningDefault(),
 		mem:                 mem,
 		panelMemory:         true,
+		panelManualOverride: map[panelRegion]bool{},
 		selAnchorLine:       -1,
 		selEndLine:          -1,
 		panelSelRegion:      regionNone,
@@ -1561,7 +1587,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.workflowState.CompletedStageTree = msg.CompletedPaths.Root
 		}
 		m.workflowState.Generic = true
-		m.workflowPanelOpen = true
+		m.autoOpenPanel(regionWorkflow)
 		m.lastWorkflowActivity = time.Now()
 		m.workflowTimeoutWarned = false
 		m.syncLayout()
@@ -1620,7 +1646,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		obs.IncrementTurnCount()
 		m.currentTurnChars = 0
 		m.currentTurnInputChars = 0
-		m.workflowPanelOpen = true
+		m.autoOpenPanel(regionWorkflow)
 		if m.workflowState != nil {
 			m.workflowState.Role = "done"
 			m.workflowState.ActiveStageTree = nil
@@ -1673,7 +1699,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.state != nil {
 			st := msg.state
 			m.workflowState = st
-			m.workflowPanelOpen = true
+			m.autoOpenPanel(regionWorkflow)
 			if st.Role != "done" {
 				m.appendTranscript(fmt.Sprintf(
 					"%s workflow %s in progress (sprint %d pass %d) — /workflow resume to continue, or ignore\n",
@@ -1683,7 +1709,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncLayout()
 		} else if msg.genericName != "" {
 			m.workflowState = &workflow.State{WorkflowName: msg.genericName, Task: msg.genericTask, Role: "interrupted"}
-			m.workflowPanelOpen = true
+			m.autoOpenPanel(regionWorkflow)
 			m.appendTranscript(fmt.Sprintf(
 				"%s workflow %s in progress (%s) — /workflow resume to continue, or ignore\n",
 				milkTag(), msg.genericName, msg.genericTask,
@@ -1775,6 +1801,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.panelMemory {
 			return m, memoryPollTick()
 		}
+		return m, nil
+
+	case taskStoreChangedMsg:
+		m.autoOpenPanel(regionTasks)
+		m.syncLayout()
+		return m, nil
+
+	case backgroundJobStartedMsg:
+		m.autoOpenPanel(regionBackground)
+		m.syncLayout()
 		return m, nil
 
 	case backgroundJobDoneMsg:
@@ -3424,6 +3460,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Notify the TUI as soon as each background job (ADR-0043) completes,
 	// independent of the turn-boundary drain path.
 	if agents.backgroundMgr != nil {
+		agents.backgroundMgr.SetOnStart(func(*local.Job) {
+			p.Send(backgroundJobStartedMsg{})
+		})
 		agents.backgroundMgr.SetOnDone(func(j *local.Job) {
 			p.Send(backgroundJobDoneMsg{job: j})
 			// User-initiated jobs (Role == "user", tagged by the busy-key
@@ -3445,10 +3484,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		})
 	}
 
-	// Wire task store redraw: when tasks change, send a tick to trigger View().
+	// Wire task store redraw: when tasks change, send a tick to trigger View()
+	// and (unless the user has manually closed it) auto-open the tasks panel.
 	if taskStore != nil {
 		taskStore.SetOnChange(func() {
-			p.Send(memoryRefreshMsg{}) // reuse existing refresh msg to trigger a redraw
+			p.Send(taskStoreChangedMsg{})
 		})
 	}
 

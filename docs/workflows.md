@@ -167,7 +167,7 @@ The role flags are whatever the chosen definition declares (`dev`/`pair`: `--des
 
 State is checkpointed to `~/.milk/sessions/<session-id>.workflow.<id>.interp.json` after every stage. `/workflow resume` re-launches from that checkpoint. `/workflow reconfigure` re-runs the agent-assignment wizard against the saved state without touching progress, so the next `/workflow resume` continues from the same point with new agents.
 
-The workflow progress panel (`/panel workflow`, auto-opens when a workflow starts) shows current stage/iteration and verdict history. Remote oversight (Telegram) labels workflow turns `workflow:<role>` — see [docs/operations.md](operations.md#remote-oversight-telegram).
+The workflow progress panel (`/panel workflow` or **F4**, auto-opens when a workflow starts unless you've manually closed it — see [docs/operations.md — Keyboard shortcuts](operations.md#keyboard-shortcuts)) shows current stage/iteration and verdict history. Remote oversight (Telegram) labels workflow turns `workflow:<role>` — see [docs/operations.md](operations.md#remote-oversight-telegram).
 
 ### Writing a custom workflow
 

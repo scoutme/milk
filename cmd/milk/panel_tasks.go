@@ -29,7 +29,7 @@ func buildTasksPanelLines(ts *tasks.Store, inner int) []string {
 	var lines []string
 	addLine := func(s string) { lines = append(lines, s) }
 
-	addLine(stylePanelTitle.Render("tasks"))
+	addLine(panelTitleLine("tasks", regionTasks, inner))
 	addLine("")
 
 	if ts == nil {

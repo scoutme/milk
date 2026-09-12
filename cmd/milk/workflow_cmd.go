@@ -443,7 +443,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 		WorkflowID: workflowID,
 	}
 
-	m.workflowPanelOpen = true
+	m.autoOpenPanel(regionWorkflow)
 	m.busy = true
 	m.spinnerFrame = 0
 	m.lastWorkflowActivity = time.Now()
