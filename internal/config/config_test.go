@@ -1092,3 +1092,250 @@ func TestLoad_RecoversFromBackupEndToEnd(t *testing.T) {
 		t.Errorf("recovered cfg.Agent = %q, want %q", cfg.Agent, "good")
 	}
 }
+
+// --- DeepMerge tests ---
+
+func TestDeepMerge_ScalarsOverride(t *testing.T) {
+	global := Config{Agent: "global-agent", DefaultRoute: "local", ContextBudgetChars: 5000}
+	local := Config{Agent: "local-agent", ContextBudgetChars: 8000}
+	merged := DeepMerge(global, local)
+	if merged.Agent != "local-agent" {
+		t.Errorf("expected local-agent, got %q", merged.Agent)
+	}
+	if merged.ContextBudgetChars != 8000 {
+		t.Errorf("expected 8000, got %d", merged.ContextBudgetChars)
+	}
+	// Unset local field should keep global.
+	if merged.DefaultRoute != "local" {
+		t.Errorf("expected global DefaultRoute preserved, got %q", merged.DefaultRoute)
+	}
+}
+
+func TestDeepMerge_PointerOverride(t *testing.T) {
+	global := Config{}
+	local := Config{ShowReasoning: boolPtr(true)}
+	merged := DeepMerge(global, local)
+	if merged.ShowReasoning == nil || !*merged.ShowReasoning {
+		t.Error("expected ShowReasoning=true from local")
+	}
+}
+
+func TestDeepMerge_PointerNilKeepsGlobal(t *testing.T) {
+	global := Config{ShowReasoning: boolPtr(true)}
+	local := Config{}
+	merged := DeepMerge(global, local)
+	if merged.ShowReasoning == nil || !*merged.ShowReasoning {
+		t.Error("expected ShowReasoning=true preserved from global")
+	}
+}
+
+func TestDeepMerge_MCPServersMergeByName(t *testing.T) {
+	enabled := true
+	global := Config{MCPServers: []MCPServerConfig{
+		{Name: "keep", URL: "http://keep"},
+		{Name: "override", URL: "http://old"},
+	}}
+	local := Config{MCPServers: []MCPServerConfig{
+		{Name: "override", URL: "http://new", Enabled: &enabled},
+		{Name: "add", URL: "http://add"},
+	}}
+	merged := DeepMerge(global, local)
+	if len(merged.MCPServers) != 3 {
+		t.Fatalf("expected 3 servers, got %d", len(merged.MCPServers))
+	}
+	// "keep" preserved
+	if merged.MCPServers[0].URL != "http://keep" {
+		t.Errorf("keep URL = %q", merged.MCPServers[0].URL)
+	}
+	// "override" replaced
+	if merged.MCPServers[1].URL != "http://new" {
+		t.Errorf("override URL = %q", merged.MCPServers[1].URL)
+	}
+	// "add" appended
+	if merged.MCPServers[2].Name != "add" {
+		t.Errorf("add name = %q", merged.MCPServers[2].Name)
+	}
+}
+
+func TestDeepMerge_AgentsMergeByName(t *testing.T) {
+	global := Config{Agents: []AgentConfig{
+		{Name: "keep", URL: "http://keep"},
+		{Name: "override", URL: "http://old", Model: "old-model"},
+	}}
+	local := Config{Agents: []AgentConfig{
+		{Name: "override", URL: "http://new", Model: "new-model"},
+	}}
+	merged := DeepMerge(global, local)
+	if len(merged.Agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(merged.Agents))
+	}
+	if merged.Agents[1].Model != "new-model" {
+		t.Errorf("override model = %q", merged.Agents[1].Model)
+	}
+}
+
+func TestDeepMerge_RulesOverride(t *testing.T) {
+	global := Config{Rules: Rules{EscalateAboveTokens: 2000, ClassifierFallback: "local"}}
+	local := Config{Rules: Rules{ClassifierFallback: "claude"}}
+	merged := DeepMerge(global, local)
+	if merged.Rules.ClassifierFallback != "claude" {
+		t.Errorf("expected claude, got %q", merged.Rules.ClassifierFallback)
+	}
+	if merged.Rules.EscalateAboveTokens != 2000 {
+		t.Errorf("expected 2000 preserved, got %d", merged.Rules.EscalateAboveTokens)
+	}
+}
+
+func TestDeepMerge_NilSlicesKeepGlobal(t *testing.T) {
+	global := Config{MCPServers: []MCPServerConfig{{Name: "s1"}}, Agents: []AgentConfig{{Name: "a1"}}}
+	local := Config{} // nil slices
+	merged := DeepMerge(global, local)
+	if len(merged.MCPServers) != 1 {
+		t.Errorf("expected 1 MCP server preserved, got %d", len(merged.MCPServers))
+	}
+	if len(merged.Agents) != 1 {
+		t.Errorf("expected 1 agent preserved, got %d", len(merged.Agents))
+	}
+}
+
+// --- LoadWithLocal tests ---
+
+func TestLoadWithLocal_NoLocalConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MILK_CONFIG", filepath.Join(dir, "config.json"))
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"agent":"global"}`), 0o644)
+
+	// Ensure no .milk dir in cwd (use temp dir as cwd).
+	orig, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(orig)
+
+	global, local, merged, hasLocal, err := LoadWithLocal()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hasLocal {
+		t.Error("expected hasLocal=false")
+	}
+	if global.Agent != "global" {
+		t.Errorf("global agent = %q", global.Agent)
+	}
+	if local.Agent != "" {
+		t.Errorf("expected empty local, got agent %q", local.Agent)
+	}
+	if merged.Agent != "global" {
+		t.Errorf("merged agent = %q", merged.Agent)
+	}
+}
+
+func TestLoadWithLocal_WithLocalOverride(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	os.WriteFile(globalPath, []byte(`{"agent":"global","context_budget_chars":5000}`), 0o644)
+	t.Setenv("MILK_CONFIG", globalPath)
+
+	// Create .milk/config.json in a subdir, then chdir there.
+	localDir := filepath.Join(dir, "project")
+	milkDir := filepath.Join(localDir, ".milk")
+	os.MkdirAll(milkDir, 0o700)
+	os.WriteFile(filepath.Join(milkDir, "config.json"), []byte(`{"agent":"local","context_budget_chars":8000}`), 0o644)
+
+	orig, _ := os.Getwd()
+	os.Chdir(localDir)
+	defer os.Chdir(orig)
+
+	global, local, merged, hasLocal, err := LoadWithLocal()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasLocal {
+		t.Error("expected hasLocal=true")
+	}
+	if global.Agent != "global" {
+		t.Errorf("global agent = %q", global.Agent)
+	}
+	if local.Agent != "local" {
+		t.Errorf("local agent = %q", local.Agent)
+	}
+	if merged.Agent != "local" {
+		t.Errorf("merged agent = %q", merged.Agent)
+	}
+	if merged.ContextBudgetChars != 8000 {
+		t.Errorf("merged context_budget = %d", merged.ContextBudgetChars)
+	}
+}
+
+func TestLoadWithLocal_LocalPartialOverride(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	os.WriteFile(globalPath, []byte(`{"agent":"global","context_budget_chars":5000,"colorization":"balanced"}`), 0o644)
+	t.Setenv("MILK_CONFIG", globalPath)
+
+	localDir := filepath.Join(dir, "project")
+	milkDir := filepath.Join(localDir, ".milk")
+	os.MkdirAll(milkDir, 0o700)
+	// Only override agent, leave rest to inherit.
+	os.WriteFile(filepath.Join(milkDir, "config.json"), []byte(`{"agent":"local"}`), 0o644)
+
+	orig, _ := os.Getwd()
+	os.Chdir(localDir)
+	defer os.Chdir(orig)
+
+	_, _, merged, hasLocal, err := LoadWithLocal()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasLocal {
+		t.Error("expected hasLocal=true")
+	}
+	if merged.Agent != "local" {
+		t.Errorf("merged agent = %q", merged.Agent)
+	}
+	if merged.ContextBudgetChars != 5000 {
+		t.Errorf("expected inherited 5000, got %d", merged.ContextBudgetChars)
+	}
+	if merged.Colorization != "balanced" {
+		t.Errorf("expected inherited balanced, got %q", merged.Colorization)
+	}
+}
+
+// --- SaveLocal tests ---
+
+func TestSaveLocal_CreatesDirAndFile(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(orig)
+
+	cfg := Config{Agent: "local-agent"}
+	if err := SaveLocal(cfg); err != nil {
+		t.Fatalf("SaveLocal: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".milk", "config.json"))
+	if err != nil {
+		t.Fatalf("read local config: %v", err)
+	}
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Agent != "local-agent" {
+		t.Errorf("agent = %q", got.Agent)
+	}
+}
+
+func TestSaveScope_Local(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(orig)
+
+	cfg := Config{Agent: "scoped"}
+	if err := SaveScope(cfg, "local"); err != nil {
+		t.Fatalf("SaveScope local: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".milk", "config.json")); err != nil {
+		t.Fatal("local config file not created")
+	}
+}

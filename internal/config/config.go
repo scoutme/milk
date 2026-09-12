@@ -12,6 +12,324 @@ import (
 	"github.com/scoutme/milk/internal/loop"
 )
 
+// LocalConfigDir is the name of the per-project config directory relative to cwd.
+// When present, its config.json is deep-merged over the global config.
+const LocalConfigDir = ".milk"
+
+// LocalConfigPath returns the absolute path to the local config file
+// (.milk/config.json relative to the current working directory), or an
+// error if cwd cannot be determined. The path is returned regardless of
+// whether the file exists — callers should os.Stat it.
+func LocalConfigPath() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolving cwd for local config: %w", err)
+	}
+	return filepath.Join(cwd, LocalConfigDir, "config.json"), nil
+}
+
+// HasLocalConfig reports whether a local config file exists in the current
+// working directory. Used to decide whether to show the scope prompt.
+func HasLocalConfig() bool {
+	p, err := LocalConfigPath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
+// SaveLocal writes the given Config as the local (.milk/config.json) config
+// file, creating the directory if needed. Unlike Save(), this does NOT write
+// the backup — local configs are project-scoped and don't need the global
+// recovery mechanism.
+func SaveLocal(cfg Config) error {
+	p, err := LocalConfigPath()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o600)
+}
+
+// DeepMerge merges src into dst using the following rules:
+//   - Scalar fields in src overwrite dst when non-zero (int != 0, string != "", bool == true)
+//   - Pointer fields in src overwrite dst when non-nil
+//   - Slice fields in src replace dst entirely (except MCPServers and Agents which merge by name)
+//   - Nested structs are merged recursively
+//
+// The merge is applied in-place to dst and dst is returned.
+func DeepMerge(dst, src Config) Config {
+	// Scalar overrides
+	if src.Agent != "" {
+		dst.Agent = src.Agent
+	}
+	if src.EscalationAgent != "" {
+		dst.EscalationAgent = src.EscalationAgent
+	}
+	if src.DefaultRoute != "" {
+		dst.DefaultRoute = src.DefaultRoute
+	}
+	if src.Colorization != "" {
+		dst.Colorization = src.Colorization
+	}
+	if src.ContextBudgetChars != 0 {
+		dst.ContextBudgetChars = src.ContextBudgetChars
+	}
+	if src.MemoryReinjectionTurns != 0 {
+		dst.MemoryReinjectionTurns = src.MemoryReinjectionTurns
+	}
+	if src.MemoryReinjectionBytes != 0 {
+		dst.MemoryReinjectionBytes = src.MemoryReinjectionBytes
+	}
+	if src.PerceptInjectMax != 0 {
+		dst.PerceptInjectMax = src.PerceptInjectMax
+	}
+	if src.PerceptInjectMaxBytes != 0 {
+		dst.PerceptInjectMaxBytes = src.PerceptInjectMaxBytes
+	}
+	if src.PerceptStoreMax != 0 {
+		dst.PerceptStoreMax = src.PerceptStoreMax
+	}
+	if src.LocalMemoryResultMaxBytes != 0 {
+		dst.LocalMemoryResultMaxBytes = src.LocalMemoryResultMaxBytes
+	}
+	if src.LocalMemoryReinjectionTurns != 0 {
+		dst.LocalMemoryReinjectionTurns = src.LocalMemoryReinjectionTurns
+	}
+	if src.LocalMemoryReinjectionBytes != 0 {
+		dst.LocalMemoryReinjectionBytes = src.LocalMemoryReinjectionBytes
+	}
+	if src.LocalContextBudgetChars != 0 {
+		dst.LocalContextBudgetChars = src.LocalContextBudgetChars
+	}
+	if src.LocalMaxToolIterations != 0 {
+		dst.LocalMaxToolIterations = src.LocalMaxToolIterations
+	}
+	if src.ReturningFreshStartLocalTurns != 0 {
+		dst.ReturningFreshStartLocalTurns = src.ReturningFreshStartLocalTurns
+	}
+	if src.NeedExpiryHours != 0 {
+		dst.NeedExpiryHours = src.NeedExpiryHours
+	}
+	if src.MaxBackgroundAgents != 0 {
+		dst.MaxBackgroundAgents = src.MaxBackgroundAgents
+	}
+	if src.BackgroundAgentTimeoutMinutes != 0 {
+		dst.BackgroundAgentTimeoutMinutes = src.BackgroundAgentTimeoutMinutes
+	}
+
+	// Bool overrides (true = override)
+	if src.DebugCLILog {
+		dst.DebugCLILog = true
+	}
+	if src.DebugLocalLog {
+		dst.DebugLocalLog = true
+	}
+	if src.DebugSubprocessLog {
+		dst.DebugSubprocessLog = true
+	}
+	if src.AWSAuthRefresh {
+		dst.AWSAuthRefresh = true
+	}
+	if src.ExperimentalPermissionManagement {
+		dst.ExperimentalPermissionManagement = true
+	}
+	if src.ExperimentalLazyHistoryManagement {
+		dst.ExperimentalLazyHistoryManagement = true
+	}
+	if src.DirectBash {
+		dst.DirectBash = true
+	}
+
+	// Pointer overrides
+	if src.ShowReasoning != nil {
+		dst.ShowReasoning = src.ShowReasoning
+	}
+	if src.StickyEscalation != nil {
+		dst.StickyEscalation = src.StickyEscalation
+	}
+	if src.PerceptRelevanceGate != nil {
+		dst.PerceptRelevanceGate = src.PerceptRelevanceGate
+	}
+	if src.UpdateCheck != nil {
+		dst.UpdateCheck = src.UpdateCheck
+	}
+	if src.UpdateChannel != "" {
+		dst.UpdateChannel = src.UpdateChannel
+	}
+	if src.UpdateSkippedVersion != "" {
+		dst.UpdateSkippedVersion = src.UpdateSkippedVersion
+	}
+	if src.UpdateLastCheck != "" {
+		dst.UpdateLastCheck = src.UpdateLastCheck
+	}
+
+	// Slice overrides (replace when non-nil)
+	if src.ConfigEditors != nil {
+		dst.ConfigEditors = src.ConfigEditors
+	}
+	if src.DirectBashAllow != nil {
+		dst.DirectBashAllow = src.DirectBashAllow
+	}
+	if src.AgentTools != nil {
+		dst.AgentTools = src.AgentTools
+	}
+
+	// Rules — deep merge sub-struct
+	dst.Rules = mergeRules(dst.Rules, src.Rules)
+
+	// Otel — deep merge sub-struct
+	dst.Otel = mergeOtel(dst.Otel, src.Otel)
+
+	// LoopDetection — pointer sub-struct override
+	if src.LoopDetection != nil {
+		dst.LoopDetection = src.LoopDetection
+	}
+
+	// RemoteOversight — pointer sub-struct override
+	if src.RemoteOversight != nil {
+		dst.RemoteOversight = src.RemoteOversight
+	}
+
+	// MCPServers — merge by name
+	if src.MCPServers != nil {
+		dst.MCPServers = mergeMCPServers(dst.MCPServers, src.MCPServers)
+	}
+
+	// Agents — merge by name
+	if src.Agents != nil {
+		dst.Agents = mergeAgents(dst.Agents, src.Agents)
+	}
+
+	return dst
+}
+
+func mergeRules(dst, src Rules) Rules {
+	if src.EscalateAboveTokens != 0 {
+		dst.EscalateAboveTokens = src.EscalateAboveTokens
+	}
+	if src.LocalBelowTokens != 0 {
+		dst.LocalBelowTokens = src.LocalBelowTokens
+	}
+	if src.EscalateThreshold != 0 {
+		dst.EscalateThreshold = src.EscalateThreshold
+	}
+	if src.LocalThreshold != 0 {
+		dst.LocalThreshold = src.LocalThreshold
+	}
+	if src.LocalVerbWeight != 0 {
+		dst.LocalVerbWeight = src.LocalVerbWeight
+	}
+	if src.EscalateVerbWeight != 0 {
+		dst.EscalateVerbWeight = src.EscalateVerbWeight
+	}
+	if src.PathRefWeight != 0 {
+		dst.PathRefWeight = src.PathRefWeight
+	}
+	if src.CodeBlockWeight != 0 {
+		dst.CodeBlockWeight = src.CodeBlockWeight
+	}
+	if src.OpenQuestionWeight != 0 {
+		dst.OpenQuestionWeight = src.OpenQuestionWeight
+	}
+	if src.ClassifierFallback != "" {
+		dst.ClassifierFallback = src.ClassifierFallback
+	}
+	if src.EscalateKeywords != nil {
+		dst.EscalateKeywords = src.EscalateKeywords
+	}
+	if src.LocalVerbs != nil {
+		dst.LocalVerbs = src.LocalVerbs
+	}
+	if src.EscalateVerbs != nil {
+		dst.EscalateVerbs = src.EscalateVerbs
+	}
+	if src.OpenQuestionPrefixes != nil {
+		dst.OpenQuestionPrefixes = src.OpenQuestionPrefixes
+	}
+	return dst
+}
+
+func mergeOtel(dst, src OtelConfig) OtelConfig {
+	if src.Enabled != dst.Enabled {
+		// Only override if explicitly set; false is zero-value so we
+		// check the parent struct instead — Otel overrides always apply.
+		dst.Enabled = src.Enabled
+	}
+	if src.LogLevel != "" {
+		dst.LogLevel = src.LogLevel
+	}
+	if src.LogFormat != "" {
+		dst.LogFormat = src.LogFormat
+	}
+	if src.LogContext {
+		dst.LogContext = true
+	}
+	if src.Traces != dst.Traces {
+		dst.Traces = src.Traces
+	}
+	if src.Metrics != dst.Metrics {
+		dst.Metrics = src.Metrics
+	}
+	if src.WarnMB != 0 {
+		dst.WarnMB = src.WarnMB
+	}
+	if src.MaxMB != 0 {
+		dst.MaxMB = src.MaxMB
+	}
+	if src.MetricsFlushMinutes != 0 {
+		dst.MetricsFlushMinutes = src.MetricsFlushMinutes
+	}
+	if src.DebugLogMaxBytes != 0 {
+		dst.DebugLogMaxBytes = src.DebugLogMaxBytes
+	}
+	if src.DebugLogMaxFiles != 0 {
+		dst.DebugLogMaxFiles = src.DebugLogMaxFiles
+	}
+	return dst
+}
+
+// mergeMCPServers merges two MCP server lists by name: entries in src with a
+// matching name in dst replace the dst entry; new names are appended.
+func mergeMCPServers(dst, src []MCPServerConfig) []MCPServerConfig {
+	idx := make(map[string]int, len(dst))
+	for i, s := range dst {
+		idx[s.Name] = i
+	}
+	for _, s := range src {
+		if i, ok := idx[s.Name]; ok {
+			dst[i] = s
+		} else {
+			dst = append(dst, s)
+		}
+	}
+	return dst
+}
+
+// mergeAgents merges two agent lists by name, same logic as mergeMCPServers.
+func mergeAgents(dst, src []AgentConfig) []AgentConfig {
+	idx := make(map[string]int, len(dst))
+	for i, a := range dst {
+		idx[a.Name] = i
+	}
+	for _, a := range src {
+		if i, ok := idx[a.Name]; ok {
+			dst[i] = a
+		} else {
+			dst = append(dst, a)
+		}
+	}
+	return dst
+}
+
 type Rules struct {
 	// Hard thresholds (conclusive)
 	EscalateAboveTokens int      `json:"escalate_above_tokens"`
@@ -1497,6 +1815,47 @@ func HistoryPath(cwd string) (string, error) {
 	return filepath.Join(histDir, hash+".txt"), nil
 }
 
+// LoadWithLocal returns the global config, the local config (if any), and the
+// merged result. The local config takes priority via DeepMerge. If no local
+// config exists, merged == global. All three are returned so callers can
+// display source annotations (config show --sources).
+func LoadWithLocal() (global, local, merged Config, hasLocal bool, err error) {
+	// Load global config (handles MILK_CONFIG env override, defaults, backup).
+	merged, err = Load()
+	if err != nil {
+		return merged, Config{}, merged, false, err
+	}
+	global = merged
+
+	// Check for local config.
+	localPath, pathErr := LocalConfigPath()
+	if pathErr != nil {
+		return global, Config{}, global, false, nil
+	}
+	localData, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return global, Config{}, global, false, nil
+		}
+		return global, Config{}, global, false, fmt.Errorf("reading local config %s: %w", localPath, readErr)
+	}
+
+	local = defaults()
+	if parseErr := json.Unmarshal(localData, &local); parseErr != nil {
+		return global, Config{}, global, false, fmt.Errorf("parsing local config %s: %w", localPath, parseErr)
+	}
+
+	merged = DeepMerge(global, local)
+	return global, local, merged, true, nil
+}
+
+// LoadMerged is a convenience wrapper that returns only the merged config.
+// Equivalent to the old Load() behavior but with local overlay support.
+func LoadMerged() (Config, error) {
+	_, _, merged, _, err := LoadWithLocal()
+	return merged, err
+}
+
 func Load() (Config, error) {
 	if p := os.Getenv("MILK_CONFIG"); p != "" {
 		return LoadFrom(p)
@@ -1824,6 +2183,17 @@ func (c Config) LoopDetectionCfg() loop.Config {
 		}
 	}
 	return cfg
+}
+
+// SaveScope writes the config to the specified scope.
+// scope = "global" writes to ~/.milk/config.json (default).
+// scope = "local"  writes to .milk/config.json in cwd.
+// Any other value falls back to global.
+func SaveScope(cfg Config, scope string) error {
+	if scope == "local" {
+		return SaveLocal(cfg)
+	}
+	return Save(cfg)
 }
 
 func Save(cfg Config) error {
