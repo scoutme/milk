@@ -93,3 +93,42 @@ func TestSaveLocalOrGlobal_WithLocalConfig_WritesLocal(t *testing.T) {
 		t.Error("did not expect the global config.json to be written")
 	}
 }
+
+// TestSaveConfigForScope_GlobalScope_DoesNotCreateLocalConfig is a regression
+// test for a bug live-testing caught: every CLI config-mutating command
+// called ensureLocalConfig() unconditionally after resolving scope, so even
+// an explicit --global save created a stray .milk/config.json in cwd — which
+// then silently flipped every later command's scope default to "local".
+// saveConfigForScope must only create the local file when scope == "local".
+func TestSaveConfigForScope_GlobalScope_DoesNotCreateLocalConfig(t *testing.T) {
+	home, cwd := withSandboxedConfigDirs(t)
+
+	if err := saveConfigForScope(config.Config{Agent: "global-agent"}, "global"); err != nil {
+		t.Fatalf("saveConfigForScope: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".milk")); err == nil {
+		t.Error("a --global save must not create .milk/ in the current directory")
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".milk", "config.json"))
+	if err != nil {
+		t.Fatalf("expected global config.json to be written: %v", err)
+	}
+	if !strings.Contains(string(data), `"global-agent"`) {
+		t.Errorf("expected global config.json to contain the saved agent name, got %q", data)
+	}
+}
+
+func TestSaveConfigForScope_LocalScope_CreatesLocalConfig(t *testing.T) {
+	_, cwd := withSandboxedConfigDirs(t)
+
+	if err := saveConfigForScope(config.Config{Agent: "local-agent"}, "local"); err != nil {
+		t.Fatalf("saveConfigForScope: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(cwd, ".milk", "config.json"))
+	if err != nil {
+		t.Fatalf("expected local config.json to be written: %v", err)
+	}
+	if !strings.Contains(string(data), `"local-agent"`) {
+		t.Errorf("expected local config.json to contain the saved agent name, got %q", data)
+	}
+}

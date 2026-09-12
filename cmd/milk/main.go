@@ -1730,10 +1730,7 @@ func runInitWizard() error {
 	} else {
 		scope = promptLocalOrGlobal()
 	}
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
@@ -1887,10 +1884,7 @@ func runConfigMCPRemove(name string) error {
 		return fmt.Errorf("MCP server %q not found", name)
 	}
 	scope := promptScopeIfNeeded()
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	fmt.Printf("MCP server %q removed (saved to %s)\n", name, scope)
@@ -1916,10 +1910,7 @@ func runConfigMCPAdd(inline string) error {
 	updated := config.UpsertMCPServer(&cfg, sc)
 	printConfigWarnings(cfg)
 	scope := promptScopeIfNeeded()
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "added"
@@ -1949,10 +1940,7 @@ func runConfigMCPAssign(serverName, agentName string, assign bool) error {
 		return nil
 	}
 	scope := promptScopeIfNeeded()
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "assigned to"
@@ -2002,10 +1990,7 @@ func runConfigAgentRemove(name string) error {
 		return fmt.Errorf("no agent named %q", name)
 	}
 	scope := promptScopeIfNeeded()
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	fmt.Printf("agent %q removed (saved to %s)\n", removed, scope)
@@ -2034,10 +2019,7 @@ func runConfigAgentAdd(inline string) error {
 	}
 	printConfigWarnings(cfg)
 	scope := promptScopeIfNeeded()
-	if err := ensureLocalConfig(); err != nil {
-		return err
-	}
-	if err := config.SaveScope(cfg, scope); err != nil {
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	fmt.Printf("agent %q added (saved to %s)\n", ac.Name, scope)
@@ -2078,6 +2060,21 @@ func promptLocalOrGlobal() string {
 		}
 	}
 	return "local"
+}
+
+// saveConfigForScope persists cfg to an already-resolved scope ("local" or
+// "global"), creating the local config file first if (and only if) the scope
+// is local. Every CLI config-mutating command must go through this rather
+// than calling ensureLocalConfig unconditionally — doing so previously
+// created a stray .milk/config.json in cwd even on a --global save, which
+// then silently flipped every later command's scope default to "local".
+func saveConfigForScope(cfg config.Config, scope string) error {
+	if scope == "local" {
+		if err := ensureLocalConfig(); err != nil {
+			return err
+		}
+	}
+	return config.SaveScope(cfg, scope)
 }
 
 // ensureLocalConfig creates .milk/config.json with a minimal empty object if
