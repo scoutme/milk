@@ -28,6 +28,12 @@ var agentToolNameRE = regexp.MustCompile(`[^a-z0-9]+`)
 const errMemUnavailable = "memory store not available"
 const errTaskUnavailable = "task store not available"
 
+// maxReadLines is the default cap for read_file when no limit is given.
+// Matches MiMo-Code's DEFAULT_READ_LIMIT (2000) — large enough that a model
+// reads a whole file (or a substantial window of one) in a single call
+// instead of paging through it in small, iteration-burning slices.
+const maxReadLines = 2000
+
 // TaskStore is the subset of the tasks.Store interface used by the local agent.
 // Defined here to avoid an import cycle between internal/agent/local and internal/tasks.
 type TaskStore interface {
@@ -178,13 +184,13 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 			"type": "function",
 			"function": map[string]any{
 				"name":        "read_file",
-				"description": "Read the contents of a file, optionally with offset and limit.",
+				"description": fmt.Sprintf("Read the contents of a file. By default returns up to %d lines from the start (or from offset, if given). Avoid tiny repeated slices (e.g. 20-30 line chunks) to explore a file — read a larger window, or the whole file, up front; use offset/limit only to page through a file that exceeds the default.", maxReadLines),
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":   map[string]any{"type": "string", "description": "Absolute or relative file path"},
 						"offset": map[string]any{"type": "integer", "description": "Line offset to start reading from (0-based)"},
-						"limit":  map[string]any{"type": "integer", "description": "Maximum number of lines to return"},
+						"limit":  map[string]any{"type": "integer", "description": fmt.Sprintf("Maximum number of lines to return (default %d)", maxReadLines)},
 					},
 					"required": []string{"path"},
 				},
@@ -1122,8 +1128,6 @@ func runReadFile(args map[string]any) (string, bool) {
 	}
 
 	lines := strings.Split(string(data), "\n")
-
-	const maxReadLines = 500
 
 	offset := 0
 	if v, ok := args["offset"]; ok {

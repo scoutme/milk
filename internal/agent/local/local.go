@@ -1178,6 +1178,14 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		maxIter = defaultMaxToolIterations
 	}
 	for i := 0; i < maxIter; i++ {
+		if i == maxIter-1 && !a.workflowRole {
+			// Last allowed iteration: force a real closing summary instead of
+			// silently exhausting the budget. Without this, every max-iteration
+			// hit falls through to the mechanical tool-trail dump below with no
+			// model-authored explanation at all.
+			msgs = append(msgs, Message{Role: "user", Content: maxIterSummaryReminder})
+			tools = nil
+		}
 		resp, fallbackRaw, toolCalls, emptyFallback, reasoningText, err := a.streamCompletion(ctx, msgs, tools, out)
 		if err != nil {
 			return msgs, err
