@@ -24,6 +24,7 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tags"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 const inferenceScope = "github.com/scoutme/milk"
@@ -1392,6 +1393,38 @@ func backgroundSystemPrompt(cwd string) string {
 	return base + "\n\nWorking directory: " + cwd
 }
 
+// runBackgroundTaskWithRetry wraps RunBackgroundTask with the same transient
+// network/stream-error retry (HTTP/2 stream reset or GOAWAY) that ordinary
+// turns and tool-agent calls already get via workflow.IsRetryableTurnError —
+// without it, a background job (which streams to io.Discard, invisibly, and
+// may have been running for minutes) was permanently lost to a single
+// upstream hiccup instead of silently retrying through it like every other
+// call site of this same error class.
+func (a *Agent) runBackgroundTaskWithRetry(ctx context.Context, cwd, task string) (string, session.TokenUsage, error) {
+	return retryBackgroundTask(ctx, a.model, func() (string, session.TokenUsage, error) {
+		return a.RunBackgroundTask(ctx, cwd, task, io.Discard)
+	})
+}
+
+// retryBackgroundTask is runBackgroundTaskWithRetry's retry loop, factored
+// out as a closure-taking function (mirroring cmd/milk's retryToolCall) so
+// the retry behavior itself is testable without a real HTTP/2 stream error.
+func retryBackgroundTask(ctx context.Context, model string, fn func() (string, session.TokenUsage, error)) (string, session.TokenUsage, error) {
+	for attempt := 0; ; attempt++ {
+		result, tokens, err := fn()
+		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
+			return result, tokens, err
+		}
+		obs.Warn("background job: transient error, retrying",
+			"model", model, "attempt", attempt+1, "max_attempts", workflow.MaxTurnRetries, "err", err)
+		select {
+		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-ctx.Done():
+			return "", tokens, ctx.Err()
+		}
+	}
+}
+
 // RunBackgroundTask runs a scoped, stateless background job spawned via the
 // spawn_background_agent tool (ADR-0043): a fresh tool loop with no session
 // recording and no memory/percept injection. Depth is capped at 1 — the
@@ -1792,7 +1825,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		role := agentRoleForMetrics(a.escalationName)
 		job := a.backgroundManager.Spawn(args.Label, args.Task, role, a.model,
 			func(jobCtx context.Context) (string, session.TokenUsage, error) {
-				return a.RunBackgroundTask(jobCtx, cwd, args.Task, io.Discard)
+				return a.runBackgroundTaskWithRetry(jobCtx, cwd, args.Task)
 			})
 		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
