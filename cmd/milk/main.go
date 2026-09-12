@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,8 @@ var (
 	flagDrop       bool
 	flagAgent      string // --agent: override primary agent name
 	flagEscalation string // --escalation-agent: override escalation agent name
+	flagLocal      bool   // --local: write to .milk/config.json (project-local)
+	flagGlobal     bool   // --global: write to ~/.milk/config.json (global)
 )
 
 // Set via -ldflags at build time.
@@ -1719,12 +1722,27 @@ func runInitWizard() error {
 	}
 
 	cfg := config.InitConfig(primary, escalation)
-	if err := config.Save(cfg); err != nil {
+	scope := "global"
+	if flagLocal {
+		scope = "local"
+	} else if flagGlobal {
+		scope = "global"
+	} else {
+		scope = promptLocalOrGlobal()
+	}
+	if err := ensureLocalConfig(); err != nil {
+		return err
+	}
+	if err := config.SaveScope(cfg, scope); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
+	scopeLabel := "~/.milk/config.json"
+	if scope == "local" {
+		scopeLabel = ".milk/config.json"
+	}
 	fmt.Println()
-	fmt.Println("config written to ~/.milk/config.json")
+	fmt.Printf("config written to %s\n", scopeLabel)
 	fmt.Println()
 	fmt.Println("next steps:")
 	fmt.Println("  milk               — start the TUI")
@@ -1752,6 +1770,9 @@ var configCmd = &cobra.Command{
 }
 
 func init() {
+	configCmd.PersistentFlags().BoolVar(&flagLocal, "local", false, "Write to .milk/config.json in the current directory (project-local)")
+	configCmd.PersistentFlags().BoolVar(&flagGlobal, "global", false, "Write to ~/.milk/config.json (global default)")
+
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "init",
 		Short: "Interactive setup wizard — configure primary and escalation agents",
@@ -1764,6 +1785,13 @@ func init() {
 		Short: "Open config in $EDITOR or system default editor",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConfigOpen()
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show merged config with field source annotations (global/local/default)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigShow()
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
@@ -1858,10 +1886,14 @@ func runConfigMCPRemove(name string) error {
 	if !removeMCPServer(&cfg, name) {
 		return fmt.Errorf("MCP server %q not found", name)
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := ensureLocalConfig(); err != nil {
 		return err
 	}
-	fmt.Printf("MCP server %q removed\n", name)
+	if err := config.SaveScope(cfg, scope); err != nil {
+		return err
+	}
+	fmt.Printf("MCP server %q removed (saved to %s)\n", name, scope)
 	return nil
 }
 
@@ -1883,14 +1915,18 @@ func runConfigMCPAdd(inline string) error {
 	}
 	updated := config.UpsertMCPServer(&cfg, sc)
 	printConfigWarnings(cfg)
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := ensureLocalConfig(); err != nil {
+		return err
+	}
+	if err := config.SaveScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "added"
 	if updated {
 		verb = "updated"
 	}
-	fmt.Printf("MCP server %q %s — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, sc.Name)
+	fmt.Printf("MCP server %q %s (saved to %s) — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, scope, sc.Name)
 	return nil
 }
 
@@ -1912,14 +1948,18 @@ func runConfigMCPAssign(serverName, agentName string, assign bool) error {
 		}
 		return nil
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := ensureLocalConfig(); err != nil {
+		return err
+	}
+	if err := config.SaveScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "assigned to"
 	if !assign {
 		verb = "unassigned from"
 	}
-	fmt.Printf("MCP server %q %s agent %q\n", serverName, verb, agentName)
+	fmt.Printf("MCP server %q %s agent %q (saved to %s)\n", serverName, verb, agentName, scope)
 	return nil
 }
 
@@ -1961,10 +2001,14 @@ func runConfigAgentRemove(name string) error {
 	case agentRemoveNotFound:
 		return fmt.Errorf("no agent named %q", name)
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := ensureLocalConfig(); err != nil {
 		return err
 	}
-	fmt.Printf("agent %q removed\n", removed)
+	if err := config.SaveScope(cfg, scope); err != nil {
+		return err
+	}
+	fmt.Printf("agent %q removed (saved to %s)\n", removed, scope)
 	return nil
 }
 
@@ -1989,32 +2033,180 @@ func runConfigAgentAdd(inline string) error {
 		cfg.Agent = ac.Name
 	}
 	printConfigWarnings(cfg)
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := ensureLocalConfig(); err != nil {
 		return err
 	}
-	fmt.Printf("agent %q added\n", ac.Name)
+	if err := config.SaveScope(cfg, scope); err != nil {
+		return err
+	}
+	fmt.Printf("agent %q added (saved to %s)\n", ac.Name, scope)
 	return nil
 }
 
-func runConfigPrint() error {
-	dir, err := config.Dir()
+// resolveSaveScope determines whether to save to local or global config.
+// Priority: --local/--global flags > interactive prompt (if local config exists) > global default.
+func resolveSaveScope() string {
+	if flagLocal {
+		return "local"
+	}
+	if flagGlobal {
+		return "global"
+	}
+	if config.HasLocalConfig() {
+		return promptLocalOrGlobal()
+	}
+	return "global"
+}
+
+// promptScopeIfNeeded returns a scope string. When a local config exists and
+// no --local/--global flag was passed, it prompts the user.
+// Used by config-mutating commands (mcp add/remove, agent add/remove, init).
+func promptScopeIfNeeded() string {
+	return resolveSaveScope()
+}
+
+// promptLocalOrGlobal asks the user whether to apply a config change to the
+// local project config or the global config. Defaults to local (Y).
+func promptLocalOrGlobal() string {
+	fmt.Print("Apply to local? [Y/n] ")
+	sc := bufio.NewScanner(os.Stdin)
+	if sc.Scan() {
+		answer := strings.TrimSpace(strings.ToLower(sc.Text()))
+		if answer == "n" || answer == "no" {
+			return "global"
+		}
+	}
+	return "local"
+}
+
+// ensureLocalConfig creates .milk/config.json with a minimal empty object if
+// it doesn't exist yet. Called after the user answers "Y" to the scope prompt
+// but no local config file is present.
+func ensureLocalConfig() error {
+	p, err := config.LocalConfigPath()
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if _, err := os.Stat(p); err == nil {
+		return nil // already exists
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte("{}\n"), 0o600)
+}
+
+func runConfigPrint() error {
+	// Show merged config (global + local) with a note if local overrides exist.
+	_, _, merged, hasLocal, err := config.LoadWithLocal()
 	if err != nil {
 		return err
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return err
+	}
+	if hasLocal {
+		fmt.Fprintln(os.Stderr, "# merged config (global + local overrides)")
 	}
 	fmt.Println(string(data))
 	return nil
 }
 
-func runConfigOpen() error {
-	dir, err := config.Dir()
+// runConfigShow prints the merged config with per-field source annotations
+// showing whether each value comes from "local", "global", or "default".
+func runConfigShow() error {
+	global, local, merged, hasLocal, err := config.LoadWithLocal()
 	if err != nil {
 		return err
 	}
-	cfgPath := filepath.Join(dir, "config.json")
+	if !hasLocal {
+		fmt.Fprintln(os.Stderr, "no local config (.milk/config.json) — all values are global")
+		data, err := json.MarshalIndent(global, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	// Marshal all three to raw JSON maps for field-by-field comparison.
+	globalRaw, _ := json.Marshal(global)
+	localRaw, _ := json.Marshal(local)
+	mergedRaw, _ := json.Marshal(merged)
+
+	var gMap, lMap, mMap map[string]json.RawMessage
+	json.Unmarshal(globalRaw, &gMap)
+	json.Unmarshal(localRaw, &lMap)
+	json.Unmarshal(mergedRaw, &mMap)
+
+	// Build annotated output: for each field in merged, determine source.
+	// Order: local fields first, then global-only fields, then defaults.
+	seen := make(map[string]bool)
+	var lines []string
+
+	for key, val := range mMap {
+		seen[key] = true
+		source := "default"
+		if _, inLocal := lMap[key]; inLocal {
+			source = "local"
+		} else if _, inGlobal := gMap[key]; inGlobal {
+			source = "global"
+		}
+		lines = append(lines, fmt.Sprintf("  // [%s] %s: %s", source, key, string(val)))
+	}
+
+	sort.Strings(lines)
+	fmt.Fprintln(os.Stderr, "# merged config — field sources: [local] [global] [default]")
+	fmt.Fprintln(os.Stderr, "# local overrides global; unset fields fall back to global, then defaults")
+	fmt.Println("{")
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	fmt.Println("}")
+
+	// Also print the full merged JSON for machine consumption.
+	fmt.Fprintln(os.Stderr)
+	fullData, _ := json.MarshalIndent(merged, "", "  ")
+	fmt.Println(string(fullData))
+	return nil
+}
+
+func runConfigOpen() error {
+	// Determine which config file to open:
+	// --local  → .milk/config.json (create if missing)
+	// --global → ~/.milk/config.json
+	// default  → local if exists, else global
+	cfgPath := ""
+	if flagLocal {
+		p, err := config.LocalConfigPath()
+		if err != nil {
+			return err
+		}
+		if err := ensureLocalConfig(); err != nil {
+			return err
+		}
+		cfgPath = p
+	} else if flagGlobal {
+		dir, err := config.Dir()
+		if err != nil {
+			return err
+		}
+		cfgPath = filepath.Join(dir, "config.json")
+	} else if config.HasLocalConfig() {
+		p, err := config.LocalConfigPath()
+		if err != nil {
+			return err
+		}
+		cfgPath = p
+	} else {
+		dir, err := config.Dir()
+		if err != nil {
+			return err
+		}
+		cfgPath = filepath.Join(dir, "config.json")
+	}
 
 	// Load config to check for config_editors override.
 	cfg, _ := config.Load()
@@ -2050,6 +2242,12 @@ func runConfigOpen() error {
 	if editorCmd == "" {
 		return fmt.Errorf("no editor found — set $EDITOR or configure config_editors in config")
 	}
+
+	// If opening local config that inherits from global, print a helpful note.
+	if config.HasLocalConfig() && cfgPath != filepath.Join(func() string { d, _ := config.Dir(); return d }(), "config.json") {
+		fmt.Fprintf(os.Stderr, "opening local config (inherits unset fields from global)\n")
+	}
+
 	cmd := exec.Command(editorCmd, append(editorArgs, cfgPath)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
