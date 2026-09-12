@@ -821,7 +821,7 @@ func execColorize(sub string, st *interactiveState) string {
 		return fmt.Sprintf("%s unknown mode %q — valid values: off, fenced, balanced, full (experimental)", milkTag(), sub)
 	}
 	st.cfg.Colorization = sub
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s set colorization to %s (config save failed: %v)", milkTag(), bold(sub), err)
 	}
 	return fmt.Sprintf("%s colorization set to %s", milkTag(), bold(sub))
@@ -1089,7 +1089,7 @@ func execAgentToolEnable(toolName, scope string, st *interactiveState) string {
 			st.cfg.Agents[acIdx].Tools[idx].Enabled = &t
 		}
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s enabled %q (config save failed: %v)", milkTag(), toolName, err)
 	}
 	return fmt.Sprintf("%s tool-agent %q enabled", milkTag(), toolName)
@@ -1127,7 +1127,7 @@ func execAgentToolDisable(toolName, scope string, st *interactiveState) string {
 			st.cfg.Agents[acIdx].Tools[idx].Enabled = &f
 		}
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s disabled %q (config save failed: %v)", milkTag(), toolName, err)
 	}
 	return fmt.Sprintf("%s tool-agent %q disabled", milkTag(), toolName)
@@ -1172,7 +1172,7 @@ func execAgentToolAdd(toolName, scope, rest string, st *interactiveState) string
 		}
 		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s added tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
 	}
 	return fmt.Sprintf("%s tool-agent %q added", milkTag(), toolName)
@@ -1201,7 +1201,7 @@ func execAgentToolRemove(toolName, scope string, st *interactiveState) string {
 		}
 		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools[:idx], st.cfg.Agents[acIdx].Tools[idx+1:]...)
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s removed tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
 	}
 	return fmt.Sprintf("%s tool-agent %q removed", milkTag(), toolName)
@@ -1441,7 +1441,7 @@ func execMCPAdd(rest string, st *interactiveState) string {
 		Timeout:   fields["timeout"],
 	}
 	updated := config.UpsertMCPServer(&st.cfg, entry)
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s added MCP server %q (config save failed: %v)", milkTag(), name, err)
 	}
 	verb := "added"
@@ -1479,7 +1479,7 @@ func execMCPRemove(name string, st *interactiveState) string {
 	if !removeMCPServer(&st.cfg, name) {
 		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s removed MCP server %q (config save failed: %v)", milkTag(), name, err)
 	}
 	return fmt.Sprintf("%s MCP server %q removed", milkTag(), name)
@@ -1496,7 +1496,7 @@ func execMCPSetEnabled(name string, enabled bool, st *interactiveState) string {
 	if !enabled {
 		verb = "disabled"
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s %s MCP server %q (config save failed: %v)", milkTag(), verb, name, err)
 	}
 	return fmt.Sprintf("%s MCP server %q %s", milkTag(), name, verb)
@@ -1620,7 +1620,7 @@ func execMCPAssign(rest string, assign bool, st *interactiveState) string {
 		}
 		return fmt.Sprintf("%s MCP server %q not assigned to agent %q", milkTag(), serverName, agentName)
 	}
-	if err := config.Save(st.cfg); err != nil {
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
 		return fmt.Sprintf("%s %sed %q for agent %q (config save failed: %v)", milkTag(), verb, serverName, agentName, err)
 	}
 	if assign {

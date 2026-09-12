@@ -1855,7 +1855,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Record last-check time so we don't spam on every startup.
 		cfg := m.st.cfg
 		cfg.UpdateLastCheck = time.Now().UTC().Format(time.RFC3339)
-		_ = config.Save(cfg)
+		_ = config.SaveScope(cfg, preferredSaveScope())
 		m.st.cfg = cfg
 		return m, nil
 

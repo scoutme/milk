@@ -255,7 +255,7 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	if isFirst {
 		m.st.cfg.Agent = ac.Name
 	}
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -674,7 +674,7 @@ func (m model) commitAddMCP(sc config.MCPServerConfig) model {
 	if updated {
 		verb = "updated"
 	}
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -1192,7 +1192,7 @@ func (m model) commitInitWizard(st *initWizardState) model {
 			Description: "Specialist agent. Describe its capabilities here.",
 		})
 	}
-	if err := config.Save(cfg); err != nil {
+	if err := saveLocalOrGlobal(cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -1401,7 +1401,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 		if m.st.sess != nil {
 			m.st.sess.RepetitionBaselineLocalTurns = m.st.sess.UserTurnCount()
 		}
-		if err := config.Save(m.st.cfg); err != nil {
+		if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
 		}
 
@@ -1478,7 +1478,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 
 	case "escalation":
 		m.st.cfg.EscalationAgent = name
-		if err := config.Save(m.st.cfg); err != nil {
+		if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 			m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
 		}
 		escAC := applyFreshAWSCreds(m.st.cfg, m.st.cfg.EscalationAgentConfig())

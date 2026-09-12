@@ -469,7 +469,7 @@ func (m model) setTelegramEnabled(on bool) model {
 	} else {
 		ro.Backend = ""
 	}
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -503,7 +503,7 @@ func (m model) commitTelegramSetup(token string, chatID int64) model {
 	ro.Telegram.ChatID = chatID
 	m.st.cfg.RemoteOversight = ro
 
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -808,6 +808,29 @@ func removeAgentConfig(cfg *config.Config, name string) (outcome agentRemoveOutc
 	return agentRemoveOK, removed
 }
 
+// preferredSaveScope returns the save scope for TUI config changes.
+// In the TUI we cannot prompt stdin (Bubble Tea owns the terminal), so the
+// scope is auto-detected: save to local if .milk/config.json exists, else global.
+// When saving to local, ensures the .milk/ directory and config file exist.
+func preferredSaveScope() string {
+	if config.HasLocalConfig() {
+		return "local"
+	}
+	return "global"
+}
+
+// saveLocalOrGlobal saves config using the TUI auto-detected scope.
+// If the scope is local, ensures the .milk/config.json file exists first.
+func saveLocalOrGlobal(cfg config.Config) error {
+	scope := preferredSaveScope()
+	if scope == "local" {
+		if err := ensureLocalConfig(); err != nil {
+			return fmt.Errorf("creating local config: %w", err)
+		}
+	}
+	return config.SaveScope(cfg, scope)
+}
+
 // execAgentRemove removes the named agent from config.
 // Refuses if the agent is currently active as primary or escalation.
 func execAgentRemove(name string, st *interactiveState) string {
@@ -822,7 +845,7 @@ func execAgentRemove(name string, st *interactiveState) string {
 	case agentRemoveNotFound:
 		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
 	default:
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
@@ -854,7 +877,7 @@ func execBash(sub string, st *interactiveState) string {
 			}
 		}
 		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow, prefix)
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s added %q to direct_bash_allow", milkTag(), prefix)
@@ -874,7 +897,7 @@ func execBash(sub string, st *interactiveState) string {
 			return fmt.Sprintf("%s %q not found in allow list", milkTag(), prefix)
 		}
 		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow[:idx], st.cfg.DirectBashAllow[idx+1:]...)
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s removed %q from direct_bash_allow", milkTag(), prefix)
@@ -1150,7 +1173,7 @@ func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		cfg := m.st.cfg
 		cfg.UpdateSkippedVersion = m.pendingUpdate.Tag
-		_ = config.Save(cfg)
+		_ = saveLocalOrGlobal(cfg)
 		m.st.cfg = cfg
 		m.pendingUpdate = nil
 		m.appendTranscript(milkTag() + " update skipped\n")

@@ -2402,7 +2402,7 @@ func runOtelDebug(enable bool) error {
 	cfg.DebugCLILog = enable
 	cfg.DebugLocalLog = enable
 	cfg.DebugSubprocessLog = enable
-	if err := config.Save(cfg); err != nil {
+	if err := config.SaveScope(cfg, resolveSaveScope()); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
