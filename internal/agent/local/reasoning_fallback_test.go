@@ -218,6 +218,46 @@ func TestRun_MaxToolIterationsExceeded_PreservesToolTrail(t *testing.T) {
 	}
 }
 
+// TestRun_MaxToolIterationsExceeded_WorkflowRoleSkipsForcedSummary verifies
+// that workflow-step executors are excluded from the forced-summary behavior
+// (like the other intra-turn loop detectors, gated by a.workflowRole): the
+// workflow interpreter handles recovery for these at a higher level, so
+// tools must stay enabled through the last iteration and the mechanical
+// tool-trail dump remains the only fallback.
+func TestRun_MaxToolIterationsExceeded_WorkflowRoleSkipsForcedSummary(t *testing.T) {
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"tools"`) {
+			t.Errorf("expected tools to remain enabled for a workflow-role agent, even on the last iteration")
+		}
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc%d","function":{"name":"read_file","arguments":"{\"path\":\"/nonexistent/file%d.css\"}"}}]}}]}`+"\n\n", n, n)
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 3})
+	agent.workflowRole = true
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "keep going", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if !strings.Contains(last.Content, "turn ended without a final summary") {
+		t.Errorf("expected the mechanical tool-trail fallback for a workflow-role agent, got %q", last.Content)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("expected exactly MaxToolIterations (3) completion calls, got %d", calls.Load())
+	}
+}
+
 // TestRun_MaxToolIterationsExceeded_ForcesModelSummary verifies that on the
 // last allowed iteration, tools are dropped from the request and the model
 // is given the chance to produce its own closing summary instead of the turn
