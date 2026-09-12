@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,32 @@ func TestReadFile_OffsetAndLimit(t *testing.T) {
 	}
 	if strings.Contains(result, `4\td`) {
 		t.Error("limit=2 should stop before line d")
+	}
+}
+
+func TestReadFile_DefaultLimitCapsAtMaxReadLines(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "big.txt")
+	var b strings.Builder
+	total := maxReadLines + 500
+	for i := 1; i <= total; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	os.WriteFile(f, []byte(b.String()), 0o600)
+	// The trailing "\n" after the last line produces one extra empty element
+	// when the file content is split on "\n" — the truncation notice reports
+	// that raw line count, not the number of non-empty lines written.
+	splitLines := total + 1
+
+	result, _ := dispatchTool(context.Background(), "read_file", `{"path":"`+f+`"}`, nil, nil, "", nil)
+	if !strings.Contains(result, fmt.Sprintf(`%d\tline%d`, maxReadLines, maxReadLines)) {
+		t.Errorf("expected the default read to reach line %d, got %q", maxReadLines, result)
+	}
+	if strings.Contains(result, fmt.Sprintf(`%d\tline%d`, maxReadLines+1, maxReadLines+1)) {
+		t.Errorf("expected the default read to stop at %d lines, got %q", maxReadLines, result)
+	}
+	if !strings.Contains(result, fmt.Sprintf("showed lines 1-%d of %d", maxReadLines, splitLines)) {
+		t.Errorf("expected a truncation notice naming the default cap, got %q", result)
 	}
 }
 
