@@ -157,7 +157,7 @@ milk [flags] <prompt>         # single-prompt mode
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
-**Panel commands:** `/panel memory`, `/panel workflow`, `/panel tasks` — see [docs/operations.md](operations.md) and [docs/workflows.md](workflows.md#the-native-workflow-engine).
+**Panel commands:** `/panel memory`, `/panel tasks`, `/panel background`, `/panel workflow` (also F1-F4) — see [docs/operations.md — Keyboard shortcuts](operations.md#keyboard-shortcuts) and [docs/workflows.md](workflows.md#the-native-workflow-engine).
 
 **/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses; `off` (default) re-enables per-tool prompting. Alone, shows current state. A red warning banner appears at startup if already on via config.
 
