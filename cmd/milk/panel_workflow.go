@@ -17,7 +17,7 @@ func buildWorkflowPanelLines(st *workflow.State, inner int) []string {
 	add := func(ss ...string) { lines = append(lines, ss...) }
 
 	// Title row (matches memory panel style)
-	add(stylePanelTitle.Render(truncatePanel(" workflow", inner)))
+	add(panelTitleLine(" workflow", regionWorkflow, inner))
 	add("")
 
 	switch {

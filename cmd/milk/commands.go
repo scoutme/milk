@@ -135,7 +135,7 @@ func (m *model) refreshSessionScopedState(oldSessionID string) error {
 			return taskErr
 		}
 		if m.st.program != nil {
-			taskStore.SetOnChange(func() { m.st.program.Send(memoryRefreshMsg{}) })
+			taskStore.SetOnChange(func() { m.st.program.Send(taskStoreChangedMsg{}) })
 		}
 		m.taskStore = taskStore
 		adapter := tasks.NewAdapter(taskStore)
@@ -1256,8 +1256,12 @@ func (m model) handleHistoryCmd(sub string) model {
 }
 
 func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
+	if m.panelManualOverride == nil {
+		m.panelManualOverride = map[panelRegion]bool{}
+	}
 	switch sub {
 	case "memory":
+		m.panelManualOverride[regionMemory] = true
 		m.panelMemory = !m.panelMemory
 		m.refreshPrompt()
 		m.syncLayout()
@@ -1270,6 +1274,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		return m, tick
 	case "tasks":
+		m.panelManualOverride[regionTasks] = true
 		m.panelTasks = !m.panelTasks
 		m.refreshPrompt()
 		m.syncLayout()
@@ -1280,6 +1285,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "workflow":
+		m.panelManualOverride[regionWorkflow] = true
 		m.workflowPanelOpen = !m.workflowPanelOpen
 		m.syncLayout()
 		if m.workflowPanelOpen {
@@ -1289,6 +1295,7 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "background":
+		m.panelManualOverride[regionBackground] = true
 		m.panelBackground = !m.panelBackground
 		m.syncLayout()
 		if m.panelBackground {

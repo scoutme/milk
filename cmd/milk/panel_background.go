@@ -32,7 +32,7 @@ func buildBackgroundPanelLines(jobs []local.Job, inner int) []string {
 	var lines []string
 	addLine := func(s string) { lines = append(lines, s) }
 
-	addLine(stylePanelTitle.Render("background agents"))
+	addLine(panelTitleLine("background agents", regionBackground, inner))
 	addLine("")
 
 	if len(jobs) == 0 {
