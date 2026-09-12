@@ -111,7 +111,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadMerged()
 	startupWarning := ""
 	if err != nil {
 		var recovered *config.ErrConfigRecovered

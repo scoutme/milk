@@ -3493,10 +3493,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	// Start a config watcher so the TUI updates automatically when config.json
-	// changes on disk (e.g. the user edits it in another terminal).
+	// changes on disk (e.g. the user edits it in another terminal). The dual
+	// watcher monitors both the global config and any local .milk/config.json,
+	// deep-merging them on every change.
 	if cfgDir, cfgDirErr := config.Dir(); cfgDirErr == nil {
 		cfgPath := cfgDir + "/config.json"
-		watcher, watchErr := config.NewWatcher(cfgPath, func(newCfg config.Config, err error) {
+		localPath, _ := config.LocalConfigPath()
+		watcher, watchErr := config.NewDualWatcher(cfgPath, localPath, func(newCfg config.Config, err error) {
 			p.Send(configReloadMsg{cfg: newCfg, err: err})
 		})
 		if watchErr == nil {
