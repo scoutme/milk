@@ -39,7 +39,6 @@ const (
 	// small enough that non-looping progress from earlier in a long turn
 	// survives the crop.
 	streakMaxSpan = 64
-
 )
 
 // recoveryNudgeMild is injected as a user message when a streak is first
