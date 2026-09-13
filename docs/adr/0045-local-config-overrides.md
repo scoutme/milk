@@ -62,15 +62,11 @@ one exists, it is loaded as today. If both exist, they are **deep-merged**:
 - **Local (`<cwd>/.milk/config.json`) takes priority** over global for every
   field that is explicitly set (non-zero, non-nil).
 - Fields absent from local fall through to global.
-- Arrays (`agents`, `mcp_servers`, `agent_tools`) use **replace semantics**:
-  if the local config defines `agents`, it replaces the global `agents` list
-  entirely (same as Claude Code's project-settings model). This avoids
-  confusing merge-by-name semantics for complex nested objects. Users who want
-  to extend rather than replace can copy the global entry into local and edit.
-  - Exception: `mcp_servers` uses **merge-by-name** — a local entry whose
-    `name` matches a global entry replaces it; new local names are appended.
-    This is the natural expectation: a project adds its own MCP servers
-    without losing the user's global ones.
+- Arrays (`agents`, `mcp_servers`, `agent_tools`) use **merge-by-name**:
+  if the local config defines an `agents` entry whose `name` matches a global
+  entry, the local entry replaces it; new local names are appended. Same for
+  `mcp_servers`. This lets projects override specific agents or add
+  project-specific ones without losing the user's global definitions.
 - Scalar fields, nested objects (`rules`, `otel`, `loop_detection`), and
   pointer fields (`show_reasoning`, `sticky_escalation`) are deep-merged:
   local overrides only the fields it explicitly sets.
@@ -249,8 +245,8 @@ the result back to local on save. This was rejected for several reasons:
 - Two config files to reason about in bug reports ("which config am I
   actually using?"). A `milk config show --sources` command that annotates
   each field with its origin (global / local / default) mitigates this.
-- Array replace semantics for `agents` may surprise users who expect
-  extension. The documentation must be explicit about this.
+- Merge-by-name semantics for `agents` may surprise users who expect full
+  replacement. The documentation must be explicit about this.
 - `config open` shows only the local file, not the merged result. Users must
   understand inheritance ("fields not set here are inherited from global").
   `milk config show` with the merged view mitigates this.
