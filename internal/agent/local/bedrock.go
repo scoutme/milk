@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 // --- Bedrock Converse API request/response types ---
@@ -292,6 +294,11 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
+		obs.Warn("inference request failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName), "provider", "bedrock",
+			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return "", "", nil, false, "", fmt.Errorf("bedrock unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -302,6 +309,11 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			attribute.String("model", a.model),
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
+		)
+		obs.Warn("inference request returned non-200",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName), "provider", "bedrock",
+			"status", httpResp.StatusCode, "body", string(b),
+			"elapsed", time.Since(inferenceStart).String(),
 		)
 		return "", "", nil, false, "", fmt.Errorf("bedrock error %d: %s", httpResp.StatusCode, b)
 	}
@@ -314,6 +326,37 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	toolBlocks := map[int]*partialTC{}
 	var textBuf strings.Builder
 
+	// See the matching comment in scanSSE (local.go) — same observability gap
+	// (a mid-stream read failure returning bare, an idle-but-open connection
+	// looking identical to dead silence), same fix, adapted to Bedrock's
+	// event-stream framing (readBedrockEvent) instead of bufio.Scanner lines.
+	streamStartedAt := time.Now()
+	var events atomic.Int64
+	var lastEventAtNano atomic.Int64
+	lastEventAtNano.Store(streamStartedAt.UnixNano())
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(streamIdleLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				idle := time.Since(time.Unix(0, lastEventAtNano.Load()))
+				if idle >= streamIdleLogInterval {
+					obs.Warn("stream idle",
+						"model", a.model, "agent", agentRoleForMetrics(a.escalationName), "provider", "bedrock",
+						"events_read", events.Load(),
+						"elapsed_since_start", time.Since(streamStartedAt).String(),
+						"elapsed_since_last_chunk", idle.String(),
+					)
+				}
+			}
+		}
+	}()
+	defer close(heartbeatDone)
+
 	done := false
 	for !done {
 		eventType, payload, err := readBedrockEvent(httpResp.Body)
@@ -321,8 +364,19 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
+			obs.Warn("stream read failed",
+				"model", a.model, "agent", agentRoleForMetrics(a.escalationName), "provider", "bedrock",
+				"err", err.Error(),
+				"events_read", events.Load(),
+				"elapsed_since_start", time.Since(streamStartedAt).String(),
+				"elapsed_since_last_chunk", time.Since(time.Unix(0, lastEventAtNano.Load())).String(),
+				"content_bytes", textBuf.Len(),
+				"retryable", workflow.IsRetryableTurnError(err),
+			)
 			return "", "", nil, false, "", fmt.Errorf("bedrock stream: %w", err)
 		}
+		events.Add(1)
+		lastEventAtNano.Store(time.Now().UnixNano())
 
 		switch eventType {
 		case "contentBlockStart":
@@ -373,6 +427,12 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 		default:
 			// exception variants — surface them as errors
 			if strings.Contains(eventType, "Exception") || strings.Contains(eventType, "exception") {
+				obs.Warn("stream exception event",
+					"model", a.model, "agent", agentRoleForMetrics(a.escalationName), "provider", "bedrock",
+					"event_type", eventType, "payload", string(payload),
+					"events_read", events.Load(),
+					"elapsed_since_start", time.Since(streamStartedAt).String(),
+				)
 				return "", "", nil, false, "", fmt.Errorf("bedrock %s: %s", eventType, string(payload))
 			}
 		}

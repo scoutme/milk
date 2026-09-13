@@ -3,6 +3,7 @@ package local
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -154,5 +155,45 @@ func TestScanSSE_NgramCutsStreamForNonWorkflowRole(t *testing.T) {
 	wantLen := len(strings.Repeat(cycle, 10))
 	if len(reasoningText) >= wantLen {
 		t.Errorf("expected the stream to be cut short before all %d chars arrived, got %d chars", wantLen, len(reasoningText))
+	}
+}
+
+// errAfterReader emits the wrapped reader's bytes, then returns a caller-
+// supplied error in place of the expected io.EOF — simulating a mid-stream
+// connection failure (RST_STREAM, GOAWAY, drop) instead of a clean stream end.
+type errAfterReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errAfterReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		return n, e.err
+	}
+	return n, err
+}
+
+// TestScanSSE_PropagatesMidStreamReadError verifies that a read failure after
+// some real data has already streamed (the RST_STREAM/INTERNAL_ERROR case
+// live-observed against a real provider) still surfaces via scanner.Err(),
+// unaffected by the observability instrumentation (heartbeat goroutine,
+// line/byte counters) added around the scan loop.
+func TestScanSSE_PropagatesMidStreamReadError(t *testing.T) {
+	sse := `data: {"choices":[{"delta":{"content":"partial answer"}}]}` + "\n"
+	wantErr := errors.New("stream error: stream ID 39; INTERNAL_ERROR; received from peer")
+	r := &errAfterReader{r: strings.NewReader(sse), err: wantErr}
+
+	a := &Agent{}
+	scanner := bufio.NewScanner(r)
+	det := NewStreamDetector(ToolFormatUnknown)
+	var textBuf strings.Builder
+
+	_, _, _, _, _, _, _, err := a.scanSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected scanSSE to propagate the underlying read error, got %v", err)
+	}
+	if textBuf.String() != "partial answer" {
+		t.Errorf("expected the content received before the failure to still be accumulated, got %q", textBuf.String())
 	}
 }

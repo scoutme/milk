@@ -9,11 +9,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 // responsesRequest is the request body for the OpenAI Responses API (/v1/responses).
@@ -145,6 +147,11 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
+		obs.Warn("inference request failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return "", "", nil, false, "", fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -155,6 +162,11 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 			attribute.String("model", a.model),
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
+		)
+		obs.Warn("inference request returned non-200",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"status", httpResp.StatusCode, "body", string(b),
+			"elapsed", time.Since(inferenceStart).String(),
 		)
 		return "", "", nil, false, "", fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
@@ -213,7 +225,41 @@ func (a *Agent) scanResponsesSSE(
 ) ([]toolCall, int64, int64, int64, error) {
 	dbg := a.debugLog
 	var promptTokens, completionTokens, cacheRead int64
+
+	// See the matching comment in scanSSE (local.go) — same observability gap,
+	// same fix: a mid-stream read failure used to return bare from
+	// scanner.Err() with no trace in milk.log, and an idle-but-open connection
+	// looked identical to dead silence in the log for however long it hung.
+	streamStartedAt := time.Now()
+	var lines atomic.Int64
+	var lastLineAtNano atomic.Int64
+	lastLineAtNano.Store(streamStartedAt.UnixNano())
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(streamIdleLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
+				if idle >= streamIdleLogInterval {
+					obs.Warn("stream idle",
+						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+						"lines_scanned", lines.Load(),
+						"elapsed_since_start", time.Since(streamStartedAt).String(),
+						"elapsed_since_last_chunk", idle.String(),
+					)
+				}
+			}
+		}
+	}()
+	defer close(heartbeatDone)
+
 	for scanner.Scan() {
+		lines.Add(1)
+		lastLineAtNano.Store(time.Now().UnixNano())
 		line := scanner.Text()
 		if dbg != nil {
 			fmt.Fprintln(dbg, line) //nolint:errcheck
@@ -260,8 +306,24 @@ func (a *Agent) scanResponsesSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		obs.Warn("stream read failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(),
+			"lines_scanned", lines.Load(),
+			"elapsed_since_start", time.Since(streamStartedAt).String(),
+			"elapsed_since_last_chunk", time.Since(time.Unix(0, lastLineAtNano.Load())).String(),
+			"content_bytes", textBuf.Len(),
+			"tool_call_fragments", len(partialTools),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return nil, 0, 0, 0, err
 	}
+	obs.Debug("stream read completed",
+		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		"lines_scanned", lines.Load(),
+		"elapsed", time.Since(streamStartedAt).String(),
+		"content_bytes", textBuf.Len(),
+	)
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -30,6 +31,13 @@ import (
 const inferenceScope = "github.com/scoutme/milk"
 
 const defaultMaxToolIterations = 20
+
+// streamIdleLogInterval is how often scanSSE's heartbeat goroutine checks
+// whether the stream has gone idle (no new SSE line) and, if so, logs it.
+// Chosen well under the ~10+ minute hangs observed in practice so a live
+// tail of milk.log shows a hang happening in near-real-time instead of going
+// silent for the whole duration.
+const streamIdleLogInterval = 20 * time.Second
 
 // EscalationSignal is returned when the local model requests escalation to the escalation agent.
 type EscalationSignal struct {
@@ -2303,6 +2311,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
+		obs.Warn("inference request failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -2313,6 +2326,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("model", a.model),
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
+		)
+		obs.Warn("inference request returned non-200",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"status", httpResp.StatusCode, "body", string(b),
+			"elapsed", time.Since(inferenceStart).String(),
 		)
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
@@ -2455,7 +2473,49 @@ func (a *Agent) scanSSE(
 	var promptTokens, completionTokens, cacheRead, imageTokens int64
 	var reasoningBuf strings.Builder
 	var finishReason string
+	// Tracked purely for observability: a mid-stream read failure (RST_STREAM,
+	// GOAWAY, connection drop) previously returned bare from scanner.Err()
+	// with zero trace in milk.log — the only place it ever became visible was
+	// whatever user-facing text a much later caller happened to print. lines
+	// and lastLineAt let the WARN below say exactly how far the stream got and
+	// how long it had gone quiet before failing, instead of just "it broke".
+	streamStartedAt := time.Now()
+	var lines atomic.Int64
+	var lastLineAtNano atomic.Int64
+	lastLineAtNano.Store(streamStartedAt.UnixNano())
+
+	// Heartbeat: scanner.Scan() blocks silently while the connection is open
+	// but idle (the exact case a hung stream looks like — no error, no data,
+	// nothing in the log to distinguish it from a normal long completion).
+	// Log periodically once idle time crosses the interval so a live tail of
+	// milk.log shows the hang happening, instead of going dead silent for the
+	// whole duration and only saying anything once it finally resolves.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(streamIdleLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
+				if idle >= streamIdleLogInterval {
+					obs.Warn("stream idle",
+						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+						"lines_scanned", lines.Load(),
+						"elapsed_since_start", time.Since(streamStartedAt).String(),
+						"elapsed_since_last_chunk", idle.String(),
+					)
+				}
+			}
+		}
+	}()
+	defer close(heartbeatDone)
+
 	for scanner.Scan() {
+		lines.Add(1)
+		lastLineAtNano.Store(time.Now().UnixNano())
 		line := scanner.Text()
 		if dbg != nil {
 			fmt.Fprintln(dbg, line) //nolint:errcheck
@@ -2519,8 +2579,27 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		obs.Warn("stream read failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(),
+			"lines_scanned", lines.Load(),
+			"elapsed_since_start", time.Since(streamStartedAt).String(),
+			"elapsed_since_last_chunk", time.Since(time.Unix(0, lastLineAtNano.Load())).String(),
+			"content_bytes", textBuf.Len(),
+			"reasoning_bytes", reasoningBuf.Len(),
+			"tool_call_fragments", len(partialTools),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return nil, 0, 0, 0, 0, "", "", err
 	}
+	obs.Debug("stream read completed",
+		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		"lines_scanned", lines.Load(),
+		"elapsed", time.Since(streamStartedAt).String(),
+		"content_bytes", textBuf.Len(),
+		"reasoning_bytes", reasoningBuf.Len(),
+		"finish_reason", finishReason,
+	)
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 

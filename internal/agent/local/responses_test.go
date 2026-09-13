@@ -2,6 +2,7 @@ package local
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -282,5 +283,30 @@ func TestInferenceURL_ResponsesAPIDefaultsToResponsesPath(t *testing.T) {
 	want := "http://localhost:8080/v1/responses"
 	if got := a.inferenceURL(); got != want {
 		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// TestScanResponsesSSE_PropagatesMidStreamReadError mirrors
+// TestScanSSE_PropagatesMidStreamReadError (scansse_test.go) for the
+// Responses API scan loop — a read failure after real data has already
+// streamed must still surface via scanner.Err(), unaffected by the
+// observability instrumentation (heartbeat goroutine, line counters) added
+// around the scan loop.
+func TestScanResponsesSSE_PropagatesMidStreamReadError(t *testing.T) {
+	sse := `data: {"type":"response.output_text.delta","delta":"partial","output_index":0}` + "\n"
+	wantErr := errors.New("stream error: stream ID 39; INTERNAL_ERROR; received from peer")
+	r := &errAfterReader{r: strings.NewReader(sse), err: wantErr}
+
+	a := &Agent{}
+	scanner := bufio.NewScanner(r)
+	det := NewStreamDetector(ToolFormatUnknown)
+	var textBuf strings.Builder
+
+	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected scanResponsesSSE to propagate the underlying read error, got %v", err)
+	}
+	if textBuf.String() != "partial" {
+		t.Errorf("expected the content received before the failure to still be accumulated, got %q", textBuf.String())
 	}
 }
