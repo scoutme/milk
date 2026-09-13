@@ -287,6 +287,18 @@ type busyHintClearMsg struct{}
 // quitPendingClearMsg clears the "press ctrl+c again to exit" hint.
 type quitPendingClearMsg struct{}
 
+// dragResetMsg fires when the mouse-drag safety timeout expires.  If the
+// terminal's MouseActionRelease event was dropped (pointer drifted outside
+// reported viewport bounds between frames), mode 1002 stays enabled and
+// wheel-scroll stops working.  The timeout — scheduled on press, rescheduled
+// on every motion, cancelled on release — detects this condition and resets
+// the terminal to mode 1000 (basic tracking, reliable wheel).
+//
+// Each scheduling call increments the generation counter; a stale message
+// (generation mismatch) is ignored so that a timeout from an earlier motion
+// cannot reset the mode while the user is still actively dragging.
+type dragResetMsg struct{ gen uint64 }
+
 // memoryRefreshMsg fires on a periodic tick to redraw the memory panel.
 type memoryRefreshMsg struct{}
 
@@ -628,12 +640,14 @@ type model struct {
 	promptWidth int
 
 	// click-to-select state (content-space coordinates; -1 = none)
-	selAnchorLine int
-	selAnchorCol  int
-	selEndLine    int
-	selEndCol     int
-	selDragging   bool   // true once the mouse has moved after the initial press
-	selText       string // plain text of the selected range (populated after release)
+	selAnchorLine    int
+	selAnchorCol     int
+	selEndLine       int
+	selEndCol        int
+	selDragging      bool   // true once the mouse has moved after the initial press
+	selText          string // plain text of the selected range (populated after release)
+	dragResetPending bool   // true while a drag-timeout cmd is outstanding
+	dragResetGen     uint64 // generation counter; stale dragResetMsgs are ignored
 
 	// click-to-select state for the memory/workflow side panels (panel-local
 	// coordinates; -1 = none). Kept separate from the transcript selection above
@@ -1117,6 +1131,7 @@ func setMouseDragMode(dragging bool) {
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
 	region, regionX := m.regionAt(ev.X)
+	var dragCmd tea.Cmd // set by press/motion; returned at the end
 	switch ev.Button {
 	case tea.MouseButtonWheelUp:
 		if p := m.panelOffsetPtr(region); p != nil {
@@ -1155,6 +1170,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.selText = m.selectionText()
 				m.setViewportContent()
 				setMouseDragMode(true)
+				m.dragResetPending = true
+				m.dragResetGen++
+				dragCmd = dragResetCmd(m.dragResetGen)
 				break
 			}
 			m.clearPanelSelection()
@@ -1166,14 +1184,20 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.selText = ""
 			m.setViewportContent()
 			setMouseDragMode(true)
+			m.dragResetPending = true
+			m.dragResetGen++
+			dragCmd = dragResetCmd(m.dragResetGen)
 		case tea.MouseActionMotion:
 			if m.selAnchorLine >= 0 {
 				m.selDragging = true
 				m.selEndLine = contentLine
 				m.selEndCol = ev.X
 				m.setViewportContent()
+				m.dragResetGen++
+				dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
 			}
 		case tea.MouseActionRelease:
+			m.dragResetPending = false
 			setMouseDragMode(false)
 			if m.selAnchorLine >= 0 {
 				if contentLine == m.selAnchorLine && ev.X == m.selAnchorCol {
@@ -1191,6 +1215,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if ev.Action == tea.MouseActionPress {
 			// A drag whose release was dropped can leave mouse mode stuck at 1002;
 			// any subsequent click reliably arrives, so reset it defensively here.
+			m.dragResetPending = false
 			setMouseDragMode(false)
 			// Finalize any in-progress drag selection that lost its release event
 			// (release can be dropped when pointer drifts outside viewport bounds).
@@ -1232,7 +1257,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	return m, nil
+	return m, dragCmd
 }
 
 // welcomeScreen returns a centered welcome message shown when the transcript is empty.
@@ -1784,6 +1809,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case busyHintClearMsg:
 		m.busyHint = ""
 		m.busySpawnArmed = false
+		return m, nil
+
+	case dragResetMsg:
+		if !m.dragResetPending {
+			return m, nil // already cancelled by a release event
+		}
+		m.dragResetPending = false
+		// The release was dropped — finalize any in-progress selection so the
+		// model state stays consistent, then reset the terminal to basic
+		// mouse tracking (mode 1000) where wheel-scroll works reliably.
+		if m.selAnchorLine >= 0 && m.selDragging && m.selText == "" {
+			m.selText = m.selectionText()
+		}
+		if m.panelSelAnchorLine >= 0 && m.panelSelDragging && m.panelSelText == "" {
+			m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+		}
+		setMouseDragMode(false)
+		m.setViewportContent()
 		return m, nil
 
 	case credRefreshReadyMsg:

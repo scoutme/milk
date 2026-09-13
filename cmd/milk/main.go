@@ -38,6 +38,7 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/shelldetect"
 )
 
 const milkScope = "github.com/scoutme/milk"
@@ -137,6 +138,9 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Wire need expiry config to session package.
 	session.NeedExpiryDuration = time.Duration(cfg.AgentNeedExpiryHours()) * time.Hour
+
+	// Register user-configured shell binaries for the shell-detector heuristic.
+	shelldetect.RegisterBinaries(cfg.ShellBinaries)
 
 	cwd, err := os.Getwd()
 	if err != nil {

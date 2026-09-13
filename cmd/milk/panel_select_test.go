@@ -1,11 +1,34 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/scoutme/milk/internal/workflow"
 )
+
+// dragTestModel returns a model with viewport and textarea properly
+// initialised so that handleMouse → setViewportContent doesn't panic.
+func dragTestModel() *model {
+	ta := buildTextarea()
+	vp := viewport.New(200, 36)
+	return &model{
+		width:              200,
+		height:             40,
+		ready:              true,
+		ta:                 ta,
+		vp:                 vp,
+		selAnchorLine:      -1,
+		selEndLine:         -1,
+		panelSelAnchorLine: -1,
+		panelSelEndLine:    -1,
+		st:                 &interactiveState{},
+		transcript:         &strings.Builder{},
+		transcriptNoThink:  &strings.Builder{},
+	}
+}
 
 // --- panelSelectionText ---
 
@@ -290,6 +313,9 @@ func workflowSelModel() *model {
 		},
 		panelSelAnchorLine: -1,
 		panelSelEndLine:    -1,
+		st:                 &interactiveState{},
+		transcript:         &strings.Builder{},
+		transcriptNoThink:  &strings.Builder{},
 		selAnchorLine:      -1,
 		selEndLine:         -1,
 	}
@@ -445,5 +471,54 @@ func TestHandleMouse_LeftClickRoutesAnySidePanelToHandlePanelMouse(t *testing.T)
 	_ = cmd
 	if m.panelSelRegion != regionTasks {
 		t.Errorf("expected a left click inside the tasks panel to start a tasks selection, got region=%v", m.panelSelRegion)
+	}
+}
+
+func TestDragResetMsg_ClearsDragModeOnTimeout(t *testing.T) {
+	m := dragTestModel()
+
+	// Simulate a click-drag in the transcript viewport.
+	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	_, _ = m.handleMouse(tea.MouseMsg(press))
+	if !m.dragResetPending {
+		t.Fatal("expected dragResetPending after press")
+	}
+
+	// First motion reschedules the timer.
+	motion := tea.MouseEvent{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
+	_, _ = m.handleMouse(tea.MouseMsg(motion))
+	if !m.selDragging {
+		t.Fatal("expected selDragging after motion")
+	}
+
+	// Simulate the release being dropped: the dragResetMsg fires after 500ms.
+	// The handler should finalize the selection and reset the drag state.
+	dm, _ := m.Update(dragResetMsg{})
+	m2 := dm.(model)
+	if m2.dragResetPending {
+		t.Error("expected dragResetPending cleared after timeout")
+	}
+	if m2.selText == "" {
+		t.Error("expected selText to be populated (selection finalized on timeout)")
+	}
+}
+
+func TestDragResetMsg_IgnoredAfterRelease(t *testing.T) {
+	m := dragTestModel()
+
+	// Press → drag → release (normal flow).
+	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	_, _ = m.handleMouse(tea.MouseMsg(press))
+	release := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}
+	_, _ = m.handleMouse(tea.MouseMsg(release))
+	if m.dragResetPending {
+		t.Fatal("expected dragResetPending cleared after release")
+	}
+
+	// Now the delayed dragResetMsg arrives — it should be a no-op.
+	dm, _ := m.Update(dragResetMsg{})
+	m2 := dm.(model)
+	if m2.selText != "" {
+		t.Error("expected no selection finalization — release already handled it")
 	}
 }

@@ -10,6 +10,19 @@ import (
 	"unicode"
 )
 
+// userBinaries holds additional first-token names registered at runtime
+// via RegisterBinaries (e.g. from config "shell_binaries").
+var userBinaries = map[string]bool{}
+
+// RegisterBinaries adds extra first-token names to the set recognised as
+// shell commands. Call once at startup with the agent's ShellBinaries config.
+// Names are lowercased before insertion.
+func RegisterBinaries(names []string) {
+	for _, n := range names {
+		userBinaries[strings.ToLower(n)] = true
+	}
+}
+
 // knownBinaries is the set of first-token names recognised as shell commands.
 var knownBinaries = map[string]bool{
 	"ls":       true,
@@ -198,8 +211,8 @@ func IsShellCommand(input string) (cmd string, ok bool) {
 		return "", false
 	}
 
-	// First token must be a known binary.
-	if !knownBinaries[first] {
+	// First token must be a known or user-registered binary.
+	if !knownBinaries[first] && !userBinaries[first] {
 		return "", false
 	}
 

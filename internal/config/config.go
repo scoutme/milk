@@ -179,6 +179,9 @@ func DeepMerge(dst, src Config) Config {
 	if src.DirectBashAllow != nil {
 		dst.DirectBashAllow = src.DirectBashAllow
 	}
+	if src.ShellBinaries != nil {
+		dst.ShellBinaries = src.ShellBinaries
+	}
 	if src.AgentTools != nil {
 		dst.AgentTools = src.AgentTools
 	}
@@ -956,6 +959,12 @@ type Config struct {
 	// against the first whitespace-delimited token of the input.
 	// Example: ["ls", "git", "docker"]
 	DirectBashAllow []string `json:"direct_bash_allow,omitempty"`
+
+	// ShellBinaries adds extra first-token names to the set recognised as
+	// shell commands by the shell-detector heuristic. Useful for uncommon
+	// binaries that aren't in the default known list.
+	// Example: ["task", "just", "mage"]
+	ShellBinaries []string `json:"shell_binaries,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.
