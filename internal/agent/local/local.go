@@ -244,6 +244,16 @@ type Agent struct {
 	permAsk          func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
 	onOpenFile       func(path string) error         // opens a file in the editor; nil = deny (non-TUI)
 	client           *http.Client
+	// backgroundClient is a separate *http.Client — its own connection pool,
+	// its own auth-wrapper state (token cache, sigv4 credentials) — used for
+	// spawn_background_agent jobs instead of client. Background jobs run
+	// concurrently with the foreground agent and with each other; sharing one
+	// http.Client (and therefore one HTTP/2 connection) between them turned
+	// out to trigger stream resets (INTERNAL_ERROR) against at least one
+	// provider under exactly that concurrency. nil for agents not built via
+	// NewFromConfig (e.g. bare New(), used by tests) — cloneForBackground
+	// falls back to client in that case.
+	backgroundClient *http.Client
 	detectedFormat   ToolFormat         // confirmed format from last tool-bearing turn
 	tokenCmd         *tokenCmdTransport // non-nil when token_cmd is configured; used for eager pre-fetch
 	sigv4            *sigv4Transport    // non-nil for Bedrock; used to wire the onRefresh callback
@@ -565,12 +575,63 @@ func (a *Agent) inferenceURL() string {
 
 // NewFromConfig creates an Agent from an AgentConfig.
 func NewFromConfig(ac config.AgentConfig) *Agent {
-	inner := buildBaseTransport(ac)
-	var transport http.RoundTripper = inner
+	transport, tct, sv4 := buildAgentTransport(ac)
+	// A second, fully independent transport chain — see buildAgentTransport's
+	// doc comment for why backgroundClient can't just share client.
+	bgTransport, _, _ := buildAgentTransport(ac)
 
-	provider := strings.ToLower(strings.TrimSpace(ac.Provider))
-	switch provider {
-	case "bedrock":
+	if strings.ToLower(strings.TrimSpace(ac.Provider)) == "bedrock" {
+		return &Agent{
+			baseURL:          strings.TrimRight(ac.URL, "/"),
+			model:            ac.Model,
+			chatPath:         ac.ChatPath,
+			skipHealthCheck:  true,
+			useBedrockNative: true,
+			client:           &http.Client{Transport: transport},
+			backgroundClient: &http.Client{Transport: bgTransport},
+			sigv4:            sv4,
+			limits:           ac.Limits,
+			systemPromptTier: ac.SystemPromptTier,
+			promptCaching:    ac.PromptCaching,
+			supportsVision:   ac.Vision,
+			maxPayloadBytes:  config.DefaultMaxPayloadBytes,
+		}
+	}
+
+	useResponses := strings.ToLower(strings.TrimSpace(ac.APIFormat)) == "responses"
+	chatPath := ac.ChatPath
+	if useResponses && chatPath == "" {
+		chatPath = "/v1/responses"
+	}
+	return &Agent{
+		baseURL:          strings.TrimRight(ac.URL, "/"),
+		model:            ac.Model,
+		selfName:         ac.Name,
+		chatPath:         chatPath,
+		tokenCmd:         tct,
+		useResponsesAPI:  useResponses,
+		skipHealthCheck:  useResponses, // remote API providers typically have no /health
+		client:           &http.Client{Transport: transport},
+		backgroundClient: &http.Client{Transport: bgTransport},
+		limits:           ac.Limits,
+		systemPromptTier: ac.SystemPromptTier,
+		supportsVision:   ac.Vision,
+		maxPayloadBytes:  config.DefaultMaxPayloadBytes,
+	}
+}
+
+// buildAgentTransport constructs the full RoundTripper chain (base transport
+// plus whatever auth layers ac requires) from scratch. Called twice by
+// NewFromConfig — once for the agent's own client, once for
+// backgroundClient — so each gets its own connection pool and its own
+// auth-wrapper state (token cache, sigv4 credentials) rather than sharing
+// either. sv4 is returned as both the transport (bedrock) and the field
+// Agent.sigv4 needs for WithOnSigV4Refresh; tct is nil for bedrock.
+func buildAgentTransport(ac config.AgentConfig) (transport http.RoundTripper, tct *tokenCmdTransport, sv4 *sigv4Transport) {
+	inner := buildBaseTransport(ac)
+	transport = inner
+
+	if strings.ToLower(strings.TrimSpace(ac.Provider)) == "bedrock" {
 		service := ac.AWSService
 		if service == "" {
 			service = "bedrock"
@@ -598,46 +659,30 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		if region == "" {
 			region = regionFromBedrockURL(ac.URL)
 		}
-		sv4 := &sigv4Transport{
+		sv4 = &sigv4Transport{
 			inner:      inner,
 			region:     region,
 			service:    service,
 			refreshCmd: ac.AWSRefreshCmd,
 			creds:      sigv4Creds{keyID: keyID, secret: secret, token: token},
 		}
-		return &Agent{
-			baseURL:          strings.TrimRight(ac.URL, "/"),
-			model:            ac.Model,
-			chatPath:         ac.ChatPath,
-			skipHealthCheck:  true,
-			useBedrockNative: true,
-			client:           &http.Client{Transport: sv4},
-			sigv4:            sv4,
-			limits:           ac.Limits,
-			systemPromptTier: ac.SystemPromptTier,
-			promptCaching:    ac.PromptCaching,
-			supportsVision:   ac.Vision,
-			maxPayloadBytes:  config.DefaultMaxPayloadBytes,
-		}
-	case "", "local":
-		// plain transport; extra headers may still apply
-	default:
-		// treat as Bearer-token provider (OpenRouter, Together.ai, Groq, GitHub Models, …)
-		//
-		// Azure OpenAI workaround: Azure uses "api-key" header + a non-standard URL path instead
-		// of Bearer auth. Use provider="" or "local", set url to the full deployment endpoint,
-		// and add {"api-key": "<key>"} to headers. A dedicated azure provider with URL
-		// templating is tracked in GitHub Issues.
+		return sv4, nil, sv4
 	}
+	// provider == "", "local", or a Bearer-token provider (OpenRouter,
+	// Together.ai, Groq, GitHub Models, …).
+	//
+	// Azure OpenAI workaround: Azure uses "api-key" header + a non-standard URL path instead
+	// of Bearer auth. Use provider="" or "local", set url to the full deployment endpoint,
+	// and add {"api-key": "<key>"} to headers. A dedicated azure provider with URL
+	// templating is tracked in GitHub Issues.
 
 	// Layer token refresh or static Bearer, then extra headers.
-	var tct *tokenCmdTransport
-	if ac.TokenCmd != "" && provider != "bedrock" {
+	if ac.TokenCmd != "" {
 		// token_cmd takes precedence: use a refreshing transport so short-lived
 		// tokens (e.g. "gh auth token") are re-fetched on 401/403.
 		tct = &tokenCmdTransport{inner: transport, cmd: ac.TokenCmd}
 		transport = tct
-	} else if ac.APIKey != "" && provider != "bedrock" {
+	} else if ac.APIKey != "" {
 		transport = &headerTransport{
 			inner:   transport,
 			headers: map[string]string{"Authorization": "Bearer " + ac.APIKey},
@@ -651,33 +696,17 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		}
 		transport = &headerTransport{inner: transport, headers: headers}
 	}
-
-	useResponses := strings.ToLower(strings.TrimSpace(ac.APIFormat)) == "responses"
-	chatPath := ac.ChatPath
-	if useResponses && chatPath == "" {
-		chatPath = "/v1/responses"
-	}
-	return &Agent{
-		baseURL:          strings.TrimRight(ac.URL, "/"),
-		model:            ac.Model,
-		selfName:         ac.Name,
-		chatPath:         chatPath,
-		tokenCmd:         tct,
-		useResponsesAPI:  useResponses,
-		skipHealthCheck:  useResponses, // remote API providers typically have no /health
-		client:           &http.Client{Transport: transport},
-		limits:           ac.Limits,
-		systemPromptTier: ac.SystemPromptTier,
-		supportsVision:   ac.Vision,
-		maxPayloadBytes:  config.DefaultMaxPayloadBytes,
-	}
+	return transport, tct, nil
 }
 
 // buildBaseTransport returns an http.RoundTripper with TLS configured per ac.
-// Falls back to http.DefaultTransport when no TLS overrides are set.
+// Falls back to a fresh clone of http.DefaultTransport's settings when no TLS
+// overrides are set — never the http.DefaultTransport singleton itself, since
+// that would give every such Agent (and both transports built for one Agent
+// by buildAgentTransport) the same shared connection pool.
 func buildBaseTransport(ac config.AgentConfig) http.RoundTripper {
 	if !ac.TLSSkipVerify && ac.TLSCACert == "" {
-		return http.DefaultTransport
+		return http.DefaultTransport.(*http.Transport).Clone()
 	}
 	tlsCfg := &tls.Config{InsecureSkipVerify: ac.TLSSkipVerify} //nolint:gosec
 	if ac.TLSCACert != "" {
@@ -1507,6 +1536,14 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 // background job spawned from a workflow step still gets full loop
 // detection (it is not itself a workflow step in the interpreter's sense).
 func (a *Agent) cloneForBackground() *Agent {
+	// Use the dedicated background transport chain (own connection pool, own
+	// auth-wrapper state) when available. Falls back to sharing a.client for
+	// agents not built via NewFromConfig (bare New(), used by tests) — those
+	// have no backgroundClient to isolate with in the first place.
+	client := a.backgroundClient
+	if client == nil {
+		client = a.client
+	}
 	return &Agent{
 		baseURL:          a.baseURL,
 		model:            a.model,
@@ -1528,9 +1565,13 @@ func (a *Agent) cloneForBackground() *Agent {
 		// asking: already-granted tools (via the shared permStore above,
 		// or skipPerms) still work; anything else fails fast with a
 		// tool-result error the model can react to, never hangs.
-		client:          a.client, // *http.Client is safe for concurrent use by design
-		tokenCmd:        a.tokenCmd,
-		sigv4:           a.sigv4,
+		client: client,
+		// tokenCmd/sigv4 deliberately NOT copied: they're convenience
+		// pointers to the *foreground* client's auth wrappers, used only for
+		// eager token pre-fetch and wiring the UI refresh callback — neither
+		// is ever called on a background clone, and the wrappers actually
+		// signing the clone's requests live inside backgroundClient's own
+		// transport chain instead.
 		memCfg:          a.memCfg,
 		logContext:      a.logContext,
 		mcpToolSet:      a.mcpToolSet,
