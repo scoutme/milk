@@ -48,6 +48,26 @@ func (e *EscalationSignal) Error() string {
 	return "escalate: " + e.Reason
 }
 
+// WorkflowStartSignal is returned when the model requests milk's native
+// /workflow engine via the start_workflow tool. Mirrors EscalationSignal's
+// pattern exactly: internal/agent/local has no access to the bubbletea model
+// that actually launches a workflow (cmd/milk/workflow_cmd.go), so the tool
+// call can't act itself — it returns this signal, which propagates up
+// through Run() the same way EscalationSignal does, for cmd/milk's dispatch
+// layer to catch and act on. Roles not present in Roles default to
+// "escalation" (matching the interactive /workflow wizard's own blank-input
+// default) — a tool call can't answer wizard prompts, so every role must be
+// resolved one way or another before the workflow can actually launch.
+type WorkflowStartSignal struct {
+	Name  string
+	Task  string
+	Roles map[string]string
+}
+
+func (w *WorkflowStartSignal) Error() string {
+	return "start_workflow: " + w.Name
+}
+
 // ContentPart is one element of a multipart message content array, as used by
 // the OpenAI vision API. A text part carries a string; an image_url part carries
 // a data URI in ImageURL.URL.
@@ -1164,10 +1184,14 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
 	effLimits := a.limits
 	if a.isToolAgent {
-		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+		// Excludes start_workflow alongside escalate for the same reason: a
+		// stateless agent-as-tool call has no session/turn for
+		// WorkflowStartSignal's caller (cmd/milk's dispatch layer) to attach
+		// a launched workflow to.
+		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate", "start_workflow"}}
 		if a.limits != nil {
 			effLimits.IncludedTools = a.limits.IncludedTools
-			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate", "start_workflow")
 		}
 	}
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, effLimits)
@@ -1333,10 +1357,10 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			a.onResponseSegment(resp)
 		}
 
-		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
-		if esc != nil {
-			return msgs, esc
+		var toolErr error
+		msgs, toolErr = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
+		if toolErr != nil {
+			return msgs, toolErr
 		}
 
 		// Invalidate read_file entries for files that were just edited/written.
@@ -1496,10 +1520,15 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 		usage.CacheCreation += cacheCreation
 	}
 
-	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+	// Excludes start_workflow alongside escalate: ADR-0043 caps background
+	// jobs at depth 1 and keeps them self-contained/stateless — spawning a
+	// full checkpointed, TUI-orchestrated workflow from inside one doesn't
+	// fit that model, and bgSess below has no real session ID for
+	// WorkflowStartSignal's caller to attach a launch to anyway.
+	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate", "start_workflow"}}
 	if bg.limits != nil {
 		bgLimits.IncludedTools = bg.limits.IncludedTools
-		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate")
+		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate", "start_workflow")
 	}
 	bgSess := &session.Session{CWD: cwd}
 	tools := schemas(nil, bg.otelDir, bgSess, nil, nil, bgLimits)
@@ -1704,13 +1733,15 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// workflowStart is set by the start_workflow tool — see WorkflowStartSignal.
+	workflowStart *WorkflowStartSignal
 	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
 	// executeToolCalls turns these into a synthetic follow-up user message,
 	// since tool-role content must stay plain text on the OpenAI-compat wire.
 	images []string
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, *EscalationSignal) {
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, error) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls, ReasoningContent: reasoningContent})
 
 	// Pre-print tool hints and collect permission decisions synchronously (before
@@ -1811,6 +1842,9 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 		if outcome.escalate {
 			return msgs, &EscalationSignal{Reason: outcome.reason}
 		}
+		if outcome.workflowStart != nil {
+			return msgs, outcome.workflowStart
+		}
 	}
 	return msgs, nil
 }
@@ -1878,6 +1912,48 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			})
 		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+	}
+
+	// start_workflow: can't act itself (no access to the bubbletea model that
+	// actually launches a workflow — see WorkflowStartSignal's doc comment),
+	// so it validates what it can locally (name resolves in the registry,
+	// task non-empty) and returns a signal for cmd/milk's dispatch layer to
+	// act on, rather than a plain tool result. A bad name/empty task is
+	// still reported as an ordinary tool-result error, not a signal — the
+	// model can see that immediately and retry in the same turn.
+	if tc.Function.Name == "start_workflow" {
+		var args struct {
+			Name  string            `json:"name"`
+			Task  string            `json:"task"`
+			Roles map[string]string `json:"roles"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+		reg, regErrs := workflow.LoadRegistry()
+		for _, e := range regErrs {
+			obs.Warn("start_workflow: registry load error", "err", e.Error())
+		}
+		def, ok := reg.Lookup(args.Name)
+		if !ok {
+			result := toolResult{Error: fmt.Sprintf("unknown workflow %q — available: %s", args.Name, strings.Join(reg.Names(), ", "))}.String()
+			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+		}
+		if strings.TrimSpace(args.Task) == "" {
+			result := toolResult{Error: "task must not be empty"}.String()
+			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+		}
+		roles := make(map[string]string, len(def.Roles))
+		for _, role := range def.Roles {
+			if v, ok := args.Roles[role]; ok && strings.TrimSpace(v) != "" {
+				roles[role] = v
+			} else {
+				roles[role] = workflow.AliasEscalation
+			}
+		}
+		result := toolResult{Output: fmt.Sprintf("Starting workflow %q.", def.Name)}.String()
+		return toolCallOutcome{
+			msg:           Message{Role: "tool", Content: result, ToolCallID: tc.ID},
+			workflowStart: &WorkflowStartSignal{Name: def.Name, Task: args.Task, Roles: roles},
+		}
 	}
 
 	// Pre-checked: permission was already denied before dispatch.

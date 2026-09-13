@@ -122,9 +122,10 @@ func runPrimary(
 	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
+	onWorkflowStart func(*local.WorkflowStartSignal),
 	prefixOut ...io.Writer,
 ) error {
-	return runPrimaryWithSession(ctx, cfg, sess, runner, escalationRunner, mem, prompt, prompt, out, da, onResponse, onSegment, prefixOut...)
+	return runPrimaryWithSession(ctx, cfg, sess, runner, escalationRunner, mem, prompt, prompt, out, da, onResponse, onSegment, onWorkflowStart, prefixOut...)
 }
 
 // runPrimaryWithSession is like runPrimary but accepts a separate sessionContent
@@ -144,6 +145,12 @@ func runPrimaryWithSession(
 	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
+	// onWorkflowStart is called when the agent's start_workflow tool call
+	// signals a launch request (TurnResult.WorkflowStart) — see
+	// local.WorkflowStartSignal's doc comment for why dispatch.go can't act
+	// on it directly. nil in single-prompt CLI mode (main.go), where there is
+	// no bubbletea model to launch a workflow against.
+	onWorkflowStart func(*local.WorkflowStartSignal),
 	prefixOut ...io.Writer,
 ) error {
 	var mgr *local.Manager
@@ -261,11 +268,23 @@ func runPrimaryWithSession(
 		session.Save(sess) //nolint:errcheck
 
 		if escalationRunner != nil {
-			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment)
+			return runEscalation(ctx, cfg, sess, escalationRunner, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment, onWorkflowStart)
 		}
 		// Fallback: build CLI escalation runner on-demand.
 		cliEsc := buildFallbackCLIRunner(cfg)
-		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment)
+		return runEscalation(ctx, cfg, sess, cliEsc, res.EscalationReason, mem, prompt, out, da, onResponse, onSegment, onWorkflowStart)
+	}
+
+	if res.WorkflowStart != nil {
+		if onWorkflowStart != nil {
+			fmt.Fprintf(out, "\n%s %s requested workflow %q\n", milkTag(), agentName, res.WorkflowStart.Name)
+			onWorkflowStart(res.WorkflowStart)
+		} else {
+			fmt.Fprintf(out, "\n%s %s requested workflow %q, but start_workflow is only supported in the TUI\n", milkTag(), agentName, res.WorkflowStart.Name)
+		}
+		logStateTransition(sess, session.StateRouting, agentName+" requested workflow")
+		sess.ForceState(session.StateRouting)
+		return session.Save(sess)
 	}
 
 	logStateTransition(sess, session.StateRouting, agentName+" primary done")
@@ -287,9 +306,10 @@ func runEscalation(
 	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
+	onWorkflowStart func(*local.WorkflowStartSignal),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, da, onResponse, onSegment, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, da, onResponse, onSegment, onWorkflowStart, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
@@ -312,6 +332,8 @@ func runEscalationWithSession(
 	da *dispatchAgents,
 	onResponse func(string),
 	onSegment func(string),
+	// onWorkflowStart: see runPrimaryWithSession's identical parameter.
+	onWorkflowStart func(*local.WorkflowStartSignal),
 	prefixOut ...io.Writer,
 ) error {
 	var mgr *local.Manager
@@ -478,6 +500,19 @@ func runEscalationWithSession(
 		if cbs.OnResponse != nil {
 			cbs.OnResponse(res.Text)
 		}
+	}
+
+	if res.WorkflowStart != nil {
+		if onWorkflowStart != nil {
+			fmt.Fprintf(out, "\n%s %s requested workflow %q\n", milkTag(), agentName, res.WorkflowStart.Name)
+			onWorkflowStart(res.WorkflowStart)
+		} else {
+			fmt.Fprintf(out, "\n%s %s requested workflow %q, but start_workflow is only supported in the TUI\n", milkTag(), agentName, res.WorkflowStart.Name)
+		}
+		sess.EscalationBrief = ""
+		logStateTransition(sess, session.StateRouting, agentName+" requested workflow")
+		sess.ForceState(session.StateRouting)
+		return session.Save(sess)
 	}
 
 	if res.EndsWithQ {

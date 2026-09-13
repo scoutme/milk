@@ -87,6 +87,12 @@ type TurnResult struct {
 	WorkflowCacheRead    int64
 	WorkflowCacheCreate  int64
 	HasWorkflowTokens    bool
+	// WorkflowStart is non-nil when a local-provider agent called the
+	// start_workflow tool — see local.WorkflowStartSignal's doc comment for
+	// why the signal has to surface here instead of being acted on directly
+	// inside internal/agent/local. The dispatcher (dispatch.go) is
+	// responsible for actually launching it.
+	WorkflowStart *local.WorkflowStartSignal
 }
 
 // TurnCallbacks carries the tag-intercept callbacks wired per-turn by the dispatcher.
@@ -285,6 +291,9 @@ func (r *localRunner) Execute(
 		if esc, ok := err.(*local.EscalationSignal); ok {
 			return TurnResult{EscalationReason: esc.Reason}, nil
 		}
+		if ws, ok := err.(*local.WorkflowStartSignal); ok {
+			return TurnResult{WorkflowStart: ws}, nil
+		}
 		// On connection failure, auto-start the server if run_cmd is configured
 		// and retry once. This handles the case where the server was stopped
 		// (manually or between sessions) but milk is already running.
@@ -296,6 +305,9 @@ func (r *localRunner) Execute(
 		if err != nil {
 			if esc, ok := err.(*local.EscalationSignal); ok {
 				return TurnResult{EscalationReason: esc.Reason}, nil
+			}
+			if ws, ok := err.(*local.WorkflowStartSignal); ok {
+				return TurnResult{WorkflowStart: ws}, nil
 			}
 			return TurnResult{}, err
 		}
@@ -355,6 +367,9 @@ func (r *localRunner) RunToolCall(ctx context.Context, _ config.Config, prompt s
 		// for it to escalate into.
 		if esc, ok := errors.AsType[*local.EscalationSignal](err); ok {
 			return fmt.Sprintf("(this agent requested escalation instead of answering directly: %s)", esc.Reason), nil
+		}
+		if ws, ok := errors.AsType[*local.WorkflowStartSignal](err); ok {
+			return fmt.Sprintf("(this agent requested workflow %q instead of answering directly — not supported for a stateless tool-agent call)", ws.Name), nil
 		}
 		return "", err
 	}

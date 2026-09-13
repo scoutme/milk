@@ -212,3 +212,139 @@ func TestStatusTokens_CacheZeroCreation(t *testing.T) {
 		t.Errorf("want cache read 800 in display, got %q", bar)
 	}
 }
+
+// TestStatusTokens_ContextPressure_AbsoluteSizeWithoutContextWindow verifies
+// the ctx: fragment falls back to the absolute prompt size when no
+// context_window_tokens is configured — giving the user a useful signal
+// rather than hiding the indicator entirely.
+func TestStatusTokens_ContextPressure_AbsoluteSizeWithoutContextWindow(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{Agents: []config.AgentConfig{{Name: "primary-agent"}}, Agent: "primary-agent"},
+		},
+		busy:               false,
+		primaryPrompt:      1000,
+		primaryCompletion:  200,
+		lastTurnPrompt:     map[string]int64{"primary": 1000, "escalation": 0},
+		lastTurnCompletion: map[string]int64{"primary": 200, "escalation": 0},
+		lastTokenRole:      "primary",
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "ctx:1.0k") {
+		t.Errorf("want ctx:1.0k (absolute size, 1000 tokens), got %q", bar)
+	}
+}
+
+// TestStatusTokens_ContextPressure_IdleShowsLastTurnPercentage verifies the
+// idle path divides the last completed turn's real prompt tokens by the
+// active agent's context_window_tokens.
+func TestStatusTokens_ContextPressure_IdleShowsLastTurnPercentage(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg: config.Config{
+				Agents: []config.AgentConfig{{Name: "primary-agent", ContextWindowTokens: 10000}},
+				Agent:  "primary-agent",
+			},
+		},
+		busy:               false,
+		primaryPrompt:      8000,
+		primaryCompletion:  200,
+		lastTurnPrompt:     map[string]int64{"primary": 8000, "escalation": 0},
+		lastTurnCompletion: map[string]int64{"primary": 200, "escalation": 0},
+		lastTokenRole:      "primary",
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "ctx:80%") {
+		t.Errorf("want ctx:80%% (8000/10000), got %q", bar)
+	}
+}
+
+// TestStatusTokens_ContextPressure_BusyUsesLiveEstimate verifies the busy
+// path estimates the current turn's prompt size from currentTurnInputChars
+// (the same estimate the ↑~/↓~ fragment above it already uses), rather than
+// waiting for the turn to finish before showing any pressure at all.
+func TestStatusTokens_ContextPressure_BusyUsesLiveEstimate(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg: config.Config{
+				Agents: []config.AgentConfig{{Name: "primary-agent", ContextWindowTokens: 4000}},
+				Agent:  "primary-agent",
+			},
+		},
+		busy:                  true,
+		currentTurnInputChars: 12000, // *0.25 = 3000 estimated tokens
+		lastTurnPrompt:        map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCompletion:    map[string]int64{"primary": 0, "escalation": 0},
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "ctx:75%") {
+		t.Errorf("want ctx:75%% (3000/4000 estimated), got %q", bar)
+	}
+}
+
+// TestStatusTokens_ContextPressure_CriticalTierIsRed verifies the fragment
+// escalates to the red/critical tier at or above contextPressureCriticalPct.
+func TestStatusTokens_ContextPressure_CriticalTierIsRed(t *testing.T) {
+	oldIsTTY := isTTY
+	isTTY = true
+	t.Cleanup(func() { isTTY = oldIsTTY })
+
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg: config.Config{
+				Agents: []config.AgentConfig{{Name: "primary-agent", ContextWindowTokens: 1000}},
+				Agent:  "primary-agent",
+			},
+		},
+		busy:               false,
+		primaryPrompt:      950,
+		lastTurnPrompt:     map[string]int64{"primary": 950, "escalation": 0},
+		lastTurnCompletion: map[string]int64{"primary": 0, "escalation": 0},
+		lastTokenRole:      "primary",
+	}
+
+	raw := m.statusTokens()
+	if !strings.Contains(raw, ansiRed) {
+		t.Errorf("want the critical-tier ctx fragment wrapped in red, got %q", raw)
+	}
+}
+
+// TestStatusTokens_ContextPressure_LargeWindowShowsAbsoluteSize verifies that
+// when the context window is large enough that the percentage rounds to 0,
+// the indicator shows the absolute prompt size instead of "ctx:0%".
+func TestStatusTokens_ContextPressure_LargeWindowShowsAbsoluteSize(t *testing.T) {
+	m := &model{
+		width: 120,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg: config.Config{
+				Agents: []config.AgentConfig{{Name: "primary-agent", ContextWindowTokens: 1000000}},
+				Agent:  "primary-agent",
+			},
+		},
+		busy:               false,
+		primaryPrompt:      4800,
+		lastTurnPrompt:     map[string]int64{"primary": 4800, "escalation": 0},
+		lastTurnCompletion: map[string]int64{"primary": 566, "escalation": 0},
+		lastTokenRole:      "primary",
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if strings.Contains(bar, "ctx:0%") {
+		t.Errorf("want absolute size instead of ctx:0%%, got %q", bar)
+	}
+	if !strings.Contains(bar, "ctx:4.8k") {
+		t.Errorf("want ctx:4.8k (absolute), got %q", bar)
+	}
+}

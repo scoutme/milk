@@ -226,9 +226,12 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil)
+		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil, nil)
 	case router.TargetEscalation:
-		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil)
+		// onWorkflowStart is nil: single-prompt CLI mode has no bubbletea
+		// model to launch a workflow against — see runPrimaryWithSession's
+		// doc comment on the same parameter.
+		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil, nil)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
@@ -307,7 +310,7 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 			sp = sp.WithDebugLog(dbg)
 		}
 		r := newSubprocessRunner(sp, primaryAC.Name)
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 		}
 		return r, nil, nil
@@ -335,7 +338,10 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if name == "" {
 		name = "primary"
 	}
-	la = attachMCPToolSet(context.Background(), cfg, primaryAC.Name, la)
+	la, mcpErr := attachMCPToolSet(context.Background(), cfg, primaryAC.Name, la)
+	if mcpErr != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: %v\n", milkTag(), mcpErr)
+	}
 	return newLocalRunner(la, name), la, nil
 }
 
@@ -366,7 +372,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 				sp = sp.WithDebugLog(dbg)
 			}
 			r := newSubprocessRunner(sp, escAC.Name)
-			if servers, ts := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
+			if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
 				r = r.withMCPToolSet(servers, ts)
 			}
 			return r, nil
@@ -397,7 +403,10 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			if name == "" {
 				name = "escalation"
 			}
-			la = attachMCPToolSet(context.Background(), cfg, escAC.Name, la)
+			la, mcpErr := attachMCPToolSet(context.Background(), cfg, escAC.Name, la)
+			if mcpErr != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: %v\n", milkTag(), mcpErr)
+			}
 			return newLocalRunner(la, name), nil
 		}
 		fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
@@ -466,13 +475,14 @@ func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 
 // attachMCPToolSet builds an mcp.ToolSet from the MCP servers configured for
 // agentName, connects all clients concurrently, and wires it into la via
-// WithMCPToolSet. Errors during connect are logged as warnings — partial
-// connectivity is preferred over a hard startup failure. When no MCP servers
-// are configured for the agent, la is returned unchanged.
-func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) *local.Agent {
+// WithMCPToolSet. Partial connectivity is preferred over a hard startup
+// failure: when some clients fail, the ToolSet is still wired so lazy
+// reconnect inside Schemas() / Dispatch() can retry on first use.
+// When no MCP servers are configured for the agent, la is returned unchanged.
+func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) (*local.Agent, error) {
 	servers := cfg.EffectiveMCPServers(agentName)
 	if len(servers) == 0 {
-		return la
+		return la, nil
 	}
 	clients := make([]*mcp.Client, 0, len(servers))
 	for _, s := range servers {
@@ -481,23 +491,24 @@ func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, 
 	ts := mcp.NewToolSet(clients)
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
+	var connectErr error
 	if err := ts.ConnectAll(connectCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
+		connectErr = fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
 	}
 	// Always wire the ToolSet even if no clients connected at startup.
 	// Lazy reconnect inside Schemas() / Dispatch() will retry on first use.
 	la = la.WithMCPToolSet(ts)
-	return la
+	return la, connectErr
 }
 
 // buildMCPToolSet builds a connected mcp.ToolSet for agentName using the servers
 // from cfg, or returns (nil, nil) when no servers are configured. Errors are
 // logged as warnings; partial connectivity is acceptable — lazy reconnect retries on use.
-func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet) {
+func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet, error) {
 	servers := cfg.EffectiveMCPServers(agentName)
 	if len(servers) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	clients := make([]*mcp.Client, 0, len(servers))
 	for _, s := range servers {
@@ -507,10 +518,10 @@ func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) (
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
 	if err := ts.ConnectAll(connectCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
 		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
+		return servers, ts, fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 	}
-	return servers, ts
+	return servers, ts, nil
 }
 
 // activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd

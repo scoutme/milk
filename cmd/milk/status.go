@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	rw "github.com/mattn/go-runewidth"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -256,11 +257,14 @@ func (m *model) statusTokens() string {
 	}
 
 	var prompt, completion int64
+	var cacheRead, cacheCreation int64
 	switch role {
 	case "escalation":
 		prompt, completion = m.escalationPrompt, m.escalationComp
+		cacheRead, cacheCreation = m.escalationCacheRead, m.escalationCacheCreation
 	default:
 		prompt, completion = m.primaryPrompt, m.primaryCompletion
+		cacheRead, cacheCreation = m.primaryCacheRead, m.primaryCacheCreation
 	}
 
 	lastPrompt := m.lastTurnPrompt[role]
@@ -292,7 +296,78 @@ func (m *model) statusTokens() string {
 			}
 		}
 	}
+	if ctxFragment := m.statusContextPressure(role, prompt+cacheRead+cacheCreation); ctxFragment != "" {
+		// Appended last and deliberately NOT run through the outer dim() below:
+		// dim/yellow/red all end with the same ANSI reset, so a colored fragment
+		// nested inside dim's string would have its own reset kill the dim state
+		// for anything after it — safe only because nothing follows this in the
+		// join. Kept as its own trailing, separately-composed segment instead of
+		// relying on that ordering staying true forever.
+		return "  " + dim(strings.Join(parts, "  ")) + "  " + ctxFragment
+	}
 	return "  " + dim(strings.Join(parts, "  "))
+}
+
+// contextPressureHighPct/CriticalPct are the thresholds at which the
+// ctx:NN% status-bar fragment shifts from dim (normal) to yellow (high) to
+// red (critical) — mirroring the loop-detection warning's use of yellow for
+// "pay attention" state, extended with a red tier since context exhaustion
+// (unlike a loop) has a hard failure mode once the trim budget can no longer
+// fit the system prompt and tools. When no context window is configured, the
+// indicator falls back to showing the absolute prompt size instead.
+const (
+	contextPressureHighPct     = 75
+	contextPressureCriticalPct = 90
+)
+
+// statusContextPressure returns a "ctx:NN%" fragment showing how much of the
+// active agent's configured context window the current prompt is using —
+// live-estimated while busy (mirrors the ↑~/↓~ estimate above it), the
+// cumulative session prompt total while idle. The numerator includes cached
+// tokens (cacheRead + cacheCreation) since they occupy context window space.
+// When no context_window_tokens is configured (nothing to divide by), falls
+// back to showing the absolute input size as "ctx:NNk" so the user still gets
+// a useful signal. Returns "" only when there's no usable numerator yet.
+func (m *model) statusContextPressure(role string, promptTokens int64) string {
+	var ac config.AgentConfig
+	if role == "escalation" {
+		ac = m.st.cfg.EscalationAgentConfig()
+	} else {
+		ac = m.st.cfg.ActiveAgent()
+	}
+	window := m.st.cfg.AgentContextWindowTokens(ac)
+
+	numerator := promptTokens
+	if m.busy {
+		numerator = int64(math.Round(float64(m.currentTurnInputChars) * 0.25))
+	}
+	if numerator <= 0 {
+		return ""
+	}
+
+	// When a context window is declared, show the percentage with color tiers.
+	// When the percentage would round to 0 but the numerator is non-trivial,
+	// fall through to the absolute-size display instead — a 1M-token window
+	// makes the percentage meaningless below ~10k tokens.
+	if window > 0 {
+		pct := int(100 * float64(numerator) / float64(window))
+		if pct > 0 {
+			label := fmt.Sprintf("ctx:%d%%", pct)
+			switch {
+			case pct >= contextPressureCriticalPct:
+				return red(label)
+			case pct >= contextPressureHighPct:
+				return yellow(label)
+			default:
+				return dim(label)
+			}
+		}
+		// pct == 0: percentage is too coarse; show absolute size instead.
+	}
+
+	// No context window configured — show the absolute prompt size so the
+	// indicator is still useful for self-regulation.
+	return dim(fmt.Sprintf("ctx:%s", formatTokenCount(numerator)))
 }
 
 // activeTokenRole returns "escalation" or "primary" reflecting which agent will

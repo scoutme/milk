@@ -20,6 +20,7 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 // agentToolNameRE matches non-alphanumeric-lowercase characters for tool name sanitisation.
@@ -128,6 +129,28 @@ func filterTools(tools []map[string]any, limits *config.AgentLimits) []map[strin
 		result = filtered
 	}
 	return result
+}
+
+// workflowRegistryNames returns every currently registered /workflow name
+// (built-in plus any ~/.milk/workflows/*.yaml overrides), for start_workflow's
+// "name" enum. Computed fresh on every schemas() call rather than hardcoded —
+// workflows are user-configurable, so a static list would drift the moment
+// someone adds or renames one.
+func workflowRegistryNames() []string {
+	reg, _ := workflow.LoadRegistry()
+	return reg.Names()
+}
+
+// workflowToolDescription builds start_workflow's description with the
+// current registry names inlined, for the same reason workflowRegistryNames
+// computes the enum fresh rather than hardcoding it.
+func workflowToolDescription() string {
+	names := workflowRegistryNames()
+	base := "Start one of milk's native /workflow pipelines — a multi-stage pipeline with structured roles and a typed completion contract, run by internal/workflow/interp, distinct from spawn_background_agent's single self-contained tool loop."
+	if len(names) == 0 {
+		return base + " No workflows are currently registered."
+	}
+	return base + " Available: " + strings.Join(names, ", ") + ". Runs independently in the background: its progress and result appear in the transcript for the user, but — unlike spawn_background_agent — are not automatically added to your own context, so don't wait on or assume its outcome in this turn."
 }
 
 // schemas returns the OpenAI function schemas for all built-in tools,
@@ -347,6 +370,30 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 						"reason": map[string]any{"type": "string", "description": "Why escalation is needed"},
 					},
 					"required": []string{"reason"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "start_workflow",
+				"description": workflowToolDescription(),
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name": map[string]any{
+							"type":        "string",
+							"enum":        workflowRegistryNames(),
+							"description": "Registered workflow name.",
+						},
+						"task": map[string]any{"type": "string", "description": "The task/goal to run through the workflow."},
+						"roles": map[string]any{
+							"type":                 "object",
+							"additionalProperties": map[string]any{"type": "string"},
+							"description":          `Optional per-role agent overrides (e.g. {"generator": "gemma-local"}) — "primary"/"escalation" are aliases for the currently configured primary/escalation agent, or use a concrete agent name. Any role left unspecified defaults to "escalation".`,
+						},
+					},
+					"required": []string{"name", "task"},
 				},
 			},
 		},

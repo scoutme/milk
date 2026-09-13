@@ -1,7 +1,8 @@
 # 45. Local Project-Level Config Overrides (.milk/)
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-09-15
+- **Updated:** 2026-09-25 — aligned with implementation (agents merge-by-name, init --local full wizard)
 
 ## Context
 

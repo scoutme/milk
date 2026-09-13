@@ -136,7 +136,8 @@ type Client struct {
 	proc       *exec.Cmd
 	procStdin  io.WriteCloser
 	procStdout *bufio.Reader
-	stdioMu    sync.Mutex // serialises JSON-RPC over the single stdio channel
+	procStderr *bytes.Buffer // captured subprocess stderr
+	stdioMu    sync.Mutex    // serialises JSON-RPC over the single stdio channel
 }
 
 // New builds a Client from an MCPServerConfig but does not connect yet.
@@ -253,12 +254,15 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mcp %q: stdout pipe: %w", c.cfg.Name, err)
 	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("mcp %q: start: %w", c.cfg.Name, err)
+		return c.wrapStdioErr("start", err, &stderrBuf)
 	}
 	c.proc = cmd
 	c.procStdin = stdin
 	c.procStdout = bufio.NewReader(stdout)
+	c.procStderr = &stderrBuf
 
 	// Phase 1: initialize
 	if _, err := c.roundtripStdio(ctx, "initialize", map[string]any{
@@ -273,20 +277,20 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		},
 	}); err != nil {
 		_ = cmd.Process.Kill()
-		return fmt.Errorf("mcp %q: initialize failed: %w", c.cfg.Name, err)
+		return c.wrapStdioErr("initialize failed", err, &stderrBuf)
 	}
 
 	// Phase 2: initialized notification
 	if err := c.notifyStdio("notifications/initialized", nil); err != nil {
 		_ = cmd.Process.Kill()
-		return fmt.Errorf("mcp %q: initialized notification failed: %w", c.cfg.Name, err)
+		return c.wrapStdioErr("initialized notification failed", err, &stderrBuf)
 	}
 
 	// Phase 3: list tools
 	tools, err := c.listTools(ctx)
 	if err != nil {
 		_ = cmd.Process.Kill()
-		return fmt.Errorf("mcp %q: tools/list failed: %w", c.cfg.Name, err)
+		return c.wrapStdioErr("tools/list failed", err, &stderrBuf)
 	}
 	c.tools = tools
 	c.ready = true
@@ -363,6 +367,15 @@ func (c *Client) notifyStdio(method string, params any) error {
 // isStdio reports whether this client uses the stdio subprocess transport.
 func (c *Client) isStdio() bool {
 	return strings.ToLower(c.cfg.Transport) == "stdio"
+}
+
+// wrapStdioErr wraps an error from a stdio phase, appending the subprocess
+// stderr content when non-empty so diagnostic output is never silently lost.
+func (c *Client) wrapStdioErr(phase string, err error, stderr *bytes.Buffer) error {
+	if stderr != nil && stderr.Len() > 0 {
+		return fmt.Errorf("mcp %q: %s: %w\nsubprocess stderr:\n%s", c.cfg.Name, phase, err, strings.TrimSpace(stderr.String()))
+	}
+	return fmt.Errorf("mcp %q: %s: %w", c.cfg.Name, phase, err)
 }
 
 // Tools returns the cached list of tools discovered during Connect.

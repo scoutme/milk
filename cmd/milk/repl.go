@@ -128,7 +128,10 @@ func (m model) refreshMCPForRole(role AgentRole, agentName string) (model, bool)
 	switch r := runner.(type) {
 	case *localRunner:
 		old := m.agents.mcpToolSets[agentName]
-		_, ts := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		_, ts, err := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s MCP connect error (agent %q): %v\n", milkTag(), agentName, err))
+		}
 		if ts == nil {
 			ts = mcp.NewToolSet(nil)
 		}
@@ -142,7 +145,10 @@ func (m model) refreshMCPForRole(role AgentRole, agentName string) (model, bool)
 		m = m.trackMCPToolSet(agentName, old, ts)
 	case *subprocessRunner:
 		old := m.agents.mcpToolSets[agentName]
-		servers, ts := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		servers, ts, err := buildMCPToolSet(m.ctx, m.st.cfg, agentName)
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s MCP connect error (agent %q): %v\n", milkTag(), agentName, err))
+		}
 		if ts == nil {
 			ts = mcp.NewToolSet(nil)
 		}
@@ -230,6 +236,15 @@ type backgroundBatchDoneMsg struct{}
 // off one specific side-question and the result should reach the main agent
 // as soon as it's free, not held back for unrelated jobs still running.
 type backgroundUserJobDoneMsg struct{}
+
+// startWorkflowFromToolMsg is sent when a local-provider agent's
+// start_workflow tool call signals a launch request (dispatch.go's
+// onWorkflowStart callback, wired from the turn-dispatch goroutine). Handled
+// by launching the workflow directly via launchGenericWorkflow, bypassing
+// the interactive per-role wizard entirely — ws.Roles already has every role
+// resolved (explicit override or defaulted to "escalation" by
+// dispatchOneTool), since a tool call has no way to answer wizard prompts.
+type startWorkflowFromToolMsg struct{ ws *local.WorkflowStartSignal }
 
 // directBashDoneMsg is sent when a direct-bash command exits (PTY or ExecProcess path).
 type directBashDoneMsg struct {
@@ -685,7 +700,9 @@ type model struct {
 	primaryCompletion int64
 	escalationPrompt  int64
 	escalationComp    int64
-	// Cumulative cache tokens for the escalation role (Claude CLI only).
+	// Cumulative cache tokens (used to compute total context input).
+	primaryCacheRead        int64
+	primaryCacheCreation    int64
 	escalationCacheRead     int64
 	escalationCacheCreation int64
 
@@ -988,6 +1005,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	newPrimaryPrompt, newPrimaryCompletion := obs.SessionTokensByRole("primary")
 	newEscPrompt, newEscComp := obs.SessionTokensByRolePrefix("escalation")
 	newEscCacheRead, newEscCacheCreation := obs.SessionCacheByRolePrefix("escalation")
+	newPrimaryCacheRead, newPrimaryCacheCreation := obs.SessionCacheByRole("primary")
 	// Compute per-role per-turn deltas from the accumulators.
 	m.lastTurnPrompt["escalation"] = newEscPrompt - m.escalationPrompt
 	m.lastTurnCompletion["escalation"] = newEscComp - m.escalationComp
@@ -995,6 +1013,7 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.lastTurnCompletion["primary"] = newPrimaryCompletion - m.primaryCompletion
 	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
 	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
+	m.primaryCacheRead, m.primaryCacheCreation = newPrimaryCacheRead, newPrimaryCacheCreation
 	m.escalationCacheRead, m.escalationCacheCreation = newEscCacheRead, newEscCacheCreation
 	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
@@ -1639,6 +1658,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 
+	case startWorkflowFromToolMsg:
+		reg, regErrs := workflow.LoadRegistry()
+		for _, e := range regErrs {
+			obs.Info("workflow.registry.load_error", "error", e.Error())
+		}
+		def, ok := reg.Lookup(msg.ws.Name)
+		if !ok {
+			// Shouldn't happen — dispatchOneTool already validated the name
+			// against the same registry before returning the signal — but
+			// the registry re-reads ~/.milk/workflows/ on every LoadRegistry
+			// call, so a file removed between the tool call and here would
+			// land here instead of failing earlier.
+			m.appendTranscript(milkTag() + fmt.Sprintf(" workflow %q no longer found — not starting\n", msg.ws.Name))
+			m.refreshPrompt()
+			return m, nil
+		}
+		w := &workflowWizardState{
+			name:       msg.ws.Name,
+			task:       msg.ws.Task,
+			def:        def,
+			roles:      def.Roles,
+			roleValues: msg.ws.Roles,
+		}
+		return m.launchGenericWorkflow(w)
+
 	case workflow.WorkflowDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
@@ -1775,7 +1819,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
 					ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 				})
-				newAgent = attachMCPToolSet(m.ctx, m.st.cfg, activeLocalAgentConfig(m.st.cfg).Name, newAgent)
+				newAgent, mcpErr := attachMCPToolSet(m.ctx, m.st.cfg, activeLocalAgentConfig(m.st.cfg).Name, newAgent)
+				if mcpErr != nil {
+					m.appendTranscript(fmt.Sprintf("%s MCP reconnect error: %v\n", milkTag(), mcpErr))
+				}
 				m.agents.local = newAgent
 				m.agents.localAvail = newAgent.Ping(m.ctx) == nil
 				m.agents.primary = newLocalRunner(newAgent, activeLocalAgentConfig(m.st.cfg).Name)
@@ -2996,6 +3043,17 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		st.notifier.NotifyResponse(turnCtx, agentName, text)
 	}
 
+	// onWorkflowStart runs on this turn's own goroutine, not the bubbletea
+	// Update() loop — it can't mutate model state or launch the workflow
+	// itself (see local.WorkflowStartSignal's doc comment). Sending a
+	// tea.Msg is the only safe way to hand this back to Update(), the same
+	// way every other cross-goroutine turn event already reaches the model.
+	onWorkflowStart := func(ws *local.WorkflowStartSignal) {
+		if st.program != nil {
+			st.program.Send(startWorkflowFromToolMsg{ws: ws})
+		}
+	}
+
 	// sessionContent is the compact version stored in history (with attachment
 	// placeholders). Falls back to input when no attachment override is set.
 	sessionContent := input
@@ -3014,11 +3072,11 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		}
 		// Local path: CLI image temp files not needed; clean up.
 		cleanupCLIImageFiles(st)
-		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, onSegment, pw)
+		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, onSegment, onWorkflowStart, pw)
 	case router.TargetEscalation:
 		imageCtxFile := st.pendingImageContextFile
 		st.pendingImageContextFile = ""
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, agents, onResponse, onSegment, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, agents, onResponse, onSegment, onWorkflowStart, pw)
 		// CLI image temp files are no longer needed after the turn.
 		cleanupCLIImageFiles(st)
 	}
@@ -3312,7 +3370,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		primaryRunner = r
 	case tuiSubprocessPrimaryAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
 			mcpServersSeen[tuiPrimaryAC.Name] = servers
@@ -3320,7 +3378,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 		primaryRunner = r
 	case localAgent != nil:
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
 			localAgent = localAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
 			mcpServersSeen[tuiPrimaryAC.Name] = servers
@@ -3332,7 +3390,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	switch {
 	case tuiSubprocessAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiEscAC.Name] = ts
 			mcpServersSeen[tuiEscAC.Name] = servers
@@ -3340,7 +3398,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 		escalationRunner = r
 	case escalationLocalAgent != nil:
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
 			escalationLocalAgent = escalationLocalAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiEscAC.Name] = ts
 			mcpServersSeen[tuiEscAC.Name] = servers
