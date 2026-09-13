@@ -229,6 +229,14 @@ type backgroundJobDoneMsg struct{ job *local.Job }
 // be dispatched) generates a response on their own.
 type backgroundBatchDoneMsg struct{}
 
+// backgroundSpawnedMsg is sent after a user-initiated background agent spawn
+// completes asynchronously (via tea.Cmd). Carries the job ID and label so
+// the Update handler can append the transcript confirmation.
+type backgroundSpawnedMsg struct {
+	jobID string
+	label string
+}
+
 // backgroundUserJobDoneMsg is sent when a user-initiated background job
 // (spawned via the busy-key "press Enter again" flow, not a tool call)
 // finishes. Unlike backgroundBatchDoneMsg, this fires per job rather than
@@ -1860,6 +1868,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 
+	case backgroundSpawnedMsg:
+		m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ spawned background agent %s (%q)", msg.jobID, msg.label)) + "\n")
+		m.autoOpenPanel(regionBackground)
+		m.syncLayout()
+		return m, nil
+
 	case backgroundJobDoneMsg:
 		j := msg.job
 		if j.Err != nil {
@@ -2548,12 +2562,17 @@ func (m model) spawnUserBackgroundAgent(task string) (tea.Model, tea.Cmd) {
 		label = label[:57] + "..."
 	}
 	cwd := m.st.cwd
-	job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context) (string, session.TokenUsage, error) {
-		return agent.RunBackgroundTask(ctx, cwd, task, io.Discard)
-	})
-	m.appendTranscript("\n" + dimWrap(fmt.Sprintf("⚙ spawned background agent %s (%q)", job.ID, label)) + "\n")
-	m.syncLayout()
-	return m, nil
+	// Perform the spawn inside a tea.Cmd so that the Manager's onStart
+	// callback (which calls p.Send on bubbletea's unbuffered msgs channel)
+	// runs outside the current Update() call — calling p.Send from within
+	// Update deadlocks because the event loop goroutine is the only reader
+	// of that channel and it is blocked waiting for Update to return.
+	return m, func() tea.Msg {
+		job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context) (string, session.TokenUsage, error) {
+			return agent.RunBackgroundTask(ctx, cwd, task, io.Discard)
+		})
+		return backgroundSpawnedMsg{jobID: job.ID, label: label}
+	}
 }
 
 // maybeAutoFollowupBackgroundJobs delivers currently-drainable
