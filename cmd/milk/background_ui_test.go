@@ -199,8 +199,10 @@ func TestHandleBusyKey_SecondEnterSpawnsBackgroundAgent(t *testing.T) {
 		t.Errorf("expected the textarea to survive the first Enter, got %q", m2.ta.Value())
 	}
 
-	// Second Enter: spawns.
-	updated2, _ := m2.handleBusyKey(teaKeyEnter())
+	// Second Enter: spawns — but the actual Spawn call is deferred into a
+	// tea.Cmd to avoid deadlocking bubbletea's unbuffered msgs channel
+	// (p.Send inside onStart would block if called from within Update).
+	updated2, cmd := m2.handleBusyKey(teaKeyEnter())
 	m3 := updated2.(model)
 	if m3.busySpawnArmed {
 		t.Error("expected busySpawnArmed to be cleared after spawning")
@@ -208,8 +210,15 @@ func TestHandleBusyKey_SecondEnterSpawnsBackgroundAgent(t *testing.T) {
 	if m3.ta.Value() != "" {
 		t.Errorf("expected the textarea to be cleared after spawning, got %q", m3.ta.Value())
 	}
-	if !strings.Contains(m3.transcript.String(), "spawned background agent") {
-		t.Errorf("expected a transcript line confirming the spawn, got %q", m3.transcript.String())
+	// Execute the deferred spawn Cmd, then feed its message back into Update.
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to spawn the background agent asynchronously")
+	}
+	msg := cmd()
+	updated3, _ := m3.Update(msg)
+	m4 := updated3.(model)
+	if !strings.Contains(m4.transcript.String(), "spawned background agent") {
+		t.Errorf("expected a transcript line confirming the spawn, got %q", m4.transcript.String())
 	}
 	if got := mgr.ActiveCount(); got != 1 {
 		t.Errorf("expected 1 active job after spawning, got %d", got)

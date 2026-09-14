@@ -132,7 +132,7 @@ func TestRunPrimaryWithSession_SurvivesTransientStreamError(t *testing.T) {
 	var out bytes.Buffer
 
 	if err := runPrimaryWithSession(context.Background(), cfg, sess, runner, nil, nil,
-		"hi", "hi", &out, nil, nil, nil); err != nil {
+		"hi", "hi", &out, nil, nil, nil, nil); err != nil {
 		t.Fatalf("runPrimaryWithSession returned error: %v", err)
 	}
 	if runner.calls != 2 {

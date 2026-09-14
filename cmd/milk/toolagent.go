@@ -96,7 +96,7 @@ func buildToolRunner(ctx context.Context, ac config.AgentConfig, cfg config.Conf
 	if existingMCP != nil {
 		la = la.WithMCPToolSet(existingMCP)
 	} else {
-		la = attachMCPToolSet(ctx, cfg, ac.Name, la)
+		la, _ = attachMCPToolSet(ctx, cfg, ac.Name, la)
 	}
 
 	if od, err := config.OtelDir(); err == nil {

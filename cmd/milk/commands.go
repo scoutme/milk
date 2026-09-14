@@ -469,7 +469,7 @@ func (m model) setTelegramEnabled(on bool) model {
 	} else {
 		ro.Backend = ""
 	}
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -503,7 +503,7 @@ func (m model) commitTelegramSetup(token string, chatID int64) model {
 	ro.Telegram.ChatID = chatID
 	m.st.cfg.RemoteOversight = ro
 
-	if err := config.Save(m.st.cfg); err != nil {
+	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -808,6 +808,29 @@ func removeAgentConfig(cfg *config.Config, name string) (outcome agentRemoveOutc
 	return agentRemoveOK, removed
 }
 
+// preferredSaveScope returns the save scope for TUI config changes.
+// In the TUI we cannot prompt stdin (Bubble Tea owns the terminal), so the
+// scope is auto-detected: save to local if .milk/config.json exists, else global.
+// When saving to local, ensures the .milk/ directory and config file exist.
+func preferredSaveScope() string {
+	if config.HasLocalConfig() {
+		return "local"
+	}
+	return "global"
+}
+
+// saveLocalOrGlobal saves config using the TUI auto-detected scope.
+// If the scope is local, ensures the .milk/config.json file exists first.
+func saveLocalOrGlobal(cfg config.Config) error {
+	scope := preferredSaveScope()
+	if scope == "local" {
+		if err := ensureLocalConfig(); err != nil {
+			return fmt.Errorf("creating local config: %w", err)
+		}
+	}
+	return config.SaveScope(cfg, scope)
+}
+
 // execAgentRemove removes the named agent from config.
 // Refuses if the agent is currently active as primary or escalation.
 func execAgentRemove(name string, st *interactiveState) string {
@@ -822,7 +845,7 @@ func execAgentRemove(name string, st *interactiveState) string {
 	case agentRemoveNotFound:
 		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
 	default:
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
@@ -854,7 +877,7 @@ func execBash(sub string, st *interactiveState) string {
 			}
 		}
 		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow, prefix)
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s added %q to direct_bash_allow", milkTag(), prefix)
@@ -874,7 +897,7 @@ func execBash(sub string, st *interactiveState) string {
 			return fmt.Sprintf("%s %q not found in allow list", milkTag(), prefix)
 		}
 		st.cfg.DirectBashAllow = append(st.cfg.DirectBashAllow[:idx], st.cfg.DirectBashAllow[idx+1:]...)
-		if err := config.Save(st.cfg); err != nil {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s removed %q from direct_bash_allow", milkTag(), prefix)
@@ -890,19 +913,25 @@ func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 		return m.handleConfigInitCmd()
 	case "open":
 		return m.handleConfigOpenCmd()
+	case "show":
+		return m.handleConfigShowCmd()
 	case "":
-		dir, err := config.Dir()
+		_, _, merged, hasLocal, err := config.LoadWithLocal()
 		if err != nil {
 			m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
 			return m, nil
 		}
-		data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+		data, err := json.MarshalIndent(merged, "", "  ")
 		if err != nil {
-			m.appendTranscript(fmt.Sprintf("%s error reading config: %v\n", milkTag(), err))
+			m.appendTranscript(fmt.Sprintf("%s error marshalling config: %v\n", milkTag(), err))
 			return m, nil
 		}
 		m.colorizeForce = true
-		m.appendTranscript(milkTag() + " ~/.milk/config.json\n```json\n" + string(data) + "\n```\n")
+		header := milkTag() + " ~/.milk/config.json"
+		if hasLocal {
+			header = milkTag() + " merged config (global + local overrides)"
+		}
+		m.appendTranscript(header + "\n```json\n" + string(data) + "\n```\n")
 		return m, nil
 	default:
 		m.appendTranscript(milkTag() + " usage: /config | /config init | /config open\n")
@@ -910,27 +939,103 @@ func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleConfigOpenCmd opens ~/.milk/config.json in $EDITOR or xdg-open.
-// Uses tea.ExecProcess so the TUI is properly suspended while the editor runs.
-func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
-	dir, err := config.Dir()
+// handleConfigShowCmd displays the merged config with field source annotations
+// (local/global/default) in the TUI transcript.
+func (m model) handleConfigShowCmd() (tea.Model, tea.Cmd) {
+	global, local, merged, hasLocal, err := config.LoadWithLocal()
 	if err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
 		return m, nil
 	}
-	cfgPath := filepath.Join(dir, "config.json")
+
+	if !hasLocal {
+		data, _ := json.MarshalIndent(merged, "", "  ")
+		m.appendTranscript(milkTag() + " no local config — all values from global\n```json\n" + string(data) + "\n```\n")
+		return m, nil
+	}
+
+	// Build source annotations per top-level field.
+	globalRaw, _ := json.Marshal(global)
+	localRaw, _ := json.Marshal(local)
+	mergedRaw, _ := json.Marshal(merged)
+
+	var gMap, lMap, mMap map[string]json.RawMessage
+	json.Unmarshal(globalRaw, &gMap)
+	json.Unmarshal(localRaw, &lMap)
+	json.Unmarshal(mergedRaw, &mMap)
+
+	var lines []string
+	for key, val := range mMap {
+		source := "default"
+		if _, ok := lMap[key]; ok {
+			source = "local"
+		} else if _, ok := gMap[key]; ok {
+			source = "global"
+		}
+		lines = append(lines, fmt.Sprintf("  /* [%s] */ %q: %s", source, key, string(val)))
+	}
+	// Deterministic order.
+	for i := 0; i < len(lines); i++ {
+		for j := i + 1; j < len(lines); j++ {
+			if lines[j] < lines[i] {
+				lines[i], lines[j] = lines[j], lines[i]
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s merged config — [local] fields override [global]; unset = [default]\n", milkTag()))
+	sb.WriteString("```json\n{\n")
+	for i, l := range lines {
+		sb.WriteString(l)
+		if i < len(lines)-1 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("}\n```\n")
+
+	fullData, _ := json.MarshalIndent(merged, "", "  ")
+	sb.WriteString(fmt.Sprintf("\n<details><summary>Full merged JSON</summary>\n\n```json\n%s\n```\n</details>\n", string(fullData)))
+
+	m.appendTranscript(sb.String())
+	return m, nil
+}
+
+// handleConfigOpenCmd opens the config file in $EDITOR or xdg-open.
+// If a local config (.milk/config.json) exists, it opens that; otherwise opens
+// the global config. Uses tea.ExecProcess so the TUI is properly suspended
+// while the editor runs.
+func (m model) handleConfigOpenCmd() (tea.Model, tea.Cmd) {
+	var cfgPath string
+	if config.HasLocalConfig() {
+		p, err := config.LocalConfigPath()
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+			return m, nil
+		}
+		cfgPath = p
+		m.appendTranscript(fmt.Sprintf("%s opening local config (inherits unset fields from global)…\n", milkTag()))
+	} else {
+		dir, err := config.Dir()
+		if err != nil {
+			m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
+			return m, nil
+		}
+		cfgPath = filepath.Join(dir, "config.json")
+		m.appendTranscript(fmt.Sprintf("%s opening %s…\n", milkTag(), cfgPath))
+	}
 	cmd := m.openInEditor(cfgPath)
 	if cmd == nil {
 		m.appendTranscript(fmt.Sprintf("%s no editor found — set $EDITOR or configure config_editors in config\n", milkTag()))
 		return m, nil
 	}
-	m.appendTranscript(fmt.Sprintf("%s opening %s…\n", milkTag(), cfgPath))
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return errMsg{err: fmt.Errorf("editor exited with error: %w", err)}
 		}
 		// Re-parse the config file after the editor exits so changes take effect.
-		newCfg, parseErr := config.Load()
+		newCfg, parseErr := config.LoadMerged()
 		return configReloadMsg{cfg: newCfg, err: parseErr}
 	})
 }
@@ -1068,7 +1173,7 @@ func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
 		}
 		cfg := m.st.cfg
 		cfg.UpdateSkippedVersion = m.pendingUpdate.Tag
-		_ = config.Save(cfg)
+		_ = saveLocalOrGlobal(cfg)
 		m.st.cfg = cfg
 		m.pendingUpdate = nil
 		m.appendTranscript(milkTag() + " update skipped\n")

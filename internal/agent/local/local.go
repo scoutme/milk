@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -31,6 +32,13 @@ const inferenceScope = "github.com/scoutme/milk"
 
 const defaultMaxToolIterations = 20
 
+// streamIdleLogInterval is how often scanSSE's heartbeat goroutine checks
+// whether the stream has gone idle (no new SSE line) and, if so, logs it.
+// Chosen well under the ~10+ minute hangs observed in practice so a live
+// tail of milk.log shows a hang happening in near-real-time instead of going
+// silent for the whole duration.
+const streamIdleLogInterval = 20 * time.Second
+
 // EscalationSignal is returned when the local model requests escalation to the escalation agent.
 type EscalationSignal struct {
 	Reason string
@@ -38,6 +46,26 @@ type EscalationSignal struct {
 
 func (e *EscalationSignal) Error() string {
 	return "escalate: " + e.Reason
+}
+
+// WorkflowStartSignal is returned when the model requests milk's native
+// /workflow engine via the start_workflow tool. Mirrors EscalationSignal's
+// pattern exactly: internal/agent/local has no access to the bubbletea model
+// that actually launches a workflow (cmd/milk/workflow_cmd.go), so the tool
+// call can't act itself — it returns this signal, which propagates up
+// through Run() the same way EscalationSignal does, for cmd/milk's dispatch
+// layer to catch and act on. Roles not present in Roles default to
+// "escalation" (matching the interactive /workflow wizard's own blank-input
+// default) — a tool call can't answer wizard prompts, so every role must be
+// resolved one way or another before the workflow can actually launch.
+type WorkflowStartSignal struct {
+	Name  string
+	Task  string
+	Roles map[string]string
+}
+
+func (w *WorkflowStartSignal) Error() string {
+	return "start_workflow: " + w.Name
 }
 
 // ContentPart is one element of a multipart message content array, as used by
@@ -1156,10 +1184,14 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
 	effLimits := a.limits
 	if a.isToolAgent {
-		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+		// Excludes start_workflow alongside escalate for the same reason: a
+		// stateless agent-as-tool call has no session/turn for
+		// WorkflowStartSignal's caller (cmd/milk's dispatch layer) to attach
+		// a launched workflow to.
+		effLimits = &config.AgentLimits{ExcludedTools: []string{"escalate", "start_workflow"}}
 		if a.limits != nil {
 			effLimits.IncludedTools = a.limits.IncludedTools
-			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate")
+			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate", "start_workflow")
 		}
 	}
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, effLimits)
@@ -1325,10 +1357,10 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			a.onResponseSegment(resp)
 		}
 
-		var esc *EscalationSignal
-		msgs, esc = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
-		if esc != nil {
-			return msgs, esc
+		var toolErr error
+		msgs, toolErr = a.executeToolCalls(ctx, msgs, toolCalls, fallbackRaw, userPrompt, out, sess, mem, reasoningText, pendingImages)
+		if toolErr != nil {
+			return msgs, toolErr
 		}
 
 		// Invalidate read_file entries for files that were just edited/written.
@@ -1488,10 +1520,15 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 		usage.CacheCreation += cacheCreation
 	}
 
-	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate"}}
+	// Excludes start_workflow alongside escalate: ADR-0043 caps background
+	// jobs at depth 1 and keeps them self-contained/stateless — spawning a
+	// full checkpointed, TUI-orchestrated workflow from inside one doesn't
+	// fit that model, and bgSess below has no real session ID for
+	// WorkflowStartSignal's caller to attach a launch to anyway.
+	bgLimits := &config.AgentLimits{ExcludedTools: []string{"escalate", "start_workflow"}}
 	if bg.limits != nil {
 		bgLimits.IncludedTools = bg.limits.IncludedTools
-		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate")
+		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate", "start_workflow")
 	}
 	bgSess := &session.Session{CWD: cwd}
 	tools := schemas(nil, bg.otelDir, bgSess, nil, nil, bgLimits)
@@ -1696,13 +1733,15 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// workflowStart is set by the start_workflow tool — see WorkflowStartSignal.
+	workflowStart *WorkflowStartSignal
 	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
 	// executeToolCalls turns these into a synthetic follow-up user message,
 	// since tool-role content must stay plain text on the OpenAI-compat wire.
 	images []string
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, *EscalationSignal) {
+func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls []toolCall, _ string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, reasoningContent string, pendingImages []ContentPart) ([]Message, error) {
 	msgs = append(msgs, Message{Role: "assistant", ToolCalls: toolCalls, ReasoningContent: reasoningContent})
 
 	// Pre-print tool hints and collect permission decisions synchronously (before
@@ -1803,6 +1842,9 @@ Action streak detected: %s. You are stuck in a non-progressing loop. Stop and tr
 		if outcome.escalate {
 			return msgs, &EscalationSignal{Reason: outcome.reason}
 		}
+		if outcome.workflowStart != nil {
+			return msgs, outcome.workflowStart
+		}
 	}
 	return msgs, nil
 }
@@ -1870,6 +1912,48 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			})
 		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+	}
+
+	// start_workflow: can't act itself (no access to the bubbletea model that
+	// actually launches a workflow — see WorkflowStartSignal's doc comment),
+	// so it validates what it can locally (name resolves in the registry,
+	// task non-empty) and returns a signal for cmd/milk's dispatch layer to
+	// act on, rather than a plain tool result. A bad name/empty task is
+	// still reported as an ordinary tool-result error, not a signal — the
+	// model can see that immediately and retry in the same turn.
+	if tc.Function.Name == "start_workflow" {
+		var args struct {
+			Name  string            `json:"name"`
+			Task  string            `json:"task"`
+			Roles map[string]string `json:"roles"`
+		}
+		json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
+		reg, regErrs := workflow.LoadRegistry()
+		for _, e := range regErrs {
+			obs.Warn("start_workflow: registry load error", "err", e.Error())
+		}
+		def, ok := reg.Lookup(args.Name)
+		if !ok {
+			result := toolResult{Error: fmt.Sprintf("unknown workflow %q — available: %s", args.Name, strings.Join(reg.Names(), ", "))}.String()
+			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+		}
+		if strings.TrimSpace(args.Task) == "" {
+			result := toolResult{Error: "task must not be empty"}.String()
+			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
+		}
+		roles := make(map[string]string, len(def.Roles))
+		for _, role := range def.Roles {
+			if v, ok := args.Roles[role]; ok && strings.TrimSpace(v) != "" {
+				roles[role] = v
+			} else {
+				roles[role] = workflow.AliasEscalation
+			}
+		}
+		result := toolResult{Output: fmt.Sprintf("Starting workflow %q.", def.Name)}.String()
+		return toolCallOutcome{
+			msg:           Message{Role: "tool", Content: result, ToolCallID: tc.ID},
+			workflowStart: &WorkflowStartSignal{Name: def.Name, Task: args.Task, Roles: roles},
+		}
 	}
 
 	// Pre-checked: permission was already denied before dispatch.
@@ -2303,6 +2387,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
 		)
+		obs.Warn("inference request failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -2313,6 +2402,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("model", a.model),
 			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
 			attribute.String("kind", "http"),
+		)
+		obs.Warn("inference request returned non-200",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"status", httpResp.StatusCode, "body", string(b),
+			"elapsed", time.Since(inferenceStart).String(),
 		)
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
@@ -2455,7 +2549,49 @@ func (a *Agent) scanSSE(
 	var promptTokens, completionTokens, cacheRead, imageTokens int64
 	var reasoningBuf strings.Builder
 	var finishReason string
+	// Tracked purely for observability: a mid-stream read failure (RST_STREAM,
+	// GOAWAY, connection drop) previously returned bare from scanner.Err()
+	// with zero trace in milk.log — the only place it ever became visible was
+	// whatever user-facing text a much later caller happened to print. lines
+	// and lastLineAt let the WARN below say exactly how far the stream got and
+	// how long it had gone quiet before failing, instead of just "it broke".
+	streamStartedAt := time.Now()
+	var lines atomic.Int64
+	var lastLineAtNano atomic.Int64
+	lastLineAtNano.Store(streamStartedAt.UnixNano())
+
+	// Heartbeat: scanner.Scan() blocks silently while the connection is open
+	// but idle (the exact case a hung stream looks like — no error, no data,
+	// nothing in the log to distinguish it from a normal long completion).
+	// Log periodically once idle time crosses the interval so a live tail of
+	// milk.log shows the hang happening, instead of going dead silent for the
+	// whole duration and only saying anything once it finally resolves.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(streamIdleLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
+				if idle >= streamIdleLogInterval {
+					obs.Warn("stream idle",
+						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+						"lines_scanned", lines.Load(),
+						"elapsed_since_start", time.Since(streamStartedAt).String(),
+						"elapsed_since_last_chunk", idle.String(),
+					)
+				}
+			}
+		}
+	}()
+	defer close(heartbeatDone)
+
 	for scanner.Scan() {
+		lines.Add(1)
+		lastLineAtNano.Store(time.Now().UnixNano())
 		line := scanner.Text()
 		if dbg != nil {
 			fmt.Fprintln(dbg, line) //nolint:errcheck
@@ -2519,8 +2655,27 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		obs.Warn("stream read failed",
+			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+			"err", err.Error(),
+			"lines_scanned", lines.Load(),
+			"elapsed_since_start", time.Since(streamStartedAt).String(),
+			"elapsed_since_last_chunk", time.Since(time.Unix(0, lastLineAtNano.Load())).String(),
+			"content_bytes", textBuf.Len(),
+			"reasoning_bytes", reasoningBuf.Len(),
+			"tool_call_fragments", len(partialTools),
+			"retryable", workflow.IsRetryableTurnError(err),
+		)
 		return nil, 0, 0, 0, 0, "", "", err
 	}
+	obs.Debug("stream read completed",
+		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		"lines_scanned", lines.Load(),
+		"elapsed", time.Since(streamStartedAt).String(),
+		"content_bytes", textBuf.Len(),
+		"reasoning_bytes", reasoningBuf.Len(),
+		"finish_reason", finishReason,
+	)
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 

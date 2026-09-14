@@ -108,6 +108,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 	const panelRowStart = 2 // same header offset as the main viewport
 	lineIdx := m.panelScrollOffset(region) + (ev.Y - panelRowStart)
 	col := panelContentCol(region, regionX)
+	var dragCmd tea.Cmd // set by press/motion; returned at the end
 
 	switch ev.Action {
 	case tea.MouseActionPress:
@@ -119,6 +120,9 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 			m.panelSelDragging = true
 			m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
 			setMouseDragMode(true)
+			m.dragResetPending = true
+			m.dragResetGen++
+			dragCmd = dragResetCmd(m.dragResetGen)
 			break
 		}
 		m.clearSelection()
@@ -133,13 +137,19 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 		m.panelSelDragging = false
 		m.panelSelText = ""
 		setMouseDragMode(true)
+		m.dragResetPending = true
+		m.dragResetGen++
+		dragCmd = dragResetCmd(m.dragResetGen)
 	case tea.MouseActionMotion:
 		if m.panelSelRegion == region && m.panelSelAnchorLine >= 0 {
 			m.panelSelDragging = true
 			m.panelSelEndLine = lineIdx
 			m.panelSelEndCol = col
+			m.dragResetGen++
+			dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
 		}
 	case tea.MouseActionRelease:
+		m.dragResetPending = false
 		setMouseDragMode(false)
 		if m.panelSelRegion != region || m.panelSelAnchorLine < 0 {
 			break
@@ -157,7 +167,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 		m.panelSelEndCol = col
 		m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
 	}
-	return m, nil
+	return m, dragCmd
 }
 
 // handleMemoryPanelClick runs the memory panel's existing click-for-detail

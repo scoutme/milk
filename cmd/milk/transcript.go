@@ -374,3 +374,15 @@ func busyHintClearCmd() tea.Cmd {
 func quitPendingClearCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return quitPendingClearMsg{} })
 }
+
+// dragResetCmd returns a command that fires the drag-timeout message after
+// 500ms.  Scheduled on mouse press, rescheduled on every motion event, and
+// cancelled on release.  If the release is dropped by the terminal (pointer
+// outside viewport bounds), the timeout resets the mouse-tracking mode to
+// basic (1000) so wheel-scroll keeps working.
+//
+// gen is the scheduling-generation counter; the returned message carries it so
+// the handler can discard stale timeouts from earlier scheduling calls.
+func dragResetCmd(gen uint64) tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return dragResetMsg{gen: gen} })
+}

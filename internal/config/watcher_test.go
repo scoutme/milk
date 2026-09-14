@@ -176,3 +176,207 @@ func TestWatcher_CloseStopsPolling(t *testing.T) {
 		t.Errorf("watcher fired %d times after Close; want 1", n)
 	}
 }
+
+// --- DualWatcher tests ---
+
+func TestDualWatcher_FiresOnGlobalChange(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	localPath := filepath.Join(dir, ".milk", "config.json")
+	os.MkdirAll(filepath.Join(dir, ".milk"), 0o700)
+
+	// Write initial configs.
+	os.WriteFile(globalPath, []byte(`{"agent":"global"}`), 0o644)
+	os.WriteFile(localPath, []byte(`{"colorization":"full"}`), 0o644)
+
+	var (
+		mu     sync.Mutex
+		gotCfg Config
+		fired  = make(chan struct{}, 5)
+	)
+
+	dw, err := NewDualWatcher(globalPath, localPath, func(cfg Config, err error) {
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		gotCfg = cfg
+		mu.Unlock()
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewDualWatcher: %v", err)
+	}
+	defer dw.Close()
+
+	// Change global config.
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(globalPath, []byte(`{"agent":"new-global"}`), 0o644)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DualWatcher did not fire on global change")
+	}
+
+	mu.Lock()
+	cfg := gotCfg
+	mu.Unlock()
+
+	// Should be merged: new-global agent + local colorization.
+	if cfg.Agent != "new-global" {
+		t.Errorf("expected new-global, got %q", cfg.Agent)
+	}
+	if cfg.Colorization != "full" {
+		t.Errorf("expected local colorization preserved, got %q", cfg.Colorization)
+	}
+}
+
+func TestDualWatcher_FiresOnLocalChange(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	localPath := filepath.Join(dir, ".milk", "config.json")
+	os.MkdirAll(filepath.Join(dir, ".milk"), 0o700)
+
+	os.WriteFile(globalPath, []byte(`{"agent":"global"}`), 0o644)
+	os.WriteFile(localPath, []byte(`{"colorization":"full"}`), 0o644)
+
+	var (
+		mu     sync.Mutex
+		gotCfg Config
+		fired  = make(chan struct{}, 5)
+	)
+
+	dw, _ := NewDualWatcher(globalPath, localPath, func(cfg Config, err error) {
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		gotCfg = cfg
+		mu.Unlock()
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+	defer dw.Close()
+
+	// Change local config.
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(localPath, []byte(`{"colorization":"off","agent":"local-override"}`), 0o644)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DualWatcher did not fire on local change")
+	}
+
+	mu.Lock()
+	cfg := gotCfg
+	mu.Unlock()
+
+	if cfg.Agent != "local-override" {
+		t.Errorf("expected local-override, got %q", cfg.Agent)
+	}
+	if cfg.Colorization != "off" {
+		t.Errorf("expected off, got %q", cfg.Colorization)
+	}
+}
+
+func TestDualWatcher_NoLocalFile(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	localPath := filepath.Join(dir, ".milk", "config.json") // doesn't exist
+
+	os.WriteFile(globalPath, []byte(`{"agent":"global"}`), 0o644)
+
+	var (
+		mu     sync.Mutex
+		gotCfg Config
+		fired  = make(chan struct{}, 5)
+	)
+
+	dw, _ := NewDualWatcher(globalPath, localPath, func(cfg Config, err error) {
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		gotCfg = cfg
+		mu.Unlock()
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+	defer dw.Close()
+
+	// Change global.
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(globalPath, []byte(`{"agent":"updated"}`), 0o644)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DualWatcher did not fire")
+	}
+
+	mu.Lock()
+	cfg := gotCfg
+	mu.Unlock()
+
+	if cfg.Agent != "updated" {
+		t.Errorf("expected updated, got %q", cfg.Agent)
+	}
+}
+
+func TestDualWatcher_LocalDeletionTriggersReload(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.json")
+	localPath := filepath.Join(dir, ".milk", "config.json")
+	os.MkdirAll(filepath.Join(dir, ".milk"), 0o700)
+
+	os.WriteFile(globalPath, []byte(`{"agent":"global"}`), 0o644)
+	os.WriteFile(localPath, []byte(`{"agent":"local"}`), 0o644)
+
+	var (
+		mu     sync.Mutex
+		gotCfg Config
+		fired  = make(chan struct{}, 5)
+	)
+
+	dw, _ := NewDualWatcher(globalPath, localPath, func(cfg Config, err error) {
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		gotCfg = cfg
+		mu.Unlock()
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+	defer dw.Close()
+
+	// Delete local config.
+	time.Sleep(10 * time.Millisecond)
+	os.Remove(localPath)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DualWatcher did not fire on local deletion")
+	}
+
+	mu.Lock()
+	cfg := gotCfg
+	mu.Unlock()
+
+	// Should fall back to global.
+	if cfg.Agent != "global" {
+		t.Errorf("expected global after local deletion, got %q", cfg.Agent)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/shelldetect"
 )
 
 const milkScope = "github.com/scoutme/milk"
@@ -52,6 +54,8 @@ var (
 	flagDrop       bool
 	flagAgent      string // --agent: override primary agent name
 	flagEscalation string // --escalation-agent: override escalation agent name
+	flagLocal      bool   // --local: write to .milk/config.json (project-local)
+	flagGlobal     bool   // --global: write to ~/.milk/config.json (global)
 )
 
 // Set via -ldflags at build time.
@@ -111,7 +115,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	prompt := strings.TrimSpace(strings.Join(args, " "))
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadMerged()
 	startupWarning := ""
 	if err != nil {
 		var recovered *config.ErrConfigRecovered
@@ -134,6 +138,9 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Wire need expiry config to session package.
 	session.NeedExpiryDuration = time.Duration(cfg.AgentNeedExpiryHours()) * time.Hour
+
+	// Register user-configured shell binaries for the shell-detector heuristic.
+	shelldetect.RegisterBinaries(cfg.ShellBinaries)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -223,9 +230,12 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil)
+		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil, nil)
 	case router.TargetEscalation:
-		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil)
+		// onWorkflowStart is nil: single-prompt CLI mode has no bubbletea
+		// model to launch a workflow against — see runPrimaryWithSession's
+		// doc comment on the same parameter.
+		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil, nil)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
@@ -304,7 +314,7 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 			sp = sp.WithDebugLog(dbg)
 		}
 		r := newSubprocessRunner(sp, primaryAC.Name)
-		if servers, ts := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
+		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, primaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 		}
 		return r, nil, nil
@@ -332,7 +342,10 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if name == "" {
 		name = "primary"
 	}
-	la = attachMCPToolSet(context.Background(), cfg, primaryAC.Name, la)
+	la, mcpErr := attachMCPToolSet(context.Background(), cfg, primaryAC.Name, la)
+	if mcpErr != nil {
+		fmt.Fprintf(os.Stderr, "%s warning: %v\n", milkTag(), mcpErr)
+	}
 	return newLocalRunner(la, name), la, nil
 }
 
@@ -363,7 +376,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 				sp = sp.WithDebugLog(dbg)
 			}
 			r := newSubprocessRunner(sp, escAC.Name)
-			if servers, ts := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
+			if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, escAC.Name); ts != nil {
 				r = r.withMCPToolSet(servers, ts)
 			}
 			return r, nil
@@ -394,7 +407,10 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 			if name == "" {
 				name = "escalation"
 			}
-			la = attachMCPToolSet(context.Background(), cfg, escAC.Name, la)
+			la, mcpErr := attachMCPToolSet(context.Background(), cfg, escAC.Name, la)
+			if mcpErr != nil {
+				fmt.Fprintf(os.Stderr, "%s warning: %v\n", milkTag(), mcpErr)
+			}
 			return newLocalRunner(la, name), nil
 		}
 		fmt.Fprintf(os.Stderr, "%s warning: escalation_agent %q not found in agents — falling back to claude-cli\n", milkTag(), cfg.EscalationAgent)
@@ -463,13 +479,14 @@ func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 
 // attachMCPToolSet builds an mcp.ToolSet from the MCP servers configured for
 // agentName, connects all clients concurrently, and wires it into la via
-// WithMCPToolSet. Errors during connect are logged as warnings — partial
-// connectivity is preferred over a hard startup failure. When no MCP servers
-// are configured for the agent, la is returned unchanged.
-func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) *local.Agent {
+// WithMCPToolSet. Partial connectivity is preferred over a hard startup
+// failure: when some clients fail, the ToolSet is still wired so lazy
+// reconnect inside Schemas() / Dispatch() can retry on first use.
+// When no MCP servers are configured for the agent, la is returned unchanged.
+func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) (*local.Agent, error) {
 	servers := cfg.EffectiveMCPServers(agentName)
 	if len(servers) == 0 {
-		return la
+		return la, nil
 	}
 	clients := make([]*mcp.Client, 0, len(servers))
 	for _, s := range servers {
@@ -478,23 +495,24 @@ func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, 
 	ts := mcp.NewToolSet(clients)
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
+	var connectErr error
 	if err := ts.ConnectAll(connectCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
+		connectErr = fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
 	}
 	// Always wire the ToolSet even if no clients connected at startup.
 	// Lazy reconnect inside Schemas() / Dispatch() will retry on first use.
 	la = la.WithMCPToolSet(ts)
-	return la
+	return la, connectErr
 }
 
 // buildMCPToolSet builds a connected mcp.ToolSet for agentName using the servers
 // from cfg, or returns (nil, nil) when no servers are configured. Errors are
 // logged as warnings; partial connectivity is acceptable — lazy reconnect retries on use.
-func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet) {
+func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet, error) {
 	servers := cfg.EffectiveMCPServers(agentName)
 	if len(servers) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	clients := make([]*mcp.Client, 0, len(servers))
 	for _, s := range servers {
@@ -504,10 +522,10 @@ func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) (
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
 	if err := ts.ConnectAll(connectCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: MCP connect error for agent %q: %v\n", milkTag(), agentName, err)
 		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
+		return servers, ts, fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 	}
-	return servers, ts
+	return servers, ts, nil
 }
 
 // activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd
@@ -1719,12 +1737,24 @@ func runInitWizard() error {
 	}
 
 	cfg := config.InitConfig(primary, escalation)
-	if err := config.Save(cfg); err != nil {
+	scope := "global"
+	if flagLocal {
+		scope = "local"
+	} else if flagGlobal {
+		scope = "global"
+	} else {
+		scope = promptLocalOrGlobal()
+	}
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
+	scopeLabel := "~/.milk/config.json"
+	if scope == "local" {
+		scopeLabel = ".milk/config.json"
+	}
 	fmt.Println()
-	fmt.Println("config written to ~/.milk/config.json")
+	fmt.Printf("config written to %s\n", scopeLabel)
 	fmt.Println()
 	fmt.Println("next steps:")
 	fmt.Println("  milk               — start the TUI")
@@ -1752,6 +1782,9 @@ var configCmd = &cobra.Command{
 }
 
 func init() {
+	configCmd.PersistentFlags().BoolVar(&flagLocal, "local", false, "Write to .milk/config.json in the current directory (project-local)")
+	configCmd.PersistentFlags().BoolVar(&flagGlobal, "global", false, "Write to ~/.milk/config.json (global default)")
+
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "init",
 		Short: "Interactive setup wizard — configure primary and escalation agents",
@@ -1764,6 +1797,13 @@ func init() {
 		Short: "Open config in $EDITOR or system default editor",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConfigOpen()
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show merged config with field source annotations (global/local/default)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigShow()
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
@@ -1858,10 +1898,11 @@ func runConfigMCPRemove(name string) error {
 	if !removeMCPServer(&cfg, name) {
 		return fmt.Errorf("MCP server %q not found", name)
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
-	fmt.Printf("MCP server %q removed\n", name)
+	fmt.Printf("MCP server %q removed (saved to %s)\n", name, scope)
 	return nil
 }
 
@@ -1883,14 +1924,15 @@ func runConfigMCPAdd(inline string) error {
 	}
 	updated := config.UpsertMCPServer(&cfg, sc)
 	printConfigWarnings(cfg)
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "added"
 	if updated {
 		verb = "updated"
 	}
-	fmt.Printf("MCP server %q %s — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, sc.Name)
+	fmt.Printf("MCP server %q %s (saved to %s) — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, scope, sc.Name)
 	return nil
 }
 
@@ -1912,14 +1954,15 @@ func runConfigMCPAssign(serverName, agentName string, assign bool) error {
 		}
 		return nil
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
 	verb := "assigned to"
 	if !assign {
 		verb = "unassigned from"
 	}
-	fmt.Printf("MCP server %q %s agent %q\n", serverName, verb, agentName)
+	fmt.Printf("MCP server %q %s agent %q (saved to %s)\n", serverName, verb, agentName, scope)
 	return nil
 }
 
@@ -1961,10 +2004,11 @@ func runConfigAgentRemove(name string) error {
 	case agentRemoveNotFound:
 		return fmt.Errorf("no agent named %q", name)
 	}
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
-	fmt.Printf("agent %q removed\n", removed)
+	fmt.Printf("agent %q removed (saved to %s)\n", removed, scope)
 	return nil
 }
 
@@ -1989,32 +2033,192 @@ func runConfigAgentAdd(inline string) error {
 		cfg.Agent = ac.Name
 	}
 	printConfigWarnings(cfg)
-	if err := config.Save(cfg); err != nil {
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
 		return err
 	}
-	fmt.Printf("agent %q added\n", ac.Name)
+	fmt.Printf("agent %q added (saved to %s)\n", ac.Name, scope)
 	return nil
 }
 
-func runConfigPrint() error {
-	dir, err := config.Dir()
+// resolveSaveScope determines whether to save to local or global config.
+// Priority: --local/--global flags > interactive prompt (if local config exists) > global default.
+func resolveSaveScope() string {
+	if flagLocal {
+		return "local"
+	}
+	if flagGlobal {
+		return "global"
+	}
+	if config.HasLocalConfig() {
+		return promptLocalOrGlobal()
+	}
+	return "global"
+}
+
+// promptScopeIfNeeded returns a scope string. When a local config exists and
+// no --local/--global flag was passed, it prompts the user.
+// Used by config-mutating commands (mcp add/remove, agent add/remove, init).
+func promptScopeIfNeeded() string {
+	return resolveSaveScope()
+}
+
+// promptLocalOrGlobal asks the user whether to apply a config change to the
+// local project config or the global config. Defaults to local (Y).
+func promptLocalOrGlobal() string {
+	fmt.Print("Apply to local? [Y/n] ")
+	sc := bufio.NewScanner(os.Stdin)
+	if sc.Scan() {
+		answer := strings.TrimSpace(strings.ToLower(sc.Text()))
+		if answer == "n" || answer == "no" {
+			return "global"
+		}
+	}
+	return "local"
+}
+
+// saveConfigForScope persists cfg to an already-resolved scope ("local" or
+// "global"), creating the local config file first if (and only if) the scope
+// is local. Every CLI config-mutating command must go through this rather
+// than calling ensureLocalConfig unconditionally — doing so previously
+// created a stray .milk/config.json in cwd even on a --global save, which
+// then silently flipped every later command's scope default to "local".
+func saveConfigForScope(cfg config.Config, scope string) error {
+	if scope == "local" {
+		if err := ensureLocalConfig(); err != nil {
+			return err
+		}
+	}
+	return config.SaveScope(cfg, scope)
+}
+
+// ensureLocalConfig creates .milk/config.json with a minimal empty object if
+// it doesn't exist yet. Called after the user answers "Y" to the scope prompt
+// but no local config file is present.
+func ensureLocalConfig() error {
+	p, err := config.LocalConfigPath()
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if _, err := os.Stat(p); err == nil {
+		return nil // already exists
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte("{}\n"), 0o600)
+}
+
+func runConfigPrint() error {
+	// Show merged config (global + local) with a note if local overrides exist.
+	_, _, merged, hasLocal, err := config.LoadWithLocal()
 	if err != nil {
 		return err
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return err
+	}
+	if hasLocal {
+		fmt.Fprintln(os.Stderr, "# merged config (global + local overrides)")
 	}
 	fmt.Println(string(data))
 	return nil
 }
 
-func runConfigOpen() error {
-	dir, err := config.Dir()
+// runConfigShow prints the merged config with per-field source annotations
+// showing whether each value comes from "local", "global", or "default".
+func runConfigShow() error {
+	global, local, merged, hasLocal, err := config.LoadWithLocal()
 	if err != nil {
 		return err
 	}
-	cfgPath := filepath.Join(dir, "config.json")
+	if !hasLocal {
+		fmt.Fprintln(os.Stderr, "no local config (.milk/config.json) — all values are global")
+		data, err := json.MarshalIndent(global, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	// Marshal all three to raw JSON maps for field-by-field comparison.
+	globalRaw, _ := json.Marshal(global)
+	localRaw, _ := json.Marshal(local)
+	mergedRaw, _ := json.Marshal(merged)
+
+	var gMap, lMap, mMap map[string]json.RawMessage
+	json.Unmarshal(globalRaw, &gMap)
+	json.Unmarshal(localRaw, &lMap)
+	json.Unmarshal(mergedRaw, &mMap)
+
+	// Build annotated output: for each field in merged, determine source.
+	// Order: local fields first, then global-only fields, then defaults.
+	seen := make(map[string]bool)
+	var lines []string
+
+	for key, val := range mMap {
+		seen[key] = true
+		source := "default"
+		if _, inLocal := lMap[key]; inLocal {
+			source = "local"
+		} else if _, inGlobal := gMap[key]; inGlobal {
+			source = "global"
+		}
+		lines = append(lines, fmt.Sprintf("  // [%s] %s: %s", source, key, string(val)))
+	}
+
+	sort.Strings(lines)
+	fmt.Fprintln(os.Stderr, "# merged config — field sources: [local] [global] [default]")
+	fmt.Fprintln(os.Stderr, "# local overrides global; unset fields fall back to global, then defaults")
+	fmt.Println("{")
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	fmt.Println("}")
+
+	// Also print the full merged JSON for machine consumption.
+	fmt.Fprintln(os.Stderr)
+	fullData, _ := json.MarshalIndent(merged, "", "  ")
+	fmt.Println(string(fullData))
+	return nil
+}
+
+func runConfigOpen() error {
+	// Determine which config file to open:
+	// --local  → .milk/config.json (create if missing)
+	// --global → ~/.milk/config.json
+	// default  → local if exists, else global
+	cfgPath := ""
+	if flagLocal {
+		p, err := config.LocalConfigPath()
+		if err != nil {
+			return err
+		}
+		if err := ensureLocalConfig(); err != nil {
+			return err
+		}
+		cfgPath = p
+	} else if flagGlobal {
+		dir, err := config.Dir()
+		if err != nil {
+			return err
+		}
+		cfgPath = filepath.Join(dir, "config.json")
+	} else if config.HasLocalConfig() {
+		p, err := config.LocalConfigPath()
+		if err != nil {
+			return err
+		}
+		cfgPath = p
+	} else {
+		dir, err := config.Dir()
+		if err != nil {
+			return err
+		}
+		cfgPath = filepath.Join(dir, "config.json")
+	}
 
 	// Load config to check for config_editors override.
 	cfg, _ := config.Load()
@@ -2050,6 +2254,12 @@ func runConfigOpen() error {
 	if editorCmd == "" {
 		return fmt.Errorf("no editor found — set $EDITOR or configure config_editors in config")
 	}
+
+	// If opening local config that inherits from global, print a helpful note.
+	if config.HasLocalConfig() && cfgPath != filepath.Join(func() string { d, _ := config.Dir(); return d }(), "config.json") {
+		fmt.Fprintf(os.Stderr, "opening local config (inherits unset fields from global)\n")
+	}
+
 	cmd := exec.Command(editorCmd, append(editorArgs, cfgPath)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -2204,7 +2414,7 @@ func runOtelDebug(enable bool) error {
 	cfg.DebugCLILog = enable
 	cfg.DebugLocalLog = enable
 	cfg.DebugSubprocessLog = enable
-	if err := config.Save(cfg); err != nil {
+	if err := config.SaveScope(cfg, resolveSaveScope()); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
