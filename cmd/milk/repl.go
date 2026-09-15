@@ -187,6 +187,13 @@ func (m model) trackMCPToolSet(agentName string, old, ts *mcp.ToolSet) model {
 // chunkMsg carries a chunk of streamed agent output.
 type chunkMsg struct{ text string }
 
+// requestSizeMsg carries the exact marshaled size (bytes) of the request
+// just sent to a local-provider agent for the current turn, replacing the
+// live ctx% estimate's crude len(userInput)-based guess with the real
+// figure. Fired once per inference call, so a multi-step tool-calling turn
+// updates it again on each subsequent call.
+type requestSizeMsg struct{ bytes int64 }
+
 // prefixChunkMsg carries the agent-name prefix printed before streaming begins.
 // It is appended to the transcript but excluded from the live token estimate.
 type prefixChunkMsg struct{ text string }
@@ -731,8 +738,14 @@ type model struct {
 	// Live turn output: chars written during the current turn, used as a streaming proxy.
 	// Reset at turn start.
 	currentTurnChars int64
-	// currentTurnInputChars holds the input prompt char count for the current turn,
-	// used as a streaming proxy for estimated input tokens.
+	// currentTurnInputChars holds the estimated input size (bytes/chars) for
+	// the current turn's live ctx% status-bar estimate. Set to just the typed
+	// prompt's length at dispatch (a placeholder for the brief window before
+	// the first request goes out, and the only value ever available for
+	// non-local-provider agents, e.g. claude-cli); overwritten with the exact
+	// marshaled request payload size by requestSizeMsg once a local-provider
+	// agent actually sends the request — updated again on each subsequent
+	// call within a multi-step tool-calling turn.
 	currentTurnInputChars int64
 	// lastTurnPrompt/Completion are per-role deltas from the last completed turn
 	// for each agent, captured at agentDoneMsg.
@@ -1530,6 +1543,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clipboardNoToolMsg:
 		m.appendTranscript(milkTag() + " clipboard paste: no non-text content found — on WSL2 powershell.exe is used automatically; on X11 install " + bold("xclip") + "; on Wayland install " + bold("wl-paste") + "\n")
+		return m, nil
+
+	case requestSizeMsg:
+		m.currentTurnInputChars = msg.bytes
 		return m, nil
 
 	case prefixChunkMsg:
@@ -3410,10 +3427,20 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		localAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
 			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 		})
+		localAgent.WithOnRequestSize(func(bytes int64) {
+			if st.program != nil {
+				st.program.Send(requestSizeMsg{bytes: bytes})
+			}
+		})
 	}
 	if escalationLocalAgent != nil {
 		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
 			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
+		})
+		escalationLocalAgent.WithOnRequestSize(func(bytes int64) {
+			if st.program != nil {
+				st.program.Send(requestSizeMsg{bytes: bytes})
+			}
 		})
 	}
 

@@ -276,6 +276,9 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	if err != nil {
 		return "", "", nil, false, "", err
 	}
+	if a.onRequestSize != nil {
+		a.onRequestSize(int64(len(body)))
+	}
 	if a.logContext {
 		obs.LogPayload(a.converseEndpoint(true), body)
 	}
