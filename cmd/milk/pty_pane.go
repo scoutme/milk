@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,6 +45,12 @@ func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
 	ws := &pty.Winsize{Rows: uint16(vpH), Cols: uint16(paneCols)}
 	ptm, err := pty.StartWithSize(cmd, ws)
 	if err != nil {
+		if errors.Is(err, pty.ErrUnsupported) {
+			// No real PTY implementation on this platform (Windows: creack/pty
+			// ships a stub there). Fall back to handing the real console to the
+			// child process directly instead of failing outright.
+			return m.launchDirectBashFallback(shellCmd)
+		}
 		return m, func() tea.Msg {
 			return directBashDoneMsg{err: fmt.Errorf("pty start: %w", err)}
 		}
