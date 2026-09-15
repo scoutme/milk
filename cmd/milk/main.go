@@ -33,6 +33,7 @@ import (
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/mcp"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/modelsdev"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
@@ -141,6 +142,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Register user-configured shell binaries for the shell-detector heuristic.
 	shelldetect.RegisterBinaries(cfg.ShellBinaries)
+
+	// Load (and, if stale, background-refresh) the models.dev catalog used
+	// by Config.AgentContextWindowTokens's fallback. Never blocks startup.
+	if !cfg.DisableModelsDevLookup {
+		if cachePath, err := config.ModelsDevCachePath(); err == nil {
+			modelsdev.EnsureLoaded(cachePath)
+		}
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {

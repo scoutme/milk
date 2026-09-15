@@ -103,9 +103,15 @@ tasks:
     deps:
       - build:mock
 
-  ci:
-    desc: fmt + vet + test + build
+  models-dev:update:
+    desc: Refresh the embedded models.dev catalog snapshot (internal/modelsdev/snapshot.json)
     cmds:
+      - scripts/update-models-dev-snapshot.sh
+
+  ci:
+    desc: models-dev:update + fmt + vet + test + build
+    cmds:
+      - task: models-dev:update
       - task: fmt
       - task: vet
       - task: test

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/loop"
+	"github.com/scoutme/milk/internal/modelsdev"
 )
 
 // LocalConfigDir is the name of the per-project config directory relative to cwd.
@@ -965,6 +966,13 @@ type Config struct {
 	// binaries that aren't in the default known list.
 	// Example: ["task", "just", "mage"]
 	ShellBinaries []string `json:"shell_binaries,omitempty"`
+
+	// DisableModelsDevLookup turns off the models.dev catalog fallback used
+	// by AgentContextWindowTokens when an agent entry omits
+	// context_window_tokens. Default: false (lookup enabled) — set true for
+	// fully offline use, or if a matched value is wrong for a custom/
+	// fine-tuned model sharing a name with a catalog entry.
+	DisableModelsDevLookup bool `json:"disable_models_dev_lookup,omitempty"`
 }
 
 // RemoteOversightConfig holds settings for the remote oversight interface.
@@ -1314,12 +1322,20 @@ func (c Config) AgentContextBudget(a AgentConfig) int {
 }
 
 // AgentContextWindowTokens returns the context window size (in tokens) for the
-// given agent. Returns 0 when not set, meaning no token-budget auto-derivation
-// will occur. Callers should use this value to auto-derive MessageBudgetChars
-// and MaxToolIterations when the corresponding limits are not explicitly set.
+// given agent. Falls back to a best-effort models.dev catalog lookup by the
+// agent's model name when context_window_tokens isn't set (unless disabled
+// via DisableModelsDevLookup); returns 0 when neither source has a value,
+// meaning no token-budget auto-derivation will occur. Callers should use
+// this value to auto-derive MessageBudgetChars and MaxToolIterations when
+// the corresponding limits are not explicitly set.
 func (c Config) AgentContextWindowTokens(a AgentConfig) int {
 	if a.ContextWindowTokens > 0 {
 		return a.ContextWindowTokens
+	}
+	if !c.DisableModelsDevLookup {
+		if window, ok := modelsdev.Lookup(a.Model); ok {
+			return window
+		}
 	}
 	return 0
 }
@@ -1790,6 +1806,16 @@ func MCPOAuthDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "mcp_oauth"), nil
+}
+
+// ModelsDevCachePath returns the path to the cached models.dev catalog
+// (~/.milk/models_dev.json), used by AgentContextWindowTokens's fallback.
+func ModelsDevCachePath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "models_dev.json"), nil
 }
 
 // OtelDir returns the directory for OTel signal files (~/.milk/otel).

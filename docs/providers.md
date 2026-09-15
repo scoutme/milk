@@ -488,6 +488,8 @@ Explicit `limits.message_budget_chars` / `limits.max_tool_iterations` always win
 
 For local models, read the value directly from the `--ctx-size` flag in `run_cmd`.
 
+When `context_window_tokens` is omitted, milk falls back to a best-effort lookup against the [models.dev](https://models.dev) model catalog, matched case-insensitively against the agent's `model` string across every provider in the catalog (milk doesn't store a models.dev provider ID, so a bare name like `claude-sonnet-4-6` is matched wherever it appears). A model's context window essentially never changes once published, so the primary source is a snapshot of the catalog embedded into the `milk` binary at build time (`internal/modelsdev/snapshot.json`, regenerated periodically via `scripts/update-models-dev-snapshot.sh`) — this works fully offline with zero startup latency for any model that existed when the snapshot was last cut. A live network fetch, cached to `~/.milk/models_dev.json` and refreshed in the background past a 24h TTL, is consulted only as a fallback for a miss against the embedded snapshot (e.g. a model released since). Lookups are served from memory and never block a turn — a miss against both sources, a fetch failure, or an unmatched model name all fall through to the pre-existing behavior (no derived limits, absolute-size `ctx:` display). Explicit `context_window_tokens` always wins over either catalog source. Disable the whole fallback (embedded snapshot and network both) with `"disable_models_dev_lookup": true` — most useful when a matched value would be wrong for a custom/fine-tuned model that happens to share a name with a catalog entry; the network fetch alone adds no meaningful offline benefit to disable separately, since it's already a no-op fallback that only matters on an embedded-snapshot miss.
+
 ---
 
 ### System prompt verbosity (`system_prompt_tier`)
@@ -709,7 +711,7 @@ All fields optional; omitted → global value applies.
 | `excluded_tools` | — | (none) | Built-in tools to remove for this agent (applied after `included_tools`) |
 | `tool_timeout_secs` | — | 120 | See [docs/tooling.md — Concurrent tool dispatch](tooling.md#concurrent-tool-dispatch) |
 
-> **Large context window agents**: set `context_window_tokens` and let milk auto-derive `message_budget_chars`/`max_tool_iterations`; `limits` overrides remain available for exact values. `milk config init` prompts for it automatically.
+> **Large context window agents**: set `context_window_tokens` and let milk auto-derive `message_budget_chars`/`max_tool_iterations`; `limits` overrides remain available for exact values. Both `milk config init` and the TUI's `/agent add` prompt for it, proposing a models.dev catalog match as the default when the model name is recognized.
 
 > **Small local models**: set `system_prompt_tier: "minimal"` and use `limits.included_tools` to restrict the tool set to the 7–8 tools the model will actually use — recovers ~700 tokens of prompt and ~1000–1500 tokens of tool-schema space per turn.
 

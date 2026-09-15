@@ -13,6 +13,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/modelsdev"
 	"github.com/scoutme/milk/internal/router"
 )
 
@@ -40,6 +41,7 @@ type addAgentState struct {
 	ac          config.AgentConfig
 	step        addAgentStep
 	runCmdAsked bool // true once the optional run_cmd step has been shown
+	limitsAsked bool // true once the optional context_window_tokens step has been shown
 	promptAsked bool // true once the optional prompt step has been shown
 }
 
@@ -53,6 +55,7 @@ const (
 	addStepModel
 	addStepAPIKey    // only when provider is bearer
 	addStepAWSRegion // only when provider is bedrock
+	addStepLimits    // optional — context_window_tokens (proposes a models.dev catalog match)
 	addStepPrompt    // optional — inline prompt or prompt_file path
 	addStepDone
 )
@@ -73,10 +76,10 @@ func (m model) startAddAgent(inline string) model {
 
 	// Otherwise start the wizard from the first missing required field.
 	// If run_cmd was supplied inline, mark it as already asked so the wizard skips it.
-	st := &addAgentState{ac: ac, runCmdAsked: ac.RunCmd != ""}
+	st := &addAgentState{ac: ac, runCmdAsked: ac.RunCmd != "", limitsAsked: ac.ContextWindowTokens != 0}
 	st.step = firstMissingStep(ac)
 	m.pendingAdd = st
-	m.appendTranscript(addAgentPrompt(st.step) + " ")
+	m.appendTranscript(addAgentPrompt(st.step, st.ac) + " ")
 	m.ta.Reset()
 	return m
 }
@@ -106,6 +109,10 @@ func parseAgentInlineArgs(s string) config.AgentConfig {
 			ac.Bin = v
 		case "run_cmd":
 			ac.RunCmd = v
+		case "context_window_tokens":
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				ac.ContextWindowTokens = n
+			}
 		}
 	}
 	return ac
@@ -136,8 +143,10 @@ func firstMissingStep(ac config.AgentConfig) addAgentStep {
 	return addStepDone
 }
 
-// addAgentPrompt returns the prompt string for a wizard step.
-func addAgentPrompt(step addAgentStep) string {
+// addAgentPrompt returns the prompt string for a wizard step. ac is the
+// agent config accumulated so far — needed by addStepLimits to propose a
+// models.dev catalog match for ac.Model.
+func addAgentPrompt(step addAgentStep, ac config.AgentConfig) string {
 	switch step {
 	case addStepName:
 		return milkTag() + " name:"
@@ -153,6 +162,11 @@ func addAgentPrompt(step addAgentStep) string {
 		return milkTag() + " api_key:"
 	case addStepAWSRegion:
 		return milkTag() + " aws_region:"
+	case addStepLimits:
+		if v, ok := modelsdev.Lookup(ac.Model); ok {
+			return milkTag() + fmt.Sprintf(" context window in tokens (matched %q in the models.dev catalog) [%d]:", ac.Model, v)
+		}
+		return milkTag() + " context window in tokens, if known (optional, enter to skip):"
 	case addStepPrompt:
 		return milkTag() + " behaviour (optional — inline prompt text, or file=<path> to load from a file, enter to skip):"
 	default:
@@ -177,19 +191,19 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch st.step {
 		case addStepName:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " name is required\n" + addAgentPrompt(addStepName) + " ")
+				m.appendTranscript(milkTag() + " name is required\n" + addAgentPrompt(addStepName, st.ac) + " ")
 				return m, nil
 			}
 			st.ac.Name = answer
 		case addStepURL:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " url is required\n" + addAgentPrompt(addStepURL) + " ")
+				m.appendTranscript(milkTag() + " url is required\n" + addAgentPrompt(addStepURL, st.ac) + " ")
 				return m, nil
 			}
 			st.ac.URL = answer
 		case addStepModel:
 			if answer == "" {
-				m.appendTranscript(milkTag() + " model is required\n" + addAgentPrompt(addStepModel) + " ")
+				m.appendTranscript(milkTag() + " model is required\n" + addAgentPrompt(addStepModel, st.ac) + " ")
 				return m, nil
 			}
 			st.ac.Model = answer
@@ -202,6 +216,15 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			st.ac.APIKey = answer
 		case addStepAWSRegion:
 			st.ac.AWSRegion = answer
+		case addStepLimits:
+			if answer == "" {
+				if v, ok := modelsdev.Lookup(st.ac.Model); ok {
+					st.ac.ContextWindowTokens = v
+				}
+			} else if n, err := strconv.Atoi(answer); err == nil && n > 0 {
+				st.ac.ContextWindowTokens = n
+			}
+			st.limitsAsked = true
 		case addStepPrompt:
 			if strings.HasPrefix(answer, "file=") {
 				st.ac.PromptFile = strings.TrimPrefix(answer, "file=")
@@ -214,23 +237,29 @@ func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// After URL is set: inject run_cmd step for local provider before advancing.
 		if st.step == addStepURL && strings.ToLower(st.ac.Provider) == "local" && !st.runCmdAsked {
 			st.step = addStepRunCmd
-			m.appendTranscript(addAgentPrompt(st.step) + " ")
+			m.appendTranscript(addAgentPrompt(st.step, st.ac) + " ")
 			return m, nil
 		}
 
 		// Advance to next missing step.
 		st.step = firstMissingStep(st.ac)
+		if st.step == addStepDone && !st.limitsAsked {
+			// Inject the optional context_window_tokens step before committing.
+			st.step = addStepLimits
+			m.appendTranscript(addAgentPrompt(st.step, st.ac) + " ")
+			return m, nil
+		}
 		if st.step == addStepDone && !st.promptAsked {
 			// Inject the optional behaviour step before committing.
 			st.step = addStepPrompt
-			m.appendTranscript(addAgentPrompt(st.step) + " ")
+			m.appendTranscript(addAgentPrompt(st.step, st.ac) + " ")
 			return m, nil
 		}
 		if st.step == addStepDone {
 			m.pendingAdd = nil
 			m = m.commitAddAgent(st.ac)
 		} else {
-			m.appendTranscript(addAgentPrompt(st.step) + " ")
+			m.appendTranscript(addAgentPrompt(st.step, st.ac) + " ")
 		}
 		return m, nil
 	}
@@ -927,17 +956,10 @@ func initWizardPrompt(st *initWizardState) string {
 	case initStepAWSRegion:
 		return milkTag() + " AWS region (e.g. us-east-1): "
 	case initStepLimits:
-		switch st.limitsSubStep {
-		case 0:
-			return milkTag() + " does this agent have a large context window? [y/N]: "
-		case 1:
-			return milkTag() + fmt.Sprintf(" max_tool_iterations [100]: ")
-		case 2:
-			return milkTag() + fmt.Sprintf(" message_budget_chars [3000000]: ")
-		case 3:
-			return milkTag() + fmt.Sprintf(" context_budget_chars [200000]: ")
+		if v, ok := modelsdev.Lookup(st.primary.Model); ok {
+			return milkTag() + fmt.Sprintf(" context window in tokens (matched %q in the models.dev catalog) [%d]: ", st.primary.Model, v)
 		}
-		return ""
+		return milkTag() + " context window in tokens, if known (blank to skip): "
 	case initStepEscalation:
 		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
 	case initStepAgentTools:
@@ -1077,52 +1099,15 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 		case initStepLimits:
-			switch st.limitsSubStep {
-			case 0:
-				// large context window?
-				lower := strings.ToLower(answer)
-				st.largeCtx = lower == "y" || lower == "yes"
-				if !st.largeCtx {
-					// skip to escalation directly
-					st.step = initStepEscalation
-					m.appendTranscript(initWizardPrompt(st))
-					return m, nil
+			v := 0
+			if answer == "" {
+				if catalogV, ok := modelsdev.Lookup(st.primary.Model); ok {
+					v = catalogV
 				}
-				st.limitsSubStep = 1
-				m.appendTranscript(initWizardPrompt(st))
-				return m, nil
-			case 1:
-				v := 100
-				if answer != "" {
-					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
-						v = n
-					}
-				}
-				st.limitToolIter = v
-				st.limitsSubStep = 2
-				m.appendTranscript(initWizardPrompt(st))
-				return m, nil
-			case 2:
-				v := 3000000
-				if answer != "" {
-					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
-						v = n
-					}
-				}
-				st.limitMsgBudget = v
-				st.limitsSubStep = 3
-				m.appendTranscript(initWizardPrompt(st))
-				return m, nil
-			case 3:
-				v := 200000
-				if answer != "" {
-					if n, err := strconv.Atoi(answer); err == nil && n > 0 {
-						v = n
-					}
-				}
-				st.limitCtxBudget = v
-				// all limit sub-steps done — fall through to next step
+			} else if n, err := strconv.Atoi(answer); err == nil && n > 0 {
+				v = n
 			}
+			st.contextWindowTokens = v
 
 		case initStepOpenConfig:
 			m.pendingInit = nil
@@ -1164,22 +1149,11 @@ func (m model) commitInitWizard(st *initWizardState) model {
 		e := config.AgentConfig{Name: "claude", Provider: "claude-cli"}
 		escalation = &e
 	}
-	// Apply per-agent limits if the user chose large context window.
-	if st.largeCtx && (st.limitToolIter > 0 || st.limitMsgBudget > 0 || st.limitCtxBudget > 0) {
-		lim := &config.AgentLimits{}
-		if st.limitToolIter > 0 {
-			v := st.limitToolIter
-			lim.MaxToolIterations = &v
-		}
-		if st.limitMsgBudget > 0 {
-			v := st.limitMsgBudget
-			lim.MessageBudgetChars = &v
-		}
-		if st.limitCtxBudget > 0 {
-			v := st.limitCtxBudget
-			lim.ContextBudgetChars = &v
-		}
-		st.primary.Limits = lim
+	// message_budget_chars/max_tool_iterations are auto-derived from
+	// context_window_tokens by AgentMessageBudget/AgentContextWindowTokens —
+	// no separate AgentLimits needed here.
+	if st.contextWindowTokens > 0 {
+		st.primary.ContextWindowTokens = st.contextWindowTokens
 	}
 	cfg := config.InitConfig(st.primary, escalation)
 	// Add tool-agent entries from wizard step.
