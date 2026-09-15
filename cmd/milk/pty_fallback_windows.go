@@ -9,10 +9,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// launchDirectBashFallback runs shellCmd via tea.ExecProcess, which suspends
-// the TUI and hands the real console directly to the child process. Used
-// when creack/pty reports ErrUnsupported — always the case on Windows, where
-// the library ships a stub with no real PTY implementation.
+// launchDirectBashFallback runs shellCmd with stdout/stderr piped and
+// streamed live into the transcript via chunkMsg — the same mechanism used
+// for streaming LLM output (sendWriter, repl.go) — since there is no real
+// PTY to embed a VT pane against. creack/pty ships only a stub on Windows,
+// so pty.StartWithSize always reports ErrUnsupported there.
+//
+// Unlike the embedded-PTY path, the child gets no stdin, so interactive
+// prompts (editors, y/n confirmations) won't work — acceptable for the
+// one-shot commands direct-bash targets.
 //
 // Direct-bash commands are typed assuming POSIX shell syntax (pipes,
 // ls/grep/...), so a POSIX shell is preferred when one is on PATH (Git Bash,
@@ -23,13 +28,30 @@ func (m model) launchDirectBashFallback(shellCmd string) (tea.Model, tea.Cmd) {
 	cmd.Env = os.Environ()
 	setPdeathsig(cmd)
 
-	m.appendTranscript(dim("[sh] no embedded terminal on Windows — running directly\n"))
+	prog := m.st.program
+	send := func(msg tea.Msg) {
+		if prog != nil {
+			prog.Send(msg)
+		}
+	}
+	sw := &sendWriter{send: send}
+	cmd.Stdout = sw
+	cmd.Stderr = sw
+
+	m.appendTranscript(dim("[sh] no embedded terminal on Windows — streaming output directly\n"))
+
+	if err := cmd.Start(); err != nil {
+		return m, func() tea.Msg {
+			return directBashDoneMsg{err: err}
+		}
+	}
+
 	m.busy = true
 	m.spinnerFrame = 0
 
-	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return directBashDoneMsg{err: err}
-	})
+	return m, func() tea.Msg {
+		return directBashDoneMsg{err: cmd.Wait()}
+	}
 }
 
 func fallbackShellCommand(shellCmd string) *exec.Cmd {
