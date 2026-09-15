@@ -1357,7 +1357,7 @@ func (m *model) welcomeScreen() string {
 			dim("type a message and press Enter to start"),
 			"",
 			dim("routing: "+primaryName+" ↔ "+escName+"  ·  /escalate to pin  ·  /primary to unpin"),
-			dim("/need — set current goal  ·  /panel memory — memory panel  ·  /think on — reasoning tokens"),
+			dim("/need — set current goal  ·  F1-F4 — memory/tasks/agents/workflow panels  ·  /think on — reasoning tokens"),
 			dim("/config — view config  ·  /config init — reconfigure  ·  /config open — edit in $EDITOR"),
 			dim("--new — fresh session  ·  --resume — resume last session  ·  /help for all commands"),
 		)

@@ -147,8 +147,10 @@ const interactiveHelp = `
   /memory <pat>          list percepts whose content matches <pat>
   /memory show <pat|#id>  show full details of matching percepts
   /forget <pat|#id>      delete a percept (asks for confirmation)
-  /panel memory          toggle the memory panel (right side)
-  /panel tasks           toggle the tasks panel (right side)
+  /panel memory          toggle the memory panel (right side) — also F1
+  /panel tasks           toggle the tasks panel (right side) — also F2
+  /panel background      toggle the background-agents panel (right side) — also F3
+  /panel workflow        toggle the workflow panel (right side) — also F4
   /tasks                 list current session and global tasks
   /task done <id>        mark a task done
 
@@ -255,6 +257,10 @@ const interactiveHelp = `
   Multi-line input
     Ctrl+N / Shift+Alt+Enter / Alt+Enter   insert newline
     Paste                                  multi-line paste sent as one block
+
+  Panels
+    F1 / F2 / F3 / F4   show/hide the memory / tasks / background-agents / workflow
+                        panel — same as /panel <name>, works in any mode
 
   Memory panel
     Double-click entry   print memory entry details to transcript
