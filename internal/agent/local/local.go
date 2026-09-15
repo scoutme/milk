@@ -297,6 +297,12 @@ type Agent struct {
 	// agent to the session package. Parameter order mirrors
 	// session.AddTokensFull so callers can pass through 1:1.
 	onTokens func(model, role string, prompt, completion, cacheRead, cacheCreation int64)
+	// onRequestSize is an optional callback fired with the exact marshaled
+	// size (bytes) of the outgoing request payload, once per inference call,
+	// right before it is sent — the live counterpart to onTokens's
+	// post-response counts, letting callers show an accurate in-flight
+	// context-size estimate instead of guessing from the input prompt alone.
+	onRequestSize func(bytes int64)
 	// debugLog receives every raw SSE line from the HTTP stream when non-nil,
 	// including lines that are skipped or fail JSON parsing.
 	debugLog io.Writer
@@ -777,6 +783,13 @@ func (a *Agent) WithOnOpenFile(fn func(path string) error) *Agent {
 // model name, agent role, and real prompt/completion/cache token counts.
 func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion, cacheRead, cacheCreation int64)) *Agent {
 	a.onTokens = fn
+	return a
+}
+
+// WithOnRequestSize registers a callback invoked with the marshaled request
+// payload size (bytes) right before each inference call is sent.
+func (a *Agent) WithOnRequestSize(fn func(bytes int64)) *Agent {
+	a.onRequestSize = fn
 	return a
 }
 
@@ -2366,6 +2379,9 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 		obs.Warn("payload after trimming",
 			"size_bytes", len(body), "messages_after", len(msgs),
 		)
+	}
+	if a.onRequestSize != nil {
+		a.onRequestSize(int64(len(body)))
 	}
 
 	if a.logContext {

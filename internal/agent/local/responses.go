@@ -129,6 +129,9 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	if err != nil {
 		return "", "", nil, false, "", err
 	}
+	if a.onRequestSize != nil {
+		a.onRequestSize(int64(len(body)))
+	}
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body)
 	}

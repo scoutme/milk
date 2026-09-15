@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,5 +98,48 @@ func TestOnTokens_NoPromptTokensDetails_RegressionGuard(t *testing.T) {
 	}
 	if gotCacheRead != 0 || gotCacheCreation != 0 {
 		t.Errorf("want cacheRead=0 cacheCreation=0 when prompt_tokens_details is absent, got cacheRead=%d cacheCreation=%d", gotCacheRead, gotCacheCreation)
+	}
+}
+
+// TestOnRequestSize_MatchesMarshaledBody verifies WithOnRequestSize fires
+// once per inference call with the exact byte length of the request body
+// actually sent over the wire — the live counterpart to onTokens, used by
+// the TUI status bar to show an accurate in-flight ctx% estimate instead of
+// guessing from the typed prompt alone.
+func TestOnRequestSize_MatchesMarshaledBody(t *testing.T) {
+	var gotBodyLen int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBodyLen = int64(len(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", "hello")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":10}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+
+	var reportedSize int64
+	var calls int
+	agent.WithOnRequestSize(func(bytes int64) {
+		calls++
+		reportedSize = bytes
+	})
+
+	sess := &session.Session{}
+	var out strings.Builder
+	if _, err := agent.Run(context.Background(), nil, "hi", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("want onRequestSize called once, got %d", calls)
+	}
+	if reportedSize == 0 {
+		t.Fatal("want non-zero reported request size")
+	}
+	if reportedSize != gotBodyLen {
+		t.Errorf("want reported size %d to match actual wire body length %d", reportedSize, gotBodyLen)
 	}
 }

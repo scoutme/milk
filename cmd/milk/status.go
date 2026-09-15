@@ -309,25 +309,33 @@ func (m *model) statusTokens() string {
 }
 
 // contextPressureHighPct/CriticalPct are the thresholds at which the
-// ctx:NN% status-bar fragment shifts from dim (normal) to yellow (high) to
+// ctx:x/y status-bar fragment shifts from dim (normal) to yellow (high) to
 // red (critical) — mirroring the loop-detection warning's use of yellow for
 // "pay attention" state, extended with a red tier since context exhaustion
 // (unlike a loop) has a hard failure mode once the trim budget can no longer
-// fit the system prompt and tools. When no context window is configured, the
-// indicator falls back to showing the absolute prompt size instead.
+// fit the system prompt and tools. Thresholds are evaluated against the exact
+// percentage even though the displayed label always shows raw counts, not a
+// rounded percentage.
 const (
 	contextPressureHighPct     = 75
 	contextPressureCriticalPct = 90
 )
 
-// statusContextPressure returns a "ctx:NN%" fragment showing how much of the
-// active agent's configured context window the current prompt is using —
-// live-estimated while busy (mirrors the ↑~/↓~ estimate above it), the
-// cumulative session prompt total while idle. The numerator includes cached
-// tokens (cacheRead + cacheCreation) since they occupy context window space.
-// When no context_window_tokens is configured (nothing to divide by), falls
-// back to showing the absolute input size as "ctx:NNk" so the user still gets
-// a useful signal. Returns "" only when there's no usable numerator yet.
+// statusContextPressure returns a "ctx:x/y" fragment (or bare "ctx:x" when no
+// context window is configured) showing how much of the active agent's
+// context window the current prompt is using — live-estimated while busy
+// (mirrors the ↑~/↓~ estimate above it), the cumulative session prompt total
+// while idle. The numerator includes cached tokens (cacheRead +
+// cacheCreation) since they occupy context window space.
+//
+// Always shows the "x/y" pair rather than switching between a percentage and
+// an absolute count depending on whether the percentage would round to a
+// meaningful number — a single format that stays informative at any window
+// size (a 1M-token window makes a rounded percentage meaningless below ~10k
+// tokens, but "77/1.0M" is still legible) is simpler than two formats that
+// look identical to the ↑/↓ token counts already on the line in the case
+// they were meant to complement. Returns "" only when there's no usable
+// numerator yet.
 func (m *model) statusContextPressure(role string, promptTokens int64) string {
 	var ac config.AgentConfig
 	if role == "escalation" {
@@ -345,29 +353,22 @@ func (m *model) statusContextPressure(role string, promptTokens int64) string {
 		return ""
 	}
 
-	// When a context window is declared, show the percentage with color tiers.
-	// When the percentage would round to 0 but the numerator is non-trivial,
-	// fall through to the absolute-size display instead — a 1M-token window
-	// makes the percentage meaningless below ~10k tokens.
-	if window > 0 {
-		pct := int(100 * float64(numerator) / float64(window))
-		if pct > 0 {
-			label := fmt.Sprintf("ctx:%d%%", pct)
-			switch {
-			case pct >= contextPressureCriticalPct:
-				return red(label)
-			case pct >= contextPressureHighPct:
-				return yellow(label)
-			default:
-				return dim(label)
-			}
-		}
-		// pct == 0: percentage is too coarse; show absolute size instead.
+	if window <= 0 {
+		// No context window configured — nothing to divide by. Still show
+		// the absolute size so the indicator is useful for self-regulation.
+		return dim(fmt.Sprintf("ctx:%s", formatTokenCount(numerator)))
 	}
 
-	// No context window configured — show the absolute prompt size so the
-	// indicator is still useful for self-regulation.
-	return dim(fmt.Sprintf("ctx:%s", formatTokenCount(numerator)))
+	pct := int(100 * float64(numerator) / float64(window))
+	label := fmt.Sprintf("ctx:%s/%s", formatTokenCount(numerator), formatTokenCount(int64(window)))
+	switch {
+	case pct >= contextPressureCriticalPct:
+		return red(label)
+	case pct >= contextPressureHighPct:
+		return yellow(label)
+	default:
+		return dim(label)
+	}
 }
 
 // activeTokenRole returns "escalation" or "primary" reflecting which agent will
@@ -394,10 +395,14 @@ func (m *model) activeTokenRole() string {
 
 // formatTokenCount formats a token count compactly: <1000 → exact, ≥1000 → "1.2k".
 func formatTokenCount(n int64) string {
-	if n < 1000 {
+	switch {
+	case n < 1000:
 		return fmt.Sprintf("%d", n)
+	case n < 1000000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
 	}
-	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // sessionRole maps session state to the human-readable role shown in the status bar.
