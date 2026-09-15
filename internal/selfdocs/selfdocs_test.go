@@ -43,7 +43,7 @@ func TestSlugify(t *testing.T) {
 }
 
 func TestLookup_KnownAliasesResolve(t *testing.T) {
-	for _, topic := range []string{"mcp add", "mcp assign", "agent add", "mcp auth"} {
+	for _, topic := range []string{"mcp add", "mcp assign", "agent add", "mcp auth", "context window", "models.dev"} {
 		if _, ok := Lookup(topic); !ok {
 			t.Errorf("Lookup(%q) = not found, want a resolved section from the real embedded docs", topic)
 		}
