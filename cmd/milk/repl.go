@@ -1620,9 +1620,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ptyPane = nil
 		}
 		if msg.err != nil {
-			if exitErr, ok := msg.err.(*exec.ExitError); ok {
-				m.appendTranscript(fmt.Sprintf("%s exit %d\n", dim("[sh]"), exitErr.ExitCode()))
-			} else if !isEOFOrClosed(msg.err) {
+			if _, ok := msg.err.(*exec.ExitError); !ok && !isEOFOrClosed(msg.err) {
 				m.appendTranscript(fmt.Sprintf("%s direct-bash error: %v\n", milkTag(), msg.err))
 			}
 		}

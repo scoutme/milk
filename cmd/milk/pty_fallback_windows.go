@@ -38,8 +38,6 @@ func (m model) launchDirectBashFallback(shellCmd string) (tea.Model, tea.Cmd) {
 	cmd.Stdout = sw
 	cmd.Stderr = sw
 
-	m.appendTranscript(dim("[sh] no embedded terminal on Windows — streaming output directly\n"))
-
 	if err := cmd.Start(); err != nil {
 		return m, func() tea.Msg {
 			return directBashDoneMsg{err: err}
