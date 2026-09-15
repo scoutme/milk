@@ -234,14 +234,14 @@ func TestStatusTokens_ContextPressure_AbsoluteSizeWithoutContextWindow(t *testin
 
 	bar := stripANSI(m.statusTokens())
 	if !strings.Contains(bar, "ctx:1.0k") {
-		t.Errorf("want ctx:1.0k (absolute size, 1000 tokens), got %q", bar)
+		t.Errorf("want ctx:1.0k (absolute size, 1000 tokens, no configured window), got %q", bar)
 	}
 }
 
-// TestStatusTokens_ContextPressure_IdleShowsLastTurnPercentage verifies the
-// idle path divides the last completed turn's real prompt tokens by the
-// active agent's context_window_tokens.
-func TestStatusTokens_ContextPressure_IdleShowsLastTurnPercentage(t *testing.T) {
+// TestStatusTokens_ContextPressure_IdleShowsLastTurnUsage verifies the idle
+// path shows the last completed turn's real prompt tokens against the
+// active agent's context_window_tokens, as an "x/y" pair.
+func TestStatusTokens_ContextPressure_IdleShowsLastTurnUsage(t *testing.T) {
 	m := &model{
 		width: 120,
 		st: &interactiveState{
@@ -260,8 +260,8 @@ func TestStatusTokens_ContextPressure_IdleShowsLastTurnPercentage(t *testing.T) 
 	}
 
 	bar := stripANSI(m.statusTokens())
-	if !strings.Contains(bar, "ctx:80%") {
-		t.Errorf("want ctx:80%% (8000/10000), got %q", bar)
+	if !strings.Contains(bar, "ctx:8.0k/10.0k") {
+		t.Errorf("want ctx:8.0k/10.0k (8000/10000), got %q", bar)
 	}
 }
 
@@ -286,8 +286,8 @@ func TestStatusTokens_ContextPressure_BusyUsesLiveEstimate(t *testing.T) {
 	}
 
 	bar := stripANSI(m.statusTokens())
-	if !strings.Contains(bar, "ctx:75%") {
-		t.Errorf("want ctx:75%% (3000/4000 estimated), got %q", bar)
+	if !strings.Contains(bar, "ctx:3.0k/4.0k") {
+		t.Errorf("want ctx:3.0k/4.0k (3000/4000 estimated), got %q", bar)
 	}
 }
 
@@ -320,10 +320,11 @@ func TestStatusTokens_ContextPressure_CriticalTierIsRed(t *testing.T) {
 	}
 }
 
-// TestStatusTokens_ContextPressure_LargeWindowShowsAbsoluteSize verifies that
-// when the context window is large enough that the percentage rounds to 0,
-// the indicator shows the absolute prompt size instead of "ctx:0%".
-func TestStatusTokens_ContextPressure_LargeWindowShowsAbsoluteSize(t *testing.T) {
+// TestStatusTokens_ContextPressure_LargeWindowStillShowsBothSides verifies
+// that even when the window is large enough that a rounded percentage would
+// be meaningless (0%), the x/y display still shows both the current usage
+// and the window size — rather than a bare, ambiguous absolute count.
+func TestStatusTokens_ContextPressure_LargeWindowStillShowsBothSides(t *testing.T) {
 	m := &model{
 		width: 120,
 		st: &interactiveState{
@@ -341,10 +342,24 @@ func TestStatusTokens_ContextPressure_LargeWindowShowsAbsoluteSize(t *testing.T)
 	}
 
 	bar := stripANSI(m.statusTokens())
-	if strings.Contains(bar, "ctx:0%") {
-		t.Errorf("want absolute size instead of ctx:0%%, got %q", bar)
+	if !strings.Contains(bar, "ctx:4.8k/1.0M") {
+		t.Errorf("want ctx:4.8k/1.0M (4800/1000000), got %q", bar)
 	}
-	if !strings.Contains(bar, "ctx:4.8k") {
-		t.Errorf("want ctx:4.8k (absolute), got %q", bar)
+}
+
+func TestFormatTokenCount_Tiers(t *testing.T) {
+	cases := map[int64]string{
+		0:       "0",
+		999:     "999",
+		1000:    "1.0k",
+		4800:    "4.8k",
+		999999:  "1000.0k",
+		1000000: "1.0M",
+		1048576: "1.0M",
+	}
+	for n, want := range cases {
+		if got := formatTokenCount(n); got != want {
+			t.Errorf("formatTokenCount(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
