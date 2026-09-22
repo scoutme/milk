@@ -201,6 +201,36 @@ func isLikelyFilePath(s string) bool {
 	return info.Mode().IsRegular()
 }
 
+// attachmentTaskBlock returns a short file-reference block for injection into a
+// workflow task string. Attachments are referenced by their on-disk path rather
+// than inlined: workflow task text passes through interp's variable budget and
+// prompt render caps (truncateLargeVarsWithBudget / maxRenderedPromptChars),
+// which would mangle base64 image data or large file contents. Path references
+// stay short and remain resolvable by every role on every pass — the referenced
+// files stay on disk for the lifetime of the temp dir.
+func attachmentTaskBlock(attachments []PendingAttachment) string {
+	if len(attachments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Attachments\n\n")
+	for _, a := range attachments {
+		fmt.Fprintf(&b, "- %s (%s, %d bytes) — file: %s\n", a.Name, a.MIMEType, len(a.Data), a.Path)
+	}
+	b.WriteString("\nAttachments stay on disk at the paths above — read or reference them as needed (e.g. as visual reference for image generation).\n")
+	return b.String()
+}
+
+// workflowTaskWithAttachments appends the attachmentTaskBlock for staged
+// attachments to a workflow task string. With no attachments the task is
+// returned unchanged.
+func workflowTaskWithAttachments(task string, attachments []PendingAttachment) string {
+	if len(attachments) == 0 {
+		return task
+	}
+	return task + "\n\n" + attachmentTaskBlock(attachments)
+}
+
 // attachmentPlaceholder returns the compact placeholder stored in session
 // history in place of attachment data.
 func attachmentPlaceholder(a PendingAttachment) string {

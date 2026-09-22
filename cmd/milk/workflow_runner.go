@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/scoutme/milk/internal/agent/claude"
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
@@ -15,6 +17,15 @@ import (
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
+
+// imagePartReceiver is implemented by runners wrapping agents that can accept
+// multipart vision content parts (localRunner → *local.Agent via
+// SetPendingImageParts). cliRunner and subprocessRunner cannot — a CLI role
+// instead receives @path prompt lines (the claude binary attaches files
+// natively), and subprocessRunner relies on the task's file references.
+type imagePartReceiver interface {
+	SetPendingImageParts(parts []local.ContentPart)
+}
 
 // workflowTurnRunner adapts a TurnRunner (cmd/milk interface) to
 // workflow.TurnRunner, capturing the session/config/memory context needed
@@ -34,6 +45,12 @@ type workflowTurnRunner struct {
 	nonce     string
 	sessionID string // persists across passes for this role; set after first Execute
 	notifier  oversight.Notifier
+	// attachments staged at workflow launch and referenced by path in the task
+	// text. Injected into the first turn only (vision content parts for local
+	// providers, @path lines for CLI providers) — later turns of the same role
+	// see them via the role's persisted history.
+	attachments         []PendingAttachment
+	attachmentsInjected bool
 }
 
 func (r *workflowTurnRunner) Name() string { return r.inner.Name() }
@@ -50,7 +67,46 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 		r.nonce = claude.GenerateNonce()
 	}
 
-	r.notifier.NotifyTurnStart(ctx, r.inner.Name(), "workflow:"+r.roleName, prompt)
+	// First-turn attachment injection: the task text already references the
+	// staged files by path (attachmentTaskBlock), but that alone leaves a
+	// vision-capable role unable to *see* an image without tool calls. Inject
+	// the payload once, on this role's first turn — subsequent turns carry it
+	// in the role's persisted history.
+	runPrompt := prompt
+	if !r.attachmentsInjected {
+		r.attachmentsInjected = true
+		if len(r.attachments) > 0 {
+			if r.inner.IsCLI() {
+				// CLI roles: @path lines — the claude binary reads @path
+				// natively (same mechanism as the REPL's CLI escalation path).
+				var sb strings.Builder
+				for _, a := range r.attachments {
+					fmt.Fprintf(&sb, "@%s\n", a.Path)
+				}
+				sb.WriteString(prompt)
+				runPrompt = sb.String()
+			}
+			if ir, ok := r.inner.(imagePartReceiver); ok {
+				// Local-provider roles: multipart vision content parts —
+				// local.Run's vision gate drops them (with a note) for agents
+				// without "vision": true, same as a normal REPL turn.
+				var parts []local.ContentPart
+				for _, a := range r.attachments {
+					if a.isImage() {
+						parts = append(parts, local.ContentPart{
+							Type:     "image_url",
+							ImageURL: &local.ImageURLPart{URL: attachmentDataURI(a)},
+						})
+					}
+				}
+				if len(parts) > 0 {
+					ir.SetPendingImageParts(parts)
+				}
+			}
+		}
+	}
+
+	r.notifier.NotifyTurnStart(ctx, r.inner.Name(), "workflow:"+r.roleName, runPrompt)
 
 	// segmentsFired tracks whether OnResponseSegment already forwarded this
 	// turn's text piecemeal (interleaved with tool calls); when it did, the
@@ -67,7 +123,7 @@ func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writ
 		r.nonce,
 		nil,   // percepts: not injected for workflow turns
 		false, // injectInstructions: not needed for workflow turns
-		prompt,
+		runPrompt,
 		TurnCallbacks{OnResponseSegment: func(text string) {
 			segmentsFired = true
 			r.notifier.NotifyResponse(ctx, r.inner.Name(), text)
@@ -134,6 +190,7 @@ func buildWorkflowRunners(
 	cliPC permContext,
 	newInput func() inputReader,
 	notifier oversight.Notifier,
+	attachments []PendingAttachment,
 ) (map[string]workflow.TurnRunner, error) {
 	if notifier == nil {
 		notifier = oversight.Noop{}
@@ -177,14 +234,15 @@ func buildWorkflowRunners(
 		}
 
 		out[role] = &workflowTurnRunner{
-			inner:    inner,
-			cfg:      cfg,
-			sess:     newWorkflowSession(),
-			replSess: replSess,
-			mem:      mem,
-			role:     RoleWorkflow,
-			roleName: role,
-			notifier: notifier,
+			inner:       inner,
+			cfg:         cfg,
+			sess:        newWorkflowSession(),
+			replSess:    replSess,
+			mem:         mem,
+			role:        RoleWorkflow,
+			roleName:    role,
+			notifier:    notifier,
+			attachments: attachments,
 		}
 	}
 	return out, nil

@@ -166,6 +166,13 @@ func (r *localRunner) Name() string { return r.name }
 func (r *localRunner) IsCLI() bool  { return false }
 func (r *localRunner) Ping() error  { return r.agent.Ping(context.Background()) }
 
+// SetPendingImageParts forwards multipart vision content to the wrapped agent
+// (consumed once by its next Run call). Satisfies the optional
+// imagePartReceiver interface used by workflowTurnRunner.
+func (r *localRunner) SetPendingImageParts(parts []local.ContentPart) {
+	r.agent.SetPendingImageParts(parts)
+}
+
 func (r *localRunner) Execute(
 	ctx context.Context,
 	cfg config.Config,

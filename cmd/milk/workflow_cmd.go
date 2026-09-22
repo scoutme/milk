@@ -417,11 +417,32 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 		}
 	}
 
+	// Consume any staged attachments (/attach, clipboard paste): clear the
+	// pending slot so they cannot silently leak into a later normal REPL turn,
+	// and hand them to the workflow as on-disk file references appended to the
+	// task (attachmentTaskBlock keeps the block short enough to survive interp's
+	// variable-budget and prompt-render truncation caps). Role runners
+	// additionally receive first-turn image injection (vision content parts for
+	// local providers, @path lines for CLI providers).
+	attachments := m.pendingAttachments
+	m.pendingAttachments = nil
+	task := workflowTaskWithAttachments(w.task, attachments)
+	if len(attachments) > 0 {
+		names := make([]string, 0, len(attachments))
+		for _, a := range attachments {
+			names = append(names, a.Name)
+		}
+		m.appendTranscript(milkTag() + fmt.Sprintf(
+			" attached %d file(s) to the workflow task as file references (%s) — available to every role on disk\n",
+			len(attachments), strings.Join(names, ", "),
+		))
+	}
+
 	m.st.toolFutures = map[string]chan string{}
 	ir0 := &tuiInputReader{send: send}
 	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
 
-	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 }, m.st.notifier)
+	runners, err := buildWorkflowRunners(agentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 }, m.st.notifier, attachments)
 	if err != nil {
 		m.appendTranscript(milkTag() + " workflow error: " + err.Error() + "\n")
 		return m, nil
@@ -430,7 +451,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 	answersCh := make(chan string, 1)
 
 	checkpointPath := workflow.InterpCheckpointPath(stateDir, sess.ID, workflowID)
-	r := interp.New(w.def, w.task).WithCheckpoint(checkpointPath).WithAgentMap(agentNames)
+	r := interp.New(w.def, task).WithCheckpoint(checkpointPath).WithAgentMap(agentNames)
 	if w.maxIterOverrideStageID != "" {
 		r = r.WithMaxIterationsOverride(w.maxIterOverrideStageID, w.maxIterOverrideN)
 	}
