@@ -244,6 +244,45 @@ func agentRoleForMetrics(escalationName string) string {
 	return "primary"
 }
 
+// logRole returns the OTel "agent" label for this instance: the plain
+// primary/escalation role tag, suffixed ":subagent" on a background-job
+// clone — so a job's inference traffic is attributed to the job, not to the
+// parent role's turns (which used to make triage blame the parent for a
+// job's failures and token spikes).
+func (a *Agent) logRole() string {
+	if a.jobID != "" {
+		return agentRoleForMetrics(a.escalationName) + ":subagent"
+	}
+	return agentRoleForMetrics(a.escalationName)
+}
+
+// jobAttrs returns obs key/value attributes tagging the originating
+// background job ID — spliced into log calls via logWarn/logDebug/logInfo
+// (or directly as the sole variadic argument, e.g. obs.LogPayload) — or nil
+// for ordinary turns, which have no job to attribute traffic to.
+func (a *Agent) jobAttrs() []any {
+	if a.jobID == "" {
+		return nil
+	}
+	return []any{"job", a.jobID}
+}
+
+// logWarn, logDebug and logInfo mirror obs.Warn/Debug/Info but splice in
+// this agent's job-tagging attrs (see jobAttrs). Go forbids mixing literal
+// variadic arguments with a trailing slice spread, so log calls that carry
+// job tags route through these helpers instead of obs directly.
+func (a *Agent) logWarn(msg string, kv ...any) {
+	obs.Warn(msg, append(kv, a.jobAttrs()...)...)
+}
+
+func (a *Agent) logDebug(msg string, kv ...any) {
+	obs.Debug(msg, append(kv, a.jobAttrs()...)...)
+}
+
+func (a *Agent) logInfo(msg string, kv ...any) {
+	obs.Info(msg, append(kv, a.jobAttrs()...)...)
+}
+
 // ToolAgentDispatcher is called when the agent issues an agent_* tool call.
 // agentName is the unsanitised agent name (e.g. "aider", not "agent_aider").
 // images, when non-empty, are images the calling agent itself couldn't attach
@@ -384,6 +423,14 @@ type Agent struct {
 	// monitor detects repetition during streaming.  The main loop checks
 	// this flag after streamCompletion returns.
 	reasoningNgramTriggered bool
+	// jobID tags this instance as a background-job clone (set by
+	// RunBackgroundTask): every obs log line and metric label it emits
+	// carries the job ID and a ":subagent" role tag (see logRole/jobAttrs),
+	// and its per-request token counts are excluded from stream-level
+	// obs.RecordTokens — the job's totals are recorded once, complete, at
+	// drain time under "<role>:subagent" (recording at both levels
+	// double-counted and mis-tagged them as the parent role).
+	jobID string
 }
 
 // TryBestRecorder is the interface for the try-best loop detector.
@@ -1444,8 +1491,8 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 	// trajectory behind a bare error (the caller only keeps updatedHistory
 	// when err is nil, so returning an error here used to drop the tool
 	// trail entirely, not just the summary).
-	obs.Warn("exceeded maximum tool iterations", "model", a.model,
-		"agent", agentRoleForMetrics(a.escalationName), "max_iter", maxIter)
+	a.logWarn("exceeded maximum tool iterations", "model", a.model,
+		"agent", a.logRole(), "max_iter", maxIter)
 	resp := summarizeToolTrail(msgs, "")
 	if a.onResponseSegment != nil && resp != "" {
 		a.onResponseSegment(resp)
@@ -1474,23 +1521,23 @@ func backgroundSystemPrompt(cwd string) string {
 // may have been running for minutes) was permanently lost to a single
 // upstream hiccup instead of silently retrying through it like every other
 // call site of this same error class.
-func (a *Agent) runBackgroundTaskWithRetry(ctx context.Context, cwd, task string) (string, session.TokenUsage, error) {
-	return retryBackgroundTask(ctx, a.model, func() (string, session.TokenUsage, error) {
-		return a.RunBackgroundTask(ctx, cwd, task, io.Discard)
+func (a *Agent) runBackgroundTaskWithRetry(ctx context.Context, jobID, cwd, task string) (string, session.TokenUsage, error) {
+	return retryBackgroundTask(ctx, jobID, a.model, func() (string, session.TokenUsage, error) {
+		return a.RunBackgroundTask(ctx, jobID, cwd, task, io.Discard)
 	})
 }
 
 // retryBackgroundTask is runBackgroundTaskWithRetry's retry loop, factored
 // out as a closure-taking function (mirroring cmd/milk's retryToolCall) so
 // the retry behavior itself is testable without a real HTTP/2 stream error.
-func retryBackgroundTask(ctx context.Context, model string, fn func() (string, session.TokenUsage, error)) (string, session.TokenUsage, error) {
+func retryBackgroundTask(ctx context.Context, jobID, model string, fn func() (string, session.TokenUsage, error)) (string, session.TokenUsage, error) {
 	for attempt := 0; ; attempt++ {
 		result, tokens, err := fn()
 		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
 			return result, tokens, err
 		}
 		obs.Warn("background job: transient error, retrying",
-			"model", model, "attempt", attempt+1, "max_attempts", workflow.MaxTurnRetries, "err", err)
+			"job", jobID, "model", model, "attempt", attempt+1, "max_attempts", workflow.MaxTurnRetries, "err", err)
 		select {
 		case <-time.After(workflow.TurnRetryBackoff(attempt)):
 		case <-ctx.Done():
@@ -1512,7 +1559,7 @@ func retryBackgroundTask(ctx context.Context, model string, fn func() (string, s
 // own "primary"/"escalation" session totals — the caller (the job manager,
 // via dispatch.go) is responsible for recording the returned usage under
 // the "<role>:subagent" convention once the job completes.
-func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.Writer) (string, session.TokenUsage, error) {
+func (a *Agent) RunBackgroundTask(ctx context.Context, jobID, cwd, task string, out io.Writer) (string, session.TokenUsage, error) {
 	// Operate on an isolated clone, not a directly. A background job is
 	// spawned into its own goroutine (see Manager.Spawn) and can easily
 	// still be running when the parent agent starts its very next turn on
@@ -1524,8 +1571,13 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 	// transcript — only its final distilled result does, once the caller
 	// drains the completed Job.
 	bg := a.cloneForBackground()
+	// Tag the clone with its Manager-assigned job ID: every obs line and
+	// metric label it emits carries the ID (and a ":subagent" role), so a
+	// job's requests can be reconstructed from milk.log without guessing
+	// which of several concurrent jobs produced them.
+	bg.jobID = jobID
 
-	usage := session.TokenUsage{Model: bg.model, Agent: agentRoleForMetrics(bg.escalationName) + ":subagent"}
+	usage := session.TokenUsage{Model: bg.model, Agent: bg.logRole()}
 	bg.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
 		usage.Prompt += prompt
 		usage.Completion += completion
@@ -1557,12 +1609,29 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, cwd, task string, out io.
 
 	resultMsgs, err := bg.runToolLoop(ctx, msgs, tools, out, bgSess, nil, task, userMsgIdx, nil)
 	if err != nil {
-		return "", usage, err
+		// Preserve partial work: resultMsgs holds the whole tool trajectory
+		// up to the failure. Returning its best answer (instead of "") keeps
+		// whatever the job had already produced visible in Job.Result — the
+		// job record, panel and drain note — even though the job failed.
+		return backgroundPartialResult(resultMsgs), usage, err
 	}
 	if len(resultMsgs) == 0 {
 		return "", usage, nil
 	}
 	return resultMsgs[len(resultMsgs)-1].Content, usage, nil
+}
+
+// backgroundPartialResult extracts the best available partial answer from a
+// tool-loop trajectory that ended in an error: the last real assistant text
+// if any, else a digest of the tool activity (so "what had it already
+// found/looked at" survives a mid-tooling failure), else "".
+func backgroundPartialResult(msgs []Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && msgs[i].Content != "" {
+			return msgs[i].Content
+		}
+	}
+	return summarizeToolTrail(msgs, "")
 }
 
 // cloneForBackground returns an independent Agent for a spawn_background_agent
@@ -1775,7 +1844,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		if len(args) > 120 {
 			args = args[:120] + "…"
 		}
-		obs.Debug("tool call", "name", tc.Function.Name, "args", args)
+		a.logDebug("tool call", "name", tc.Function.Name, "args", args)
 		if d := toolDiff(tc.Function.Name, tc.Function.Arguments); d != "" {
 			fmt.Fprint(out, d)
 		}
@@ -1920,8 +1989,8 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		}
 		role := agentRoleForMetrics(a.escalationName)
 		job := a.backgroundManager.Spawn(args.Label, args.Task, role, a.model,
-			func(jobCtx context.Context) (string, session.TokenUsage, error) {
-				return a.runBackgroundTaskWithRetry(jobCtx, cwd, args.Task)
+			func(jobCtx context.Context, jobID string) (string, session.TokenUsage, error) {
+				return a.runBackgroundTaskWithRetry(jobCtx, jobID, cwd, args.Task)
 			})
 		result := toolResult{Output: fmt.Sprintf("Spawned background agent %s (%q). You will be notified when it completes.", job.ID, args.Label)}.String()
 		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
@@ -2328,7 +2397,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 			}
 			return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
 		}
-		obs.Warn("image request returned no image_tokens usage — backend likely dropped the image, retrying",
+		a.logWarn("image request returned no image_tokens usage — backend likely dropped the image, retrying",
 			"model", a.model, "attempt", attempt, "max_attempts", maxAttempts)
 	}
 	return text, fallbackRaw, tcs, emptyFallback, reasoningText, nil
@@ -2360,10 +2429,9 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// configured max (default 900KB), progressively trim the oldest content
 	// and re-marshal to avoid 413 errors from reverse proxies.
 	if a.maxPayloadBytes > 0 && len(body) > a.maxPayloadBytes {
-		obs.Warn("payload exceeds limit, trimming history",
+		a.logWarn("payload exceeds limit, trimming history",
 			"size_bytes", len(body), "limit_bytes", a.maxPayloadBytes,
-			"messages_before", len(msgs),
-		)
+			"messages_before", len(msgs))
 		for len(body) > a.maxPayloadBytes {
 			next, ok := dropOldestDroppableUnit(msgs)
 			if !ok {
@@ -2376,16 +2444,15 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 				return "", "", nil, false, "", 0, err
 			}
 		}
-		obs.Warn("payload after trimming",
-			"size_bytes", len(body), "messages_after", len(msgs),
-		)
+		a.logWarn("payload after trimming",
+			"size_bytes", len(body), "messages_after", len(msgs))
 	}
 	if a.onRequestSize != nil {
 		a.onRequestSize(int64(len(body)))
 	}
 
 	if a.logContext {
-		obs.LogPayload(a.inferenceURL(), body)
+		obs.LogPayload(a.inferenceURL(), body, a.jobAttrs()...)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -2400,14 +2467,13 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	if err != nil {
 		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
 			attribute.String("model", a.model),
-			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		obs.Warn("inference request failed",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("inference request failed",
+			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
-			"retryable", workflow.IsRetryableTurnError(err),
-		)
+			"retryable", workflow.IsRetryableTurnError(err))
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -2416,14 +2482,13 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 		b, _ := io.ReadAll(httpResp.Body)
 		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
 			attribute.String("model", a.model),
-			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		obs.Warn("inference request returned non-200",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("inference request returned non-200",
+			"model", a.model, "agent", a.logRole(),
 			"status", httpResp.StatusCode, "body", string(b),
-			"elapsed", time.Since(inferenceStart).String(),
-		)
+			"elapsed", time.Since(inferenceStart).String())
 		return "", "", nil, false, "", 0, fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
@@ -2450,7 +2515,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	danglingToolFragment := len(toolCalls) == 0 && len(partialTools) > 0
 	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && det.RawBlock() == ""
 	if emptyFallback && (reasoningText != "" || finishReason == "length" || det.InBlock() || danglingToolFragment) {
-		obs.Warn("empty completion", "model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("empty completion", "model", a.model, "agent", a.logRole(),
 			"reasoning_seen", reasoningText != "", "finish_reason", finishReason,
 			"unclosed_block", det.InBlock(), "dangling_tool_fragment", danglingToolFragment)
 		// The model streamed reasoning (or was cut off by a length limit, or
@@ -2472,7 +2537,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			}
 		}
 	}
-	role := agentRoleForMetrics(a.escalationName)
+	role := a.logRole()
 	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
 		attribute.String("model", a.model),
 		attribute.String("agent", role),
@@ -2486,7 +2551,14 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// total input. Subtract here, once, so that invariant holds regardless of
 	// which provider produced the numbers.
 	freshPrompt := max(promptTokens-cacheRead, 0)
-	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+	// Background-job clones record their token totals once, complete, at
+	// drain time under "<role>:subagent" (see cmd/milk's drainBackgroundJobs).
+	// Also recording per-request here would double-count them in
+	// metrics.jsonl — and did, before this guard, mis-tag them as the
+	// parent role's turns.
+	if a.jobID == "" {
+		obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+	}
 	if a.onTokens != nil {
 		// cacheCreation is always 0 here: OpenAI-compatible automatic caching
 		// (mirrored by other providers such as MiMo) reports cache-read hits via
@@ -2593,12 +2665,11 @@ func (a *Agent) scanSSE(
 			case <-ticker.C:
 				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
 				if idle >= streamIdleLogInterval {
-					obs.Warn("stream idle",
-						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+					a.logWarn("stream idle",
+						"model", a.model, "agent", a.logRole(),
 						"lines_scanned", lines.Load(),
 						"elapsed_since_start", time.Since(streamStartedAt).String(),
-						"elapsed_since_last_chunk", idle.String(),
-					)
+						"elapsed_since_last_chunk", idle.String())
 				}
 			}
 		}
@@ -2671,8 +2742,8 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		obs.Warn("stream read failed",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("stream read failed",
+			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(),
 			"lines_scanned", lines.Load(),
 			"elapsed_since_start", time.Since(streamStartedAt).String(),
@@ -2680,18 +2751,16 @@ func (a *Agent) scanSSE(
 			"content_bytes", textBuf.Len(),
 			"reasoning_bytes", reasoningBuf.Len(),
 			"tool_call_fragments", len(partialTools),
-			"retryable", workflow.IsRetryableTurnError(err),
-		)
+			"retryable", workflow.IsRetryableTurnError(err))
 		return nil, 0, 0, 0, 0, "", "", err
 	}
-	obs.Debug("stream read completed",
-		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+	a.logDebug("stream read completed",
+		"model", a.model, "agent", a.logRole(),
 		"lines_scanned", lines.Load(),
 		"elapsed", time.Since(streamStartedAt).String(),
 		"content_bytes", textBuf.Len(),
 		"reasoning_bytes", reasoningBuf.Len(),
-		"finish_reason", finishReason,
-	)
+		"finish_reason", finishReason)
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 
@@ -2767,7 +2836,7 @@ Task: ` + prompt
 		return false, err
 	}
 	if a.logContext {
-		obs.LogPayload(a.inferenceURL()+" [classify]", body)
+		obs.LogPayload(a.inferenceURL()+" [classify]", body, a.jobAttrs()...)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,

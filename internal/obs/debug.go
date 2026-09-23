@@ -77,13 +77,14 @@ func Debug(msg string, args ...any) {
 	}
 }
 
-// LogPayload emits the full serialised request payload at DEBUG level.
+// LogPayload emits the full serialised request payload at DEBUG level,
+// with optional extra key/value attributes (e.g. the originating job ID).
 // No-op when milkLogger is nil (logging disabled) or payload is empty.
-func LogPayload(endpoint string, payload []byte) {
+func LogPayload(endpoint string, payload []byte, attrs ...any) {
 	if milkLogger == nil || len(payload) == 0 {
 		return
 	}
-	milkLogger.Debug("request payload", "endpoint", endpoint, "payload", string(payload))
+	milkLogger.Debug("request payload", append([]any{"endpoint", endpoint, "payload", string(payload)}, attrs...)...)
 }
 
 // Info emits an info-level message to the milk log (no-op when disabled).

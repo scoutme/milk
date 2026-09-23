@@ -17,14 +17,14 @@ import (
 func TestManager_Spawn_DoesNotBlockCaller(t *testing.T) {
 	mgr := NewManager(context.Background(), 1)
 	release := make(chan struct{})
-	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-release
 		return "ok", session.TokenUsage{}, nil
 	})
 
 	done := make(chan struct{})
 	go func() {
-		mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 			return "ok", session.TokenUsage{}, nil
 		})
 		close(done)
@@ -49,7 +49,7 @@ func TestManager_OutlivesCallerContext(t *testing.T) {
 	turnCtx, cancelTurn := context.WithCancel(context.Background())
 
 	result := make(chan string, 1)
-	mgr.Spawn("job", "t", "primary", "m", func(jobCtx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("job", "t", "primary", "m", func(jobCtx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-turnCtx.Done() // the caller's turn "ends" shortly after Spawn returns
 		select {
 		case <-jobCtx.Done():
@@ -74,7 +74,7 @@ func TestManager_ConcurrencyBounded(t *testing.T) {
 	release := make(chan struct{})
 
 	for i := 0; i < 5; i++ {
-		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 			started <- struct{}{}
 			<-release
 			return "ok", session.TokenUsage{}, nil
@@ -107,10 +107,10 @@ func TestManager_Drain_ReturnsAndClears(t *testing.T) {
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
 
 	wg.Add(2)
-	mgr.Spawn("a", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("a", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "a-result", session.TokenUsage{}, nil
 	})
-	mgr.Spawn("b", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("b", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "b-result", session.TokenUsage{}, nil
 	})
 	wg.Wait()
@@ -134,7 +134,7 @@ func TestManager_FailedRun_SetsJobFailed(t *testing.T) {
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
 
 	wantErr := errors.New("boom")
-	mgr.Spawn("failing", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("failing", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "", session.TokenUsage{}, wantErr
 	})
 	wg.Wait()
@@ -164,7 +164,7 @@ func TestManager_OnDone_FiresExactlyOncePerJob(t *testing.T) {
 	})
 
 	for i := 0; i < 4; i++ {
-		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 			return "ok", session.TokenUsage{}, nil
 		})
 	}
@@ -184,7 +184,7 @@ func TestManager_ActiveCount(t *testing.T) {
 	wg.Add(1)
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
 
-	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-release
 		return "ok", session.TokenUsage{}, nil
 	})
@@ -217,7 +217,7 @@ func TestManager_JobTimeout_TerminatesAndFreesSlot(t *testing.T) {
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
 
 	never := make(chan struct{})
-	mgr.Spawn("stuck", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("stuck", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		select {
 		case <-never:
 			return "ok", session.TokenUsage{}, nil
@@ -241,7 +241,7 @@ func TestManager_JobTimeout_TerminatesAndFreesSlot(t *testing.T) {
 	// immediately rather than queuing behind the "stuck" one forever.
 	wg.Add(1)
 	started := make(chan struct{})
-	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		close(started)
 		return "ok", session.TokenUsage{}, nil
 	})
@@ -271,7 +271,7 @@ func TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes(t *testing.T) {
 
 	release := make(chan struct{})
 	for i := 0; i < 4; i++ {
-		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+		mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 			<-release
 			return "ok", session.TokenUsage{}, nil
 		})
@@ -297,7 +297,7 @@ func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
-	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "ok", session.TokenUsage{}, nil
 	})
 	wg.Wait()
@@ -308,7 +308,7 @@ func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
 	mgr.Drain()
 
 	wg.Add(1)
-	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "ok", session.TokenUsage{}, nil
 	})
 	wg.Wait()
@@ -327,11 +327,11 @@ func TestManager_Jobs_SnapshotOrderedOldestFirst_SurvivesDrain(t *testing.T) {
 	wg.Add(2)
 	mgr.SetOnDone(func(j *Job) { wg.Done() })
 
-	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("first", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "a", session.TokenUsage{}, nil
 	})
 	time.Sleep(2 * time.Millisecond) // ensure a distinct, later StartedAt
-	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("second", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "b", session.TokenUsage{}, nil
 	})
 	wg.Wait()

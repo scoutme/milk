@@ -32,10 +32,10 @@ func TestDrainBackgroundJobs_FormatsCompletedAndFailed_RecordsTokens(t *testing.
 	wg.Add(2)
 	mgr.SetOnDone(func(j *local.Job) { wg.Done() })
 
-	mgr.Spawn("investigate X", "task1", "primary", "test-model", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("investigate X", "task1", "primary", "test-model", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "found the bug in foo.go", session.TokenUsage{Prompt: 100, Completion: 20}, nil
 	})
-	mgr.Spawn("investigate Y", "task2", "escalation", "test-model", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("investigate Y", "task2", "escalation", "test-model", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		return "", session.TokenUsage{}, errors.New("boom")
 	})
 	wg.Wait()

@@ -55,7 +55,7 @@ func TestStatusBar_BackgroundAgentCount(t *testing.T) {
 	}
 
 	release := make(chan struct{})
-	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-release
 		return "ok", session.TokenUsage{}, nil
 	})
@@ -154,7 +154,7 @@ func TestMaybeAutoFollowup_ActiveJobsRemain_DoesNotDispatch(t *testing.T) {
 	m.pendingBackgroundFollowup = true
 
 	release := make(chan struct{})
-	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("job", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-release
 		return "ok", session.TokenUsage{}, nil
 	})
@@ -264,7 +264,7 @@ func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T
 	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
 
 	release := make(chan struct{})
-	mgr.Spawn("still running", "t", "primary", "m", func(ctx context.Context) (string, session.TokenUsage, error) {
+	mgr.Spawn("still running", "t", "primary", "m", func(ctx context.Context, _ string) (string, session.TokenUsage, error) {
 		<-release
 		return "ok", session.TokenUsage{}, nil
 	})

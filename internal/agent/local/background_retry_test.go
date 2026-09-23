@@ -46,7 +46,7 @@ func TestRetryBackgroundTask_RecoversFromTransientStreamError(t *testing.T) {
 		result: "recovered",
 	}
 
-	result, _, err := retryBackgroundTask(context.Background(), "test-model", task.run)
+	result, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
 	if err != nil {
 		t.Fatalf("retryBackgroundTask returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestRetryBackgroundTask_GivesUpAfterMaxRetries(t *testing.T) {
 		errs: []error{bgStreamResetErr(), bgStreamResetErr(), bgStreamResetErr()},
 	}
 
-	_, _, err := retryBackgroundTask(context.Background(), "test-model", task.run)
+	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
 	if err == nil {
 		t.Fatal("want error after exhausting retries, got nil")
 	}
@@ -77,7 +77,7 @@ func TestRetryBackgroundTask_DoesNotRetryNonTransientError(t *testing.T) {
 		errs: []error{io.ErrUnexpectedEOF},
 	}
 
-	_, _, err := retryBackgroundTask(context.Background(), "test-model", task.run)
+	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}

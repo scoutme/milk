@@ -2,11 +2,14 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -32,9 +35,19 @@ type Job struct {
 	Role      string // "primary" or "escalation" — role of the spawning agent
 	Model     string
 	Tokens    session.TokenUsage
+	TimedOut  bool // true when the per-job execution timeout fired (Status is JobFailed)
 	StartedAt time.Time
 	EndedAt   time.Time
+	// LastAliveAt is bumped by the Manager's heartbeat while the job runs and
+	// persisted (when a state file is configured), so a killed process leaves
+	// a last-known liveness timestamp on disk — the difference between "stuck"
+	// and "was still alive when milk died" during triage.
+	LastAliveAt time.Time
 }
+
+// JobRun is the body of a background job. jobID is the Manager-assigned ID
+// (Job.ID), passed in so the job can tag its logs and metrics with it.
+type JobRun func(ctx context.Context, jobID string) (string, session.TokenUsage, error)
 
 // Manager tracks background jobs spawned by an agent's spawn_background_agent
 // tool calls across however many turns a session runs. Concurrency is
@@ -61,6 +74,12 @@ type Manager struct {
 	batchSignaled bool
 	nextID        int
 	jobTimeout    time.Duration
+	// stateFile, when non-empty, is the path job records are persisted to
+	// (see jobstore.go and SetStateFile) so job state survives a killed milk.
+	stateFile string
+	// heartbeatInterval is how often a running job's LastAliveAt is bumped
+	// and persisted (see defaultHeartbeatInterval and startHeartbeat).
+	heartbeatInterval time.Duration
 }
 
 // defaultJobTimeout bounds how long a single job may run once it starts
@@ -84,6 +103,13 @@ type Manager struct {
 // not just tests.
 const defaultJobTimeout = 20 * time.Minute
 
+// defaultHeartbeatInterval is how often a running job's LastAliveAt is bumped
+// (and persisted, when a state file is configured) while it executes. It
+// bounds how stale the on-disk liveness timestamp can be after a hard kill —
+// at 30s, a killed milk's job file tells triage "was alive within half a
+// minute of the kill" rather than only "was started once".
+const defaultHeartbeatInterval = 30 * time.Second
+
 // NewManager returns a Manager allowing at most maxConcurrent jobs to
 // actually execute (queue past that) at once, running jobs under baseCtx —
 // which should outlive individual turns (see the Manager doc comment).
@@ -93,10 +119,11 @@ func NewManager(baseCtx context.Context, maxConcurrent int) *Manager {
 		maxConcurrent = 1
 	}
 	return &Manager{
-		baseCtx:    baseCtx,
-		sem:        make(chan struct{}, maxConcurrent),
-		jobs:       make(map[string]*Job),
-		jobTimeout: defaultJobTimeout,
+		baseCtx:           baseCtx,
+		sem:               make(chan struct{}, maxConcurrent),
+		jobs:              make(map[string]*Job),
+		jobTimeout:        defaultJobTimeout,
+		heartbeatInterval: defaultHeartbeatInterval,
 	}
 }
 
@@ -149,6 +176,24 @@ func (m *Manager) SetJobTimeout(d time.Duration) {
 	m.mu.Unlock()
 }
 
+// SetStateFile enables job-record persistence at path (a JSON file, written
+// atomically — see jobstore.go), so job state survives a killed milk. Empty
+// path disables persistence. Typically ~/.milk/jobs/<session-id>.json.
+func (m *Manager) SetStateFile(path string) {
+	m.mu.Lock()
+	m.stateFile = path
+	m.persistLocked()
+	m.mu.Unlock()
+}
+
+// SetHeartbeatInterval overrides the LastAliveAt persistence interval (see
+// defaultHeartbeatInterval). Intended for tests; production uses the default.
+func (m *Manager) SetHeartbeatInterval(d time.Duration) {
+	m.mu.Lock()
+	m.heartbeatInterval = d
+	m.mu.Unlock()
+}
+
 // Spawn launches run in a goroutine and returns immediately with a Job
 // handle in JobRunning status. run does not start executing until a
 // concurrency slot is free — Spawn itself never blocks the caller waiting
@@ -156,22 +201,28 @@ func (m *Manager) SetJobTimeout(d time.Duration) {
 // derived from the Manager's own baseCtx (not any context belonging to the
 // turn that called Spawn), bounded by the Manager's jobTimeout once it
 // starts executing.
-func (m *Manager) Spawn(label, task, role, model string, run func(context.Context) (string, session.TokenUsage, error)) *Job {
+func (m *Manager) Spawn(label, task, role, model string, run JobRun) *Job {
 	m.mu.Lock()
 	m.nextID++
 	job := &Job{
-		ID:        fmt.Sprintf("job_%d", m.nextID),
-		Label:     label,
-		Task:      task,
-		Status:    JobRunning,
-		Role:      role,
-		Model:     model,
-		StartedAt: time.Now(),
+		ID:          fmt.Sprintf("job_%d", m.nextID),
+		Label:       label,
+		Task:        task,
+		Status:      JobRunning,
+		Role:        role,
+		Model:       model,
+		StartedAt:   time.Now(),
+		LastAliveAt: time.Now(),
 	}
 	m.jobs[job.ID] = job
+	m.persistLocked()
 	timeout := m.jobTimeout
 	onStart := m.onStart
 	m.mu.Unlock()
+
+	obs.Event("background.spawned",
+		"job", job.ID, "label", job.Label, "role", role, "model", model,
+		"task", truncateRunes(task, 160))
 
 	if onStart != nil {
 		onStart(job)
@@ -188,11 +239,108 @@ func (m *Manager) Spawn(label, task, role, model string, run func(context.Contex
 
 		jobCtx, cancel := context.WithTimeout(m.baseCtx, timeout)
 		defer cancel()
-		result, tokens, err := run(jobCtx)
+		hbDone := m.startHeartbeat(job)
+		result, tokens, err := safeJobRun(jobCtx, job.ID, run)
+		close(hbDone)
+		// The job's own execution deadline firing (as opposed to the
+		// manager's baseCtx ending — i.e. milk shutting down) is this job
+		// timing out. Say so explicitly in the error so the transcript,
+		// job record and event log all distinguish "ran out of time" from
+		// "upstream failed", and so Job.TimedOut (which keys off
+		// errors.Is(err, context.DeadlineExceeded) via jobTimeoutError.Is)
+		// is set even when the job body returned its own opaque error at
+		// the deadline instead of a wrapped context error.
+		if err != nil && m.baseCtx.Err() == nil &&
+			(errors.Is(err, context.DeadlineExceeded) || jobCtx.Err() == context.DeadlineExceeded) {
+			err = &jobTimeoutError{timeout: timeout, err: err}
+		}
 		m.finish(job, result, tokens, err)
 	}()
 
 	return job
+}
+
+// jobTimeoutError is the error a job finishes with when its execution
+// deadline (Manager.jobTimeout) fired. Its message names the timeout so a
+// human reading the transcript or job record sees "timed out after 20m0s"
+// rather than a bare "context deadline exceeded", and errors.Is(err,
+// context.DeadlineExceeded) stays true so Job.TimedOut and any retry logic
+// keep recognising the cause.
+type jobTimeoutError struct {
+	timeout time.Duration
+	err     error
+}
+
+func (e *jobTimeoutError) Error() string {
+	return fmt.Sprintf("timed out after %s: %v", e.timeout, e.err)
+}
+
+func (e *jobTimeoutError) Unwrap() error { return e.err }
+
+func (e *jobTimeoutError) Is(target error) bool { return target == context.DeadlineExceeded }
+
+// safeJobRun runs one job body, converting a panic into an ordinary error so
+// a buggy job (or tool callback, or MCP server driver) fails its own Job
+// record instead of taking the whole milk process down — Spawn's job
+// goroutine has no other panic protection, and an unguarded goroutine panic
+// crashes the process regardless of which goroutine the main TUI runs on.
+// The panic value and stack are preserved in the error text for triage.
+func safeJobRun(ctx context.Context, jobID string, run JobRun) (result string, tokens session.TokenUsage, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in background job %s: %v\n%s", jobID, r, debug.Stack())
+		}
+	}()
+	return run(ctx, jobID)
+}
+
+// startHeartbeat bumps job.LastAliveAt (persisting it when a state file is
+// configured) at the Manager's heartbeat interval while the job runs, so a
+// hard-killed milk leaves a "last alive" timestamp on disk rather than only
+// the moment the job started. Returns a channel the caller closes when the
+// job ends; the goroutine also exits on its own once the job is no longer
+// JobRunning or the manager's context ends.
+func (m *Manager) startHeartbeat(job *Job) chan struct{} {
+	m.mu.Lock()
+	interval := m.heartbeatInterval
+	m.mu.Unlock()
+	done := make(chan struct{})
+	if interval <= 0 {
+		return done
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-m.baseCtx.Done():
+				return
+			case <-ticker.C:
+				m.mu.Lock()
+				if job.Status != JobRunning {
+					m.mu.Unlock()
+					return
+				}
+				job.LastAliveAt = time.Now()
+				m.persistLocked()
+				m.mu.Unlock()
+			}
+		}
+	}()
+	return done
+}
+
+// truncateRunes bounds a string to n runes (for log/event attributes that
+// would otherwise carry a whole multi-KB task prompt), appending an ellipsis
+// when it truncated. Rune-safe: never splits a multi-byte character.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "\u2026"
 }
 
 func (m *Manager) finish(job *Job, result string, tokens session.TokenUsage, err error) {
@@ -201,11 +349,17 @@ func (m *Manager) finish(job *Job, result string, tokens session.TokenUsage, err
 	job.Tokens = tokens
 	job.Err = err
 	job.EndedAt = time.Now()
+	job.LastAliveAt = job.EndedAt
+	// jobTimeoutError.Is (and a bare/unwrapped context.DeadlineExceeded from
+	// a job body that respected its context) both satisfy this, so TimedOut
+	// is reliable regardless of how the job body surfaced the deadline.
+	job.TimedOut = errors.Is(err, context.DeadlineExceeded)
 	if err != nil {
 		job.Status = JobFailed
 	} else {
 		job.Status = JobCompleted
 	}
+	m.persistLocked()
 	m.pending = append(m.pending, job)
 	onDone := m.onDone
 
@@ -221,6 +375,26 @@ func (m *Manager) finish(job *Job, result string, tokens session.TokenUsage, err
 		fireBatchDone = m.onBatchDone
 	}
 	m.mu.Unlock()
+
+	// Lifecycle events (milk.log + logs.jsonl): every job's end state —
+	// completed, failed, timed out, killed by shutdown — lands in the
+	// durable signals with its ID, role, model, duration and token usage,
+	// so triage does not depend on a volatile transcript or an in-memory
+	// job table that dies with the process.
+	dur := job.EndedAt.Sub(job.StartedAt)
+	if err != nil {
+		obs.EventWarn("background.failed",
+			"job", job.ID, "label", job.Label, "role", job.Role, "model", job.Model,
+			"duration", dur.String(), "timed_out", job.TimedOut, "err", err,
+			"partial_result_chars", len(result),
+			"prompt_tokens", tokens.Prompt, "completion_tokens", tokens.Completion)
+	} else {
+		obs.Event("background.completed",
+			"job", job.ID, "label", job.Label, "role", job.Role, "model", job.Model,
+			"duration", dur.String(), "result_chars", len(result),
+			"prompt_tokens", tokens.Prompt, "completion_tokens", tokens.Completion,
+			"cache_read_tokens", tokens.CacheRead, "cache_creation_tokens", tokens.CacheCreation)
+	}
 
 	if onDone != nil {
 		onDone(job)

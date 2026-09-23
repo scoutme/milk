@@ -40,7 +40,15 @@ func drainBackgroundJobs(ctx context.Context, mgr *local.Manager, sess *session.
 		obs.AccumulateCacheTokens(j.Model, role, j.Tokens.CacheRead, j.Tokens.CacheCreation)
 		sess.AddTokensFull(j.Model, role, j.Tokens.Prompt, j.Tokens.Completion, j.Tokens.CacheRead, j.Tokens.CacheCreation)
 		if j.Err != nil {
-			fmt.Fprintf(&b, "[background agent %q failed: %v]\n", j.Label, j.Err)
+			// Failed jobs may still carry partial work (RunBackgroundTask
+			// preserves the best-effort answer from the tool trajectory up
+			// to the failure). Say so explicitly — the value is in Job.Result
+			// and the persisted job record — instead of silently dropping it.
+			if j.Result != "" {
+				fmt.Fprintf(&b, "[background agent %q failed: %v — partial result preserved (%d chars) in job state]\n", j.Label, j.Err, len(j.Result))
+			} else {
+				fmt.Fprintf(&b, "[background agent %q failed: %v]\n", j.Label, j.Err)
+			}
 			continue
 		}
 		fmt.Fprintf(&b, "[background agent %q completed: %s]\n", j.Label, j.Result)

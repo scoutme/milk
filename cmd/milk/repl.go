@@ -2626,8 +2626,8 @@ func (m model) spawnUserBackgroundAgent(task string) (tea.Model, tea.Cmd) {
 	// Update deadlocks because the event loop goroutine is the only reader
 	// of that channel and it is blocked waiting for Update to return.
 	return m, func() tea.Msg {
-		job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context) (string, session.TokenUsage, error) {
-			return agent.RunBackgroundTask(ctx, cwd, task, io.Discard)
+		job := mgr.Spawn(label, task, "user", modelName, func(ctx context.Context, jobID string) (string, session.TokenUsage, error) {
+			return agent.RunBackgroundTask(ctx, jobID, cwd, task, io.Discard)
 		})
 		return backgroundSpawnedMsg{jobID: job.ID, label: label}
 	}
@@ -3525,6 +3525,13 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		backgroundMgr: local.NewManager(ctx, cfg.EffectiveMaxBackgroundAgents()),
 	}
 	agents.backgroundMgr.SetJobTimeout(cfg.EffectiveBackgroundAgentTimeout())
+	// Persist job records (ADR-0043 triage): a killed milk leaves each job's
+	// last-known status, result and heartbeat timestamp on disk — see
+	// internal/agent/local's jobstore.go. Best-effort: a home dir milk can't
+	// write to just means no persistence, never a failed session.
+	if cfgDir, dirErr := config.Dir(); dirErr == nil && sess.ID != "" {
+		agents.backgroundMgr.SetStateFile(cfgDir + "/jobs/" + sess.ID + ".json")
+	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
 	m.taskStore = taskStore

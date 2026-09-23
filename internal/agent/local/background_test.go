@@ -64,7 +64,7 @@ func TestRunBackgroundTask_ExcludesRecursiveAndEscalationTools(t *testing.T) {
 	agent.toolAgentEntries = []config.AgentToolEntry{{Agent: "helper", Description: "a helper"}}
 
 	var out strings.Builder
-	resp, _, err := agent.RunBackgroundTask(context.Background(), "/tmp", "investigate something", &out)
+	resp, _, err := agent.RunBackgroundTask(context.Background(), "job_test", "/tmp", "investigate something", &out)
 	if err != nil {
 		t.Fatalf("RunBackgroundTask returned error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunBackgroundTask_TokenUsageNotAttributedToParent(t *testing.T) {
 	})
 
 	var out strings.Builder
-	_, usage, err := agent.RunBackgroundTask(context.Background(), "/tmp", "investigate", &out)
+	_, usage, err := agent.RunBackgroundTask(context.Background(), "job_test", "/tmp", "investigate", &out)
 	if err != nil {
 		t.Fatalf("RunBackgroundTask returned error: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRunBackgroundTask_RespectsMaxIterations(t *testing.T) {
 	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 3})
 	agent.skipPerms = true
 	var out strings.Builder
-	resp, _, err := agent.RunBackgroundTask(context.Background(), "/tmp", "keep going forever", &out)
+	resp, _, err := agent.RunBackgroundTask(context.Background(), "job_test", "/tmp", "keep going forever", &out)
 	if err != nil {
 		t.Fatalf("RunBackgroundTask returned error: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestRunBackgroundTask_ConcurrentWithParentRun_NoRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var out strings.Builder
-		if _, _, err := agent.RunBackgroundTask(context.Background(), "/tmp", "investigate", &out); err != nil {
+		if _, _, err := agent.RunBackgroundTask(context.Background(), "job_test", "/tmp", "investigate", &out); err != nil {
 			t.Errorf("RunBackgroundTask returned error: %v", err)
 		}
 	}()
@@ -429,7 +429,7 @@ func TestRunBackgroundTask_PermissionGatedToolDeniesInsteadOfHanging(t *testing.
 	var runErr error
 	go func() {
 		var out strings.Builder
-		resp, _, runErr = agent.RunBackgroundTask(context.Background(), "/tmp", "run ls", &out)
+		resp, _, runErr = agent.RunBackgroundTask(context.Background(), "job_test", "/tmp", "run ls", &out)
 		close(done)
 	}()
 

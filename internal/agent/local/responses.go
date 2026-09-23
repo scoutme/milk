@@ -133,7 +133,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 		a.onRequestSize(int64(len(body)))
 	}
 	if a.logContext {
-		obs.LogPayload(a.inferenceURL(), body)
+		obs.LogPayload(a.inferenceURL(), body, a.jobAttrs()...)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.inferenceURL(), bytes.NewReader(body))
@@ -147,14 +147,13 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	if err != nil {
 		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
 			attribute.String("model", a.model),
-			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		obs.Warn("inference request failed",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("inference request failed",
+			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
-			"retryable", workflow.IsRetryableTurnError(err),
-		)
+			"retryable", workflow.IsRetryableTurnError(err))
 		return "", "", nil, false, "", fmt.Errorf("inference server unreachable: %w", err)
 	}
 	defer httpResp.Body.Close()
@@ -163,14 +162,13 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 		b, _ := io.ReadAll(httpResp.Body)
 		obs.Inc(ctx, inferenceScope, "milk.inference.errors",
 			attribute.String("model", a.model),
-			attribute.String("agent", agentRoleForMetrics(a.escalationName)),
+			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		obs.Warn("inference request returned non-200",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("inference request returned non-200",
+			"model", a.model, "agent", a.logRole(),
 			"status", httpResp.StatusCode, "body", string(b),
-			"elapsed", time.Since(inferenceStart).String(),
-		)
+			"elapsed", time.Since(inferenceStart).String())
 		return "", "", nil, false, "", fmt.Errorf("inference server error %d: %s", httpResp.StatusCode, b)
 	}
 
@@ -190,7 +188,7 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	// of persisting (or discarding) a blank assistant message.
 	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && !det.InBlock() && det.RawBlock() == ""
 
-	role := agentRoleForMetrics(a.escalationName)
+	role := a.logRole()
 	obs.RecordDuration(ctx, inferenceScope, "milk.inference.latency_ms", time.Since(inferenceStart),
 		attribute.String("model", a.model),
 		attribute.String("agent", role),
@@ -201,7 +199,12 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	// normalize to fresh-only so it matches the convention every downstream
 	// consumer (session, obs, status bar, memory panel) already assumes.
 	freshPrompt := max(promptTokens-cacheRead, 0)
-	obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+	// See the matching comment in streamCompletionOnce (local.go):
+	// background-job clones record their token totals once at drain time,
+	// never per-request (double-counting + parent-role mis-tagging).
+	if a.jobID == "" {
+		obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+	}
 	if a.onTokens != nil {
 		// cacheCreation is always 0: the Responses API, like Chat Completions,
 		// reports cache reads only. See input_tokens_details.cached_tokens
@@ -248,12 +251,11 @@ func (a *Agent) scanResponsesSSE(
 			case <-ticker.C:
 				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
 				if idle >= streamIdleLogInterval {
-					obs.Warn("stream idle",
-						"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+					a.logWarn("stream idle",
+						"model", a.model, "agent", a.logRole(),
 						"lines_scanned", lines.Load(),
 						"elapsed_since_start", time.Since(streamStartedAt).String(),
-						"elapsed_since_last_chunk", idle.String(),
-					)
+						"elapsed_since_last_chunk", idle.String())
 				}
 			}
 		}
@@ -309,24 +311,22 @@ func (a *Agent) scanResponsesSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		obs.Warn("stream read failed",
-			"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+		a.logWarn("stream read failed",
+			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(),
 			"lines_scanned", lines.Load(),
 			"elapsed_since_start", time.Since(streamStartedAt).String(),
 			"elapsed_since_last_chunk", time.Since(time.Unix(0, lastLineAtNano.Load())).String(),
 			"content_bytes", textBuf.Len(),
 			"tool_call_fragments", len(partialTools),
-			"retryable", workflow.IsRetryableTurnError(err),
-		)
+			"retryable", workflow.IsRetryableTurnError(err))
 		return nil, 0, 0, 0, err
 	}
-	obs.Debug("stream read completed",
-		"model", a.model, "agent", agentRoleForMetrics(a.escalationName),
+	a.logDebug("stream read completed",
+		"model", a.model, "agent", a.logRole(),
 		"lines_scanned", lines.Load(),
 		"elapsed", time.Since(streamStartedAt).String(),
-		"content_bytes", textBuf.Len(),
-	)
+		"content_bytes", textBuf.Len())
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
 }
 
@@ -350,7 +350,7 @@ Task: ` + prompt
 		return false, err
 	}
 	if a.logContext {
-		obs.LogPayload(a.inferenceURL()+" [classify]", body)
+		obs.LogPayload(a.inferenceURL()+" [classify]", body, a.jobAttrs()...)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.inferenceURL(), bytes.NewReader(body))
