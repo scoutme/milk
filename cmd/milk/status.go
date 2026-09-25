@@ -28,7 +28,7 @@ func (m *model) headerBar() string {
 		sessID = sessID[:8]
 	}
 	var totalPrompt, totalCompletion, totalCacheRead, totalCacheCreation int64
-	for _, u := range m.st.sess.Tokens {
+	for _, u := range m.st.sess.TokensSnapshot() {
 		totalPrompt += u.Prompt
 		totalCompletion += u.Completion
 		totalCacheRead += u.CacheRead

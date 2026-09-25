@@ -162,7 +162,9 @@ func Save(s *Session) error {
 		return err
 	}
 
+	tokensMu.RLock()
 	data, err := json.MarshalIndent(s, "", "  ")
+	tokensMu.RUnlock()
 	if err != nil {
 		return err
 	}

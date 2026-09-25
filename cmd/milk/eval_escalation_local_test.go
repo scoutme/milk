@@ -276,8 +276,7 @@ func TestEval_EscalationLocal(t *testing.T) {
 		// ── baseline: pre-optimization path ───────────────────────────────
 		// Full history via escalationLocalHistory, WithTagCallbacks mirroring
 		// old runEscalationLocal, no orientation, no percept injection.
-		baseSess := *orig
-		baseSess.History = append([]session.Turn(nil), orig.History...)
+		baseSess := *orig.Clone()
 		baseAgent := buildBaselineAgent(ts.URL)
 		var baseOut strings.Builder
 		baseAgent.Run(context.Background(), escalationLocalHistory(&baseSess, prompt, false), prompt, &baseOut, &baseSess, nil) //nolint:errcheck
@@ -286,8 +285,7 @@ func TestEval_EscalationLocal(t *testing.T) {
 		baseHasEsc := srv.hasEscalationTurns(escalationReply)
 
 		// ── new path: live runEscalation (via localRunner) ───────────────
-		newSess := *orig
-		newSess.History = append([]session.Turn(nil), orig.History...)
+		newSess := *orig.Clone()
 		newAgent := local.NewFromConfig(cfg.EscalationAgentConfig()).AsEscalationTarget("esc")
 		var newOut strings.Builder
 		if err := runEscalation(context.Background(), cfg, &newSess, newLocalRunner(newAgent, "esc"), "", nil, prompt, &newOut, nil, nil, nil, nil); err != nil {
