@@ -119,6 +119,15 @@ type Session struct {
 	// Returning/Resume detection. Cleared immediately after use. Not persisted.
 	ForceFreshEscalation bool `json:"-"`
 
+	// PendingBangOutput holds output from `!`-prefixed direct-bash commands run
+	// while an agent turn was already in progress (issue #128) — queued here
+	// instead of being silently dropped or routed through an LLM background
+	// agent (which has no special handling for milk's own bang-mode
+	// convention). Drained and prepended to the next dispatch prompt the same
+	// way drainBackgroundJobs handles ADR-0043 job results. Not persisted:
+	// ephemeral within a single process run.
+	PendingBangOutput []string `json:"-"`
+
 	// RepetitionBaselineLocalTurns is the total user-turn count (all agents) at the
 	// moment the user last returned to the primary agent via /primary. The
 	// repeated-prompt check skips any user turns before this index so that prompts
