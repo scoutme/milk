@@ -44,6 +44,9 @@ func (m model) launchDirectBashFallback(shellCmd string) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// See launchPTYPane's comment: tells directBashDoneMsg's cleanup not to
+	// clobber an already-in-progress turn's busy/cancelTurn state.
+	m.directBashConcurrentTurn = m.busy
 	m.busy = true
 	m.spinnerFrame = 0
 

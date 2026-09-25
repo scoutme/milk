@@ -59,6 +59,23 @@ func drainBackgroundJobs(ctx context.Context, mgr *local.Manager, sess *session.
 	return b.String()
 }
 
+// drainPendingBangOutput returns and clears sess.PendingBangOutput — output
+// from `!`-prefixed direct-bash commands run while a turn was already in
+// progress (issue #128) — as a synthetic context block to prepend to the
+// next dispatch prompt, mirroring drainBackgroundJobs above.
+func drainPendingBangOutput(sess *session.Session) string {
+	if len(sess.PendingBangOutput) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, out := range sess.PendingBangOutput {
+		b.WriteString(out)
+	}
+	sess.PendingBangOutput = nil
+	b.WriteString("\n")
+	return b.String()
+}
+
 // executeWithRetry wraps runner.Execute with the same transient network/stream
 // error retry (HTTP/2 stream reset or GOAWAY) that workflow turns already get
 // via workflow.Turn — without it, a single upstream hiccup ends a standalone
@@ -168,7 +185,7 @@ func runPrimaryWithSession(
 	// dispatchPrompt, not prompt, carries any completed background-job
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// RecordNeed/percept-matching/session bookkeeping below.
-	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + prompt
+	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + drainPendingBangOutput(sess) + prompt
 
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
@@ -351,7 +368,7 @@ func runEscalationWithSession(
 	// dispatchPrompt, not prompt, carries any completed background-job
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// percept-matching/session bookkeeping below.
-	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + prompt
+	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + drainPendingBangOutput(sess) + prompt
 	escAC := cfg.EscalationAgentConfig()
 	agentName := runner.Name()
 

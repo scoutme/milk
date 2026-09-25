@@ -64,6 +64,12 @@ func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
 		shellCmd: shellCmd,
 	}
 
+	// m.ptyPane is nil whenever launchPTYPane can be reached (PTY-active takes
+	// top dispatch priority, so a second bang can't stack), so m.busy already
+	// true here means an agent turn is running underneath — a bang run while
+	// busy (issue #128). directBashConcurrentTurn tells directBashDoneMsg's
+	// cleanup not to clobber that turn's busy/cancelTurn state.
+	m.directBashConcurrentTurn = m.busy
 	m.ptyPane = state
 	m.busy = true
 	m.spinnerFrame = 0

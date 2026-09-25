@@ -729,6 +729,15 @@ type model struct {
 	// ptyPane is non-nil while a shell command is running inside an embedded PTY.
 	ptyPane *ptyPaneState
 
+	// directBashConcurrentTurn is true when a direct-bash/bang command (via
+	// launchPTYPane or launchDirectBashFallback) was launched while an agent
+	// turn was already in progress — i.e. from handleBusyKey rather than the
+	// idle path (issue #128). directBashDoneMsg's cleanup uses this to avoid
+	// clobbering the still-running turn's busy/cancelTurn state, and to route
+	// the command's output into sess.PendingBangOutput for the next turn
+	// instead of relying solely on the (agent-invisible) transcript.
+	directBashConcurrentTurn bool
+
 	// hasInferenceAgent is true when the user has explicitly configured a
 	// local-agent backend. Used to show setup hints on the welcome screen.
 	hasInferenceAgent bool
@@ -918,6 +927,35 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter", "ctrl+m":
 		input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
+		// Bang mode consumed the "!" at keystroke time (same as handleEnter's
+		// idle path); re-prepend it so stripBangPrefix below still recognizes
+		// this as a direct-execution command.
+		if m.bangMode {
+			input = "!" + input
+			m.bangMode = false
+			m.refreshPrompt()
+		}
+		// "!" is always available regardless of busy state (issue #128): it's
+		// an explicit, agent-bypassing request, so it must not be silently
+		// funneled into the "press Enter again to spawn a background agent"
+		// flow below, which would hand an LLM agent the raw "!..." string —
+		// the agent has no special handling for milk's own bang syntax.
+		if shellCmd, ok := stripBangPrefix(input); ok && !m.leadingPasted {
+			m.ta.Reset()
+			m.leadingPasted = false
+			m.tabMatches = nil
+			m.tabIdx = -1
+			m.tabHints = nil
+			m.tabHintsBase = nil
+			m.busyHint = ""
+			m.busySpawnArmed = false
+			m.syncLayout()
+			m.appendTranscript(promptLabel(m.st) + colorizeTokens(input) + "\n")
+			if shellCmd == "" {
+				return m, nil
+			}
+			return m.launchPTYPane(shellCmd)
+		}
 		if cmd, rest, found := extractSlashCommand(input); found && !m.leadingPasted {
 			if busySafeCommands[cmd] {
 				// Safe command: execute immediately without clearing busy state.
@@ -1621,15 +1659,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case directBashDoneMsg:
-		m.busy = false
-		m.cancelTurn = nil
-		m.busyHint = ""
+		concurrentTurn := m.directBashConcurrentTurn
+		m.directBashConcurrentTurn = false
+		if !concurrentTurn {
+			// The PTY/fallback was the only reason busy was true — safe to
+			// clear. If it ran alongside an already-in-progress agent turn,
+			// that turn's own completion handler owns busy/cancelTurn.
+			m.busy = false
+			m.cancelTurn = nil
+			m.busyHint = ""
+		}
 		if m.ptyPane != nil {
 			// Snapshot the VT screen and append cleaned output to the transcript.
 			out := m.ptySnapshot()
 			if out != "" {
 				m.appendTranscript(dimLines(out))
 				m.currentTurnChars += int64(len(out))
+				if concurrentTurn && m.st != nil && m.st.sess != nil {
+					// Queue for the next dispatch prompt (issue #128) — the
+					// turn already in flight when this ran can't see it, and
+					// the agent has no special handling for milk's bang
+					// syntax, so the output (not the raw "!..." input) is
+					// what gets surfaced next turn.
+					m.st.sess.PendingBangOutput = append(m.st.sess.PendingBangOutput,
+						fmt.Sprintf("[direct command %q completed while agent was busy — output:\n%s]\n", m.ptyPane.shellCmd, out))
+				}
 			}
 			_ = m.ptyPane.ptm.Close()
 			m.ptyPane = nil
