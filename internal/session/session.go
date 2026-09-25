@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -137,7 +138,36 @@ type Session struct {
 
 	// Tokens holds cumulative token usage for this session, keyed by "model\x00role".
 	// Persisted so /usage can show totals from prior runs of the same session.
+	// Written from turn goroutines (see AddTokensFull) while the TUI's render
+	// goroutine reads it via TokensSnapshot on every View() — tokensMu guards
+	// every access to prevent a concurrent map iteration/write crash. Package-
+	// level (not a struct field) so that Session, which is copied by value in
+	// a few places (tests cloning a scenario base), stays free of go vet's
+	// copylocks check.
 	Tokens map[string]*TokenUsage `json:"tokens,omitempty"`
+}
+
+// tokensMu guards every Session's Tokens map. A single package-level lock
+// rather than a per-instance field: Tokens map operations are brief, and a
+// lock field would make every Session value-copy (several exist, e.g. test
+// scenario cloning) trip go vet's copylocks check.
+var tokensMu sync.RWMutex
+
+// Clone returns an independent copy of s: a deep copy of History and Tokens,
+// a shallow copy of every other field.
+func (s *Session) Clone() *Session {
+	tokensMu.RLock()
+	defer tokensMu.RUnlock()
+	out := *s
+	out.History = append([]Turn(nil), s.History...)
+	if s.Tokens != nil {
+		out.Tokens = make(map[string]*TokenUsage, len(s.Tokens))
+		for k, u := range s.Tokens {
+			cp := *u
+			out.Tokens[k] = &cp
+		}
+	}
+	return &out
 }
 
 // TokenUsage holds cumulative token counts for one (model, agent-role) pair.
@@ -160,6 +190,8 @@ func (s *Session) AddTokensFull(model, role string, prompt, completion, cacheRea
 	if model == "" || role == "" || (prompt == 0 && completion == 0 && cacheRead == 0 && cacheCreation == 0) {
 		return
 	}
+	tokensMu.Lock()
+	defer tokensMu.Unlock()
 	if s.Tokens == nil {
 		s.Tokens = map[string]*TokenUsage{}
 	}
@@ -175,12 +207,28 @@ func (s *Session) AddTokensFull(model, role string, prompt, completion, cacheRea
 	e.CacheCreation += cacheCreation
 }
 
+// TokensSnapshot returns a copy of the session's token-usage entries, safe to
+// range over without racing AddTokensFull writes from another goroutine (turn
+// goroutines write live during streaming; the TUI reads on its render
+// goroutine every View()).
+func (s *Session) TokensSnapshot() map[string]TokenUsage {
+	tokensMu.RLock()
+	defer tokensMu.RUnlock()
+	out := make(map[string]TokenUsage, len(s.Tokens))
+	for k, u := range s.Tokens {
+		out[k] = *u
+	}
+	return out
+}
+
 // SessionTokensByRolePrefix returns the sum of prompt and completion tokens
 // for all roles that start with the given prefix. For example, prefix
 // "escalation" matches "escalation", "escalation:subagent", and
 // "escalation:workflow". This is useful for querying all tokens related to
 // an escalation agent, including its subagents and workflows.
 func (s *Session) SessionTokensByRolePrefix(prefix string) (prompt, completion int64) {
+	tokensMu.RLock()
+	defer tokensMu.RUnlock()
 	for _, u := range s.Tokens {
 		if u.Agent == prefix || strings.HasPrefix(u.Agent, prefix+":") {
 			prompt += u.Prompt
@@ -194,6 +242,8 @@ func (s *Session) SessionTokensByRolePrefix(prefix string) (prompt, completion i
 // creation tokens for all roles that start with the given prefix. Mirrors
 // SessionTokensByRolePrefix for cache metrics.
 func (s *Session) SessionCacheTokensByRolePrefix(prefix string) (cacheRead, cacheCreation int64) {
+	tokensMu.RLock()
+	defer tokensMu.RUnlock()
 	for _, u := range s.Tokens {
 		if u.Agent == prefix || strings.HasPrefix(u.Agent, prefix+":") {
 			cacheRead += u.CacheRead

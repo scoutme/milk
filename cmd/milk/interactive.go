@@ -616,7 +616,7 @@ func execUsage(st *interactiveState) string {
 	var sessEntries []obs.SessionTokenEntry
 	var turns int64
 	if st != nil && st.sess != nil {
-		for _, u := range st.sess.Tokens {
+		for _, u := range st.sess.TokensSnapshot() {
 			sessEntries = append(sessEntries, obs.SessionTokenEntry{
 				Model: u.Model, Agent: u.Agent,
 				Prompt: u.Prompt, Completion: u.Completion,
