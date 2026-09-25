@@ -215,6 +215,8 @@ Same commands on the CLI as `milk config`, `milk config init`, `milk config open
 
 **Clipboard binary paste**: when a bracketed paste yields empty text, milk probes the system clipboard (`xclip`/`wl-paste`) for non-text content (e.g. `image/png`); found content is saved to a temp file and staged as a pending attachment, same as `/attach`. No special key combination beyond a normal paste gesture.
 
+**Pasted content never triggers commands**: a slash command, `!`-prefixed shell command, or direct-bash shortcut only fires when its leading token was typed, not pasted — pasting a transcript that happens to start with `/learn` or `!rm -rf` is sent to the agent as inert prompt text instead of executing. Typing a command and then pasting its argument (e.g. `/escalate ` followed by a pasted paragraph) is unaffected, since the paste doesn't occupy the leading position.
+
 **Keyboard**: Up/Down navigates input history (single-line mode); Ctrl-C clears a pending force-mode flag or exits; Ctrl-D exits.
 
 ### Flags

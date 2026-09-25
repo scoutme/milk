@@ -28,3 +28,68 @@ func TestInteractiveHelp_MentionsAllPanelsAndShortcuts(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractSlashCommand_LeadingTokenOnly guards against issue #151's root
+// cause: a command mentioned anywhere in the input (typed or pasted) used to
+// fire, not just when it's the deliberate first thing in the line.
+func TestExtractSlashCommand_LeadingTokenOnly(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantCmd   string
+		wantRest  string
+		wantFound bool
+	}{
+		{
+			name:      "leading command fires",
+			input:     "/help",
+			wantCmd:   "/help",
+			wantRest:  "",
+			wantFound: true,
+		},
+		{
+			name:      "leading command with prompt",
+			input:     "/escalate please look into this",
+			wantCmd:   "/escalate",
+			wantRest:  "please look into this",
+			wantFound: true,
+		},
+		{
+			name:      "command mid-sentence is inert",
+			input:     "please run /help now",
+			wantCmd:   "",
+			wantRest:  "please run /help now",
+			wantFound: false,
+		},
+		{
+			name:      "command embedded in a pasted transcript is inert",
+			input:     "Here is my earlier turn:\n> /learn milk likes Go\nand the reply",
+			wantCmd:   "",
+			wantRest:  "Here is my earlier turn:\n> /learn milk likes Go\nand the reply",
+			wantFound: false,
+		},
+		{
+			name:      "unknown leading slash word is not a command",
+			input:     "/notacommand foo bar",
+			wantCmd:   "",
+			wantRest:  "/notacommand foo bar",
+			wantFound: false,
+		},
+		{
+			name:      "empty input",
+			input:     "",
+			wantCmd:   "",
+			wantRest:  "",
+			wantFound: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, rest, found := extractSlashCommand(tc.input)
+			if cmd != tc.wantCmd || rest != tc.wantRest || found != tc.wantFound {
+				t.Errorf("extractSlashCommand(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.input, cmd, rest, found, tc.wantCmd, tc.wantRest, tc.wantFound)
+			}
+		})
+	}
+}

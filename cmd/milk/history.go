@@ -90,11 +90,13 @@ func (m model) historyBack() model {
 	}
 	if m.histIdx == -1 {
 		m.saved = m.ta.Value()
+		m.savedLeadingPasted = m.leadingPasted
 		m.histIdx = len(h) - 1
 	} else if m.histIdx > 0 {
 		m.histIdx--
 	}
 	m.ta.SetValue(h[m.histIdx])
+	m.leadingPasted = false
 	m.hintIdx = -1
 	m.tabHints = nil
 	m.tabHintsBase = nil
@@ -111,9 +113,15 @@ func (m model) historyForward() model {
 	if m.histIdx >= len(h) {
 		m.histIdx = -1
 		m.ta.SetValue(m.saved)
-	} else {
-		m.ta.SetValue(h[m.histIdx])
+		m.leadingPasted = m.savedLeadingPasted
+		m.hintIdx = -1
+		m.tabHints = nil
+		m.tabHintsBase = nil
+		m.taClearSel()
+		return m
 	}
+	m.ta.SetValue(h[m.histIdx])
+	m.leadingPasted = false
 	m.hintIdx = -1
 	m.tabHints = nil
 	m.tabHintsBase = nil
@@ -160,6 +168,7 @@ func (m model) historySearchBack() model {
 	if idx := searchBack(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
 		m.searchIdx = idx
 		m.ta.SetValue(h[idx])
+		m.leadingPasted = false
 	}
 	return m
 }
@@ -174,6 +183,7 @@ func (m model) historySearchForward() model {
 	if idx := searchForward(h, m.searchQuery.String(), m.searchIdx); idx >= 0 {
 		m.searchIdx = idx
 		m.ta.SetValue(h[idx])
+		m.leadingPasted = false
 	}
 	return m
 }

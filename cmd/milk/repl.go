@@ -538,11 +538,12 @@ type model struct {
 	spinnerFrame int
 
 	// history navigation
-	sessionHistory   []string // entries for this session only (default navigation)
-	globalHistory    []string // entries across all sessions
-	useGlobalHistory bool     // when true, navigate globalHistory instead
-	histIdx          int
-	saved            string
+	sessionHistory     []string // entries for this session only (default navigation)
+	globalHistory      []string // entries across all sessions
+	useGlobalHistory   bool     // when true, navigate globalHistory instead
+	histIdx            int
+	saved              string
+	savedLeadingPasted bool // leadingPasted snapshot for saved, restored on historyForward back to it
 
 	// ctrl+r / ctrl+s incremental search state
 	searching     bool
@@ -713,6 +714,17 @@ type model struct {
 	// line), and handleEnter (on submit, which re-prepends "!" to the
 	// submitted text so submitInput's stripBangPrefix still applies).
 	bangMode bool
+
+	// leadingPasted is true when the character(s) at the very start of the
+	// current textarea buffer arrived via a real bracketed-paste event rather
+	// than being typed. Set in handleKey's msg.Paste branch when the cursor
+	// sits at absolute buffer offset 0 at the moment of the paste; cleared at
+	// every point the buffer is reset or replaced wholesale (submit, Ctrl+C
+	// clear, history recall). Used to keep slash/bang/direct-bash triggering
+	// gated to deliberately typed input — see submitInput and handleBusyKey
+	// (issue #151: pasted content, e.g. a copied transcript that happens to
+	// start with "/learn" or "!rm -rf", must not execute as a command).
+	leadingPasted bool
 
 	// ptyPane is non-nil while a shell command is running inside an embedded PTY.
 	ptyPane *ptyPaneState
@@ -906,7 +918,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter", "ctrl+m":
 		input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
-		if cmd, rest, found := extractSlashCommand(input); found {
+		if cmd, rest, found := extractSlashCommand(input); found && !m.leadingPasted {
 			if busySafeCommands[cmd] {
 				// Safe command: execute immediately without clearing busy state.
 				m.ta.Reset()
@@ -954,6 +966,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		answer := strings.TrimSpace(m.ta.Value())
 		m.ta.Reset()
+		m.leadingPasted = false
 		m.syncLayout()
 		m.appendTranscript(answer + "\n")
 		m.pendingPerm.respCh <- answer
@@ -978,6 +991,7 @@ func (m *model) dequeueNextPerm() {
 	m.pendingPerm = &next
 	m.appendTranscript(next.prompt)
 	m.ta.Reset()
+	m.leadingPasted = false
 	m.syncLayout()
 }
 
@@ -989,6 +1003,7 @@ func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
 	m.pendingPerm = &msg
 	m.appendTranscript(msg.prompt)
 	m.ta.Reset()
+	m.leadingPasted = false
 	m.syncLayout()
 	return m, nil
 }
@@ -2064,6 +2079,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if pasted == "" {
 			return m, m.probeClipboardCmd()
 		}
+		// The paste lands at the very start of the buffer: the leading token
+		// (what extractSlashCommand/stripBangPrefix/shelldetect inspect) is
+		// about to become pasted content rather than typed content.
+		if m.taCursorOffset() == 0 {
+			m.leadingPasted = true
+		}
 		m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
 		m.ta.SetHeight(m.height)
 		var cmd tea.Cmd
@@ -2327,6 +2348,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.undoPush(true)
 	cmd = m.updateTA(msg)
+	// Buffer emptied out (e.g. backspacing away a paste): nothing pasted
+	// remains, so any further typing starts a clean, untainted leading token.
+	if m.ta.Value() == "" {
+		m.leadingPasted = false
+	}
 	m.syncLayout()
 	return m, tea.Batch(cmd, m.scheduleHintRebuild())
 }
@@ -2472,6 +2498,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if m.bangMode || m.ta.Value() != "" {
 		m.ta.Reset()
 		m.bangMode = false
+		m.leadingPasted = false
 
 		m.tabMatches = nil
 		m.tabIdx = -1
@@ -2535,6 +2562,9 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 
 	// If we're collecting designer disambiguation answers, send them to the workflow.
 	if m.pendingWorkflowQuestions != "" {
+		// This branch never reaches submitInput (the one place that normally
+		// consumes and clears leadingPasted), so clear it here.
+		m.leadingPasted = false
 		// Don't send empty answers — they create empty checkpoint entries
 		// that replay badly on resume.  Treat bare Enter as "continue".
 		answer := input
@@ -2593,6 +2623,7 @@ const backgroundFollowupPrompt = local.BackgroundFollowupPrompt
 // capable one) and falls back to primary's.
 func (m model) spawnUserBackgroundAgent(task string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
+	m.leadingPasted = false
 	m.busyHint = ""
 	m.busySpawnArmed = false
 	m.syncLayout()
@@ -2687,6 +2718,13 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Snapshot and clear: this input cycle's provenance is fully consumed by
+	// the gate below, and the field must not leak into whatever the caller
+	// (e.g. handleEnter, which resets the textarea before calling submitInput)
+	// puts in the buffer next.
+	leadingPasted := m.leadingPasted
+	m.leadingPasted = false
+
 	// Feed user turn to loop detector (resets turn-flood streak).
 	if m.loopDetector != nil {
 		m.loopDetector.Feed(loop.TurnSummary{
@@ -2704,42 +2742,49 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 	m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
 	m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
 
-	if input == cmdPaste {
-		// /paste is also the manual trigger for clipboard binary attachment:
-		// terminals (especially Windows Terminal / WSL2) never send a bracketed-paste
-		// event when the clipboard holds only binary data (image, PDF, etc.), so the
-		// automatic empty-paste hook cannot fire. /paste covers that gap.
-		return m, m.probeClipboardCmd()
-	}
-
-	// "!" prefix: explicit direct-execution mode (Claude Code style). Always
-	// available regardless of the direct_bash config, and skips confirmation —
-	// the leading "!" is itself an unambiguous request to run a shell command.
-	if shellCmd, ok := stripBangPrefix(input); ok {
-		if shellCmd == "" {
-			return m, nil
+	// All command/bang/direct-bash triggers below are gated on !leadingPasted:
+	// if the leading content of this input arrived via a real paste event
+	// rather than being typed, it's treated as inert prompt text (issue #151) —
+	// a pasted transcript that happens to start with "/learn" or "!rm -rf" must
+	// not execute anything.
+	if !leadingPasted {
+		if input == cmdPaste {
+			// /paste is also the manual trigger for clipboard binary attachment:
+			// terminals (especially Windows Terminal / WSL2) never send a bracketed-paste
+			// event when the clipboard holds only binary data (image, PDF, etc.), so the
+			// automatic empty-paste hook cannot fire. /paste covers that gap.
+			return m, m.probeClipboardCmd()
 		}
-		return m.launchPTYPane(shellCmd)
-	}
 
-	if cmd, rest, found := extractSlashCommand(input); found {
-		return m.handleSlashInput(cmd, rest)
-	}
-
-	// Direct-bash shortcut: if enabled and input looks like a shell command,
-	// ask for confirmation before running it locally (or run immediately if
-	// the first token is in the allow-list).
-	if m.st.cfg.DirectBash {
-		if shellCmd, ok := shelldetect.IsShellCommand(input); ok {
-			if shelldetect.HasAllowedPrefix(shellCmd, m.st.cfg.DirectBashAllow) {
-				return m.launchPTYPane(shellCmd)
+		// "!" prefix: explicit direct-execution mode (Claude Code style). Always
+		// available regardless of the direct_bash config, and skips confirmation —
+		// the leading "!" is itself an unambiguous request to run a shell command.
+		if shellCmd, ok := stripBangPrefix(input); ok {
+			if shellCmd == "" {
+				return m, nil
 			}
-			// Show confirmation prompt.
-			cmd := shellCmd
-			m.pendingDirectBash = &cmd
-			m.appendTranscript(milkTag() + " run: " + bold(shellCmd) + "  [Y/n] ")
-			m.refreshPrompt()
-			return m, nil
+			return m.launchPTYPane(shellCmd)
+		}
+
+		if cmd, rest, found := extractSlashCommand(input); found {
+			return m.handleSlashInput(cmd, rest)
+		}
+
+		// Direct-bash shortcut: if enabled and input looks like a shell command,
+		// ask for confirmation before running it locally (or run immediately if
+		// the first token is in the allow-list).
+		if m.st.cfg.DirectBash {
+			if shellCmd, ok := shelldetect.IsShellCommand(input); ok {
+				if shelldetect.HasAllowedPrefix(shellCmd, m.st.cfg.DirectBashAllow) {
+					return m.launchPTYPane(shellCmd)
+				}
+				// Show confirmation prompt.
+				cmd := shellCmd
+				m.pendingDirectBash = &cmd
+				m.appendTranscript(milkTag() + " run: " + bold(shellCmd) + "  [Y/n] ")
+				m.refreshPrompt()
+				return m, nil
+			}
 		}
 	}
 
