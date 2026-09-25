@@ -25,3 +25,16 @@ func TestDimLines_NonTTYLeavesTextUnchanged(t *testing.T) {
 		t.Fatalf("dimLines() = %q, want %q", got, input)
 	}
 }
+
+func TestColorize_ResetBeforeTrailingNewline(t *testing.T) {
+	oldIsTTY := isTTY
+	isTTY = true
+	t.Cleanup(func() { isTTY = oldIsTTY })
+
+	got := yellow("[⚠ loop detected: reasoning chunk flood (confidence 85%)]\n")
+	want := ansiYellow + "[⚠ loop detected: reasoning chunk flood (confidence 85%)]" + ansiReset + "\n"
+
+	if got != want {
+		t.Fatalf("yellow() = %q, want %q", got, want)
+	}
+}
