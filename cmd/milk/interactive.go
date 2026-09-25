@@ -439,25 +439,17 @@ func (st *interactiveState) escalationAgentName() string {
 	return st.cfg.EscalationAgentConfig().Name
 }
 
-// extractSlashCommand scans input for a known slash command token anywhere in
-// the line. Returns the command, the remaining text with the token stripped,
-// and whether a command was found.
+// extractSlashCommand recognizes a known slash command only as the leading
+// token of the input — never mid-sentence or mid-paste — so mentioning a
+// command by name elsewhere in a prompt (typed or pasted) is inert text.
+// Returns the command, the remaining text with the token stripped, and
+// whether a command was found.
 func extractSlashCommand(input string) (cmd, rest string, found bool) {
 	words := strings.Fields(input)
-	var keep []string
-	for _, w := range words {
-		if !found && strings.HasPrefix(w, "/") {
-			if slices.Contains(slashCommands, w) {
-				cmd = w
-				found = true
-			} else {
-				keep = append(keep, w)
-			}
-		} else {
-			keep = append(keep, w)
-		}
+	if len(words) == 0 || !strings.HasPrefix(words[0], "/") || !slices.Contains(slashCommands, words[0]) {
+		return "", input, false
 	}
-	return cmd, strings.Join(keep, " "), found
+	return words[0], strings.Join(words[1:], " "), true
 }
 
 // promptFriendly is the set of slash commands that can be combined with a prompt.
