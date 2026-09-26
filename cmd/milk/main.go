@@ -450,9 +450,15 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 	return r, nil
 }
 
-// cliAgentConfig returns the AgentConfig for the claude-cli backend —
-// the first entry with Provider "claude-cli", or a built-in default.
+// cliAgentConfig returns the AgentConfig for the claude-cli backend: the
+// escalation agent whenever it is a claude-cli entry (an unset
+// escalation_agent resolves to "claude" — an entry of that name, or the
+// built-in one), otherwise the first entry with Provider "claude-cli", or a
+// built-in default.
 func cliAgentConfig(cfg config.Config) config.AgentConfig {
+	if esc := cfg.EscalationAgentConfig(); esc.IsCLI() {
+		return esc
+	}
 	for _, a := range cfg.Agents {
 		if a.IsCLI() {
 			return a
@@ -1006,9 +1012,9 @@ type permContext struct {
 	cs          *claudesettings.Store
 	cwd         string                 // working directory; always passed as --add-dir so trust checks don't silently fail
 	toolFutures map[string]chan string // tool name → buffered channel pre-filled by OnToolUse
-	// contextHash, when non-nil, holds the hash of the last --append-system-prompt-file
-	// sent to the escalation agent. runCLIEscalationAgent skips re-sending the file when
-	// the hash is unchanged, preserving Claude's prompt cache prefix.
+	// contextHash, when non-nil, holds the hash of the last per-turn context block
+	// prepended to a resumed escalation prompt (cliRunner.Execute). An identical
+	// block on the next resume is dropped instead of being appended again.
 	contextHash *string
 }
 

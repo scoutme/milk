@@ -113,7 +113,7 @@ Assistant: <turn>
 User: <final prompt that triggered escalation>
 ```
 
-For Claude CLI, this is split across two `--append-system-prompt-file` flags to preserve Claude's prompt cache — a **static** file (identity block, per-session nonce tags, remembered percepts; byte-identical across turns) and a **dynamic** file (escalation brief, current need, last local summary; changes per turn, suppressed when unchanged). Inference-server escalation agents receive the same content as the first system message.
+For Claude CLI, a new session gets this across two `--append-system-prompt-file` flags to preserve Claude's prompt cache — a **static** file (identity block, per-session nonce tags, remembered percepts; byte-identical across turns) and a **dynamic** file (escalation brief, current need, last local summary). On a resumed session (`--resume`) Claude Code replays the system prompt it recorded on the session's first request (`--system-prompt-snapshot`, on by default) and ignores new system-prompt files until a compaction, so milk instead prepends whatever is new for that turn — the dynamic content, plus the static instructions when they are being re-injected — to the user message in a `<milk-context>…</milk-context>` block (dropped when identical to the previous resumed turn's block). The full static block is still passed as a file on every resume so that a compaction re-records it. Inference-server escalation agents receive the same content as the first system message.
 
 ### Returning to a stale escalation
 

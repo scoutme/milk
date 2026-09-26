@@ -400,8 +400,9 @@ type interactiveState struct {
 	// time by handleAgentDone once the current turn completes.
 	pendingRemoteInputs []string
 
-	// lastEscalationContextHash is a short hash of the last --append-system-prompt-file
-	// content sent to the CLI escalation agent. Used to suppress re-sends when unchanged.
+	// lastEscalationContextHash is a short hash of the last per-turn context block
+	// prepended to a resumed CLI escalation prompt. Used to avoid appending the same
+	// block to the conversation twice in a row.
 	lastEscalationContextHash string
 
 	// pendingSessionContent overrides the user-turn content recorded in session history
@@ -409,13 +410,6 @@ type interactiveState struct {
 	// instead of the raw prompt. Reset to "" after each turn. Used to store compact
 	// attachment placeholders in history instead of full file content.
 	pendingSessionContent string
-
-	// pendingImageContextFile is the path to a temp file containing image data-URI
-	// blocks for the next escalation turn. When set, cliRunner passes it as an
-	// additional --append-system-prompt-file instead of inlining it in the prompt
-	// argument (which can exceed ARG_MAX for large images). Reset and deleted after
-	// each turn.
-	pendingImageContextFile string
 
 	// pendingCLIImageFiles holds temp file paths for images staged for the CLI
 	// escalation path. Each file is prepended as @<path> in the prompt so the

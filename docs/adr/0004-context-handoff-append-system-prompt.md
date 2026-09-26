@@ -1,7 +1,7 @@
 # 4. Context Handoff via --append-system-prompt-file (split static/dynamic)
 
 Date: 2026-05-05
-Updated: 2026-06-03
+Updated: 2026-06-03, 2026-09-26 (resumed turns — see Update below)
 
 ## Status
 
@@ -26,3 +26,14 @@ Claude orients itself from this context without a separate reformulation step.
 ## Consequences
 
 Cache hits on the static instruction prefix across all resume and returning turns. Only the dynamic summary (small, frequently empty on RESUME turns) changes between turns. The nonce must now be persisted in the session file (`EscalationNonce`) rather than regenerated per turn. The `BuildContext` function is kept as a deprecated compatibility wrapper over the two split functions.
+
+## Update (2026-09-26): resumed turns
+
+The split files only reach Claude on a session's **first** request. Claude Code records the system prompt then and replays it on every `--resume` (`--system-prompt-snapshot`, default on), ignoring `--append-system-prompt-file` until a compaction re-records it from the compacting launch's files (verified live on Claude Code 2.1.283). The dynamic file sent on resumed turns, and instruction re-injection, therefore never took effect.
+
+On resumed turns milk now:
+
+- still passes the **full static block** as a file (inert unless the turn compacts, in which case it is what gets re-recorded);
+- prepends context that is new for the turn — the dynamic content, plus the static instructions when re-injecting — to the **user message** in a `<milk-context>…</milk-context>` block. It persists in conversation history and costs no cache invalidation of the recorded prefix. The hash guard now applies to this block (skipped when identical to the previous resumed turn's) and no longer to first-turn files.
+
+`--system-prompt-snapshot off` was rejected: it re-reads the files every turn, breaking the prompt-cache benefit this ADR is about, and would drop the instructions on any turn where the file is suppressed.

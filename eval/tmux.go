@@ -33,6 +33,11 @@ func tmuxSendEnter(session string) error {
 	return exec.Command("tmux", "send-keys", "-t", session, "Enter").Run()
 }
 
+// tmuxSendKey sends a named key (e.g. "Down", "Enter") to the pane.
+func tmuxSendKey(session, key string) error {
+	return exec.Command("tmux", "send-keys", "-t", session, key).Run()
+}
+
 func tmuxCapturePane(session string) (string, error) {
 	out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
 	return string(out), err
@@ -63,22 +68,6 @@ func pollPaneNotContains(ctx context.Context, session, substr string, interval t
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
-}
-
-// pollPaneChanged polls the tmux pane until its content differs from before,
-// or ctx is done. Returns true if a change was observed.
-func pollPaneChanged(ctx context.Context, session, before string, interval time.Duration) bool {
-	for {
-		content, err := tmuxCapturePane(session)
-		if err == nil && content != before {
-			return true
-		}
-		select {
-		case <-ctx.Done():
-			return false
 		case <-time.After(interval):
 		}
 	}

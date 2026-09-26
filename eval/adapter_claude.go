@@ -80,6 +80,10 @@ type claudeJSONLLine struct {
 }
 
 type claudeMessage struct {
+	// ID is the API message ID. Claude Code writes one JSONL line per content
+	// block of a response; those lines share this ID and each repeats the
+	// response's full usage.
+	ID         string               `json:"id"`
 	Role       string               `json:"role"`
 	Content    []claudeContentBlock `json:"content"`
 	Usage      claudeUsage          `json:"usage"`
@@ -171,7 +175,7 @@ func recordClaudeActivity() {
 	_ = os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0644)
 }
 
-func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
+func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 	if a.cacheCooldownErr != nil {
 		return a.cacheCooldownErr
 	}
@@ -209,6 +213,13 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
 	if err := tmuxNewSession(a.sessionName, 200, 50); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
+	// The harness only Stops an adapter whose Start succeeded; don't leak the
+	// tmux session when a later startup step fails.
+	defer func() {
+		if err != nil {
+			_ = tmuxKillSession(a.sessionName)
+		}
+	}()
 
 	// Launch Claude Code.
 	cmd := fmt.Sprintf("cd %s && claude --session-id %s --dangerously-skip-permissions", workdir, a.sessionID)
@@ -246,12 +257,26 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) error {
 // poll is a race — checking once here instead of watching for a window let a
 // still-rendering dialog slip through Start() undetected, only to swallow the
 // first real prompt sent by RunPrompt (its Enter just confirmed the dialog).
+//
+// The dialog's default selection is "No, exit" (Claude Code 2.1.x), so a bare
+// Enter would quit Claude: move the selection to "Yes, I trust this folder"
+// first.
 func (a *claudeAdapter) confirmTrustDialogIfShown(ctx context.Context) error {
 	watchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
 		pane, _ := tmuxCapturePane(a.sessionName)
 		if strings.Contains(pane, "trust this folder") || strings.Contains(pane, "Yes, I trust") {
+			for i := 0; i < 3 && !trustYesSelected(pane); i++ {
+				if err := tmuxSendKey(a.sessionName, "Down"); err != nil {
+					return fmt.Errorf("selecting trust option: %w", err)
+				}
+				time.Sleep(300 * time.Millisecond)
+				pane, _ = tmuxCapturePane(a.sessionName)
+			}
+			if !trustYesSelected(pane) {
+				return fmt.Errorf("could not select %q in the trust dialog", "Yes, I trust this folder")
+			}
 			if err := tmuxSendEnter(a.sessionName); err != nil {
 				return fmt.Errorf("confirming trust dialog: %w", err)
 			}
@@ -265,6 +290,17 @@ func (a *claudeAdapter) confirmTrustDialogIfShown(ctx context.Context) error {
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+// trustYesSelected reports whether the trust dialog's "❯" selection marker is
+// on the "Yes, I trust this folder" option.
+func trustYesSelected(pane string) bool {
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(line, "Yes, I trust") {
+			return strings.Contains(line, "❯")
+		}
+	}
+	return false
 }
 
 // setupProjectSettings creates a project-level settings file that pre-trusts the workdir.
@@ -310,7 +346,7 @@ func (a *claudeAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult
 
 	// 2. Send prompt via tmux, retrying if Claude Code's TUI wasn't yet
 	// listening for input (see sendPromptUntilAccepted).
-	if err := a.sendPromptUntilAccepted(ctx, prompt); err != nil {
+	if err := a.sendPromptUntilAccepted(ctx, prompt, prevSize); err != nil {
 		return RunResult{}, err
 	}
 
@@ -349,38 +385,124 @@ func (a *claudeAdapter) Stop() error {
 }
 
 // sendPromptUntilAccepted sends prompt via tmux and verifies Claude Code
-// actually received it. Claude Code renders its "❯" prompt (the readiness
-// marker polled in Start) before it has attached its input handler, so
-// keystrokes sent in that window — right after startup, or right after the
-// previous turn's response finishes rendering — are silently dropped rather
-// than queued. A dropped send leaves the pane pixel-identical to before the
-// send (no echoed text, no spinner), which is what we check for here; a
-// genuine send always changes the pane within a couple hundred ms.
-func (a *claudeAdapter) sendPromptUntilAccepted(ctx context.Context, prompt string) error {
+// actually submitted it, i.e. a user message holding the prompt appears in the
+// transcript past prevSize (Claude Code records it as soon as a prompt is
+// submitted). Two failure modes
+// are retried:
+//   - Claude Code renders its "❯" prompt (the readiness marker polled in Start)
+//     before it has attached its input handler, so keystrokes sent in that
+//     window — right after startup, or right after the previous turn's response
+//     finishes rendering — are silently dropped rather than queued. The text is
+//     then absent from the pane and is typed again.
+//   - An Enter arriving right behind a long burst of text is taken as part of
+//     the paste and inserts nothing, leaving the prompt typed but unsubmitted.
+//     Enter is therefore sent after a short pause, and resent while the text is
+//     still sitting in the input box.
+func (a *claudeAdapter) sendPromptUntilAccepted(ctx context.Context, prompt string, prevSize int64) error {
 	const maxAttempts = 5
+	marker := promptMarker(prompt)
+	typed := false
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		before, err := tmuxCapturePane(a.sessionName)
-		if err != nil {
-			return fmt.Errorf("tmux capture-pane: %w", err)
+		if !typed {
+			if err := tmuxSendKeys(a.sessionName, prompt); err != nil {
+				return fmt.Errorf("tmux send-keys: %w", err)
+			}
+			typed = true
 		}
-		if err := tmuxSendKeys(a.sessionName, prompt); err != nil {
-			return fmt.Errorf("tmux send-keys: %w", err)
-		}
+		time.Sleep(enterDelay)
 		if err := tmuxSendEnter(a.sessionName); err != nil {
 			return fmt.Errorf("tmux send-enter: %w", err)
 		}
 
-		settleCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		accepted := pollPaneChanged(settleCtx, a.sessionName, before, 300*time.Millisecond)
+		settleCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		submitted := a.pollPromptRecorded(settleCtx, prevSize, marker, 200*time.Millisecond)
 		cancel()
-		if accepted {
+		if submitted {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if pane, err := tmuxCapturePane(a.sessionName); err == nil && !strings.Contains(pane, marker) {
+			typed = false // keystrokes were dropped: type the prompt again
+		}
 	}
 	return fmt.Errorf("prompt not accepted by Claude Code after %d attempts", maxAttempts)
+}
+
+// enterDelay separates the typed prompt from its submitting Enter, so Claude
+// Code doesn't fold the Enter into the preceding paste burst. A variable so
+// tests can shorten it.
+var enterDelay = 500 * time.Millisecond
+
+// promptMarker returns a short prefix of the prompt's first line, used to tell
+// whether the typed text is visible in the pane (the full text may wrap).
+func promptMarker(prompt string) string {
+	line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(prompt), "\n", 2)[0])
+	if r := []rune(line); len(r) > 20 {
+		line = string(r[:20])
+	}
+	return line
+}
+
+// pollPromptRecorded reports whether a user message containing marker appears
+// in the transcript past prevSize before ctx is done. Growth alone isn't enough:
+// Claude Code may still be appending records for the previous turn (e.g.
+// turn_duration) after its end_turn line.
+func (a *claudeAdapter) pollPromptRecorded(ctx context.Context, prevSize int64, marker string, interval time.Duration) bool {
+	for {
+		if a.promptRecorded(prevSize, marker) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+}
+
+// promptRecorded reports whether the transcript past offset holds a user message
+// whose text contains marker. User prompts are stored with string content, tool
+// results with block content; both shapes are checked.
+func (a *claudeAdapter) promptRecorded(offset int64, marker string) bool {
+	f, err := os.Open(a.transcriptPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	for scanner.Scan() {
+		var line struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &line) != nil || line.Type != "user" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(line.Message.Content, &text) == nil {
+			if strings.Contains(text, marker) {
+				return true
+			}
+			continue
+		}
+		var blocks []claudeContentBlock
+		if json.Unmarshal(line.Message.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Type == "text" && strings.Contains(b.Text, marker) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // waitForTurn polls the transcript file from prevSize until it finds an assistant
@@ -410,7 +532,14 @@ func (a *claudeAdapter) waitForTurn(ctx context.Context, prevSize int64) ([]clau
 }
 
 // readNewLines reads JSONL lines starting from offset. Returns the lines read so far,
-// whether an end_turn was found, and any error.
+// whether the turn has ended, and any error.
+//
+// A response is written as one line per content block, and every one of them
+// carries the response's stop_reason — so the thinking line of an end_turn
+// response already says "end_turn" before its text line is written. The turn is
+// therefore complete only at an end_turn line holding a non-thinking block, or
+// at the first non-assistant line after an end_turn (Claude Code follows every
+// turn with e.g. a system turn_duration record).
 func (a *claudeAdapter) readNewLines(offset int64) ([]claudeJSONLLine, bool, error) {
 	f, err := os.Open(a.transcriptPath)
 	if err != nil {
@@ -423,6 +552,7 @@ func (a *claudeAdapter) readNewLines(offset int64) ([]claudeJSONLLine, bool, err
 	}
 
 	var lines []claudeJSONLLine
+	sawEndTurn := false
 	scanner := bufio.NewScanner(f)
 	// Increase buffer for large JSONL lines (thinking blocks can be big).
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
@@ -431,9 +561,17 @@ func (a *claudeAdapter) readNewLines(offset int64) ([]claudeJSONLLine, bool, err
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue // skip malformed lines (e.g. non-message control records)
 		}
+		if sawEndTurn && line.Type != "assistant" {
+			return lines, true, nil
+		}
 		lines = append(lines, line)
 		if line.Type == "assistant" && line.Message.StopReason == "end_turn" {
-			return lines, true, nil
+			sawEndTurn = true
+			for _, b := range line.Message.Content {
+				if b.Type != "thinking" {
+					return lines, true, nil
+				}
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -442,13 +580,22 @@ func (a *claudeAdapter) readNewLines(offset int64) ([]claudeJSONLLine, bool, err
 	return lines, false, nil
 }
 
-// sumTurnTokens sums token usage from all assistant messages in a turn.
+// sumTurnTokens sums token usage from all assistant messages in a turn,
+// counting each API response once even though its usage is repeated on every
+// per-content-block line (lines without an ID are counted individually).
 // It also sums subagent and workflow tokens from result-type lines when
 // present in the transcript.
 func sumTurnTokens(lines []claudeJSONLLine) TokenUsage {
 	var total TokenUsage
+	seen := make(map[string]bool)
 	for _, l := range lines {
 		if l.Type == "assistant" {
+			if id := l.Message.ID; id != "" {
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+			}
 			total.InputTokens += l.Message.Usage.InputTokens
 			total.OutputTokens += l.Message.Usage.OutputTokens
 			total.CacheCreate += l.Message.Usage.CacheCreationInputTokens

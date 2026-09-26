@@ -49,7 +49,7 @@ All backends milk supports can serve as primary or escalation (see the principle
 { "name": "claude", "provider": "claude-cli", "bin": "claude" }
 ```
 
-A built-in entry named `"claude"` with `provider: "claude-cli"` is always available even if not listed explicitly in `agents`, and is the default `escalation_agent` (a default of convenience — see the principle above).
+A built-in entry named `"claude"` with `provider: "claude-cli"` is always available even if not listed explicitly in `agents`, and is the default `escalation_agent` (a default of convenience — see the principle above). With several `claude-cli` entries (e.g. one per backend via `settings.env`), `escalation_agent` picks which one runs; leaving it unset runs `"claude"` — your own entry of that name if you define one, otherwise the built-in.
 
 | Field | Default | Description |
 |---|---|---|

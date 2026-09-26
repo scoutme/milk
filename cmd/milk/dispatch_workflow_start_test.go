@@ -73,7 +73,7 @@ func TestRunEscalationWithSession_WorkflowStart_CallsCallback(t *testing.T) {
 	onWorkflowStart := func(w *local.WorkflowStartSignal) { got = w }
 
 	if err := runEscalationWithSession(context.Background(), cfg, sess, runner, "", nil,
-		"hi", "hi", "", &out, nil, nil, nil, onWorkflowStart); err != nil {
+		"hi", "hi", &out, nil, nil, nil, onWorkflowStart); err != nil {
 		t.Fatalf("runEscalationWithSession returned error: %v", err)
 	}
 	if got != ws {

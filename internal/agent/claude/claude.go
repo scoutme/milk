@@ -288,21 +288,46 @@ func (a *Agent) RunFirst(ctx context.Context, staticContext, dynamicContext, pro
 }
 
 // RunResume continues an existing Claude session.
-// staticContext holds the stable instruction block (nonce tags, percepts); it is only
-// re-sent when instructions need re-injection after compaction. dynamicContext holds
-// the turn-specific summary and is re-sent whenever it changes. Sending them as
-// separate files lets the static prefix remain cached even when the dynamic part changes.
-func (a *Agent) RunResume(ctx context.Context, claudeSessionID, staticContext, dynamicContext, prompt string, out io.Writer) (ParseResult, error) {
+//
+// Claude Code records a conversation's system prompt on its first request and
+// replays it verbatim on every resume (--system-prompt-snapshot, default on), so
+// an --append-system-prompt-file passed on resume is ignored — until a compaction,
+// when the snapshot is re-recorded from that launch's file (ADR-0046). The two
+// context arguments are therefore delivered differently:
+//
+//   - systemContext is the full stable instruction block (identity, nonce tags,
+//     percepts). It goes to --append-system-prompt-file on every resume: inert
+//     normally, but it is what the snapshot re-records if this turn compacts, so
+//     milk's instructions survive compaction.
+//   - turnContext is context that is new for this turn (primary-agent summary,
+//     brief, re-injected instructions). It is prepended to the prompt in a
+//     <milk-context> block so it actually reaches Claude and stays in the
+//     conversation history. Empty means nothing new to deliver.
+func (a *Agent) RunResume(ctx context.Context, claudeSessionID, systemContext, turnContext, prompt string, out io.Writer) (ParseResult, error) {
 	if a.logContext {
-		obs.LogPayload("claude-cli [resume] static-context", []byte(staticContext))
-		obs.LogPayload("claude-cli [resume] dynamic-context", []byte(dynamicContext))
+		obs.LogPayload("claude-cli [resume] system-context", []byte(systemContext))
+		obs.LogPayload("claude-cli [resume] turn-context", []byte(turnContext))
 		obs.LogPayload("claude-cli [resume] prompt", []byte(prompt))
 	}
 	args := []string{"--resume", claudeSessionID}
-	args, cleanup := appendContextFiles(args, staticContext, dynamicContext)
+	args, cleanup := appendContextFiles(args, systemContext, "")
 	defer cleanup()
-	args = append(args, "--", prompt)
+	args = append(args, "--", WithTurnContext(turnContext, prompt))
 	return a.run(ctx, args, out)
+}
+
+// WithTurnContext prepends turnContext to prompt as a delimited <milk-context>
+// block, marked as not typed by the user. Returns prompt unchanged when
+// turnContext is empty.
+func WithTurnContext(turnContext, prompt string) string {
+	turnContext = strings.TrimSpace(turnContext)
+	if turnContext == "" {
+		return prompt
+	}
+	return "<milk-context>\n" +
+		"[Context from milk for this turn — not typed by the user. The user's message follows the closing tag.]\n" +
+		turnContext + "\n" +
+		"</milk-context>\n\n" + prompt
 }
 
 // appendContextFiles writes the combined context to a single temp file and appends

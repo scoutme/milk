@@ -66,7 +66,7 @@ type milkTokenUsage struct {
 func (a *milkAdapter) Name() string          { return "milk-tui" }
 func (a *milkAdapter) SetArgs(args []string) { a.extraArgs = args }
 
-func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
+func (a *milkAdapter) Start(ctx context.Context, workdir string) (err error) {
 	a.workdir = workdir
 	a.sessionName = "milk-eval-" + uuid.New().String()[:8]
 
@@ -74,6 +74,13 @@ func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	if err := tmuxNewSession(a.sessionName, 200, 50); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
+	// The harness only Stops an adapter whose Start succeeded; don't leak the
+	// tmux session when a later startup step fails.
+	defer func() {
+		if err != nil {
+			_ = tmuxKillSession(a.sessionName)
+		}
+	}()
 
 	// Launch milk binary directly from the scenario workdir.
 	// We don't use "task run" because the workdir is a temp directory with
