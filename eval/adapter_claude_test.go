@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -347,5 +348,123 @@ func TestClaudeAdapter_CooldownPersistsAcrossProcesses(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
 		t.Errorf("expected the second call to wait out the persisted cooldown, only waited %v", elapsed)
+	}
+}
+
+// Claude Code writes one transcript line per content block of a response; the
+// lines share message.id and each repeats the full usage. Count it once.
+func TestSumTurnTokens_SplitResponseCountedOnce(t *testing.T) {
+	block := func(id string, in, out int64) claudeJSONLLine {
+		l := mkAssistantLine(in, out, 10, 20)
+		l.Message.ID = id
+		return l
+	}
+	lines := []claudeJSONLLine{
+		block("msg_a", 2, 150), // thinking
+		block("msg_a", 2, 150), // tool_use
+		{Type: "user"},
+		block("msg_b", 3, 40), // thinking
+		block("msg_b", 3, 40), // text
+	}
+	tok := sumTurnTokens(lines)
+	if tok.InputTokens != 5 || tok.OutputTokens != 190 || tok.CacheCreate != 20 || tok.CacheRead != 40 {
+		t.Errorf("got in=%d out=%d cc=%d cr=%d, want 5/190/20/40",
+			tok.InputTokens, tok.OutputTokens, tok.CacheCreate, tok.CacheRead)
+	}
+}
+
+func writeTranscript(t *testing.T, lines ...string) *claudeAdapter {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return &claudeAdapter{transcriptPath: p}
+}
+
+// The thinking line of an end_turn response already carries stop_reason
+// "end_turn"; the turn isn't over until its text line has been read.
+func TestReadNewLines_EndTurnThinkingLineDoesNotEndTurn(t *testing.T) {
+	thinking := `{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"hm"}]}}`
+	text := `{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}]}}`
+
+	a := writeTranscript(t, thinking)
+	if _, done, err := a.readNewLines(0); err != nil || done {
+		t.Fatalf("thinking-only end_turn line: done=%v err=%v, want not done", done, err)
+	}
+
+	a = writeTranscript(t, thinking, text, `{"type":"system","subtype":"turn_duration"}`)
+	lines, done, err := a.readNewLines(0)
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v, want done", done, err)
+	}
+	if got := extractResponse(lines); got != "answer" {
+		t.Errorf("response = %q, want %q", got, "answer")
+	}
+}
+
+// A response that ends on a thinking block is complete once a non-assistant
+// line follows it.
+func TestReadNewLines_EndTurnThinkingFollowedByOtherRecord(t *testing.T) {
+	a := writeTranscript(t,
+		`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"hm"}]}}`,
+		`{"type":"system","subtype":"turn_duration"}`,
+	)
+	lines, done, err := a.readNewLines(0)
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v, want done", done, err)
+	}
+	if len(lines) != 1 {
+		t.Errorf("got %d lines, want 1 (the trailing record is not part of the turn)", len(lines))
+	}
+}
+
+func TestTrustYesSelected(t *testing.T) {
+	noSelected := " Security guide\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+	yesSelected := " Security guide\n   No, exit\n ❯ Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+	if trustYesSelected(noSelected) {
+		t.Error("default \"No, exit\" selection reported as Yes")
+	}
+	if !trustYesSelected(yesSelected) {
+		t.Error("Yes selection not detected")
+	}
+	if trustYesSelected("❯ ") {
+		t.Error("prompt without dialog reported as Yes")
+	}
+}
+
+func TestPromptMarker(t *testing.T) {
+	if got := promptMarker("  Reply with only the single word: pong\n"); got != "Reply with only the " {
+		t.Errorf("got %q", got)
+	}
+	if got := promptMarker("short\nsecond line"); got != "short" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A submitted prompt shows up as a user line; trailing records of the previous
+// turn (turn_duration, tool results without the prompt) don't count.
+func TestPromptRecorded(t *testing.T) {
+	prev := `{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`
+	a := writeTranscript(t, prev)
+	offset, _ := fileSize(a.transcriptPath)
+
+	if a.promptRecorded(offset, "Think briefly") {
+		t.Error("nothing new yet: want not recorded")
+	}
+
+	f, err := os.OpenFile(a.transcriptPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"type":"system","subtype":"turn_duration"}` + "\n")
+	f.WriteString(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}` + "\n")
+	if a.promptRecorded(offset, "Think briefly") {
+		t.Error("trailing records only: want not recorded")
+	}
+	f.WriteString(`{"type":"user","message":{"role":"user","content":"Think briefly, then read data.txt"}}` + "\n")
+	f.Close()
+	if !a.promptRecorded(offset, "Think briefly") {
+		t.Error("prompt line appended: want recorded")
 	}
 }

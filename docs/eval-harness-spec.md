@@ -490,6 +490,8 @@ tokens := TokenUsage{
 
 Note: when Claude makes multiple tool calls in a single turn, there are multiple `assistant` messages with `stop_reason: "tool_use"`. The final `end_turn` message contains only the last API call's tokens. To get the full turn's token usage, sum all assistant messages since the user message:
 
+> **Correction (implemented):** Claude Code writes one JSONL line per *content block* of a response (thinking, text, each tool_use), all sharing `message.id` and each repeating the full usage and the same `stop_reason`. The adapter therefore sums usage once per `message.id`, and treats an `end_turn` line as the end of the turn only when it holds a non-thinking block (or a non-assistant record follows it) — the thinking line of an `end_turn` response is written before its text line.
+
 ```go
 func (a *claudeAdapter) sumTurnTokens(lines []claudeJSONLLine) TokenUsage {
     var total TokenUsage

@@ -221,7 +221,7 @@ None of the shipped scenarios use `expected:` (see the no-op caveat above). `ite
 | `claude-code` | The `claude` CLI, launched inside a fresh tmux session per scenario, in a throwaway git-initialized temp workdir. Reads Claude Code's own transcript JSONL for the response, token usage, and tool calls. | `claude` CLI on `PATH`, logged in |
 | `milk-tui` | The installed `~/.local/bin/milk` binary (built via `task build`), launched inside a fresh tmux session per scenario. Reads `~/.milk/sessions/<id>.json` for the response and token usage. | `milk` built and configured (`~/.milk/config.json`) |
 
-Both adapters type the prompt into the target program's interactive prompt via `tmux send-keys`/`send-enter` — the same input path a human would use, not an API shortcut — then poll for turn completion (Claude Code: transcript reaches `stop_reason: "end_turn"`; milk: session state returns to `ROUTING`).
+Both adapters type the prompt into the target program's interactive prompt via `tmux send-keys`/`send-enter` — the same input path a human would use, not an API shortcut — then poll for turn completion (Claude Code: transcript reaches the text block of a `stop_reason: "end_turn"` response, or any non-assistant record after one; milk: session state returns to `ROUTING`). Claude Code writes one transcript line per content block, each repeating the response's usage, so token usage is counted once per `message.id`.
 
 ### Per-adapter options
 
