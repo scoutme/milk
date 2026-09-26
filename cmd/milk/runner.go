@@ -107,10 +107,6 @@ type TurnCallbacks struct {
 	// response. Only cliRunner and localRunner support this; other runners
 	// simply never call it, and the caller falls back to OnResponse.
 	OnResponseSegment func(text string)
-	// ImageContextFile is an optional path to a temp file containing image data-URI
-	// blocks. CLI runners append it via --append-system-prompt-file to avoid
-	// inlining large base64 strings in the prompt argument (ARG_MAX).
-	ImageContextFile string
 }
 
 // TurnRunner abstracts provider-specific inference for one agent turn.
@@ -469,59 +465,80 @@ func (r *cliRunner) Execute(
 		agent = agent.WithMCPServers(r.mcpServers)
 	}
 
-	var staticCtx, dynamicCtx string
-	switch role {
-	case RoleWorkflow:
-		// Workflow executors receive no session orientation — their context comes
-		// entirely from the workflow prompt injected by the caller. Mirrors
-		// localRunner.Execute's identical switch.
-	case RolePrimary:
-		staticCtx = escalation.BuildPrimaryStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
-		dynamicCtx = escalation.BuildPrimaryDynamicContext(sess, ctxMode)
-	default: // RoleEscalation
-		staticCtx = escalation.BuildStaticContext(nonce, percepts, ctxMode, injectInstructions, primaryName, escalationName)
-		dynamicCtx = escalation.BuildDynamicContext(sess, ctxMode)
-	}
-	if cfg.ExperimentalPermissionManagement {
-		staticCtx += permissionManagementInstruction
-	}
-
-	// Prepend custom prompt from this role's own agent config when set.
+	// Custom prompt from this role's own agent config, prepended to every static block.
+	var customPrompt string
 	roleAC := agentConfigForRole(cfg, role)
 	if roleAC.Prompt != "" || roleAC.PromptFile != "" {
 		vars := buildPromptVars(sess, percepts, cfg)
 		if rendered, err := agentprompt.Render(roleAC, vars); err != nil {
 			fmt.Fprintf(os.Stderr, "%s warning: custom prompt render failed for agent %q: %v\n", milkTag(), roleAC.Name, err)
-		} else if rendered != "" {
-			staticCtx = rendered + "\n\n" + staticCtx
-		}
-	}
-
-	// Append image context (data-URI blocks) to dynamicCtx so large base64 strings
-	// reach Claude via --append-system-prompt-file (temp file) rather than the
-	// prompt argument, avoiding ARG_MAX failures for large images.
-	if cbs.ImageContextFile != "" {
-		if data, err := os.ReadFile(cbs.ImageContextFile); err == nil && len(data) > 0 {
-			if dynamicCtx != "" {
-				dynamicCtx += "\n"
-			}
-			dynamicCtx += string(data)
-		}
-		os.Remove(cbs.ImageContextFile) //nolint:errcheck
-		cbs.ImageContextFile = ""
-	}
-
-	// Suppress duplicate context on any resume-like turn (cache preservation).
-	// Hash the full combined content so a change to either half still triggers a write.
-	// Re-sending identical files shifts the cache suffix and causes a miss.
-	if r.pc.contextHash != nil {
-		h := fmt.Sprintf("%x", sha256.Sum256([]byte(staticCtx+dynamicCtx)))[:16]
-		if h == *r.pc.contextHash {
-			staticCtx = ""
-			dynamicCtx = ""
 		} else {
-			*r.pc.contextHash = h
+			customPrompt = rendered
 		}
+	}
+	buildStatic := func(mode escalation.ContextMode, inject bool) string {
+		var s string
+		switch role {
+		case RoleWorkflow:
+			// Workflow executors receive no session orientation — their context comes
+			// entirely from the workflow prompt injected by the caller. Mirrors
+			// localRunner.Execute's identical switch.
+		case RolePrimary:
+			s = escalation.BuildPrimaryStaticContext(nonce, percepts, mode, inject, primaryName, escalationName)
+		default: // RoleEscalation
+			s = escalation.BuildStaticContext(nonce, percepts, mode, inject, primaryName, escalationName)
+		}
+		if cfg.ExperimentalPermissionManagement {
+			s += permissionManagementInstruction
+		}
+		if customPrompt != "" {
+			s = customPrompt + "\n\n" + s
+		}
+		return s
+	}
+	buildDynamic := func(mode escalation.ContextMode) string {
+		switch role {
+		case RoleWorkflow:
+			return ""
+		case RolePrimary:
+			return escalation.BuildPrimaryDynamicContext(sess, mode)
+		default: // RoleEscalation
+			return escalation.BuildDynamicContext(sess, mode)
+		}
+	}
+
+	// BuildDynamicContext marks the primary summary as injected; remember the prior
+	// marker so the invalid-session fallback below can re-deliver it to the new session.
+	prevSummaryInjected := sess.LastLocalSummaryInjected
+	staticCtx := buildStatic(ctxMode, injectInstructions)
+	dynamicCtx := buildDynamic(ctxMode)
+
+	// On resume Claude replays the session's recorded system prompt
+	// (--system-prompt-snapshot), so per-turn context must travel in the user
+	// message instead (see claude.Agent.RunResume). systemCtx is the full stable
+	// block, re-recorded only if this turn compacts; turnCtx is what is new for
+	// this turn. Static content is part of turnCtx only when instructions are
+	// being (re-)injected — otherwise it is identity-only and already recorded.
+	resumeLike := ctxMode == escalation.ContextModeResume || ctxMode == escalation.ContextModeContinuation || (ctxMode == escalation.ContextModeReturning && sessionID != "")
+	var systemCtx, turnCtx string
+	if resumeLike {
+		systemCtx = buildStatic(escalation.ContextModeFirst, true)
+		turnCtx = dynamicCtx
+		if injectInstructions {
+			turnCtx = strings.TrimSpace(staticCtx + "\n" + dynamicCtx)
+		}
+		// Don't append the same context block to the conversation twice in a row.
+		if r.pc.contextHash != nil && turnCtx != "" {
+			h := fmt.Sprintf("%x", sha256.Sum256([]byte(turnCtx)))[:16]
+			if h == *r.pc.contextHash {
+				turnCtx = ""
+			} else {
+				*r.pc.contextHash = h
+			}
+		}
+	} else if r.pc.contextHash != nil {
+		// New session: always gets its full context; nothing delivered into it yet.
+		*r.pc.contextHash = ""
 	}
 
 	// Stream live to the TUI; redirect into askBuf only if AskUserQuestion is
@@ -543,8 +560,8 @@ func (r *cliRunner) Execute(
 		res    claude.ParseResult
 		runErr error
 	)
-	if ctxMode == escalation.ContextModeResume || ctxMode == escalation.ContextModeContinuation || (ctxMode == escalation.ContextModeReturning && sessionID != "") {
-		res, runErr = agent.RunResume(ctx, sessionID, staticCtx, dynamicCtx, prompt, sw)
+	if resumeLike {
+		res, runErr = agent.RunResume(ctx, sessionID, systemCtx, turnCtx, prompt, sw)
 		if runErr != nil && claude.IsInvalidSession(runErr) {
 			// Stale session ID — Claude's store no longer has this session (evicted,
 			// CLI upgrade, machine restart, etc.). Restore live output, notify the
@@ -552,8 +569,12 @@ func (r *cliRunner) Execute(
 			askBuf.Reset()
 			sw.redirectTo(out)
 			fmt.Fprintf(out, "\n\033[2m[Claude session refreshed — previous session no longer available]\033[0m\n\n")
-			staticCtx = escalation.BuildStaticContext(nonce, percepts, escalation.ContextModeFirst, injectInstructions, primaryName, escalationName)
-			dynamicCtx = escalation.BuildDynamicContext(sess, escalation.ContextModeFirst)
+			sess.LastLocalSummaryInjected = prevSummaryInjected
+			staticCtx = buildStatic(escalation.ContextModeFirst, true)
+			dynamicCtx = buildDynamic(escalation.ContextModeFirst)
+			if r.pc.contextHash != nil {
+				*r.pc.contextHash = ""
+			}
 			var newID string
 			newID, res, runErr = agent.RunFirst(ctx, staticCtx, dynamicCtx, prompt, sw)
 			if runErr == nil {
@@ -623,8 +644,10 @@ func (r *cliRunner) Execute(
 		var resumeErr error
 		// A non-empty prompt is required — empty prompt triggers a "no deferred
 		// tool marker" error. This sentinel causes Claude to process the pending
-		// task-notification and report workflow completion.
-		resumeRes, resumeErr = agent.RunResume(resumeCtx, sessionID, "", "", "workflow status?", out)
+		// task-notification and report workflow completion. The full stable block
+		// still goes to the system file in case this resume is the one that compacts
+		// (the recorded system prompt is re-taken from it).
+		resumeRes, resumeErr = agent.RunResume(resumeCtx, sessionID, buildStatic(escalation.ContextModeFirst, true), "", "workflow status?", out)
 		resumeCancel()
 		baseCancel()
 		if resumeErr != nil {

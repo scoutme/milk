@@ -3250,9 +3250,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		cleanupCLIImageFiles(st)
 		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, onSegment, onWorkflowStart, pw)
 	case router.TargetEscalation:
-		imageCtxFile := st.pendingImageContextFile
-		st.pendingImageContextFile = ""
-		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, imageCtxFile, out, agents, onResponse, onSegment, onWorkflowStart, pw)
+		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, out, agents, onResponse, onSegment, onWorkflowStart, pw)
 		// CLI image temp files are no longer needed after the turn.
 		cleanupCLIImageFiles(st)
 	}

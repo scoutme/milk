@@ -334,7 +334,7 @@ func runEscalation(
 	onWorkflowStart func(*local.WorkflowStartSignal),
 	prefixOut ...io.Writer,
 ) error {
-	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, "", out, da, onResponse, onSegment, onWorkflowStart, prefixOut...)
+	return runEscalationWithSession(ctx, cfg, sess, runner, brief, mem, prompt, prompt, out, da, onResponse, onSegment, onWorkflowStart, prefixOut...)
 }
 
 // runEscalationWithSession executes one escalation-agent turn using runner.
@@ -352,7 +352,6 @@ func runEscalationWithSession(
 	mem *memory.Store,
 	prompt string,
 	sessionContent string,
-	imageContextFile string,
 	out io.Writer,
 	da *dispatchAgents,
 	onResponse func(string),
@@ -445,7 +444,6 @@ func runEscalationWithSession(
 		OnPercept:         buildPerceptCallback(ctx, mem, primaryName, escalationName, true),
 		OnResponse:        onResponse,
 		OnResponseSegment: onSegment,
-		ImageContextFile:  imageContextFile,
 	}
 
 	// Wire tool-agent dispatcher into local runners when dispatchAgents is available.
