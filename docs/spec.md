@@ -113,9 +113,12 @@ Implementation detail for the `claude-cli` provider specifically — see [docs/p
   ```
   claude --print --output-format stream-json \
          --resume <escalation-session-id> \
-         --append-system-prompt-file <dynamic-ctx-if-changed> \
-         -- "<user prompt>"
+         --append-system-prompt-file <full-static-ctx> \
+         -- "<milk-context>…</milk-context>
+
+  <user prompt>"
   ```
+  Claude Code replays the system prompt recorded on the session's first request (`--system-prompt-snapshot`, default on), so a system-prompt file on resume only takes effect if that turn compacts — milk passes the full static block for exactly that case. Context that is new for the turn (dynamic summary, re-injected instructions) travels in a `<milk-context>` block prepended to the prompt, omitted when there is nothing new or it is identical to the previous resumed turn's block (`claude.WithTurnContext`, `cliRunner.Execute`).
 - `session_id` is extracted from the first NDJSON message and persisted to the milk session file.
 
 ### Permission prompt flow

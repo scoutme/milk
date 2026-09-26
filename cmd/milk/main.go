@@ -451,14 +451,13 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 }
 
 // cliAgentConfig returns the AgentConfig for the claude-cli backend: the
-// configured escalation agent when escalation_agent explicitly names a
-// claude-cli entry (including the built-in "claude"), otherwise the first
-// entry with Provider "claude-cli", or a built-in default.
+// escalation agent whenever it is a claude-cli entry (an unset
+// escalation_agent resolves to "claude" — an entry of that name, or the
+// built-in one), otherwise the first entry with Provider "claude-cli", or a
+// built-in default.
 func cliAgentConfig(cfg config.Config) config.AgentConfig {
-	if strings.TrimSpace(cfg.EscalationAgent) != "" {
-		if esc := cfg.EscalationAgentConfig(); esc.IsCLI() {
-			return esc
-		}
+	if esc := cfg.EscalationAgentConfig(); esc.IsCLI() {
+		return esc
 	}
 	for _, a := range cfg.Agents {
 		if a.IsCLI() {

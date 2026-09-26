@@ -19,7 +19,8 @@ func TestCLIAgentConfig_HonoursEscalationAgent(t *testing.T) {
 	}{
 		{"claude-work", "claude-work"},
 		{"claude", "claude"},    // built-in entry, no agent named "claude" in the list
-		{"", "claude-alt"},      // unset: first claude-cli entry, as before
+		{"", "claude"},          // unset: the default escalation agent, the built-in "claude"
+		{"missing", "claude"},   // unknown name: EscalationAgentConfig falls back to the built-in
 		{"local", "claude-alt"}, // non-CLI escalation target: first claude-cli entry
 	}
 	for _, c := range cases {
