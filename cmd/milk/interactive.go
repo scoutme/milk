@@ -246,6 +246,15 @@ const interactiveHelp = `
   /help                  show this help
   /exit  /quit           quit
 
+── Multi-value parameters ───────────────────────────────────────────────
+  The server and agent name parameters of /mcp assign|unassign (both
+  sides of "for") and the "for <agent>|global" scope of
+  /agent tool enable|disable|add|remove accept comma separated lists,
+  e.g. "… for alice,bob" targets both agents — with several servers
+  every server×agent pair is applied. Validation is all-or-nothing:
+  one bad name rejects the whole call, lists each invalid item, and
+  applies nothing. Tab completion starts a fresh segment at each comma.
+
 ── Keyboard ─────────────────────────────────────────────────────────────
   Scrolling
     Mouse wheel / PgUp/PgDn / Ctrl+U / Ctrl+F   scroll transcript
@@ -987,14 +996,19 @@ func execAgentTool(sub string, st *interactiveState) string {
 
 // parseAgentToolScope parses "<tool-name> [for <agent>|global]" and returns (scope, toolName).
 // scope is "" (default: active primary), "global", or an agent name.
+// For "add", the name segment also carries "description=<desc>" — cut it out
+// so the tool-agent name never absorbs the description text (#165 follow-up).
 func parseAgentToolScope(s string) (scope, toolName string) {
 	if idx := strings.Index(s, " for "); idx >= 0 {
 		toolName = strings.TrimSpace(s[:idx])
 		scope = strings.TrimSpace(s[idx+5:])
-		return
+	} else {
+		toolName = strings.TrimSpace(s)
 	}
-	toolName = strings.TrimSpace(s)
-	return
+	if di := strings.Index(toolName, "description="); di >= 0 {
+		toolName = strings.TrimSpace(toolName[:di])
+	}
+	return scope, toolName
 }
 
 // execAgentToolList shows effective tool-agents for the given scope.
@@ -1072,83 +1086,189 @@ func execAgentToolList(scope string, st *interactiveState) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// execAgentToolEnable sets Enabled=true on a matching entry.
+// --- multi-value scope handling (#165) ---
+//
+// /agent tool enable|disable|add|remove accept a comma-separated agent list in
+// their "for <agent>|global" scope (and /mcp assign|unassign on both sides of
+// "for"). Validation is all-or-nothing: every scope and name is checked before
+// any config mutation, so a typo in one item rejects the whole call with a
+// per-item report and changes nothing — a multi-target change is never left
+// half-applied without saying so.
+
+// resolveToolScopes expands a "for <agent>|global" segment into concrete
+// scopes ("global", or an agent name — the empty segment resolves to the
+// active primary agent). Multi-value form: comma-separated agent names;
+// "global" is a scope, not a name, and cannot appear in a list. Returns one
+// line per invalid item — when non-empty, nothing may be applied.
+func resolveToolScopes(seg string, cfg config.Config) (scopes []string, invalid []string) {
+	items := splitCommaNames(seg)
+	if len(items) == 0 {
+		items = []string{""}
+	}
+	multi := len(items) > 1
+	seen := map[string]bool{}
+	for _, it := range items {
+		if strings.EqualFold(it, "global") {
+			if multi {
+				invalid = append(invalid, fmt.Sprintf("%s %q is a scope, not an agent name — cannot be combined in a list", milkTag(), it))
+				continue
+			}
+			scopes = append(scopes, "global")
+			continue
+		}
+		name := it
+		if name == "" {
+			name = cfg.ActiveAgent().Name
+		}
+		if seen[strings.ToLower(name)] {
+			continue // dedupe repeated names: "a,a" acts once
+		}
+		seen[strings.ToLower(name)] = true
+		if findAgentIdx(cfg, name) < 0 {
+			invalid = append(invalid, fmt.Sprintf("%s agent %q not found", milkTag(), name))
+			continue
+		}
+		scopes = append(scopes, name)
+	}
+	return scopes, invalid
+}
+
+// toolScopeOp is one /agent tool mutation split into per-scope validation
+// (check) and per-scope application (apply), so runToolScopeOp can validate
+// every scope of a multi-value list before touching config.
+type toolScopeOp struct {
+	past  string // "enabled", "added", … — used in outcome/save-failure lines
+	check func(toolName, scope string, st *interactiveState) string
+	apply func(toolName, scope string, st *interactiveState) string
+}
+
+// runToolScopeOp validates then applies op across every scope in the (possibly
+// comma-separated) scopeSeg with all-or-nothing semantics, saving the config
+// once at the end.
+func runToolScopeOp(toolName, scopeSeg string, st *interactiveState, op toolScopeOp) string {
+	scopes, invalid := resolveToolScopes(scopeSeg, st.cfg)
+	for _, sc := range scopes {
+		if msg := op.check(toolName, sc, st); msg != "" {
+			invalid = append(invalid, msg)
+		}
+	}
+	if len(invalid) > 0 {
+		return strings.Join(invalid, "\n") + "\n" + milkTag() + " nothing applied"
+	}
+	var msgs []string
+	for _, sc := range scopes {
+		msgs = append(msgs, op.apply(toolName, sc, st))
+	}
+	if err := saveLocalOrGlobal(st.cfg); err != nil {
+		msgs = append(msgs, fmt.Sprintf("%s %s tool-agent %q (config save failed: %v)", milkTag(), op.past, toolName, err))
+	}
+	return strings.Join(msgs, "\n")
+}
+
+// toolScopeMsg formats the per-scope outcome line of a tool-agent mutation.
+func toolScopeMsg(past, toolName, scope string) string {
+	if scope == "global" {
+		return fmt.Sprintf("%s tool-agent %q %s", milkTag(), toolName, past)
+	}
+	return fmt.Sprintf("%s tool-agent %q %s for agent %q", milkTag(), toolName, past, scope)
+}
+
+// checkToolEntryExists validates that toolName exists in the scope (in the
+// global list, or as a global entry / per-agent override for agent scopes) —
+// used by enable/disable.
+func checkToolEntryExists(toolName, scope string, st *interactiveState) string {
+	if scope == "global" {
+		if findToolEntryIdx(st.cfg.AgentTools, toolName) < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found in global list — use /agent tool add first", milkTag(), toolName)
+		}
+		return ""
+	}
+	acIdx := findAgentIdx(st.cfg, scope)
+	if findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName) < 0 &&
+		findToolEntryIdx(st.cfg.AgentTools, toolName) < 0 {
+		return fmt.Sprintf("%s tool-agent %q not found — use /agent tool add first", milkTag(), toolName)
+	}
+	return ""
+}
+
+// checkToolEntryAbsent validates that toolName does not exist yet in the
+// scope — used by add.
+func checkToolEntryAbsent(toolName, scope string, st *interactiveState) string {
+	if scope == "global" {
+		if findToolEntryIdx(st.cfg.AgentTools, toolName) >= 0 {
+			return fmt.Sprintf("%s tool-agent %q already exists in global list — use enable/disable to change its state", milkTag(), toolName)
+		}
+		return ""
+	}
+	acIdx := findAgentIdx(st.cfg, scope)
+	if findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName) >= 0 {
+		return fmt.Sprintf("%s tool-agent %q already exists for agent %q", milkTag(), toolName, scope)
+	}
+	return ""
+}
+
+// checkToolEntryInScope validates that toolName exists as an entry in exactly
+// the given scope — used by remove.
+func checkToolEntryInScope(toolName, scope string, st *interactiveState) string {
+	if scope == "global" {
+		if findToolEntryIdx(st.cfg.AgentTools, toolName) < 0 {
+			return fmt.Sprintf("%s tool-agent %q not found in global list", milkTag(), toolName)
+		}
+		return ""
+	}
+	acIdx := findAgentIdx(st.cfg, scope)
+	if findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName) < 0 {
+		return fmt.Sprintf("%s tool-agent %q not found for agent %q", milkTag(), toolName, scope)
+	}
+	return ""
+}
+
+// setToolEnabled flips the Enabled flag for toolName in one scope, creating a
+// per-agent override from the global entry when the agent has none yet.
+// Callers must validate first (checkToolEntryExists).
+func setToolEnabled(toolName, scope string, st *interactiveState, val *bool) {
+	if scope == "global" {
+		st.cfg.AgentTools[findToolEntryIdx(st.cfg.AgentTools, toolName)].Enabled = val
+		return
+	}
+	acIdx := findAgentIdx(st.cfg, scope)
+	idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
+	if idx < 0 {
+		entry := st.cfg.AgentTools[findToolEntryIdx(st.cfg.AgentTools, toolName)]
+		entry.Enabled = val
+		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
+		return
+	}
+	st.cfg.Agents[acIdx].Tools[idx].Enabled = val
+}
+
+// execAgentToolEnable sets Enabled=true on matching entries in every scope.
 func execAgentToolEnable(toolName, scope string, st *interactiveState) string {
-	t := true
-	if scope == "global" {
-		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
-		if idx < 0 {
-			return fmt.Sprintf("%s tool-agent %q not found in global list — use /agent tool add first", milkTag(), toolName)
-		}
-		st.cfg.AgentTools[idx].Enabled = &t
-	} else {
-		agentName := scope
-		if agentName == "" {
-			agentName = st.cfg.ActiveAgent().Name
-		}
-		acIdx := findAgentIdx(st.cfg, agentName)
-		if acIdx < 0 {
-			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-		}
-		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
-		if idx < 0 {
-			// Check if it exists globally; if so, create a per-agent override.
-			gIdx := findToolEntryIdx(st.cfg.AgentTools, toolName)
-			if gIdx < 0 {
-				return fmt.Sprintf("%s tool-agent %q not found — use /agent tool add first", milkTag(), toolName)
-			}
-			entry := st.cfg.AgentTools[gIdx]
-			entry.Enabled = &t
-			st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
-		} else {
-			st.cfg.Agents[acIdx].Tools[idx].Enabled = &t
-		}
-	}
-	if err := saveLocalOrGlobal(st.cfg); err != nil {
-		return fmt.Sprintf("%s enabled %q (config save failed: %v)", milkTag(), toolName, err)
-	}
-	return fmt.Sprintf("%s tool-agent %q enabled", milkTag(), toolName)
+	return runToolScopeOp(toolName, scope, st, toolScopeOp{
+		past:  "enabled",
+		check: checkToolEntryExists,
+		apply: func(toolName, scope string, st *interactiveState) string {
+			t := true
+			setToolEnabled(toolName, scope, st, &t)
+			return toolScopeMsg("enabled", toolName, scope)
+		},
+	})
 }
 
-// execAgentToolDisable sets Enabled=false on a matching entry.
+// execAgentToolDisable sets Enabled=false on matching entries in every scope.
 func execAgentToolDisable(toolName, scope string, st *interactiveState) string {
-	f := false
-	if scope == "global" {
-		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
-		if idx < 0 {
-			return fmt.Sprintf("%s tool-agent %q not found in global list — use /agent tool add first", milkTag(), toolName)
-		}
-		st.cfg.AgentTools[idx].Enabled = &f
-	} else {
-		agentName := scope
-		if agentName == "" {
-			agentName = st.cfg.ActiveAgent().Name
-		}
-		acIdx := findAgentIdx(st.cfg, agentName)
-		if acIdx < 0 {
-			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-		}
-		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
-		if idx < 0 {
-			// Check if it exists globally; create per-agent override that disables it.
-			gIdx := findToolEntryIdx(st.cfg.AgentTools, toolName)
-			if gIdx < 0 {
-				return fmt.Sprintf("%s tool-agent %q not found — use /agent tool add first", milkTag(), toolName)
-			}
-			entry := st.cfg.AgentTools[gIdx]
-			entry.Enabled = &f
-			st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
-		} else {
-			st.cfg.Agents[acIdx].Tools[idx].Enabled = &f
-		}
-	}
-	if err := saveLocalOrGlobal(st.cfg); err != nil {
-		return fmt.Sprintf("%s disabled %q (config save failed: %v)", milkTag(), toolName, err)
-	}
-	return fmt.Sprintf("%s tool-agent %q disabled", milkTag(), toolName)
+	return runToolScopeOp(toolName, scope, st, toolScopeOp{
+		past:  "disabled",
+		check: checkToolEntryExists,
+		apply: func(toolName, scope string, st *interactiveState) string {
+			f := false
+			setToolEnabled(toolName, scope, st, &f)
+			return toolScopeMsg("disabled", toolName, scope)
+		},
+	})
 }
 
-// execAgentToolAdd adds a new tool-agent entry to the target scope.
+// execAgentToolAdd adds a new tool-agent entry to every target scope.
 // The rest argument still contains the full "toolName [description=...] [for ...]" text
 // so we can extract the description= field.
 func execAgentToolAdd(toolName, scope, rest string, st *interactiveState) string {
@@ -1165,61 +1285,39 @@ func execAgentToolAdd(toolName, scope, rest string, st *interactiveState) string
 	if desc == "" {
 		return milkTag() + " usage: /agent tool add <tool-agent> description=<desc> [for <agent>|global]"
 	}
-
-	entry := config.AgentToolEntry{Agent: toolName, Description: desc}
-
-	if scope == "global" {
-		if findToolEntryIdx(st.cfg.AgentTools, toolName) >= 0 {
-			return fmt.Sprintf("%s tool-agent %q already exists in global list — use enable/disable to change its state", milkTag(), toolName)
-		}
-		st.cfg.AgentTools = append(st.cfg.AgentTools, entry)
-	} else {
-		agentName := scope
-		if agentName == "" {
-			agentName = st.cfg.ActiveAgent().Name
-		}
-		acIdx := findAgentIdx(st.cfg, agentName)
-		if acIdx < 0 {
-			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-		}
-		if findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName) >= 0 {
-			return fmt.Sprintf("%s tool-agent %q already exists for agent %q", milkTag(), toolName, agentName)
-		}
-		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
-	}
-	if err := saveLocalOrGlobal(st.cfg); err != nil {
-		return fmt.Sprintf("%s added tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
-	}
-	return fmt.Sprintf("%s tool-agent %q added", milkTag(), toolName)
+	return runToolScopeOp(toolName, scope, st, toolScopeOp{
+		past:  "added",
+		check: checkToolEntryAbsent,
+		apply: func(toolName, scope string, st *interactiveState) string {
+			entry := config.AgentToolEntry{Agent: toolName, Description: desc}
+			if scope == "global" {
+				st.cfg.AgentTools = append(st.cfg.AgentTools, entry)
+			} else {
+				acIdx := findAgentIdx(st.cfg, scope)
+				st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools, entry)
+			}
+			return toolScopeMsg("added", toolName, scope)
+		},
+	})
 }
 
-// execAgentToolRemove removes a tool-agent entry from the target scope.
+// execAgentToolRemove removes tool-agent entries from every target scope.
 func execAgentToolRemove(toolName, scope string, st *interactiveState) string {
-	if scope == "global" {
-		idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
-		if idx < 0 {
-			return fmt.Sprintf("%s tool-agent %q not found in global list", milkTag(), toolName)
-		}
-		st.cfg.AgentTools = append(st.cfg.AgentTools[:idx], st.cfg.AgentTools[idx+1:]...)
-	} else {
-		agentName := scope
-		if agentName == "" {
-			agentName = st.cfg.ActiveAgent().Name
-		}
-		acIdx := findAgentIdx(st.cfg, agentName)
-		if acIdx < 0 {
-			return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-		}
-		idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
-		if idx < 0 {
-			return fmt.Sprintf("%s tool-agent %q not found for agent %q", milkTag(), toolName, agentName)
-		}
-		st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools[:idx], st.cfg.Agents[acIdx].Tools[idx+1:]...)
-	}
-	if err := saveLocalOrGlobal(st.cfg); err != nil {
-		return fmt.Sprintf("%s removed tool-agent %q (config save failed: %v)", milkTag(), toolName, err)
-	}
-	return fmt.Sprintf("%s tool-agent %q removed", milkTag(), toolName)
+	return runToolScopeOp(toolName, scope, st, toolScopeOp{
+		past:  "removed",
+		check: checkToolEntryInScope,
+		apply: func(toolName, scope string, st *interactiveState) string {
+			if scope == "global" {
+				idx := findToolEntryIdx(st.cfg.AgentTools, toolName)
+				st.cfg.AgentTools = append(st.cfg.AgentTools[:idx], st.cfg.AgentTools[idx+1:]...)
+			} else {
+				acIdx := findAgentIdx(st.cfg, scope)
+				idx := findToolEntryIdx(st.cfg.Agents[acIdx].Tools, toolName)
+				st.cfg.Agents[acIdx].Tools = append(st.cfg.Agents[acIdx].Tools[:idx], st.cfg.Agents[acIdx].Tools[idx+1:]...)
+			}
+			return toolScopeMsg("removed", toolName, scope)
+		},
+	})
 }
 
 // findToolEntryIdx returns the index of a tool entry by agent name in a slice,
@@ -1613,35 +1711,92 @@ func assignMCPServer(cfg *config.Config, serverName, agentName string, assign bo
 	return mcpAssignOK
 }
 
-// execMCPAssign adds or removes an MCP server reference from an agent's mcp_servers list.
-// rest is "<server-name> for <agent-name>".
+// execMCPAssign adds or removes an MCP server reference from an agent's
+// mcp_servers list. rest is "<server[,server…]> for <agent[,agent…]>": both
+// sides accept comma-separated lists (#165) and every server×agent
+// combination is applied. Validation is all-or-nothing — an unknown name
+// rejects the whole call with a per-item report and changes nothing — and
+// outcomes are grouped per server. The config is saved once at the end.
 func execMCPAssign(rest string, assign bool, st *interactiveState) string {
 	verb := "assign"
 	if !assign {
 		verb = "unassign"
 	}
-	serverName, agentName, ok := parseMCPAssignArgs(rest)
+	serverSeg, agentSeg, ok := parseMCPAssignArgs(rest)
 	if !ok {
 		return fmt.Sprintf("%s usage: /mcp %s <server> for <agent>", milkTag(), verb)
 	}
-	switch assignMCPServer(&st.cfg, serverName, agentName, assign) {
-	case mcpAssignServerNotFound:
-		return fmt.Sprintf("%s MCP server %q not found — add it first with /mcp add", milkTag(), serverName)
-	case mcpAssignAgentNotFound:
-		return fmt.Sprintf("%s agent %q not found", milkTag(), agentName)
-	case mcpAssignNoop:
-		if assign {
-			return fmt.Sprintf("%s MCP server %q already assigned to agent %q", milkTag(), serverName, agentName)
+	servers := splitCommaNames(serverSeg)
+	agents := splitCommaNames(agentSeg)
+	if len(servers) == 0 || len(agents) == 0 {
+		return fmt.Sprintf("%s usage: /mcp %s <server> for <agent>", milkTag(), verb)
+	}
+	var invalid []string
+	for _, s := range servers {
+		if findMCPServerIdx(st.cfg.MCPServers, s) < 0 {
+			invalid = append(invalid, fmt.Sprintf("%s MCP server %q not found — add it first with /mcp add", milkTag(), s))
 		}
-		return fmt.Sprintf("%s MCP server %q not assigned to agent %q", milkTag(), serverName, agentName)
 	}
-	if err := saveLocalOrGlobal(st.cfg); err != nil {
-		return fmt.Sprintf("%s %sed %q for agent %q (config save failed: %v)", milkTag(), verb, serverName, agentName, err)
+	for _, a := range agents {
+		if findAgentIdx(st.cfg, a) < 0 {
+			invalid = append(invalid, fmt.Sprintf("%s agent %q not found", milkTag(), a))
+		}
 	}
-	if assign {
-		return fmt.Sprintf("%s MCP server %q assigned to agent %q", milkTag(), serverName, agentName)
+	if len(invalid) > 0 {
+		return strings.Join(invalid, "\n") + "\n" + milkTag() + " nothing applied"
 	}
-	return fmt.Sprintf("%s MCP server %q unassigned from agent %q", milkTag(), serverName, agentName)
+	var msgs []string
+	changed := false
+	for _, s := range servers {
+		var hit, miss []string
+		for _, a := range agents {
+			switch assignMCPServer(&st.cfg, s, a, assign) {
+			case mcpAssignOK:
+				changed = true
+				hit = append(hit, a)
+			default: // mcpAssignNoop — existence validated above
+				miss = append(miss, a)
+			}
+		}
+		if len(hit) > 0 {
+			if assign {
+				msgs = append(msgs, fmt.Sprintf("%s MCP server %q assigned to %s", milkTag(), s, agentTargetList(hit)))
+			} else {
+				msgs = append(msgs, fmt.Sprintf("%s MCP server %q unassigned from %s", milkTag(), s, agentTargetList(hit)))
+			}
+		}
+		if len(miss) > 0 {
+			if assign {
+				msgs = append(msgs, fmt.Sprintf("%s MCP server %q already assigned to %s", milkTag(), s, agentTargetList(miss)))
+			} else {
+				msgs = append(msgs, fmt.Sprintf("%s MCP server %q not assigned to %s", milkTag(), s, agentTargetList(miss)))
+			}
+		}
+	}
+	if changed {
+		if err := saveLocalOrGlobal(st.cfg); err != nil {
+			msgs = append(msgs, fmt.Sprintf("%s %sed %s (config save failed: %v)", milkTag(), verb, quotedNames(servers), err))
+		}
+	}
+	return strings.Join(msgs, "\n")
+}
+
+// agentTargetList formats agent names for a per-item outcome line:
+// "agent \"x\"" (singular) or "agents \"x\", \"y\"" (plural).
+func agentTargetList(names []string) string {
+	if len(names) == 1 {
+		return fmt.Sprintf("agent %q", names[0])
+	}
+	return "agents " + quotedNames(names)
+}
+
+// quotedNames joins names as "a", "b".
+func quotedNames(names []string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // parseMCPAssignArgs parses "<server> for <agent>" from the rest string.

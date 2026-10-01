@@ -56,7 +56,7 @@ cmd/milk/
   dispatch.go       runPrimary / runEscalation — role-specific session bookkeeping shared by single-shot and TUI
   interactive.go    slash commands, help text (canonical command signatures), prompt label helpers
   completion.go     tab completion: command/subcommand cycling, @-paths, value-mode insertion
-  namespaces.go     parameter name-space index for slash-command completion (agents, MCP, panels, …)
+  namespaces.go     parameter name-space index + multi-value list positions for slash-command completion (agents, MCP, panels, …)
   ansi.go           ANSI colour helpers and activity spinner
   notify.go         notification toasts: queue/history, expiry tick, overlay render, /notifications (ADR-0048)
   panel_memory.go   right-side memory panel (/panel memory)
@@ -167,6 +167,12 @@ milk [flags] <prompt>         # single-prompt mode
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
 **Panel commands:** `/panel memory`, `/panel tasks`, `/panel background`, `/panel workflow` (also F1-F4) — see [docs/operations.md — Keyboard shortcuts](operations.md#keyboard-shortcuts) and [docs/workflows.md](workflows.md#the-native-workflow-engine).
+
+#### Tab completion and multi-value parameters
+
+Parameter value completion is name-space aware: agent names, MCP servers, panels, workflows and tool-agents each complete at their declared positions (the `multiValueParams`/name-space tables in `cmd/milk/namespaces.go` are the single source of truth shared by completion, validation and help), with the name space shown beside the hints. On list-taking parameters a comma starts a fresh completion segment — `/mcp assign gh,sl<TAB>` completes the second server while keeping the first.
+
+Multi-value positions — `/mcp assign|unassign` on both sides of `for`, and the `for <agent>|global` scope of `/agent tool enable|disable|add|remove` — accept comma-separated lists and apply every combination (several servers × several agents for `/mcp assign`). Validation is all-or-nothing: one invalid name rejects the whole call with a per-item report and applies nothing (no silent partial application). `global` is a scope, not an agent name, and cannot appear in a list.
 
 **/skip-permissions** toggles `dangerously_skip_permissions` for the current session: `on` makes the escalation agent auto-approve all tool uses; `off` (default) re-enables per-tool prompting. Alone, shows current state. A red warning banner appears at startup if already on via config.
 

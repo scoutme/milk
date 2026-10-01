@@ -85,12 +85,14 @@ func (m model) handleTab(dir int) model {
 		if len(m.tabMatches) == 0 {
 			m.tabValueMode = false
 			m.tabNsLabel = ""
+			m.tabSegPrefix = ""
 			return m
 		}
 		m.tabPrefix = tabInputPrefix(beforeCursor)
 		m.tabSubcmdMode = res.replaceBase != ""
 		m.tabValueMode = res.valueMode
 		m.tabNsLabel = res.nsLabel
+		m.tabSegPrefix = res.segPrefix
 		switch {
 		case res.valueMode:
 			// Concrete parameter values (#166): apply against the full
@@ -352,10 +354,12 @@ func applyTabCompletion(input, completed string) string {
 
 // applyCompletionToken renders an accepted completion into m.tabBeforeCursor:
 // value mode (#166) replaces/appends the token under the cursor, every other
-// mode goes through applyTabCompletion (slash-token replacement).
+// mode goes through applyTabCompletion (slash-token replacement). In multi-value
+// value mode (#165) the already-typed comma segments (m.tabSegPrefix) are kept
+// and only the segment under the cursor is replaced.
 func (m model) applyCompletionToken(token string) string {
 	if m.tabValueMode {
-		return applyValueCompletion(m.tabBeforeCursor, token)
+		return applyValueCompletion(m.tabBeforeCursor, m.tabSegPrefix+token)
 	}
 	return applyTabCompletion(m.tabBeforeCursor, token)
 }
@@ -899,6 +903,7 @@ type tabBuild struct {
 	replaceBase string   // non-empty → subcommand mode: replace this slash token with the full sig
 	valueMode   bool     // matches are concrete parameter values (#166): replace/append last word
 	nsLabel     string   // name-space shown beside value hints (value mode only)
+	segPrefix   string   // multi-value (#165): keep this prefix (through the last comma) when inserting a value
 }
 
 // paramLookup resolves a parameter name-space to its values (see

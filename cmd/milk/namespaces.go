@@ -77,6 +77,130 @@ func namespaceForParam(cmd, inner string) string {
 	return nsByPlaceholder[inner]
 }
 
+// multiValueParams declares which parameter positions accept comma-separated
+// value lists (#165). Keyed "<command-prefix> <placeholder>": the signature's
+// literal words up to the first parameter, plus the placeholder text — e.g.
+// "/mcp assign agent" for the <agent> of "/mcp assign <server> for <agent>"
+// (see sigCmdPrefix).
+//
+// Only management commands that act on N targets at once are listed (the
+// issue's use case: configure MCP/tool features across several agents in one
+// call). Single-target commands (/agent switch, /server …, read-only listings)
+// deliberately stay single-value — acting on or reporting about one target per
+// call is the intent there. Both sides of /mcp assign|unassign accept lists
+// and every server×agent combination is applied. TestMultiValueParamsCoverRealSignatures
+// guards the keys against help-text drift.
+var multiValueParams = map[string]bool{
+	cmdMCP + " assign server":        true,
+	cmdMCP + " assign agent":         true,
+	cmdMCP + " unassign server":      true,
+	cmdMCP + " unassign agent":       true,
+	cmdAgent + " tool enable agent":  true,
+	cmdAgent + " tool disable agent": true,
+	cmdAgent + " tool add agent":     true,
+	cmdAgent + " tool remove agent":  true,
+}
+
+// sigCmdPrefix returns the literal command path of a signature — its words up
+// to (but excluding) the first parameter token — e.g. "/agent tool enable" for
+// "/agent tool enable <tool> [for <agent>|global]".
+func sigCmdPrefix(sig string) string {
+	var parts []string
+	for _, w := range strings.Fields(sig) {
+		if strings.ContainsAny(w, "<[") {
+			break
+		}
+		parts = append(parts, w)
+	}
+	return strings.Join(parts, " ")
+}
+
+// placeholderInner returns the text inside the first <...> of tok, or "" when
+// tok is not a parameter token (literals, mixed tokens like description=<desc>).
+func placeholderInner(tok string) string {
+	w := strings.TrimPrefix(tok, "[")
+	if !strings.HasPrefix(w, "<") {
+		return ""
+	}
+	gt := strings.IndexByte(w, '>')
+	if gt < 0 {
+		return ""
+	}
+	return w[1:gt]
+}
+
+// paramIsMultiValue reports whether the parameter at this signature position
+// accepts comma-separated value lists (#165).
+func paramIsMultiValue(sig, tok string) bool {
+	inner := placeholderInner(tok)
+	return inner != "" && multiValueParams[sigCmdPrefix(sig)+" "+inner]
+}
+
+// splitValueSegment treats a typed token as a comma-separated value list
+// (#165): the last comma starts a fresh completion segment. Only the last
+// whitespace word of the token is considered — everything before it stays in
+// the line untouched when the completion is applied (applyValueCompletion
+// replaces just that word). Returns the prefix to preserve on insertion
+// (everything through the last comma) and the partial segment to match against
+// name spaces — "a,b" → "a,", "b"; "a, b" → "", "b"; "a," → "a,", "".
+func splitValueSegment(word string) (keep, partial string) {
+	if i := strings.LastIndexAny(word, " \t"); i >= 0 {
+		word = word[i+1:]
+	}
+	if i := strings.LastIndexByte(word, ','); i >= 0 {
+		return word[:i+1], word[i+1:]
+	}
+	return "", word
+}
+
+// mergeCommaContinuations folds a word ending with "," and the word after it
+// into one list word ("a," + "b" → "a, b") when the comma sits on a
+// multi-value parameter (#165) — dispatch accepts both "a,b" and "a, b"
+// (splitCommaNames trims), and completion must keep such a list on a single
+// signature position. Single-value positions never merge, so "foo, bar" at a
+// one-value parameter does not swallow the next argument. The command token is
+// never merged into.
+func mergeCommaContinuations(rel []string, vs []cmdVariant) []string {
+	out := make([]string, 0, len(rel))
+	for _, w := range rel {
+		if n := len(out); n > 1 && strings.HasSuffix(out[n-1], ",") &&
+			paramPosIsMultiValue(vs, out, n-1) {
+			out[n-1] += " " + w
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// variantFitsPrefix reports whether the typed words before pos are consistent
+// with this variant's signature: placeholders accept any typed value, literals
+// must match (see sigWordMatchesTyped).
+func variantFitsPrefix(rel, sigWords []string, pos int) bool {
+	for i := 1; i < pos; i++ {
+		if i >= len(sigWords) || !sigWordMatchesTyped(rel[0], sigWords[i], rel[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// paramPosIsMultiValue reports whether any signature variant that fits the
+// typed words up to pos declares that position's parameter as accepting
+// comma-separated lists (#165).
+func paramPosIsMultiValue(vs []cmdVariant, rel []string, pos int) bool {
+	for _, v := range vs {
+		sigWords := strings.Fields(v.sig)
+		if pos >= len(sigWords) || !variantFitsPrefix(rel, sigWords, pos) {
+			continue
+		}
+		if paramIsMultiValue(v.sig, sigWords[pos]) {
+			return true
+		}
+	}
+	return false
+}
+
 // paramExpectation describes what completion expects at one signature
 // position: literal alternatives (subcommands, keywords like "for"/"as",
 // option words like "global") and/or name spaces whose members to complete.
@@ -181,23 +305,32 @@ func buildParamMatches(words []string, afterSpace bool, lookup paramLookup) tabB
 	if cmdIdx < 0 {
 		return tabBuild{}
 	}
-	rel := words[cmdIdx:]
-	vs := cmdVariants[rel[0]]
+	cmdWord := words[cmdIdx]
+	vs := cmdVariants[cmdWord]
 	if len(vs) == 0 {
 		return tabBuild{}
 	}
+	rel := mergeCommaContinuations(words[cmdIdx:], vs)
 	pos := len(rel) - 1
 	partial := ""
 	if !afterSpace {
 		partial = rel[pos]
 	} else {
 		pos = len(rel)
+		// Multi-value continuation (#165): a trailing comma followed by a
+		// space starts an empty new segment of the same list — stay on this
+		// parameter instead of advancing to the next signature position.
+		if n := len(rel); n >= 2 && strings.HasSuffix(rel[n-1], ",") &&
+			paramPosIsMultiValue(vs, rel, n-1) {
+			pos = n - 1
+		}
 	}
 	if pos < 1 {
 		return tabBuild{}
 	}
 
 	var exp paramExpectation
+	multiValue := false
 	seenLit := map[string]bool{}
 	seenNS := map[string]bool{}
 	for _, v := range vs {
@@ -215,6 +348,9 @@ func buildParamMatches(words []string, afterSpace bool, lookup paramLookup) tabB
 		if !ok {
 			continue
 		}
+		if paramIsMultiValue(v.sig, sigWords[pos]) {
+			multiValue = true
+		}
 		var got paramExpectation
 		parseSigPosition(rel[0], sigWords[pos], &got)
 		for _, ns := range got.namespaces {
@@ -230,6 +366,14 @@ func buildParamMatches(words []string, afterSpace bool, lookup paramLookup) tabB
 				exp.literals = append(exp.literals, l)
 			}
 		}
+	}
+
+	// Multi-value parameters (#165): a comma starts a fresh completion
+	// segment — match only the text after the last comma and preserve what
+	// came before it on insertion.
+	segPrefix := ""
+	if multiValue {
+		segPrefix, partial = splitValueSegment(partial)
 	}
 
 	// Collect values: name-space members first, then literals; filter by the
@@ -261,7 +405,7 @@ func buildParamMatches(words []string, afterSpace bool, lookup paramLookup) tabB
 	if len(exp.namespaces) == 1 {
 		label = exp.namespaces[0]
 	}
-	return tabBuild{matches: matches, valueMode: true, nsLabel: label}
+	return tabBuild{matches: matches, valueMode: true, nsLabel: label, segPrefix: segPrefix}
 }
 
 // paramLookup resolves a parameter name space to its current member names.

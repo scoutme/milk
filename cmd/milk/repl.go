@@ -563,6 +563,7 @@ type model struct {
 	tabSubcmdMode   bool     // true when tabMatches holds full sigs (subcommand/trailing-space mode)
 	tabValueMode    bool     // true when tabMatches are concrete parameter values (#166): replace/append the token under the cursor
 	tabNsLabel      string   // name-space shown beside value hints (value mode only)
+	tabSegPrefix    string   // multi-value params (#165): comma-prefix preserved when inserting a value
 	tabHints        []string // hint lines shown below viewport (may have one entry highlighted)
 	tabHintsBase    []string // same lines without any highlight; source of truth for highlightHint
 	hintIdx         int      // selected inline hint (-1 = none)
@@ -2445,6 +2446,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tabSubcmdMode = false
 			m.tabValueMode = false
 			m.tabNsLabel = ""
+			m.tabSegPrefix = ""
 			m.tabHints = nil
 			m.tabHintsBase = nil
 			m.hintIdx = -1
@@ -2764,6 +2766,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.tabSubcmdMode = false
 		m.tabValueMode = false
 		m.tabNsLabel = ""
+		m.tabSegPrefix = ""
 		m.tabHints = nil
 		m.tabHintsBase = nil
 		m.refreshPrompt()
