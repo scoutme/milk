@@ -99,6 +99,15 @@ func (ts *ToolSet) Close(ctx context.Context) {
 	}
 }
 
+// WithOnAuthRequired wires fn into every client (see
+// Client.WithOnAuthRequired): called once per client when a tool call fails
+// because that client's server needs the interactive /mcp auth flow.
+func (ts *ToolSet) WithOnAuthRequired(fn func(serverName string)) {
+	for _, c := range ts.clients {
+		c.WithOnAuthRequired(fn)
+	}
+}
+
 // Len returns the number of clients in the set.
 func (ts *ToolSet) Len() int { return len(ts.clients) }
 

@@ -3,6 +3,7 @@ package mcpauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,5 +137,30 @@ func TestRefreshOnly_StaleRecordMissingEndpoint(t *testing.T) {
 	}
 	if _, err := RefreshOnly(context.Background(), "srv"); !errors.Is(err, ErrNotAuthorized) {
 		t.Errorf("err = %v, want ErrNotAuthorized for a record with no cached token_endpoint/client_id", err)
+	}
+}
+
+// TestIsAuthRequired_ClassifiesAuthVsOtherErrors pins the #161 classifier
+// used to decide whether a connect/call failure should surface as "run /mcp
+// auth <server>" (ErrNotAuthorized / ErrNoRefreshToken, wrapped or bare) vs.
+// a plain transient error (network blip, token endpoint down) that must not
+// claim authorization is the fix.
+func TestIsAuthRequired_ClassifiesAuthVsOtherErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"bare ErrNotAuthorized", ErrNotAuthorized, true},
+		{"bare ErrNoRefreshToken", ErrNoRefreshToken, true},
+		{"wrapped ErrNotAuthorized", fmt.Errorf("mcp %q: %w", "s", ErrNotAuthorized), true},
+		{"wrapped ErrNoRefreshToken", fmt.Errorf("mcp %q: %w", "s", ErrNoRefreshToken), true},
+		{"unrelated error", errors.New("connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsAuthRequired(c.err); got != c.want {
+			t.Errorf("%s: IsAuthRequired(%v) = %v, want %v", c.name, c.err, got, c.want)
+		}
 	}
 }

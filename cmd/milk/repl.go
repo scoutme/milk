@@ -31,6 +31,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/mcp"
+	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/router"
@@ -409,6 +410,24 @@ type oauthRequiredMsg struct {
 type mcpOAuthStartedMsg struct {
 	serverName string
 	authURL    string
+}
+
+// mcpConnectResult is one server's outcome from the deferred startup MCP
+// connect (#161). err is nil when the client connected; a server backing
+// several agents' toolsets is collapsed to a single result by
+// mergeConnectResults before it ever reaches the TUI.
+type mcpConnectResult struct {
+	server string
+	err    error
+}
+
+// mcpConnectReadyMsg delivers the merged per-server outcomes of the startup
+// MCP connect. Emitted by the mcpConnectInit cmd from Init() — never from a
+// goroutine started before p.Run() — and consumed as toasts only: an
+// unconnected client stays wired and retries lazily on first use, so this is
+// turn-unrelated information, not turn output (ADR-0048's boundary).
+type mcpConnectReadyMsg struct {
+	results []mcpConnectResult
 }
 
 // forgetState holds the pending /forget confirmation dialog.
@@ -836,6 +855,11 @@ type model struct {
 	// workflowResumeInit, if non-nil, is returned by Init() to check for a
 	// saved workflow state file and emit workflowResumeCheckMsg when found.
 	workflowResumeInit tea.Cmd
+
+	// mcpConnectInit, if non-nil, is returned by Init() to run the deferred
+	// startup MCP connect (#161) and emit mcpConnectReadyMsg once every
+	// client's outcome is known.
+	mcpConnectInit tea.Cmd
 
 	// pendingUpdate is non-nil when an update is available but not yet installed.
 	pendingUpdate *updater.Release
@@ -1554,6 +1578,9 @@ func (m model) Init() tea.Cmd {
 	if m.workflowResumeInit != nil {
 		cmds = append(cmds, m.workflowResumeInit)
 	}
+	if m.mcpConnectInit != nil {
+		cmds = append(cmds, m.mcpConnectInit)
+	}
 	if m.st.cfg.ShouldCheckUpdate() {
 		cfg := m.st.cfg
 		cmds = append(cmds, func() tea.Msg {
@@ -1723,13 +1750,44 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handlePermRequest(msg)
 
 	case oauthRequiredMsg:
+		name := "<server-name>"
+		if msg.serverName != "" {
+			name = msg.serverName
+		}
 		notice := milkTag() + " MCP OAuth authorization required"
 		if msg.authURL != "" {
 			notice += "\n" + milkTag() + " authorization URL: " + msg.authURL
 		}
-		notice += "\n" + milkTag() + " run " + bold("/mcp auth <server-name>") + " to authorize"
+		notice += "\n" + milkTag() + " run " + bold("/mcp auth "+name) + " to authorize"
 		m.appendTranscript(notice + "\n")
 		m.syncLayout()
+		return m, nil
+
+	case mcpConnectReadyMsg:
+		// Startup MCP connect finished (#161). Toasts only — the transcript
+		// stays clean of turn-unrelated startup noise (ADR-0048).
+		ok := 0
+		for _, r := range msg.results {
+			if r.err == nil {
+				ok++
+				continue
+			}
+			obs.Info("mcp.connect.ready.failed", "server", r.server, "error", r.err.Error())
+			if mcpauth.IsAuthRequired(r.err) {
+				m.notify(fmt.Sprintf("MCP %q: authorization required", r.server),
+					"/mcp auth "+r.server)
+			} else {
+				m.notify(fmt.Sprintf("MCP %q: unavailable, will retry on first use", r.server),
+					"/mcp reconnect "+r.server)
+			}
+		}
+		if ok > 0 {
+			if ok == len(msg.results) {
+				m.notify(fmt.Sprintf("MCP: %d server(s) connected", ok), "/mcp list")
+			} else {
+				m.notify(fmt.Sprintf("MCP: %d of %d servers connected", ok, len(msg.results)), "/mcp list")
+			}
+		}
 		return m, nil
 
 	case mcpOAuthStartedMsg:
@@ -3746,6 +3804,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Build TurnRunner instances for dispatch.
 	mcpToolSets := map[string]*mcp.ToolSet{}
 	mcpServersSeen := map[string][]config.MCPServerConfig{}
+	// mcpConnectTSS collects every toolset built below (primary + escalation);
+	// the deferred startup connect (#161, m.mcpConnectInit) connects all of
+	// them in parallel once the TUI event loop is running, instead of
+	// blocking here before the TUI ever renders.
+	var mcpConnectTSS []*mcp.ToolSet
 	var primaryRunner TurnRunner
 	switch {
 	case tuiPrimaryCLIAgent != nil:
@@ -3758,15 +3821,16 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		primaryRunner = r
 	case tuiSubprocessPrimaryAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessPrimaryAgent, tuiPrimaryAC.Name)
-		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+		if servers, ts := newMCPToolSet(cfg, tuiPrimaryAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
 			mcpServersSeen[tuiPrimaryAC.Name] = servers
+			mcpConnectTSS = append(mcpConnectTSS, ts)
 			defer ts.Close(context.Background())
 		}
 		primaryRunner = r
 	case localAgent != nil:
-		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiPrimaryAC.Name); ts != nil {
+		if servers, ts := newMCPToolSet(cfg, tuiPrimaryAC.Name); ts != nil {
 			localAgent = localAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiPrimaryAC.Name] = ts
 			mcpServersSeen[tuiPrimaryAC.Name] = servers
@@ -3778,18 +3842,20 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	switch {
 	case tuiSubprocessAgent != nil:
 		r := newSubprocessRunner(tuiSubprocessAgent, tuiEscAC.Name)
-		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+		if servers, ts := newMCPToolSet(cfg, tuiEscAC.Name); ts != nil {
 			r = r.withMCPToolSet(servers, ts)
 			mcpToolSets[tuiEscAC.Name] = ts
 			mcpServersSeen[tuiEscAC.Name] = servers
+			mcpConnectTSS = append(mcpConnectTSS, ts)
 			defer ts.Close(context.Background())
 		}
 		escalationRunner = r
 	case escalationLocalAgent != nil:
-		if servers, ts, _ := buildMCPToolSet(context.Background(), cfg, tuiEscAC.Name); ts != nil {
+		if servers, ts := newMCPToolSet(cfg, tuiEscAC.Name); ts != nil {
 			escalationLocalAgent = escalationLocalAgent.WithMCPToolSet(ts)
 			mcpToolSets[tuiEscAC.Name] = ts
 			mcpServersSeen[tuiEscAC.Name] = servers
+			mcpConnectTSS = append(mcpConnectTSS, ts)
 			defer ts.Close(context.Background())
 		}
 		escalationRunner = newLocalRunner(escalationLocalAgent, tuiEscAC.Name)
@@ -3905,10 +3971,34 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
+	// Startup MCP connect (#161) is deferred to Init() for the same reason
+	// as credRefreshInit/workflowResumeInit above: connecting can block on
+	// OAuth token resolution, token_cmd execution, or network, and must not
+	// gate the TUI's first render. tss is captured here (not read from
+	// mcpConnectTSS lazily) so the cmd closure doesn't depend on this
+	// function's local variables outliving it.
+	if tss := mcpConnectTSS; len(tss) > 0 {
+		m.mcpConnectInit = func() tea.Msg {
+			return mcpConnectReadyMsg{results: connectToolSets(ctx, tss)}
+		}
+	}
+
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
 	)
 	st.program = p
+
+	// Notify the TUI the first time a *later* (post-startup) tool call hits
+	// a server that needs the interactive /mcp auth flow (#161) — the
+	// startup connect above only covers the initial attempt; this covers
+	// every lazy reconnect after that. No authURL yet (the user still has
+	// to run /mcp auth themselves to get one); oauthRequiredMsg already
+	// renders fine with authURL empty.
+	for _, ts := range mcpConnectTSS {
+		ts.WithOnAuthRequired(func(serverName string) {
+			p.Send(oauthRequiredMsg{serverName: serverName})
+		})
+	}
 
 	// Notify the TUI as soon as each background job (ADR-0043) completes,
 	// independent of the turn-boundary drain path.

@@ -132,6 +132,14 @@ type Client struct {
 	// <token>") for "token_cmd" auth, resolved once at Connect time.
 	cachedToken string
 
+	// onAuthRequired, when set, is notified the first time a tool call fails
+	// because the server needs the interactive /mcp auth flow (no token, or an
+	// expired one with no refresh token) — the TUI turns it into the same
+	// "run /mcp auth <server>" notice the claude-cli path emits
+	// (docs/tooling.md "Authorizing"). Rearmed by the next successful Connect.
+	onAuthRequired func(serverName string)
+	authNotified   bool
+
 	// stdio transport fields — non-nil only when Transport == "stdio".
 	proc       *exec.Cmd
 	procStdin  io.WriteCloser
@@ -236,6 +244,7 @@ func (c *Client) Connect(ctx context.Context) (retErr error) {
 	}
 	c.tools = tools
 	c.ready = true
+	c.authNotified = false
 	obs.Info("mcp.connect", "server", c.cfg.Name, "tools", len(c.tools))
 	return nil
 }
@@ -445,6 +454,7 @@ func (c *Client) Call(ctx context.Context, toolName, argsJSON string) (CallResul
 	})
 	if err != nil {
 		obs.Info("mcp.call.failed", "server", c.cfg.Name, "tool", toolName, "error", err.Error())
+		c.maybeNotifyAuthRequired(err)
 		return CallResult{IsError: true, Content: []ContentItem{{Type: "text", Text: err.Error()}}}, nil
 	}
 
@@ -657,6 +667,12 @@ func (c *Client) doHTTP(ctx context.Context, body []byte) (*http.Response, error
 	if resp.StatusCode == http.StatusUnauthorized && strings.EqualFold(c.cfg.Auth, "oauth") {
 		resp.Body.Close()
 		if _, rerr := mcpauth.RefreshOnly(ctx, c.cfg.Name); rerr != nil {
+			if mcpauth.IsAuthRequired(rerr) {
+				// Auth-requiring failure (#161): name the server and the
+				// remedy instead of surfacing a bare 401 chain, and keep the
+				// sentinel wrapped so callers can classify it.
+				return nil, fmt.Errorf("mcp %q: %w — run /mcp auth %q to authorize", c.cfg.Name, rerr, c.cfg.Name)
+			}
 			return nil, fmt.Errorf("mcp %q: unauthorized: %w", c.cfg.Name, rerr)
 		}
 		retryReq, err := c.newHTTPRequest(ctx, body)
@@ -753,6 +769,36 @@ func (c *Client) ServerName() string { return c.cfg.Name }
 // Startup callers (e.g. attachMCPToolSet) use this to derive a per-client
 // context deadline rather than applying a single global timeout.
 func (c *Client) ConnectTimeout() time.Duration { return c.connectTimeout }
+
+// WithOnAuthRequired wires fn to be called the first time a tool call fails
+// because this server needs the interactive /mcp auth flow (see the field
+// comment). Passing nil disables the notification. The guard is rearmed by
+// the next successful Connect.
+func (c *Client) WithOnAuthRequired(fn func(serverName string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onAuthRequired = fn
+}
+
+// maybeNotifyAuthRequired fires onAuthRequired once per connected epoch when
+// err classifies as "needs /mcp auth" (mcpauth.IsAuthRequired). Further auth
+// failures stay silent until a successful Connect rearms the guard, so a
+// multi-call turn surfaces the notice exactly once.
+func (c *Client) maybeNotifyAuthRequired(err error) {
+	if err == nil || !mcpauth.IsAuthRequired(err) {
+		return
+	}
+	c.mu.Lock()
+	fn := c.onAuthRequired
+	notify := !c.authNotified
+	if notify {
+		c.authNotified = true
+	}
+	c.mu.Unlock()
+	if notify && fn != nil {
+		fn(c.cfg.Name)
+	}
+}
 
 // ConnectionStatus is the runtime state of an MCP client.
 type ConnectionStatus int

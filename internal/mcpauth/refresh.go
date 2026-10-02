@@ -8,12 +8,26 @@ import (
 )
 
 // ErrNotAuthorized is returned when no token has been stored for a server
-// (the user has never run /mcp auth for it).
-var ErrNotAuthorized = errors.New("not authorized — run /mcp auth <server> first")
+// (the user has never run /mcp auth for it). The sentinel text is deliberately
+// terse: callers phrase the remedy with the real server name (see
+// internal/mcp.Client.doHTTP) instead of every error string carrying a
+// placeholder like "/mcp auth <server>".
+var ErrNotAuthorized = errors.New("not authorized")
 
 // ErrNoRefreshToken is returned when the stored token has expired (or is
-// about to) and there is no refresh token to renew it with.
-var ErrNoRefreshToken = errors.New("no refresh token available — run /mcp auth <server> to re-authorize")
+// about to) and there is no refresh token to renew it with. Same remedy as
+// ErrNotAuthorized: a fresh /mcp auth. Like that sentinel it may wrap a stale
+// (but possibly still valid) TokenSet — check the token, not just the error.
+var ErrNoRefreshToken = errors.New("no refresh token available")
+
+// IsAuthRequired reports whether err means "this server needs the interactive
+// /mcp auth flow" — i.e. it wraps ErrNotAuthorized or ErrNoRefreshToken. Used
+// to classify auth failures apart from transient ones (network blips, token
+// endpoint errors) so they can carry an actionable remedy and drive the
+// "authorization required" notice (#161).
+func IsAuthRequired(err error) bool {
+	return errors.Is(err, ErrNotAuthorized) || errors.Is(err, ErrNoRefreshToken)
+}
 
 // refreshSkew is how far ahead of expiry EnsureFresh proactively refreshes.
 const refreshSkew = 60 * time.Second

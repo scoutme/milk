@@ -22,7 +22,10 @@ import (
 // "oauth" is best-effort: an unauthorized or unrefreshable server returns
 // ("", nil) rather than an error, so callers can send the request
 // unauthenticated and let the target reject it, rather than failing the
-// whole turn over a stale/missing token.
+// whole turn over a stale/missing token. When a token exists but renewal
+// failed (expired refresh token, token endpoint down), the stale token is
+// still returned — a token that might still validate beats none — with the
+// reactive-refresh-on-401 path picking up if the target does reject it.
 func ResolveHeader(ctx context.Context, cfg config.MCPServerConfig) (string, error) {
 	switch strings.ToLower(cfg.Auth) {
 	case "bearer":
@@ -40,8 +43,11 @@ func ResolveHeader(ctx context.Context, cfg config.MCPServerConfig) (string, err
 		}
 		return "Bearer " + strings.TrimSpace(string(out)), nil
 	case "oauth":
-		tok, err := EnsureFresh(ctx, cfg.Name)
-		if err != nil || tok == nil {
+		// A non-nil err here (refresh failed) with a non-nil token means the
+		// renewal failed but a (possibly stale) token is still on record: use
+		// it rather than dropping to an unauthenticated request.
+		tok, _ := EnsureFresh(ctx, cfg.Name)
+		if tok == nil {
 			return "", nil
 		}
 		return "Bearer " + tok.AccessToken, nil

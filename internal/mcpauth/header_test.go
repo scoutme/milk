@@ -89,6 +89,31 @@ func TestResolveHeader_OAuth_NotAuthorized(t *testing.T) {
 	}
 }
 
+// TestResolveHeader_OAuth_StaleTokenUsedWhenRefreshFails pins #161's change:
+// EnsureFresh returns a non-nil stale token alongside ErrNoRefreshToken when
+// a token exists but has expired with no refresh token to renew it — the
+// stale access token is still returned ("might still validate beats none"),
+// not dropped to an unauthenticated request. The reactive-refresh-on-401
+// path (internal/mcp.Client.doHTTP) picks up if the target does reject it.
+func TestResolveHeader_OAuth_StaleTokenUsedWhenRefreshFails(t *testing.T) {
+	withTempMilkHome(t)
+	if err := SaveToken("s", &TokenSet{
+		AccessToken: "stale-at",
+		ExpiresAt:   time.Now().Add(-time.Hour), // already expired
+		// RefreshToken deliberately empty: EnsureFresh can't renew it.
+	}); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+	cfg := config.MCPServerConfig{Name: "s", Auth: "oauth"}
+	got, err := ResolveHeader(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ResolveHeader: expected best-effort nil error, got %v", err)
+	}
+	if got != "Bearer stale-at" {
+		t.Errorf("got %q, want the stale token still used: %q", got, "Bearer stale-at")
+	}
+}
+
 func TestResolveHeader_NoneOrUnknown(t *testing.T) {
 	for _, auth := range []string{"", "none", "bogus"} {
 		cfg := config.MCPServerConfig{Name: "s", Auth: auth}

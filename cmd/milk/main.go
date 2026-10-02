@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -499,15 +500,10 @@ func newCLIAgent(ac config.AgentConfig) *claude.Agent {
 // reconnect inside Schemas() / Dispatch() can retry on first use.
 // When no MCP servers are configured for the agent, la is returned unchanged.
 func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, la *local.Agent) (*local.Agent, error) {
-	servers := cfg.EffectiveMCPServers(agentName)
-	if len(servers) == 0 {
+	servers, ts := newMCPToolSet(cfg, agentName)
+	if ts == nil {
 		return la, nil
 	}
-	clients := make([]*mcp.Client, 0, len(servers))
-	for _, s := range servers {
-		clients = append(clients, mcp.New(s))
-	}
-	ts := mcp.NewToolSet(clients)
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
 	var connectErr error
@@ -515,25 +511,39 @@ func attachMCPToolSet(ctx context.Context, cfg config.Config, agentName string, 
 		connectErr = fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 		obs.Info("mcp.attach.failed", "agent", agentName, "error", err.Error())
 	}
+	_ = servers
 	// Always wire the ToolSet even if no clients connected at startup.
 	// Lazy reconnect inside Schemas() / Dispatch() will retry on first use.
 	la = la.WithMCPToolSet(ts)
 	return la, connectErr
 }
 
-// buildMCPToolSet builds a connected mcp.ToolSet for agentName using the servers
-// from cfg, or returns (nil, nil) when no servers are configured. Errors are
-// logged as warnings; partial connectivity is acceptable — lazy reconnect retries on use.
-func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet, error) {
+// newMCPToolSet builds an unconnected mcp.ToolSet for agentName from cfg plus
+// the resolved server list, or (nil, nil) when no servers are configured. No
+// I/O happens here — connecting can block on OAuth token resolution, token_cmd
+// execution or network, so it is the caller's decision: buildMCPToolSet does
+// it inline, while the TUI bootstrap defers it to an async background connect
+// (mcpConnectReadyMsg) so the interface renders immediately (#161).
+func newMCPToolSet(cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet) {
 	servers := cfg.EffectiveMCPServers(agentName)
 	if len(servers) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	clients := make([]*mcp.Client, 0, len(servers))
 	for _, s := range servers {
 		clients = append(clients, mcp.New(s))
 	}
-	ts := mcp.NewToolSet(clients)
+	return servers, mcp.NewToolSet(clients)
+}
+
+// buildMCPToolSet builds a connected mcp.ToolSet for agentName using the servers
+// from cfg, or returns (nil, nil) when no servers are configured. Errors are
+// logged as warnings; partial connectivity is acceptable — lazy reconnect retries on use.
+func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) ([]config.MCPServerConfig, *mcp.ToolSet, error) {
+	servers, ts := newMCPToolSet(cfg, agentName)
+	if ts == nil {
+		return nil, nil, nil
+	}
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
 	if err := ts.ConnectAll(connectCtx); err != nil {
@@ -541,6 +551,57 @@ func buildMCPToolSet(ctx context.Context, cfg config.Config, agentName string) (
 		return servers, ts, fmt.Errorf("MCP connect error for agent %q: %w", agentName, err)
 	}
 	return servers, ts, nil
+}
+
+// connectToolSets connects every client across tss in parallel, each bounded by
+// its own connect timeout, and returns one merged result per server name
+// (mergeConnectResults). Used by the deferred TUI startup connect (#161):
+// unconnected clients are never fatal — lazy reconnect retries on first use —
+// the results only drive the notification toasts.
+func connectToolSets(ctx context.Context, tss []*mcp.ToolSet) []mcpConnectResult {
+	var wg sync.WaitGroup
+	ch := make(chan mcpConnectResult)
+	for _, ts := range tss {
+		for _, cl := range ts.Clients() {
+			wg.Add(1)
+			go func(cl *mcp.Client) {
+				defer wg.Done()
+				cctx, cancel := context.WithTimeout(ctx, cl.ConnectTimeout())
+				defer cancel()
+				ch <- mcpConnectResult{server: cl.ServerName(), err: cl.Connect(cctx)}
+			}(cl)
+		}
+	}
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+	var results []mcpConnectResult
+	for r := range ch {
+		results = append(results, r)
+	}
+	return mergeConnectResults(results)
+}
+
+// mergeConnectResults collapses per-client connect outcomes into one result per
+// server name, in first-seen order: the same server can back several agents'
+// toolsets (each instance must connect for its own toolset), but the user only
+// needs one line per server. A name counts as connected when any of its
+// instances connected; otherwise the first error stands.
+func mergeConnectResults(in []mcpConnectResult) []mcpConnectResult {
+	index := make(map[string]int, len(in))
+	var out []mcpConnectResult
+	for _, r := range in {
+		if i, ok := index[r.server]; ok {
+			if r.err == nil {
+				out[i].err = nil
+			}
+			continue
+		}
+		index[r.server] = len(out)
+		out = append(out, r)
+	}
+	return out
 }
 
 // activeLocalAgentConfig returns the active AgentConfig with AWSRefreshCmd
