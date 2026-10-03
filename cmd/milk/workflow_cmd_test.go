@@ -461,6 +461,63 @@ func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
 	if nm.workflowState == nil || nm.workflowState.WorkflowName != "swarm" {
 		t.Errorf("workflowState = %+v, want WorkflowName %q", nm.workflowState, "swarm")
 	}
+	if !nm.workflowRunning {
+		t.Error("expected workflowRunning to be true after launchGenericWorkflow")
+	}
+}
+
+// TestLaunchGenericWorkflow_RefusesSecondConcurrentLaunch guards against the
+// start_workflow tool path (unlike the /workflow slash commands) having no
+// check against an already-active run: calling launchGenericWorkflow again
+// with resuming=false while workflowRunning is still true from a prior
+// launch must not replace workflowState/cancelTurn or start a second
+// goroutine racing the first one over that shared state.
+func TestLaunchGenericWorkflow_RefusesSecondConcurrentLaunch(t *testing.T) {
+	sandboxMilkHome(t)
+	reg, errs := workflow.LoadRegistry()
+	if len(errs) != 0 {
+		t.Fatalf("LoadRegistry errors: %v", errs)
+	}
+	def, ok := reg.Lookup("swarm")
+	if !ok {
+		t.Fatal("expected built-in \"swarm\" definition")
+	}
+
+	m := testModel()
+	m.ctx = context.Background()
+	m.st = &interactiveState{sess: &session.Session{ID: "test-launch-generic-workflow-second-session"}}
+
+	roleValues := make(map[string]string, len(def.Roles))
+	for _, role := range def.Roles {
+		roleValues[role] = workflow.AliasPrimary
+	}
+	first := &workflowWizardState{
+		name:       "swarm",
+		task:       "build the first thing",
+		def:        def,
+		roles:      def.Roles,
+		roleValues: roleValues,
+	}
+	newM, _ := m.launchGenericWorkflow(first)
+	m = newM.(model)
+	firstState := m.workflowState
+
+	second := &workflowWizardState{
+		name:       "swarm",
+		task:       "build a second, unrelated thing",
+		def:        def,
+		roles:      def.Roles,
+		roleValues: roleValues,
+	}
+	newM, _ = m.launchGenericWorkflow(second)
+	nm := newM.(model)
+
+	if nm.workflowState != firstState {
+		t.Errorf("workflowState changed after refused second launch: got %+v, want unchanged %+v", nm.workflowState, firstState)
+	}
+	if !strings.Contains(nm.transcript.String(), "already running") {
+		t.Errorf("expected transcript to report the refusal, got: %s", nm.transcript.String())
+	}
 }
 
 // ── Generic (interpreter-driven) resume/clear/reconfigure ────────────────────

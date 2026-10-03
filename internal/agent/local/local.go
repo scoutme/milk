@@ -22,6 +22,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/scoutme/milk/internal/ansi"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/escalation"
@@ -418,12 +419,16 @@ type Agent struct {
 	// (ADR-0043) and receives its calls. nil for background jobs themselves
 	// (RunBackgroundTask never sets it), enforcing the depth-1 fork cap.
 	backgroundManager *Manager
-	// onToolUse is called just before each tool is dispatched, with the tool name
-	// and a short human-readable summary of its key argument.
-	onToolUse func(name, summary string)
-	// onToolResult is called just after each tool finishes, with the tool name
-	// and its result content (the same string stored as the tool message).
-	onToolResult func(name, result string)
+	// onToolUse is called just before each tool is dispatched, with the tool
+	// call's id (toolCall.ID — stable across the use/result pair, unlike
+	// pairing by name or call order), the tool name, a short human-readable
+	// summary of its key argument, and the raw parsed argument map.
+	onToolUse func(id, name, summary string, rawInput map[string]any)
+	// onToolResult is called just after each tool finishes, with the same id
+	// passed to onToolUse, the tool name, its result content (the same string
+	// stored as the tool message), and whether the result is an error
+	// (isToolError's authoritative check, not a caller-side heuristic).
+	onToolResult func(id, name, result string, isError bool)
 	// onResponseSegment is called with each contiguous chunk of assistant text
 	// as it completes — once per tool-calling round before its tools dispatch,
 	// and once more with the final round's text.
@@ -978,17 +983,19 @@ func (a *Agent) WithOnRequestSize(fn func(bytes int64)) *Agent {
 }
 
 // WithOnToolUse returns a shallow copy of the agent that calls fn just before
-// each tool is dispatched. name is the tool name; summary is the short
-// human-readable argument summary produced by toolArgSummary.
-func (a *Agent) WithOnToolUse(fn func(name, summary string)) *Agent {
+// each tool is dispatched. id is the tool call's id (toolCall.ID); name is
+// the tool name; summary is the short human-readable argument summary
+// produced by toolArgSummary; rawInput is the parsed argument map.
+func (a *Agent) WithOnToolUse(fn func(id, name, summary string, rawInput map[string]any)) *Agent {
 	copy := *a
 	copy.onToolUse = fn
 	return &copy
 }
 
 // WithOnToolResult returns a shallow copy of the agent that calls fn just
-// after each tool finishes dispatching, with its result content.
-func (a *Agent) WithOnToolResult(fn func(name, result string)) *Agent {
+// after each tool finishes dispatching, with the same id passed to
+// WithOnToolUse's callback, its result content, and whether it's an error.
+func (a *Agent) WithOnToolResult(fn func(id, name, result string, isError bool)) *Agent {
 	copy := *a
 	copy.onToolResult = fn
 	return &copy
@@ -2250,7 +2257,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 		if a.onToolUse != nil {
 			var argMap map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
-			a.onToolUse(tc.Function.Name, toolArgSummary(argMap))
+			a.onToolUse(tc.ID, tc.Function.Name, toolArgSummary(argMap), argMap)
 		}
 		args := tc.Function.Arguments
 		if len(args) > 120 {
@@ -2290,7 +2297,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			if strings.HasPrefix(tc.Function.Name, "agent_") {
 				continue
 			}
-			a.onToolResult(tc.Function.Name, outcomes[i].msg.Content)
+			a.onToolResult(tc.ID, tc.Function.Name, outcomes[i].msg.Content, isToolError(outcomes[i].msg.Content))
 		}
 	}
 
@@ -2371,7 +2378,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 			// if this guess is wrong too.
 			agentName = tc.Function.Name[len("agent_"):]
 		}
-		fmt.Fprintf(out, "\n\033[2m⚙ calling agent %s…\033[0m\n", agentName)
+		fmt.Fprintf(out, "\n%s\n", ansi.Dim(fmt.Sprintf("⚙ calling agent %s…", agentName)))
 		result, err := a.toolAgentDispatcher(ctx, agentName, reqArgs.Request, pendingImages, out)
 		if err != nil {
 			obs.Inc(ctx, inferenceScope, "milk.tools.tool_agent_errors",
@@ -2588,9 +2595,9 @@ func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 				summary = string(runes[:maxSummary-1]) + "…"
 			}
 		}
-		fmt.Fprintf(out, "\n%s\n", dimWrap("⚙ "+tc.Function.Name+": "+summary))
+		fmt.Fprintf(out, "\n%s\n", ansi.Dim("⚙ "+tc.Function.Name+": "+summary))
 	} else {
-		fmt.Fprintf(out, "\n%s\n", dimWrap("⚙ "+tc.Function.Name))
+		fmt.Fprintf(out, "\n%s\n", ansi.Dim("⚙ "+tc.Function.Name))
 	}
 }
 
@@ -2619,20 +2626,6 @@ func toolDiff(name, argsJSON string) string {
 		return diff.ForWrite(path, content, 3)
 	}
 	return ""
-}
-
-// dimWrap wraps s in ANSI dim, closing and reopening the escape at each embedded
-// newline so every output line is a self-contained dim span with no bleed.
-func dimWrap(s string) string {
-	const on, off = "\033[2m", "\033[0m"
-	if !strings.Contains(s, "\n") {
-		return on + s + off
-	}
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = on + l + off
-	}
-	return strings.Join(lines, "\n")
 }
 
 // summarizeToolTrail builds a fallback assistant message for a turn that

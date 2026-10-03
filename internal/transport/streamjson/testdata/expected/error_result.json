@@ -1,0 +1,8 @@
+{
+  "response": "provider request failed: connection reset",
+  "tokens": { "input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_create": 0 },
+  "tool_calls": [],
+  "is_error": true,
+  "stop_reason": "error",
+  "num_turns": 1
+}

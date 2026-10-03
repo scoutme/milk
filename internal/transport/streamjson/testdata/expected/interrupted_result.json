@@ -1,0 +1,8 @@
+{
+  "response": "partial work",
+  "tokens": { "input_tokens": 500, "output_tokens": 20, "cache_read": 0, "cache_create": 0 },
+  "tool_calls": [],
+  "is_error": false,
+  "stop_reason": "interrupted",
+  "num_turns": 1
+}

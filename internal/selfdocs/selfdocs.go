@@ -67,6 +67,25 @@ var (
 		"completion":             "tab-completion-and-multi-value-parameters",
 		"multi-value":            "tab-completion-and-multi-value-parameters",
 		"multi-value parameters": "tab-completion-and-multi-value-parameters",
+
+		// Machine-readable output (docs/tooling.md §Machine-readable output —
+		// the ADR-0049/0050 batch + embedding wire contract).
+		"machine-readable-output": "machine-readable-output",
+		"machine readable output": "machine-readable-output",
+		"machine-readable output": "machine-readable-output",
+		"stream-json":             "machine-readable-output",
+		"stream json":             "machine-readable-output",
+		"batch output":            "machine-readable-output",
+		"output-format":           "machine-readable-output",
+		"output format":           "machine-readable-output",
+		"jsonl":                   "machine-readable-output",
+		"acp":                     "machine-readable-output",
+		"acp serve":               "machine-readable-output",
+		"serve --acp":             "machine-readable-output",
+		"permission-mode":         "machine-readable-output",
+		"allow-tool":              "machine-readable-output",
+		"stream-json schema":      "machine-readable-output",
+		"stream-v1":               "machine-readable-output",
 	}
 )
 

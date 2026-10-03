@@ -23,27 +23,27 @@ const claudeScope = "github.com/scoutme/milk"
 
 // Agent runs the claude CLI as a subprocess.
 type Agent struct {
-	bin               string                                  // path to claude binary, e.g. "claude"
-	skipPermissions   bool                                    // pass --dangerously-skip-permissions to the CLI
-	allowedTools      []string                                // tools pre-approved via --allowedTools
-	addDirs           []string                                // extra directories granted via --add-dir
-	settingsJSON      []byte                                  // optional --settings payload (written to temp file at invocation)
-	permissionHandler PermissionHandler                       // nil → denyAllHandler
-	debugLog          io.Writer                               // when non-nil, every raw NDJSON line is written here
-	onToolUse         func(string)                            // called on content_block_start tool_use events
-	onToolUseReady    func(string, map[string]any)            // called on content_block_stop with full input
-	onThinking        func(string)                            // called on thinking_delta tokens
-	onToolResult      func(name, result string, isError bool) // called on type:"user" tool_result blocks
-	onResponseSegment func(string)                            // called with each completed text segment, see WithOnResponseSegment
-	onPercept         func(string, string)                    // called for each <milk:percept:NONCE> tag; args: content, consumerHint
-	perceptNonce      string                                  // session-specific nonce matching the system-prompt instruction
-	agentNames        []string                                // [primaryName, escalationName] for @<name>: consumer-hint parsing
-	onNeed            func(string)                            // called for each <milk:need:NONCE> tag; arg: new current-need text
-	needNonce         string                                  // session-specific nonce matching the system-prompt need instruction
-	extraEnv          []string                                // extra KEY=VALUE pairs injected into subprocess env
-	logContext        bool                                    // when true, log system context and prompt at DEBUG level
-	mcpServers        []config.MCPServerConfig                // MCP servers to expose via --mcp-config
-	onOAuthRequired   func(serverName, url string)            // called when stderr indicates an OAuth challenge
+	bin               string                                      // path to claude binary, e.g. "claude"
+	skipPermissions   bool                                        // pass --dangerously-skip-permissions to the CLI
+	allowedTools      []string                                    // tools pre-approved via --allowedTools
+	addDirs           []string                                    // extra directories granted via --add-dir
+	settingsJSON      []byte                                      // optional --settings payload (written to temp file at invocation)
+	permissionHandler PermissionHandler                           // nil → denyAllHandler
+	debugLog          io.Writer                                   // when non-nil, every raw NDJSON line is written here
+	onToolUse         func(id, name string)                       // called on content_block_start tool_use events
+	onToolUseReady    func(id, name string, input map[string]any) // called on content_block_stop with full input
+	onThinking        func(string)                                // called on thinking_delta tokens
+	onToolResult      func(id, name, result string, isError bool) // called on type:"user" tool_result blocks
+	onResponseSegment func(string)                                // called with each completed text segment, see WithOnResponseSegment
+	onPercept         func(string, string)                        // called for each <milk:percept:NONCE> tag; args: content, consumerHint
+	perceptNonce      string                                      // session-specific nonce matching the system-prompt instruction
+	agentNames        []string                                    // [primaryName, escalationName] for @<name>: consumer-hint parsing
+	onNeed            func(string)                                // called for each <milk:need:NONCE> tag; arg: new current-need text
+	needNonce         string                                      // session-specific nonce matching the system-prompt need instruction
+	extraEnv          []string                                    // extra KEY=VALUE pairs injected into subprocess env
+	logContext        bool                                        // when true, log system context and prompt at DEBUG level
+	mcpServers        []config.MCPServerConfig                    // MCP servers to expose via --mcp-config
+	onOAuthRequired   func(serverName, url string)                // called when stderr indicates an OAuth challenge
 }
 
 func New(bin string) *Agent {
@@ -87,27 +87,29 @@ func (a *Agent) WithDebugLog(w io.Writer) *Agent {
 }
 
 // WithOnToolUse returns a copy of the agent that calls fn whenever Claude
-// begins a tool call (content_block_start with type=tool_use).
-func (a *Agent) WithOnToolUse(fn func(string)) *Agent {
+// begins a tool call (content_block_start with type=tool_use). id is the
+// block's stable tool_use id, stable across the use/result pair.
+func (a *Agent) WithOnToolUse(fn func(id, name string)) *Agent {
 	c := *a
 	c.onToolUse = fn
 	return &c
 }
 
 // OnToolUseCallback returns the current onToolUse callback, or nil if not set.
-func (a *Agent) OnToolUseCallback() func(string) { return a.onToolUse }
+func (a *Agent) OnToolUseCallback() func(id, name string) { return a.onToolUse }
 
 // WithOnToolUseReady returns a copy of the agent that calls fn when a tool
 // call block is complete (content_block_stop) and the full input is available.
-func (a *Agent) WithOnToolUseReady(fn func(string, map[string]any)) *Agent {
+func (a *Agent) WithOnToolUseReady(fn func(id, name string, input map[string]any)) *Agent {
 	c := *a
 	c.onToolUseReady = fn
 	return &c
 }
 
 // WithOnToolResult returns a copy of the agent that calls fn when a
-// tool_result block arrives for a completed tool call.
-func (a *Agent) WithOnToolResult(fn func(name, result string, isError bool)) *Agent {
+// tool_result block arrives for a completed tool call, with the same id
+// passed to WithOnToolUse's callback.
+func (a *Agent) WithOnToolResult(fn func(id, name, result string, isError bool)) *Agent {
 	c := *a
 	c.onToolResult = fn
 	return &c
@@ -492,12 +494,12 @@ func (a *Agent) run(ctx context.Context, args []string, out io.Writer) (ParseRes
 
 	// Wrap onToolUse to also emit the metric counter — avoids modifying all call sites.
 	origOnToolUse := a.onToolUse
-	a.onToolUse = func(name string) {
+	a.onToolUse = func(id, name string) {
 		obs.Inc(ctx, claudeScope, "milk.claude.tool_uses",
 			attribute.String("name", name),
 		)
 		if origOnToolUse != nil {
-			origOnToolUse(name)
+			origOnToolUse(id, name)
 		}
 	}
 

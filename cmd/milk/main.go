@@ -41,23 +41,25 @@ import (
 	"github.com/scoutme/milk/internal/selfdocs"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/shelldetect"
+	"github.com/scoutme/milk/internal/transport/streamjson"
 )
 
 const milkScope = "github.com/scoutme/milk"
 
 var (
-	flagEscalate   bool
-	flagPrimary    bool
-	flagNew        bool
-	flagSession    string
-	flagContinue   bool
-	flagList       bool
-	flagListAll    bool
-	flagDrop       bool
-	flagAgent      string // --agent: override primary agent name
-	flagEscalation string // --escalation-agent: override escalation agent name
-	flagLocal      bool   // --local: write to .milk/config.json (project-local)
-	flagGlobal     bool   // --global: write to ~/.milk/config.json (global)
+	flagEscalate     bool
+	flagPrimary      bool
+	flagNew          bool
+	flagSession      string
+	flagContinue     bool
+	flagList         bool
+	flagListAll      bool
+	flagDrop         bool
+	flagAgent        string // --agent: override primary agent name
+	flagEscalation   string // --escalation-agent: override escalation agent name
+	flagLocal        bool   // --local: write to .milk/config.json (project-local)
+	flagGlobal       bool   // --global: write to ~/.milk/config.json (global)
+	flagOutputFormat string // --output-format: text|json|stream-json for one-shot prompts
 )
 
 // Set via -ldflags at build time.
@@ -99,11 +101,13 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagDrop, "drop", false, "Delete the current session")
 	rootCmd.Flags().StringVar(&flagAgent, "agent", "", "Override primary agent (by name)")
 	rootCmd.Flags().StringVar(&flagEscalation, "escalation-agent", "", "Override escalation agent (by name)")
+	rootCmd.Flags().StringVar(&flagOutputFormat, "output-format", "text", "Output format for one-shot prompts: text|json|stream-json")
 
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(otelCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(eval.Command())
 }
 
@@ -161,8 +165,21 @@ func run(cmd *cobra.Command, args []string) error {
 		return runREPL(cfg, cwd, flagNew, flagSession, startupWarning)
 	}
 
+	// Validated here, before any session/agent setup, so a bad value never
+	// reaches session/router code and --output-format is a strict no-op for
+	// --list/--drop/REPL above (design doc §5).
+	fmtVal, err := parseOutputFormat(flagOutputFormat)
+	if err != nil {
+		return err
+	}
+
+	var warnings []string
+	if startupWarning != "" {
+		warnings = append(warnings, startupWarning)
+	}
 	for _, w := range config.Validate(cfg) {
 		fmt.Fprintf(os.Stderr, "%s config warning: %s\n", milkTag(), w)
+		warnings = append(warnings, w.String())
 	}
 
 	sess, err := loadSessionForRun(cwd)
@@ -230,6 +247,31 @@ func run(cmd *cobra.Command, args []string) error {
 	targetLabel := string(target)
 	sourceLabel := turnSourceLabel(flagEscalate, flagPrimary)
 
+	// out/onResponse are the --output-format taps: text mode keeps the exact
+	// pre-existing code path (os.Stdout, all four trailing args nil below);
+	// json/stream-json discard the raw passthrough (stdout becomes
+	// events-only per design §8.3) and capture the final text via onResponse
+	// instead — see outputformat.go and this file's status note in
+	// docs/machine-readable-output-design.md for scope.
+	out := io.Writer(os.Stdout)
+	var enc *streamjson.Encoder
+	var onResponse func(string)
+	var lastText string
+	if fmtVal != formatText {
+		out = io.Discard
+		onResponse = func(text string) {
+			lastText = text
+			if fmtVal == formatStreamJSON {
+				emit(enc, buildAssistantEvent(sess.ID, text))
+			}
+		}
+	}
+	if fmtVal == formatStreamJSON {
+		enc = streamjson.NewEncoder(os.Stdout)
+		emit(enc, buildInitEvent(sess.ID, cwd, cfg, decision, target, warnings))
+	}
+
+	before := sess.TokensSnapshot()
 	turnStart := time.Now()
 	var turnErr error
 	switch target {
@@ -240,14 +282,27 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, os.Stdout, nil, nil, nil, nil)
+		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, out, nil, onResponse, nil, nil)
 	case router.TargetEscalation:
 		// onWorkflowStart is nil: single-prompt CLI mode has no bubbletea
 		// model to launch a workflow against — see runPrimaryWithSession's
 		// doc comment on the same parameter.
-		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, os.Stdout, nil, nil, nil, nil)
+		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, out, nil, onResponse, nil, nil)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
+	}
+	durationMS := time.Since(turnStart).Milliseconds()
+
+	if fmtVal != formatText {
+		resEv := buildResultEvent(sess.ID, target, turnErr, lastText, durationMS, before, sess.TokensSnapshot())
+		switch fmtVal {
+		case formatStreamJSON:
+			emit(enc, resEv)
+		case formatJSON:
+			resEv.TS = nowTS()
+			b, _ := json.MarshalIndent(resEv, "", "  ") //nolint:errcheck // Event always marshals
+			os.Stdout.Write(append(b, '\n'))            //nolint:errcheck // stdout write
+		}
 	}
 
 	obs.Inc(ctx, milkScope, "milk.turns.total",

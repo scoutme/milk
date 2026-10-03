@@ -182,18 +182,19 @@ func GenerateNonce() string {
 type StreamOpts struct {
 	OnPermission PermissionHandler
 	// OnToolUse is called as soon as Claude begins a tool call (content_block_start
-	// with type=tool_use). The tool name is passed; called from the stream goroutine.
-	OnToolUse func(name string)
+	// with type=tool_use). id is the block's tool_use id, stable across the
+	// use/result pair; called from the stream goroutine.
+	OnToolUse func(id, name string)
 	// OnToolUseReady is called when a tool call block is complete (content_block_stop)
 	// and the full input map is available. Supersedes OnToolUse when params are needed.
-	OnToolUseReady func(name string, input map[string]any)
+	OnToolUseReady func(id, name string, input map[string]any)
 	// OnThinking is called for each thinking_delta token. The caller is responsible
 	// for any formatting (e.g. dimming). Called from the stream goroutine.
 	OnThinking func(text string)
 	// OnToolResult is called when a tool_result block arrives for a previously
-	// registered tool_use (see toolRegistry). name is resolved from the
+	// registered tool_use (see toolRegistry). id/name are resolved from the
 	// registry; result is the plain-text content of the block, untruncated.
-	OnToolResult func(name, result string, isError bool)
+	OnToolResult func(id, name, result string, isError bool)
 	// OnResponseSegment is called with each contiguous chunk of assistant text
 	// as it completes — once right before each tool call starts, and once more
 	// for the trailing text when the stream ends. Concatenating every segment
@@ -321,10 +322,10 @@ func Stream(r io.Reader, out io.Writer, stdinW io.Writer, opts StreamOpts) (Pars
 // eventCallbacks groups the optional callbacks passed to applyEvent.
 type eventCallbacks struct {
 	onPermission      PermissionHandler
-	onToolUse         func(string)
-	onToolUseReady    func(string, map[string]any)
+	onToolUse         func(id, name string)
+	onToolUseReady    func(id, name string, input map[string]any)
 	onThinking        func(string)
-	onToolResult      func(name, result string, isError bool)
+	onToolResult      func(id, name, result string, isError bool)
 	onResponseSegment func(string)
 	// toolRegistry accumulates tool_use id→{name,input} during streaming so that
 	// type:"user" tool_result lines with "Stream closed" can be correlated.
@@ -440,7 +441,7 @@ func applyUserMessage(res *ParseResult, raw []byte, cb eventCallbacks) {
 			if name == "" {
 				name = "tool"
 			}
-			cb.onToolResult(name, contentBlockText(block.Content), block.IsError)
+			cb.onToolResult(block.ToolUseID, name, contentBlockText(block.Content), block.IsError)
 		}
 		if dir := parseWorkflowTranscriptDir(block.Content); dir != "" {
 			res.HasPendingWorkflow = true
@@ -562,7 +563,7 @@ func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer,
 		if wrapper.Event.ContentBlock.Type == "tool_use" && wrapper.Event.ContentBlock.Name != "" {
 			flushResponseSegment(res, textBuf, cb)
 			if cb.onToolUse != nil {
-				cb.onToolUse(wrapper.Event.ContentBlock.Name)
+				cb.onToolUse(wrapper.Event.ContentBlock.ID, wrapper.Event.ContentBlock.Name)
 			}
 			toolBlock.id = wrapper.Event.ContentBlock.ID
 			toolBlock.name = wrapper.Event.ContentBlock.Name
@@ -580,7 +581,7 @@ func applyStreamEvent(res *ParseResult, textBuf *strings.Builder, out io.Writer,
 				json.Unmarshal([]byte(s), &input) //nolint:errcheck
 			}
 			if cb.onToolUseReady != nil {
-				cb.onToolUseReady(toolBlock.name, input)
+				cb.onToolUseReady(toolBlock.id, toolBlock.name, input)
 			}
 			// Register in the per-turn registry so type:"user" stream-closed results can correlate.
 			if cb.toolRegistry != nil && toolBlock.id != "" {

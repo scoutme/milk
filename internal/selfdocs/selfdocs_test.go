@@ -1,6 +1,7 @@
 package selfdocs
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -43,9 +44,33 @@ func TestSlugify(t *testing.T) {
 }
 
 func TestLookup_KnownAliasesResolve(t *testing.T) {
-	for _, topic := range []string{"mcp add", "mcp assign", "agent add", "mcp auth", "context window", "models.dev", "multi-value parameters", "tab completion"} {
+	for _, topic := range []string{"mcp add", "mcp assign", "agent add", "mcp auth", "context window", "models.dev", "multi-value parameters", "tab completion", "machine-readable-output", "stream-json", "output-format", "acp", "serve --acp"} {
 		if _, ok := Lookup(topic); !ok {
 			t.Errorf("Lookup(%q) = not found, want a resolved section from the real embedded docs", topic)
+		}
+	}
+}
+
+// TestLookup_MachineReadableOutputTopic pins the `machine-readable-output`
+// topic registered against docs/tooling.md's "Machine-readable output"
+// section: it must mirror that section's contractual surface — the CLI flags,
+// the ACP entry point, the JSON Schema link and the design §6 reference — so
+// an agent looking up the topic gets the machine contract, not a stub.
+func TestLookup_MachineReadableOutputTopic(t *testing.T) {
+	body, ok := Lookup("machine-readable-output")
+	if !ok {
+		t.Fatal(`Lookup("machine-readable-output") = not found`)
+	}
+	for _, want := range []string{
+		"milk serve --acp",
+		"--output-format stream-json",
+		"--permission-mode",
+		"--allow-tool",
+		"schema/stream-json.schema.json",
+		"0050-batch-stream-json-contract.md",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("machine-readable-output topic body missing %q", want)
 		}
 	}
 }
@@ -85,5 +110,8 @@ func TestTopics_IncludesAliasesAndHeadings(t *testing.T) {
 	}
 	if !found {
 		t.Error(`expected "mcp-add" alias in Topics()`)
+	}
+	if !slices.Contains(topics, "machine-readable-output") {
+		t.Error(`expected "machine-readable-output" topic in Topics()`)
 	}
 }

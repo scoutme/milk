@@ -47,3 +47,5 @@
 * [45. Local Project-Level Config Overrides (.milk/)](0045-local-config-overrides.md)
 * [47. Live-Attach View for Background Jobs and Workflows](0047-live-background-transcript-view.md)
 * [48. Notification Toasts: Displaced, Timestamped, Dismissable Events](0048-notification-toasts.md)
+* [49. Machine-Readable Wire Contract: ACP v2 Embedding + Batch JSONL](0049-machine-readable-wire-contract.md)
+* [50. Batch `stream-json` JSONL Contract (§6 Catalog + §8.3 Conventions)](0050-batch-stream-json-contract.md)

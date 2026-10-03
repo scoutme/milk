@@ -572,12 +572,12 @@ func (r *cliRunner) Execute(
 	var askBuf bytes.Buffer
 	sw := &switchWriter{target: out}
 	prevOnToolUse := agent.OnToolUseCallback()
-	agent = agent.WithOnToolUse(func(name string) {
+	agent = agent.WithOnToolUse(func(id, name string) {
 		if name == "AskUserQuestion" {
 			sw.redirectTo(&askBuf)
 		}
 		if prevOnToolUse != nil {
-			prevOnToolUse(name)
+			prevOnToolUse(id, name)
 		}
 	})
 
@@ -593,7 +593,7 @@ func (r *cliRunner) Execute(
 			// user inline, and fall back to a fresh RunFirst with full context.
 			askBuf.Reset()
 			sw.redirectTo(out)
-			fmt.Fprintf(out, "\n\033[2m[Claude session refreshed — previous session no longer available]\033[0m\n\n")
+			fmt.Fprintf(out, "\n%s\n\n", dim("[Claude session refreshed — previous session no longer available]"))
 			sess.LastLocalSummaryInjected = prevSummaryInjected
 			staticCtx = buildStatic(escalation.ContextModeFirst, true)
 			dynamicCtx = buildDynamic(escalation.ContextModeFirst)
@@ -656,7 +656,7 @@ func (r *cliRunner) Execute(
 	// the poll and the resume both use a fresh context derived from the session
 	// root (no deadline) that only cancels on explicit user interruption (Ctrl+C).
 	for res.HasPendingWorkflow && sessionID != "" {
-		fmt.Fprintf(out, "\n\033[2m[workflow running]\033[0m\n")
+		fmt.Fprintf(out, "\n%s\n", dim("[workflow running]"))
 		pollCtx, pollCancel := withoutDeadline(ctx)
 		err := waitForWorkflowResult(pollCtx, res.PendingWorkflowDir)
 		pollCancel()

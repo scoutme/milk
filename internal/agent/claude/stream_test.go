@@ -242,7 +242,7 @@ func TestStream_OnToolUseCallback(t *testing.T) {
 	)
 	var out strings.Builder
 	Stream(strings.NewReader(input), &out, nil, StreamOpts{ //nolint:errcheck
-		OnToolUse: func(name string) { got = append(got, name) },
+		OnToolUse: func(id, name string) { got = append(got, name) },
 	})
 	if len(got) != 1 || got[0] != "Bash" {
 		t.Errorf("OnToolUse: want [Bash], got %v", got)

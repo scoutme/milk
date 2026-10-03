@@ -7,12 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/scoutme/milk/internal/config"
 )
+
+// indexMu guards index.json's read-modify-write cycle (loadIndex→upsertIndex→
+// saveIndex) in Save. Harmless with one session per process (the only case
+// that existed before milk serve --acp); a real lost-update race once
+// concurrent sessions in one process call Save at the end of every turn.
+var indexMu sync.Mutex
 
 // NeedExpiryDuration is the wall-clock duration after which a CurrentNeed is
 // considered stale and cleared on session resume. Default: 24 hours.
@@ -173,6 +180,8 @@ func Save(s *Session) error {
 		return err
 	}
 
+	indexMu.Lock()
+	defer indexMu.Unlock()
 	idx, err := loadIndex()
 	if err != nil {
 		return err
@@ -251,6 +260,8 @@ func Drop(id, cwd string) error {
 		return err
 	}
 
+	indexMu.Lock()
+	defer indexMu.Unlock()
 	idx, err := loadIndex()
 	if err != nil {
 		return err

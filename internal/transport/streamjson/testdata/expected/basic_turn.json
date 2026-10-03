@@ -1,0 +1,8 @@
+{
+  "response": "I'll check the file.",
+  "tokens": { "input_tokens": 1234, "output_tokens": 567, "cache_read": 8000, "cache_create": 200 },
+  "tool_calls": [],
+  "is_error": false,
+  "stop_reason": "end_turn",
+  "num_turns": 1
+}

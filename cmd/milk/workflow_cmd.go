@@ -392,6 +392,26 @@ func (m model) applyGenericWorkflowReconfigure(w *workflowWizardState) (tea.Mode
 // launchGenericWorkflow resolves agents, builds runners, and starts the
 // interpreter-driven workflow goroutine for any registered definition.
 func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
+	// Refuse a second concurrent fresh launch: without this, start_workflow's
+	// tool-driven path (cmd/milk/repl.go's startWorkflowFromToolMsg) has no
+	// equivalent of the /workflow slash commands' workflow.CurrentWorkflowID
+	// check, so a model that calls the tool again while a workflow is still
+	// running would start a second interp.Runner goroutine racing the first
+	// one over the single m.workflowState/m.cancelTurn/m.busy fields. A
+	// resume/reconfigure/extend of the *same* run (w.resuming) is unaffected.
+	if !w.resuming && m.workflowRunning {
+		running := "a workflow"
+		if m.workflowState != nil && m.workflowState.WorkflowName != "" {
+			running = fmt.Sprintf("workflow %q (role: %s)", m.workflowState.WorkflowName, m.workflowState.Role)
+		}
+		m.appendTranscript(milkTag() + fmt.Sprintf(
+			" %s is already running — ignoring request to start %q; check /workflow status or /workflow clear it first\n",
+			running, w.name,
+		))
+		m.refreshPrompt()
+		return m, nil
+	}
+
 	cfg := m.st.cfg
 	sess := m.st.sess
 	send := func(msg tea.Msg) { m.st.program.Send(msg) }
@@ -466,6 +486,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 
 	m.autoOpenPanel(regionWorkflow)
 	m.busy = true
+	m.workflowRunning = true
 	m.spinnerFrame = 0
 	m.lastWorkflowActivity = time.Now()
 	m.workflowTimeoutWarned = false

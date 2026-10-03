@@ -295,3 +295,64 @@ Attachment data is never stored verbatim. The session records a compact placehol
 | `.json`, `.yaml`, `.toml`, `.html`, `.css` | Various text | Fenced block in prompt |
 | `.pdf` | `application/pdf` | Binary notice only |
 | Other | `text/plain` (default) | Fenced block in prompt |
+
+---
+
+## Machine-readable output
+
+milk can present itself to machines two ways: a long-lived ACP v2 agent
+server for editor embedding (`milk serve --acp`), and a one-shot batch event
+stream for CI/scripts (`--output-format stream-json|json`). Both are **real,
+shipped, and narrower than the full design** — the wire contract's full
+target shape is ratified in [ADR-0049](adr/0049-machine-readable-wire-contract.md)
+and [ADR-0050](adr/0050-batch-stream-json-contract.md), and the complete
+normative catalog lives in [docs/machine-readable-output-design.md](machine-readable-output-design.md)
+— but what's actually implemented today is a deliberately scoped subset of
+that catalog, documented precisely (not aspirationally) in two places:
+
+- **[docs/acp-integration.md](acp-integration.md)** — `milk serve --acp`:
+  which of the 4 real methods work, which of the rest return a plain
+  JSON-RPC "method not found," the permission-handling caveat (local-provider
+  agents only), and a worked example exchange. Read this, not the design
+  doc, if you're integrating an editor against milk right now.
+- **Batch mode, below** — `--output-format stream-json|json`.
+
+```
+milk serve --acp                                  # ACP v2 agent server on stdio (editor embedding)
+milk [flags] "prompt" --output-format stream-json  # batch event stream (CI/scripts/log pipelines)
+milk [flags] "prompt" --output-format json         # single terminal-result document
+milk [flags] "prompt"                              # --output-format text (default, unchanged)
+```
+
+- **`--output-format text`** — current behavior byte-for-byte, unchanged.
+  Interactive TUI mode ignores `--output-format` entirely.
+- **`--output-format stream-json`** — exactly **three** lines on stdout per
+  run, in order: one `system`/`init` event, one completed `assistant`
+  message (the whole response text — **not** token-level deltas; there is no
+  `stream_event`/partial-message emission in batch mode today), and one
+  terminal `result` event. `--output-format json` is that same `result`
+  event alone, as a single `json.MarshalIndent`-ed document.
+- Nothing else in the full §6 event catalog is emitted in batch mode: no
+  `stream_event` partial deltas, no `tool_use`/`tool_result` events (tool
+  calls happen, just not reported on this wire — see the eval harness's
+  `tool_calls: 0` caveat in [docs/eval.md](eval.md) if you rely on this),
+  no `system` subtypes beyond `init` (no `agent_switch`, `route`,
+  `notification`, `warning`, `state`, `task_*`, `memory`, `commands`,
+  `config_option`, `permission_denied`, `error`). `system/init` itself omits
+  `tools` and `mcp_servers` — nothing at the CLI boundary enumerates them
+  cheaply yet.
+- `--permission-mode`/`--allow-tool`/`--no-partial-messages` flags described
+  in the design doc **do not exist** on the CLI — batch mode has no
+  permission-prompt wiring at all today; a tool needing interactive
+  confirmation is handled per the agent's own existing default (see
+  [docs/acp-integration.md](acp-integration.md)'s permission caveat, which
+  applies here too).
+- What *is* locked and accurate: **snake_case fields** throughout
+  (`input_tokens`, `cache_read`, `is_error`, `session_id`), a `type`
+  discriminator per line (`subtype` for the `system`/`result` families, all
+  open-set), **stdout = events only, stderr = prose** (`[milk]` warnings
+  stay on stderr, never mirrored into a stdout event yet), exactly one
+  terminal `result` per run, and no ANSI escapes ever on this wire. The
+  machine-checkable schema for the three real line shapes is
+  [`docs/schema/stream-json.schema.json`](schema/stream-json.schema.json)
+  (golden fixtures under `internal/transport/streamjson/testdata/`).

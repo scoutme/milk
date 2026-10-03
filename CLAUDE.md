@@ -11,6 +11,7 @@ Switch models, not context. Routes prompts between a local LLM (any OpenAI-compa
 - [docs/operations.md](docs/operations.md) — memory usage, observability, loop detection, task tracking, remote oversight
 - [docs/spec.md](docs/spec.md) — architecture and CLI reference
 - [docs/eval.md](docs/eval.md) — `milk eval` usage: commands, scenario format, adapters and their per-adapter options, judging, reports
+- [docs/acp-integration.md](docs/acp-integration.md) — `milk serve --acp`: what's actually implemented today (not the full design), example JSON-RPC exchange, known gaps
 - [docs/adr/README.md](docs/adr/README.md) — architecture decision records (why things are the way they are)
 - [docs/branching-strategy.md](docs/branching-strategy.md) — branch naming, conventional commits, per-step branch plan
 
@@ -25,6 +26,13 @@ cmd/milk/interactive.go       # slash commands, tab completion, prompt label
 cmd/milk/ansi.go              # ANSI color helpers and spinner
 cmd/milk/panel_memory.go      # right-side memory panel (open by default, toggle /panel memory)
 cmd/milk/attach.go            # TUI attach view: swap main transcript for a background job's/workflow's internal/livebuf.Buffer (ADR-0047)
+cmd/milk/outputformat.go      # --output-format text|json|stream-json builders, wired in main.go's run()
+cmd/milk/serve.go             # `milk serve --acp` cobra command
+cmd/milk/acp_server.go        # ACP method dispatch (initialize/session/new/prompt/cancel) — see docs/acp-integration.md
+cmd/milk/acp_session.go       # per-ACP-session state + turn dispatch, mirrors repl.go's buildTUIAgents
+cmd/milk/host_acp.go          # events.Host adapter over ACP (local-provider agents only)
+internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json
+internal/transport/acp/       # ACP v2 wire vocabulary + stdio.go's JSON-RPC transport (StdioConn)
 internal/config/              # config loading (~/.milk/config.json)
 internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)

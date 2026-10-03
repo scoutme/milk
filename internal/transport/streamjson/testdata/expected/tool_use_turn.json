@@ -1,0 +1,10 @@
+{
+  "response": "go.mod declares module example.com/t.",
+  "tokens": { "input_tokens": 2234, "output_tokens": 767, "cache_read": 8000, "cache_create": 200 },
+  "tool_calls": [
+    { "name": "read_file", "args": "{\"path\":\"go.mod\"}", "result": "38 lines" }
+  ],
+  "is_error": false,
+  "stop_reason": "end_turn",
+  "num_turns": 2
+}

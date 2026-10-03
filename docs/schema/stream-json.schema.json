@@ -1,0 +1,763 @@
+{
+  "$defs": {
+    "agent_info": {
+      "additionalProperties": false,
+      "properties": {
+        "context_window_tokens": {
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "command": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "content_block": {
+      "additionalProperties": false,
+      "properties": {
+        "_meta": {
+          "description": "free-form JSON object (host/implementation metadata)"
+        },
+        "content": {
+          "description": "free-form tool result payload (tool_result)"
+        },
+        "extension": {
+          "description": "free-form JSON object (provider detail — never new modeled keys)"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "description": "free-form tool arguments (tool_use)"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "thinking": {
+          "description": "reasoning preserved verbatim per ADR-0042",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "type": "string"
+        },
+        "type": {
+          "description": "text | thinking | tool_use | tool_result (open set)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "delta": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "thinking": {
+          "type": "string"
+        },
+        "type": {
+          "description": "text_delta | thinking_delta (open set)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "additionalProperties": false,
+      "properties": {
+        "_meta": {
+          "description": "reserved _meta field: host/implementation metadata (also the only other home for provider detail)"
+        },
+        "agent": {
+          "description": "dual-form: the AgentInfo object on system/init lines; a role label string (primary | escalation) on assistant/user lines",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/agent_info"
+            }
+          ]
+        },
+        "body": {
+          "type": "string"
+        },
+        "capabilities": {
+          "description": "open-set strings (known: stream_v1, partial_messages_v1, tasks_v1, workflows_v1) — tolerate unknown values",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "category": {
+          "type": "string"
+        },
+        "command_hint": {
+          "type": "string"
+        },
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/command"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "escalation_agent": {
+          "$ref": "#/$defs/agent_info"
+        },
+        "event": {
+          "$ref": "#/$defs/stream_payload"
+        },
+        "extension": {
+          "description": "reserved extension point: the ONLY home for provider-specific detail"
+        },
+        "finished_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "from": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_error": {
+          "description": "boolean contract: true when the run failed (execution error, max turns, interruption); present on every result line",
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/mcpserver"
+          },
+          "type": "array"
+        },
+        "message": {
+          "description": "dual-form: a string on system/error lines; the Message object on assistant/user lines",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/message"
+            }
+          ]
+        },
+        "milk_version": {
+          "type": "string"
+        },
+        "model_usage": {
+          "additionalProperties": {
+            "$ref": "#/$defs/usage"
+          },
+          "description": "per-model token rollups, keyed by model name",
+          "type": "object"
+        },
+        "num_turns": {
+          "type": "integer"
+        },
+        "op": {
+          "type": "string"
+        },
+        "option": {
+          "type": "string"
+        },
+        "parent_tool_use_id": {
+          "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
+          "type": "string"
+        },
+        "percept_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "string"
+        },
+        "route": {
+          "$ref": "#/$defs/route_decision"
+        },
+        "route_history": {
+          "items": {
+            "$ref": "#/$defs/route_hop"
+          },
+          "type": "array"
+        },
+        "running_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "seq": {
+          "description": "monotonic per run (gap-tolerant consumers can detect dropped lines on relays)",
+          "type": "integer"
+        },
+        "session_id": {
+          "description": "milk session id (sess_...)",
+          "type": "string"
+        },
+        "session_state": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "stop_reason": {
+          "description": "open set (known: end_turn, max_turns, refusal, cancelled, error)",
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "subtype": {
+          "description": "system family: init | agent_switch | route | notification | warning | state | task_started | task_progress | task_notification | background_tasks_changed | memory | commands | config_option | permission_denied | error; result family: success | error_during_execution | error_max_turns | interrupted | refused (open sets — ignore unrecognized values)",
+          "type": "string"
+        },
+        "task": {
+          "description": "free-form task payload (workflow stage node, live-buffer chunk, ...) — tool/provider detail belongs here or in extension/_meta"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_use_result": {
+          "description": "free-form structured tool summary (path, is_error, summary)"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "total_cost_usd": {
+          "description": "reserved — emitted only once milk has a pricing table"
+        },
+        "ts": {
+          "description": "RFC 3339 timestamp",
+          "type": "string"
+        },
+        "type": {
+          "description": "line discriminator — system | stream_event | assistant | user | result (open set: ignore unknown values)",
+          "type": "string"
+        },
+        "usage": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/usage"
+            }
+          ],
+          "description": "aggregate per-run token accounting"
+        },
+        "value": {
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "seq",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "mcpserver": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "message": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "items": {
+            "$ref": "#/$defs/content_block"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "type": "object"
+    },
+    "route_decision": {
+      "additionalProperties": false,
+      "properties": {
+        "conclusive": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "route_hop": {
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "turn": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "target"
+      ],
+      "type": "object"
+    },
+    "stream_payload": {
+      "additionalProperties": false,
+      "properties": {
+        "_meta": {
+          "description": "free-form JSON object (host/implementation metadata)"
+        },
+        "delta": {
+          "$ref": "#/$defs/delta"
+        },
+        "extension": {
+          "description": "free-form JSON object (provider detail — never new modeled keys)"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "partial_json": {
+          "description": "progressive tool-argument fragment (AI SDK-style delta framing; consumers concatenate, no partial-JSON reassembly)",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "type": "string"
+        },
+        "type": {
+          "description": "content_block_delta | tool_args_delta (open set)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "usage": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_creation": {
+          "description": "milk's snake_case token-cache key (session store + eval reports) — kept as-is rather than Anthropic's cache_creation_input_tokens (design §6.4)",
+          "type": "integer"
+        },
+        "cache_read": {
+          "description": "milk's snake_case token-cache key (session store + eval reports) — kept as-is rather than Anthropic's cache_read_input_tokens (design §6.4)",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read",
+        "cache_creation"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/scoutme/milk/docs/schema/stream-json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Validates ONE line of milk's batch machine-readable output stream\n(milk \"prompt\" --output-format stream-json), the JSONL wire ratified in\nADR-0049 and locked in detail by docs/machine-readable-output-design.md §6\n(event catalog) and §8.3 (batch conventions).\n\nFraming rules the schema cannot express (enforced by the golden-file contract\nsuite in internal/transport/streamjson): one UTF-8 JSON object per line with\none trailing newline and nothing else on stdout; system/init first; exactly\none terminal result last; monotonic seq per run; never any ANSI escapes;\nprovider detail confined to the extension/_meta reserved fields (or free-form\npayloads such as tool_use.input and tool_use_result).\n\nConventions: snake_case fields; a \"type\" discriminator per line plus \"subtype\"\nfor the system/result families; open-set enums everywhere — this schema\ndocuments known values in descriptions but does not constrain them, and\nconsumers must ignore values they don't recognize (result subtype known set:\nsuccess | error_during_execution | error_max_turns | interrupted | refused,\nwith is_error as the boolean contract — a refusal is a completed turn and\nreports is_error false). usage.cache_read / usage.cache_creation are milk's\nexisting snake_case token-cache keys (session store + eval reports), kept\nas-is rather than Anthropic's cache_read_input_tokens so one vocabulary spans\nsession files, eval reports, MilkEvent and this stream.\n\nEvolution is additive-only within capability stream_v1; any shape change\nrequires a superseding ADR.",
+  "oneOf": [
+    {
+      "description": "lifecycle/meta lines: system/init first, then agent_switch | route | notification | warning | state | task_started | task_progress | task_notification | background_tasks_changed | memory | commands | config_option | permission_denied | error (open set)",
+      "properties": {
+        "type": {
+          "const": "system"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "partial deltas (partial_messages_v1): content_block_delta or tool_args_delta",
+      "properties": {
+        "type": {
+          "const": "stream_event"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "completed assistant message blocks (text | thinking | tool_use)",
+      "properties": {
+        "type": {
+          "const": "assistant"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "tool_result blocks + tool_use_result summary",
+      "properties": {
+        "type": {
+          "const": "user"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "exactly one terminal line per run",
+      "properties": {
+        "type": {
+          "const": "result"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "properties": {
+    "_meta": {
+      "description": "reserved _meta field: host/implementation metadata (also the only other home for provider detail)"
+    },
+    "agent": {
+      "description": "dual-form: the AgentInfo object on system/init lines; a role label string (primary | escalation) on assistant/user lines",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/agent_info"
+        }
+      ]
+    },
+    "body": {
+      "type": "string"
+    },
+    "capabilities": {
+      "description": "open-set strings (known: stream_v1, partial_messages_v1, tasks_v1, workflows_v1) — tolerate unknown values",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "category": {
+      "type": "string"
+    },
+    "command_hint": {
+      "type": "string"
+    },
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/command"
+      },
+      "type": "array"
+    },
+    "count": {
+      "type": "integer"
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "type": "integer"
+    },
+    "escalation_agent": {
+      "$ref": "#/$defs/agent_info"
+    },
+    "event": {
+      "$ref": "#/$defs/stream_payload"
+    },
+    "extension": {
+      "description": "reserved extension point: the ONLY home for provider-specific detail"
+    },
+    "finished_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "from": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "is_error": {
+      "description": "boolean contract: true when the run failed (execution error, max turns, interruption); present on every result line",
+      "type": "boolean"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "limit": {
+      "type": "integer"
+    },
+    "mcp_servers": {
+      "items": {
+        "$ref": "#/$defs/mcpserver"
+      },
+      "type": "array"
+    },
+    "message": {
+      "description": "dual-form: a string on system/error lines; the Message object on assistant/user lines",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/message"
+        }
+      ]
+    },
+    "milk_version": {
+      "type": "string"
+    },
+    "model_usage": {
+      "additionalProperties": {
+        "$ref": "#/$defs/usage"
+      },
+      "description": "per-model token rollups, keyed by model name",
+      "type": "object"
+    },
+    "num_turns": {
+      "type": "integer"
+    },
+    "op": {
+      "type": "string"
+    },
+    "option": {
+      "type": "string"
+    },
+    "parent_tool_use_id": {
+      "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
+      "type": "string"
+    },
+    "percept_id": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "recoverable": {
+      "type": "boolean"
+    },
+    "result": {
+      "type": "string"
+    },
+    "route": {
+      "$ref": "#/$defs/route_decision"
+    },
+    "route_history": {
+      "items": {
+        "$ref": "#/$defs/route_hop"
+      },
+      "type": "array"
+    },
+    "running_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "seq": {
+      "description": "monotonic per run (gap-tolerant consumers can detect dropped lines on relays)",
+      "type": "integer"
+    },
+    "session_id": {
+      "description": "milk session id (sess_...)",
+      "type": "string"
+    },
+    "session_state": {
+      "type": "string"
+    },
+    "severity": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "stop_reason": {
+      "description": "open set (known: end_turn, max_turns, refusal, cancelled, error)",
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "subtype": {
+      "description": "system family: init | agent_switch | route | notification | warning | state | task_started | task_progress | task_notification | background_tasks_changed | memory | commands | config_option | permission_denied | error; result family: success | error_during_execution | error_max_turns | interrupted | refused (open sets — ignore unrecognized values)",
+      "type": "string"
+    },
+    "task": {
+      "description": "free-form task payload (workflow stage node, live-buffer chunk, ...) — tool/provider detail belongs here or in extension/_meta"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "to": {
+      "type": "string"
+    },
+    "tool": {
+      "type": "string"
+    },
+    "tool_use_result": {
+      "description": "free-form structured tool summary (path, is_error, summary)"
+    },
+    "tools": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "total_cost_usd": {
+      "description": "reserved — emitted only once milk has a pricing table"
+    },
+    "ts": {
+      "description": "RFC 3339 timestamp",
+      "type": "string"
+    },
+    "type": {
+      "description": "line discriminator — system | stream_event | assistant | user | result (open set: ignore unknown values)",
+      "type": "string"
+    },
+    "usage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/usage"
+        }
+      ],
+      "description": "aggregate per-run token accounting"
+    },
+    "value": {
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "type",
+    "session_id",
+    "seq",
+    "ts"
+  ],
+  "title": "milk machine-readable output stream v1 — one stream-json line (stream_v1)",
+  "type": "object"
+}

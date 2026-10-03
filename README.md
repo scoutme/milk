@@ -38,6 +38,8 @@ Requires Go 1.21+. See [docs/getting-started.md](docs/getting-started.md) for wh
 
 **Measure** — token usage by role (`/usage`), OpenTelemetry file exporters (`/metrics`, `/otel`), and `milk eval` — run the same scenarios against different agents and compare LLM-judged quality, tokens, cache efficiency, and latency side-by-side.
 
+**Embed** — `milk serve --acp` runs milk as a long-lived [Agent Client Protocol](https://agentclientprotocol.com) v2 agent an editor can spawn and drive over JSON-RPC; `--output-format json|stream-json` gives one-shot prompts a machine-readable alternative to the TUI for scripts and CI. See [docs/acp-integration.md](docs/acp-integration.md) for exactly what's implemented today.
+
 ## Backends
 
 Both the primary and escalation roles support any of these backends — there is no backend tied exclusively to one role:

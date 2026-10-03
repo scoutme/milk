@@ -156,7 +156,13 @@ A second failure class sits *before* the permission-prompt handler: Claude Code'
 ```
 milk                          # interactive REPL mode
 milk [flags] <prompt>         # single-prompt mode
+milk [flags] <prompt> --output-format json|stream-json  # machine-readable single-prompt mode
+milk serve --acp              # long-lived ACP v2 agent server (editor embedding)
 ```
+
+`--output-format` and `milk serve --acp` are machine-readable output
+surfaces — see [docs/tooling.md — Machine-readable output](tooling.md#machine-readable-output)
+and, for ACP integration specifically, [docs/acp-integration.md](acp-integration.md).
 
 ### Interactive mode
 
@@ -246,6 +252,7 @@ Same commands on the CLI as `milk config`, `milk config init`, `milk config open
 | `--list` | List sessions for current cwd |
 | `--list --all` | List all sessions across all directories |
 | `--drop` | Delete current session |
+| `--output-format text\|json\|stream-json` | Single-prompt mode only (ignored by the REPL); `text` (default) is unchanged, `json`/`stream-json` emit machine-readable output — see [docs/tooling.md](tooling.md#machine-readable-output) |
 
 ---
 

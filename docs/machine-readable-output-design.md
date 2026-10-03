@@ -1,9 +1,135 @@
 # editor embedding & machine-readable output (ACP + `stream-json`) — design proposal
 
-> **Status: PROPOSAL — not implemented.** Target: an ADR once the wire
-> contract is ratified. This doc answers: *how should `milk` present itself to
-> a machine — rich enough that an editor (or any external UI) can host it and
-> reach parity with the TUI without embedding it?*
+> **Status: RATIFIED — the wire contract is locked in
+> [ADR-0049](adr/0049-machine-readable-wire-contract.md)** (ACP v2 as the
+> embedding wire; batch JSONL §6/§8.3 as the locked batch contract; §8.2
+> normalization-at-model-layer; the `MarshalIndent` whole-document rule).
+> Implementation proceeds per §11 phasing — the contract below holds
+> regardless of which phase is in flight. This doc answers: *how should `milk`
+> present itself to a machine — rich enough that an editor (or any external
+> UI) can host it and reach parity with the TUI without embedding it?*
+>
+> **Status note (phase 4b — contract hardening, docs, eval):** the batch
+> contract is additionally locked in [ADR-0050](adr/0050-batch-stream-json-contract.md)
+> (§6 catalog + §8.3 conventions, additive-only within `stream_v1`, superseding
+> ADR required for shape changes) with its machine-checkable form —
+> [docs/schema/stream-json.schema.json](schema/stream-json.schema.json) and the
+> golden recordings under `internal/transport/streamjson/testdata/` — and a
+> real consumer: `eval/adapter_milk.go` spawns `milk --output-format
+> stream-json` and decodes it via `streamjson.Decoder`. The typed event model
+> + JSONL encoder/decoder live in `internal/transport/streamjson`; the ACP v2
+> payload vocabulary lives in `internal/transport/acp`, now with a real
+> JSON-RPC stdio loop (`milk serve --acp` — see the Phase 2 status note
+> below). This note records status only — the contract below is unchanged.
+>
+> **Status note (phase 4 — `--output-format` CLI wiring):** `text|json|
+> stream-json` landed (`cmd/milk/outputformat.go`, wired in `main.go`'s
+> one-shot `run()`), narrower than full §6 fidelity — see this note for what's
+> real vs. deferred. `text` is the exact pre-existing code path, provably
+> unchanged (no edits to `dispatch.go`/`runner.go`). `json`/`stream-json`
+> emit `system/init` first and a terminal `result` always last; the only
+> content event is one completed `assistant` message per turn (via the
+> existing `onResponse` tap). Deferred, not faked: `tool_use`/`tool_result`
+> events (`local.Agent`'s and `claude.Agent`'s tool-use callbacks don't expose
+> a stable tool-call ID today — a real API gap in two agent packages, not
+> `cmd/milk` plumbing; **accepted cost: every `stream-json` eval run reports
+> `tool_calls: 0` until that lands**, even for tool-heavy turns); `stream_event`
+> partial deltas (`OnResponseSegment`'s real contract is "once per tool call
+> boundary," not token-level streaming — wiring it in would overclaim
+> `partial_messages_v1`, so `capabilities` only ever advertises `stream_v1`);
+> `system/agent_switch` and multi-hop `route_history` (no role-aware signal
+> distinguishes primary's own response from one forwarded through a mid-run
+> self-escalation hand-off — `route_history` stays single-hop, `num_turns:1`,
+> `assistant.agent` is omitted rather than risked); `Tools`, `MCPServers`,
+> `system/state` (no cheap call site enumerates them at the `main.go`
+> boundary; both are optional on the wire and the eval adapter already
+> tolerates their absence). One accepted, intentional behavior change: a few
+> `fmt.Fprintf(out, ...)` diagnostic lines in `dispatch.go` (transient-retry,
+> self-escalation, unsupported-workflow notices) go silent under `json`/
+> `stream-json` since `out` becomes `io.Discard` — correct per §8.3 (stdout is
+> events-only), not a bug.
+>
+> **Status note (phase 1 — Host interface + internal/events):** landed
+> narrower than this doc's own §11 Phase 1 bullet reads literally, for
+> concrete reasons found while implementing it — see the Phase 1 plan's
+> rationale (preserved in git history on the branch this landed on) for the
+> full list. In short: `internal/events` (`internal/events/host.go`) ships
+> minimal — just the `Host` interface and its four methods' payload types,
+> not the §6 content-event catalog, which has no consumer yet. `Host` is
+> implemented by `cmd/milk/host_tui.go`'s `tuiHost`, wrapping the TUI's
+> existing `tuiInputReader`/`m.notify` machinery unchanged. Exactly one
+> production call site is migrated (`makeLocalPermAsk`, the local-agent
+> permission ask) — every other permission/elicitation call site
+> (`makeTUIPermissionHandler`, `makePermissionHandler`,
+> `buildAskUserQuestionAnswers`) stays on its current path, since those are
+> protocol handlers for claude-cli's own control-request wire format (one
+> racing a live remote-oversight call), not host-presentation calls; forcing
+> them through `Host` now would mean rewriting daily-exercised logic with no
+> immediate payoff. `Host.State` is wired to nothing — `m.busy` alone is not a
+> clean running/idle signal (at least 4 overlapping gates exist, plus
+> `WorkflowQuestionsMsg` sets `busy=false` while actually awaiting input), so
+> getting the classification right is deferred as real design work, not
+> extraction. None of the 22 existing toast (`m.notify`) call sites are
+> migrated — they're synchronous on bubbletea's `Update()` call stack and no
+> engine/goroutine code emits a toast today, so there's no real caller to
+> prove an async migration against yet. `internal/transport/streamjson` and
+> `internal/transport/acp` are untouched. The ANSI-literal fix (`internal/ansi`,
+> new package) covers exactly the four `\033[...]` literal sites §11's Phase 1
+> bullet names (`cmd/milk/runner.go:596,659`, `internal/agent/local/
+> local.go`'s `⚙ calling agent` literal and its now-deleted duplicate
+> `dimWrap`) — not the broader "~10 direct `fmt.Fprint` call sites" catalog in
+> §8.2, which is plain prose output with no ANSI, and belongs to Phase 4.
+>
+> **Status note (phase 2 — `milk serve --acp` core):** landed —
+> `internal/transport/acp/lifecycle.go` (the inbound `initialize`/
+> `session/new`/`session/prompt`/`session/cancel` structs, field names
+> verified against the upstream `agentclientprotocol/agent-client-protocol`
+> schema/v2, not guessed from this doc's own prose tables — one real
+> correction found that way: `PromptResponse` carries only `messageId`, never
+> `stopReason`, which rides on a `state_update` notification instead) and
+> `internal/transport/acp/stdio.go` (`StdioConn`: a real JSON-RPC 2.0
+> transport over any reader/writer, concurrent-in-flight-safe, each incoming
+> request dispatched to its own goroutine — required because `session/
+> prompt`'s response is held open for the whole turn per the upstream schema,
+> so a second session's `session/new` must never stall behind it).
+> `cmd/milk/host_acp.go` adapts `events.Host` (Phase 1) onto `acp.ACPHost` for
+> **local-provider agents only**; claude-cli-as-escalation gets no new wiring
+> and stays on its existing `denyAllHandler` default — its own control-request
+> wire format is a separate protocol, out of scope here. Tool-call identity
+> (`tool_call_update`) uses the *real* ids both agent packages already
+> compute and previously discarded (`local.Agent`'s `toolCall.ID`, `claude.
+> Agent`'s `ContentBlock.ID`) — threaded through widened callback signatures,
+> not a synthetic FIFO-ordered id, which turned out to be unsafe for both
+> providers (local-agent's result order is call-order only by incidental
+> implementation choice; claude-cli's tool execution order is opaque to milk
+> entirely). `AgentCapabilities.Session` is advertised as the upstream
+> schema's monolithic baseline (there's no finer-grained flag covering only
+> new/prompt/cancel/update) — `session/list|resume|close` calls get the
+> standard JSON-RPC "method not found" error (`acp.MethodNotFoundError`,
+> -32601), the correct way to say "not implemented yet," not a capability
+> lie. Deferred, unchanged from the design's own catalog: `auth/*`,
+> `session/list|resume|delete|close`, `session/set_config_option` dispatch
+> (`ConfigState` already exists, stays unwired), `elicitation/create` wiring,
+> `plan_update`/workflow mapping, `terminal_update`, the `milk/*`
+> `ExtNotification` channels, `available_commands_update`. One fix to shared
+> code this required: `internal/session/store.go`'s `Save`/`Drop` did an
+> unsynchronized read-modify-write of the shared `index.json` — harmless with
+> one session per process (true until now), a real lost-update race once
+> `milk serve --acp` runs concurrent sessions; fixed with a package-level
+> mutex, purely additive. Verified end-to-end against the real compiled
+> binary (`cmd/milk/serve_acp_e2e_test.go`, mirroring `eval/adapter_milk.go`'s
+> subprocess pattern) since no real ACP client (Zed, a VS Code adapter, etc.)
+> is available in this environment or vendored in the repo — the single-
+> session round trip and the "unknown method" error path are both 100%
+> reliable; a third test proving two sessions never block each other is
+> opt-in (`MILK_ACP_E2E_STRESS=1`) because real-subprocess scheduling in this
+> sandboxed environment made it ~25% flaky — the same property is proven
+> deterministically and race-clean twice over by other means (`internal/
+> transport/acp/stdio_test.go`'s concurrent-request tests at the transport
+> layer, and an in-process-only variant hitting `acpServer` directly that
+> completed in 5-9ms across 15/15 runs with zero failures), isolating the
+> flakiness to the subprocess+OS-pipe layer in this sandbox, not to milk's
+> own concurrency.
 >
 > **Scope decision (recorded):** the primary target is **editor embedding** —
 > milk as a managed agent inside an editor ("GitHub Copilot inside VS Code" is
@@ -42,7 +168,6 @@ To reach TUI parity an external host must reconstruct, live:
 | notification toasts (ADR-0048) | turn-unrelated notifications with command hints + history |
 | task panel (F2) / background agents (F3) / workflows (F4) | task lifecycle, live buffers, stage progress |
 | permission prompts (ADR-0013/0015) | **bidirectional**: request/response with the user |
-| wish/willing confirmations | **bidirectional**: structured user input |
 | memory panel (F1) | percept/current-need records written during the turn |
 | input completion | slash commands + tool names |
 | routing decisions | which agent won and why |
@@ -378,7 +503,7 @@ map (authoritative names from `schema/v2/meta.json`):
 | `system/commands` | `available_commands_update` (`availableCommands`, `TextCommandInput.hint`) | milk's slash commands become editor input completion, natively |
 | `system/config_option` | `config_option_update` + client calls `session/set_config_option` | `/think on|off`, `/agent switch`, `/model` as `SessionConfigOption`s (v2 replaced v1's `session/set_mode`) |
 | permission prompt (ADR-0013 suggestions) | `session/request_permission` (`title`, `description`, `subject` = tool call or command, `options[]` with `PermissionOptionKind` `allow_once|allow_always|reject_once|reject_always`) → outcome `selected(optionId)|cancelled` | maps field-for-field onto milk's structured permission records |
-| wish/willing confirmations, "keep wish alive or mark fulfilled" | `elicitation/create` (form/select schema: `ElicitationSchema`, `EnumOption`, `MultiSelectItems`) → `elicitation/complete` | ACP's structured-input mechanism; no custom dialog protocol needed |
+| structured user input prompts | `elicitation/create` (form/select schema: `ElicitationSchema`, `EnumOption`, `MultiSelectItems`) → `elicitation/complete` | ACP's structured-input mechanism; no custom dialog protocol needed |
 | interrupt | `session/cancel` (client→agent) | aborts the in-flight turn; terminal update carries `stopReason: cancelled`/`cancelled` |
 | PTY pane (ADR-0047-ish process output) | `terminal_update` + `terminal_output_chunk` (agent-owned terminals, v2) | v2's terminal model is agent-owned: milk runs the PTYs and streams output — exactly milk's `internal/livebuf` + `cmd/milk/attach.go` shape |
 | `result` (§6.4) | `session/prompt` response (`messageId`) + terminal `state_update` (`idle`, `stopReason`) + `usage_update` | v2 ends turns via state, not a result blob; `usage_update` carries `used`/`size` (context window) + `cost` (`amount`,`currency`) — milk maps `cache_read`→used-context accounting and emits `cost` only when a pricing table exists |
@@ -398,7 +523,7 @@ Coverage map (batch mode §6 forms in parentheses):
 | tasks/background agents/workflows | `tool_call_update` tree + `plan_update` (`task_*`, `background_tasks_changed`) | none |
 | live-attach view (ADR-0047) | `tool_call_content_chunk`, `terminal_output_chunk` (`task_progress`) | none |
 | permission prompts | `session/request_permission` (`--permission-mode` flags in batch) | none |
-| wish/willing prompts | `elicitation/create` (batch: not applicable) | none |
+| structured input prompts | `elicitation/create` (batch: not applicable) | none |
 | memory panel | `milk/memory` (`system/memory`) | none |
 | input completion | `available_commands_update` (`system/commands`) | none |
 | input history, selection/copy, welcome screen | — | intentionally out of scope (client chrome, not agent state) |
@@ -431,7 +556,7 @@ milk's interactive surfaces are currently TUI-shaped calls sprinkled through
 type Host interface {
     Notify(Event)                              // toasts, warnings, route, memory…
     RequestPermission(PermissionRequest) (PermissionOutcome, error)  // ADR-0013/0015
-    Elicit(ElicitationRequest) (ElicitationResult, error)            // wish/willing prompts
+    Elicit(ElicitationRequest) (ElicitationResult, error)            // structured input prompts
     State(StateUpdate)                         // running/idle/requires_action
 }
 ```
@@ -444,9 +569,9 @@ type Host interface {
 
 Concretely this extracts from `cmd/milk`: the permission prompt path
 (`main.go:859` writes a prompt to `os.Stdout` — becomes `Host.RequestPermission`),
-toast dispatch (ADR-0048), wish/willing confirmations, and the status-bar data
-feed. The turn loop, router, dispatch, agents and memory stay untouched above
-the interface.
+toast dispatch (ADR-0048), structured user-input prompts, and the status-bar
+data feed. The turn loop, router, dispatch, agents and memory stay untouched
+above the interface.
 
 ### 8.2 One emitter, zero direct writes
 
@@ -550,7 +675,7 @@ Provider normalization (applies to all transports once, at the model layer):
 3. **Phase 3 — parity surface.** `plan_update` (workflows → F4),
    background-agent tool trees + `tool_call_content_chunk` (F3/attach),
    `terminal_update|terminal_output_chunk` (PTY pane), `elicitation/create`
-   (wish/willing), `available_commands_update` + `session/set_config_option`
+   (structured input), `available_commands_update` + `session/set_config_option`
    (slash commands, `/think`, `/agent switch`, `/model`), `ExtNotification`s
    (toasts, warnings, memory, route), `session_info_update._meta`.
 4. **Phase 4 — batch mode + contract hardening.**
