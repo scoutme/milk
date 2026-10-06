@@ -141,6 +141,17 @@ func (m *model) refreshSessionScopedState(oldSessionID string) error {
 	}
 
 	if dir, err := config.Dir(); err == nil {
+		// Re-point background-job persistence at the new session's jobs file
+		// (ADR-0043 triage). SetStateFile is otherwise only called with the
+		// startup session's ID (repl.go's Manager construction; acp_features.go
+		// does its own per-session equivalent), so without this every job
+		// spawned after /new, /clear or /drop would keep persisting under the
+		// *previous* session's file and the new session's triage record would
+		// never appear. Jobs spawned before the swap keep their own file — see
+		// internal/agent/local's persistLocked per-job attribution.
+		if m.agents.backgroundMgr != nil && m.st.sess.ID != "" {
+			m.agents.backgroundMgr.SetStateFile(filepath.Join(dir, "jobs", m.st.sess.ID+".json"))
+		}
 		taskStore, taskErr := tasks.New(filepath.Join(dir, "tasks"), m.st.sess.ID)
 		if taskErr != nil {
 			return taskErr
