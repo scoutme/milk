@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -87,5 +90,62 @@ func TestHandleSlashInputClearAliasesNew(t *testing.T) {
 	vars, ok := cmdVariants["/clear"]
 	if !ok || len(vars) == 0 {
 		t.Fatalf("expected /clear variants derived from help text, got %#v", vars)
+	}
+}
+
+// TestHandleSlashInputNewRepointsBackgroundJobStateFile covers the session-
+// swap persistence bug: the background Manager's job state file is wired once
+// with the startup session's ID (repl.go's Manager construction), so without a
+// re-point in refreshSessionScopedState every job spawned after /new, /clear
+// or /drop kept persisting under the *previous* session's ~/.milk/jobs file
+// and the new session's triage record never appeared.
+func TestHandleSlashInputNewRepointsBackgroundJobStateFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	oldSess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobsDir := filepath.Join(os.Getenv("HOME"), ".milk", "jobs")
+	mgr := local.NewManager(context.Background(), 2)
+	mgr.SetStateFile(filepath.Join(jobsDir, oldSess.ID+".json")) // repl.go's startup wiring
+	st := &interactiveState{sess: oldSess, cwd: "/repo", notifier: oversight.Noop{}}
+	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
+
+	updated, _ := m.handleSlashInput("/new", "")
+	if updated == nil {
+		t.Fatal("expected a model back from /new")
+	}
+	newSessID := st.sess.ID
+	if newSessID == oldSess.ID {
+		t.Fatal("expected /new to replace active session")
+	}
+
+	// A job spawned after the swap must persist under the NEW session's file.
+	done := make(chan *local.Job, 1)
+	mgr.SetOnDone(func(j *local.Job) { done <- j })
+	mgr.Spawn("post-swap", "t", "primary", "m",
+		func(context.Context, string, io.Writer) (string, session.TokenUsage, error) {
+			return "ok", session.TokenUsage{}, nil
+		})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-swap job never finished")
+	}
+
+	newRecs, err := local.LoadJobs(filepath.Join(jobsDir, newSessID+".json"))
+	if err != nil {
+		t.Fatalf("LoadJobs(new session file): %v", err)
+	}
+	if len(newRecs) != 1 || newRecs[0].Label != "post-swap" || newRecs[0].Status != local.JobCompleted {
+		t.Fatalf("new session's job file = %+v, want exactly one completed post-swap job", newRecs)
+	}
+	oldRecs, err := local.LoadJobs(filepath.Join(jobsDir, oldSess.ID+".json"))
+	if err != nil {
+		t.Fatalf("LoadJobs(old session file): %v", err)
+	}
+	if len(oldRecs) != 0 {
+		t.Fatalf("old session's job file still holds post-swap records: %+v", oldRecs)
 	}
 }

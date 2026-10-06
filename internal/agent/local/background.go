@@ -45,6 +45,13 @@ type Job struct {
 	// a last-known liveness timestamp on disk — the difference between "stuck"
 	// and "was still alive when milk died" during triage.
 	LastAliveAt time.Time
+	// stateFile snapshots the Manager's state-file path at Spawn (see
+	// jobstore.go's persistLocked): a job's records keep persisting to the
+	// session that spawned it even when the Manager is later re-pointed at a
+	// new session's file (the TUI's /new, /clear and /drop). Empty when no
+	// state file was configured at Spawn; not persisted (jobstore.go's
+	// jobRecord lists its fields explicitly).
+	stateFile string
 	// Live accumulates this job's streamed tool-loop output (see
 	// internal/livebuf) for the TUI's attach view (ADR-0047), kept off the
 	// parent conversation's transcript/status bar exactly like the rest of a
@@ -233,6 +240,7 @@ func (m *Manager) Spawn(label, task, role, model string, run JobRun) *Job {
 		StartedAt:   time.Now(),
 		LastAliveAt: time.Now(),
 		Live:        livebuf.New(0),
+		stateFile:   m.stateFile,
 	}
 	m.jobs[job.ID] = job
 	m.persistLocked()

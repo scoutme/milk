@@ -34,44 +34,74 @@ type jobRecord struct {
 }
 
 // jobStateFile is the full on-disk document written by persistLocked — one
-// per milk session (see SetStateFile's path convention), rewritten
-// atomically on every state change.
+// per milk session (see SetStateFile's path convention and persistLocked's
+// per-job attribution), rewritten atomically on every state change to that
+// session's jobs.
 type jobStateFile struct {
 	UpdatedAt time.Time   `json:"updated_at"`
 	Jobs      []jobRecord `json:"jobs"`
 }
 
-// persistLocked writes the full job registry to m.stateFile as JSON, via a
-// temp file + rename so a kill mid-write can never leave a torn document —
-// triage either finds the previous consistent state or the new one. Best
-// effort by design: a persistence failure (read-only home, full disk) must
-// never fail the job itself, so errors are logged at debug and swallowed.
+// persistLocked writes every job's record to its own state file as JSON, via
+// a temp file + rename so a kill mid-write can never leave a torn document —
+// triage either finds the previous consistent state or the new one.
+//
+// Each job belongs to the state file that was current when it was Spawned
+// (Job.stateFile; jobs spawned before any file was configured follow the
+// current one), so a mid-run SetStateFile re-point — the TUI does exactly this
+// on /new, /clear and /drop, when a fresh session takes over — never drags
+// already-spawned jobs across sessions: an in-flight job keeps updating the
+// old session's file (which would otherwise freeze mid-run, a state
+// LoadJobs reads as "milk died mid-job") while new jobs land in the new
+// session's file. One document is written per distinct file, containing just
+// that session's jobs; the currently-configured file is always written, even
+// empty, so SetStateFile eagerly creates it.
+//
+// Best effort by design: a persistence failure (read-only home, full disk)
+// must never fail the job itself, so errors are logged at debug and swallowed.
 // No-op when no state file is configured. Callers must hold m.mu.
 func (m *Manager) persistLocked() {
-	if m.stateFile == "" {
-		return
-	}
-	recs := make([]jobRecord, 0, len(m.jobs))
+	byFile := map[string][]jobRecord{}
 	for _, j := range m.jobs {
-		recs = append(recs, newJobRecord(j))
+		path := j.stateFile
+		if path == "" {
+			path = m.stateFile
+		}
+		if path == "" {
+			continue
+		}
+		byFile[path] = append(byFile[path], newJobRecord(j))
 	}
-	sort.Slice(recs, func(i, k int) bool { return recs[i].StartedAt.Before(recs[k].StartedAt) })
+	if m.stateFile != "" {
+		if _, ok := byFile[m.stateFile]; !ok {
+			byFile[m.stateFile] = []jobRecord{}
+		}
+	}
+	for path, recs := range byFile {
+		sort.Slice(recs, func(i, k int) bool { return recs[i].StartedAt.Before(recs[k].StartedAt) })
+		writeJobStateFile(path, recs)
+	}
+}
+
+// writeJobStateFile atomically rewrites one per-session job document (see
+// persistLocked). Callers must hold m.mu.
+func writeJobStateFile(path string, recs []jobRecord) {
 	data, err := json.MarshalIndent(jobStateFile{UpdatedAt: time.Now(), Jobs: recs}, "", "  ")
 	if err != nil {
-		obs.Debug("job state marshal failed", "path", m.stateFile, "err", err)
+		obs.Debug("job state marshal failed", "path", path, "err", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0o700); err != nil {
-		obs.Debug("job state mkdir failed", "path", m.stateFile, "err", err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		obs.Debug("job state mkdir failed", "path", path, "err", err)
 		return
 	}
-	tmp := m.stateFile + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		obs.Debug("job state write failed", "path", m.stateFile, "err", err)
+		obs.Debug("job state write failed", "path", path, "err", err)
 		return
 	}
-	if err := os.Rename(tmp, m.stateFile); err != nil {
-		obs.Debug("job state rename failed", "path", m.stateFile, "err", err)
+	if err := os.Rename(tmp, path); err != nil {
+		obs.Debug("job state rename failed", "path", path, "err", err)
 	}
 }
 

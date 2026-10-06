@@ -39,6 +39,8 @@ cmd/milk/acp_signals.go       # ACP: route announcements and loop/consumption wa
 cmd/milk/turn_routing.go      # host-independent routing core (pins, single-turn flags, availability fallback, auto-sticky, turn metrics) shared by TUI runTurn and ACP
 cmd/milk/workflow_core.go     # host-independent workflow launch plan, saved-workflow lookup and clear, shared by TUI and ACP
 cmd/milk/followup_core.go     # host-independent rules for when finished background jobs trigger a follow-up turn, shared by TUI and ACP
+cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, config commit) shared by TUI handleInitWizardKey and ACP pendingInit
+cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json
 internal/transport/acp/       # ACP v2 wire vocabulary + stdio.go's JSON-RPC transport (StdioConn)
 internal/config/              # config loading (~/.milk/config.json)
