@@ -78,6 +78,12 @@ type acpSession struct {
 	localAgent    *local.Agent
 	escLocalAgent *local.Agent
 
+	// pendingInit is the /config init (/init) setup wizard: while set, the
+	// next client prompt is consumed as the wizard's next answer instead of
+	// being routed to a model (see runTurn and initwizard_core.go). Only
+	// touched under turnMu, like the rest of prompt handling.
+	pendingInit *initWizardState
+
 	// v1Client: the client speaks ACP v1, which lacks v2's plan_update and
 	// tool_call_content_chunk (see notifyPlan, streamLive).
 	v1Client  bool
@@ -95,16 +101,6 @@ type acpSession struct {
 // conn.Notify/Mapper call.
 func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id acp.SessionID) (*acpSession, error) {
 	cwd := sess.CWD
-	ctx := context.Background()
-
-	primaryRunner, localAgent, err := buildPrimaryRunner(ctx, cfg, cwd, sess)
-	if err != nil {
-		return nil, fmt.Errorf("building primary agent: %w", err)
-	}
-	escalationRunner, err := buildEscalationRunner(ctx, cfg, cwd, sess)
-	if err != nil {
-		return nil, fmt.Errorf("building escalation agent: %w", err)
-	}
 
 	memDir, err := memoryDir()
 	if err != nil {
@@ -129,13 +125,49 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 	as.loop = loop.New(cfg.LoopDetectionCfg())
 	as.cliPC = permContext{cwd: cwd, toolFutures: map[string]chan string{}}
 	as.setupTasks()
-	as.setupBackground(localAgent != nil || isLocalRunner(escalationRunner))
+	if err := as.buildRunners(cfg); err != nil {
+		return nil, err
+	}
+	return as, nil
+}
+
+// buildRunners (re)builds the session's primary/escalation runners from cfg
+// and (re)wires everything that hangs off them — the ACP analogue of the TUI's
+// buildTUIAgents/commitSwitchAgent live-rebuild path. newACPSession calls it
+// once at session creation; acpConfig's /config init commit calls it again so
+// an ACP-only setup (an editor driving milk with no TUI in the loop) switches
+// to the configured agent without restarting the session. cfg/st.cfg are only
+// swapped after the new runners build, so a failure leaves the session on its
+// previous working config.
+func (as *acpSession) buildRunners(cfg config.Config) error {
+	cwd := as.st.cwd
+	ctx := context.Background()
+
+	primaryRunner, localAgent, err := buildPrimaryRunner(ctx, cfg, cwd, as.sess)
+	if err != nil {
+		return fmt.Errorf("building primary agent: %w", err)
+	}
+	escalationRunner, err := buildEscalationRunner(ctx, cfg, cwd, as.sess)
+	if err != nil {
+		return fmt.Errorf("building escalation agent: %w", err)
+	}
+
+	// Publish the new config before the steps below (setupBackground reads it).
+	as.cfg = cfg
+	as.st.cfg = cfg
+
+	// The background-job manager is created once per session (ADR-0043);
+	// a rebuild only needs to create it if this is the first config with a
+	// local agent that could run jobs at all.
+	if as.mgr == nil {
+		as.setupBackground(localAgent != nil || isLocalRunner(escalationRunner))
+	}
 
 	// wireLocal applies everything an ACP session adds to a local-provider agent.
 	wireLocal := func(a *local.Agent) *local.Agent {
 		permStore, _ := local.OpenPermStore(cwd) //nolint:errcheck // nil disables persistent grants, same as every other best-effort call site
 		wired := a.
-			WithPermissions(permStore, makeLocalPermAsk(host, permStore)).
+			WithPermissions(permStore, makeLocalPermAsk(as.host, permStore)).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
 			WithOnToolUse(as.onLocalToolUse).
@@ -153,8 +185,11 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 	if localAgent != nil {
 		as.localAgent = wireLocal(localAgent)
 		primaryRunner = newLocalRunner(as.localAgent, primaryRunner.Name())
+	} else {
+		as.localAgent = nil
 	}
 
+	as.escLocalAgent = nil
 	switch er := escalationRunner.(type) {
 	case *cliRunner:
 		// No WithPermissionHandler call, and a non-nil empty toolFutures so
@@ -177,16 +212,19 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 
 	as.primaryRunner = primaryRunner
 	as.escalationRunner = escalationRunner
-	as.da = &dispatchAgents{
-		primary:         primaryRunner,
-		escalation:      escalationRunner,
-		local:           as.localAgent,
-		escalationLocal: as.escLocalAgent,
-		localAvail:      primaryRunner != nil,
-		escalationAvail: escalationRunner != nil,
-		backgroundMgr:   as.mgr,
+	if as.da == nil {
+		as.da = &dispatchAgents{}
 	}
-	return as, nil
+	// Update the dispatch set in place so lazily-built per-session maps on it
+	// (toolRunners, MCP toolsets) survive a config reload.
+	as.da.primary = primaryRunner
+	as.da.escalation = escalationRunner
+	as.da.local = as.localAgent
+	as.da.escalationLocal = as.escLocalAgent
+	as.da.localAvail = primaryRunner != nil
+	as.da.escalationAvail = escalationRunner != nil
+	as.da.backgroundMgr = as.mgr
+	return nil
 }
 
 // notify sends a session/update notification for this session.
@@ -318,7 +356,52 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	onResponse := say
 	turn := &acpTurn{ctx: turnCtx, as: as, say: say}
 
+	// A pending /config init wizard consumes this prompt as its next answer
+	// (ACP's handleInitWizardKey analogue — one answer per session/prompt).
+	// Escape hatches, since ACP has no esc key: any recognized slash command
+	// cancels the wizard and runs instead, and a plain cancel word aborts it.
+	// Background follow-ups are synthetic and never wizard input.
+	wizardCancelNote := ""
+	if as.pendingInit != nil && prompt != backgroundFollowupPrompt {
+		if _, _, found := extractSlashCommand(prompt); found {
+			as.pendingInit = nil
+			if !initWizardRestartPrompt(prompt) {
+				wizardCancelNote = stripANSI(milkTag()) + " setup wizard cancelled — restart with /config init\n\n"
+			}
+		} else if initWizardCancelWord(prompt) {
+			as.pendingInit = nil
+			say(stripANSI(milkTag() + " setup wizard cancelled\n"))
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		} else {
+			res := initWizardApply(as.pendingInit, prompt, initWizardOpts{
+				NumAgents:       len(as.st.cfg.Agents),
+				OfferOpenEditor: false,
+			})
+			if res.Committed != nil {
+				// Save already happened inside the wizard; rebuild this
+				// session's runners so the next prompt actually uses the
+				// agent the user just configured — no restart needed.
+				if err := as.buildRunners(*res.Committed); err != nil {
+					res.Output += "\n" + milkTag() + " config saved, but this session could not reload it (" +
+						err.Error() + ") — new sessions will pick it up\n"
+				}
+			}
+			if res.Done {
+				as.pendingInit = nil
+			}
+			if res.Output != "" {
+				say(stripANSI(res.Output))
+			}
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		}
+	}
+
 	if handled, output, dispatch := as.runSlashCommand(turn, prompt); handled {
+		if wizardCancelNote != "" {
+			output = wizardCancelNote + output
+		}
 		if output != "" {
 			say(output)
 		}

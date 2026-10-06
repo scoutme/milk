@@ -43,6 +43,7 @@ const cmdColorize = "/colorize"
 const cmdThink = "/think"
 const cmdSetup = "/setup"
 const cmdConfig = "/config"
+const cmdInit = "/init"
 const cmdOpen = "/open"
 const cmdMCP = "/mcp"
 const cmdUpdate = "/update"
@@ -52,7 +53,7 @@ const cmdBg = "/bg"
 const cmdNotifications = "/notifications"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash, cmdBg, cmdNotifications,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdInit, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash, cmdBg, cmdNotifications,
 	"/new", "/clear", "/drop", "/list", "/help", "/exit", "/quit",
 }
 
@@ -226,8 +227,10 @@ const interactiveHelp = `
 
 ── Setup ─────────────────────────────────────────────────────────────────
   /config                print the current config (~/.milk/config.json)
+  /config show           print the merged config tagged [global]/[local]/[default]
   /config init           run the setup wizard (configure primary + escalation agents)
   /config open           open config in $EDITOR / system default editor
+  /init                  alias for /config init — run the setup wizard
   /reload                re-parse config.json immediately (same as the auto-watcher)
   /open <file>           open any file in $EDITOR (agent can also call the open_file tool)
   /setup telegram        configure Telegram remote oversight interactively
@@ -588,6 +591,10 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// Handled in repl.go (needs model state). No-op here.
 	case cmdConfig:
 		// Handled in repl.go (needs model state and config path). No-op here.
+	case cmdInit:
+		// /init is an alias for /config init; the TUI intercepts it in
+		// handleSlashInput (commands.go) before it reaches here. Guard to
+		// prevent "unknown command" output.
 	case cmdOpen:
 		// Handled in repl.go (needs tea.ExecProcess). No-op here.
 	case cmdAttach:

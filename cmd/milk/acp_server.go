@@ -119,7 +119,17 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 	}
 	id := acp.SessionID(sess.ID)
 
-	as, err := newACPSession(s.cfg, sess, s.conn, id)
+	// Re-read the config from disk: a serve process outlives any single
+	// session, and /config init (or an external editor) may have rewritten
+	// the config since startup — a session created afterwards must see it,
+	// not the startup snapshot. Fall back to the startup config when the
+	// file can't be read.
+	cfg := s.cfg
+	if fresh, err := config.LoadMerged(); err == nil {
+		cfg = fresh
+	}
+
+	as, err := newACPSession(cfg, sess, s.conn, id)
 	if err != nil {
 		return nil, fmt.Errorf("session/new: %w", err)
 	}

@@ -36,7 +36,7 @@ milk serve --acp
 | `session/prompt` | client → agent | ✅ real |
 | `session/cancel` | client → agent (notification) | ✅ real |
 | `session/update` (`state_update`) | agent → client | ✅ real: `running` at turn start, `idle` at turn end |
-| `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity, no refresh — `milk serve --acp` has no config reload) |
+| `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity; the list itself is static for the process, while the config it may edit is re-read from disk at `session/new` — see "The setup wizard" below) |
 | `session/update` (`agent_message_chunk`) | agent → client | ✅ real, but **one per completed turn, not per token** — see caveat below |
 | `session/update` (`tool_call_update`) | agent → client | ✅ real, for both the local-provider and claude-cli-escalation paths |
 | `session/request_permission` | agent → client | ✅ real, but **local-provider agents only** — see caveat below |
@@ -67,6 +67,10 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/list` | list sessions for the working directory |
 | `/skip-permissions [on\|off]` | approve every tool call without asking (seeded from `dangerously_skip_permissions`, like the TUI) |
 | `/think [on\|off]` | show or hide `agent_thought_chunk` updates for this session (default on, as before, unless `show_reasoning` is set to false) |
+| `/config` | print the merged config as fenced JSON |
+| `/config show` | the same, annotated per field `[global]`/`[local]`/`[default]` |
+| `/config open` | open the config file: launches the platform file opener (`xdg-open` / `open` / `start`) detached on the machine milk runs on and reports exactly what happened — an ACP agent is headless and never launches an interactive editor itself; when no opener is available it says so and falls back to the config path(s) for the client's editor |
+| `/config init`, `/init` | run the interactive setup wizard (see below) |
 | `/agent [list]` | list configured agents (switching is TUI-only) |
 | `/tasks`, `/task done <id>` | list / complete tasks (session and global) |
 | `/bg [list\|start <task>\|stop <id>]` | list, start or stop background agents |
@@ -75,11 +79,35 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/help` | list the above |
 
 TUI-only commands (`/panel`, `/colorize`, `/paste`, `/attach`, `/mcp`,
-`/config`, `/reload`, `/new`, `/workflow reconfigure`,
+`/reload`, `/new`, `/workflow reconfigure`,
 `/task add`, …) are **not** advertised. If sent anyway they get a "only available in the
 milk TUI" reply instead of reaching the model. Text that merely mentions a
 command mid-sentence is an ordinary prompt. Routing pins from `/escalate` and
 `/primary` are per ACP session.
+
+### The setup wizard
+
+`/config init` (or its `/init` alias) runs the same guided first-run wizard
+the TUI runs, driven entirely over ACP — the whole point being that someone
+who only ever meets milk through their editor can configure it:
+
+- **One prompt per answer.** The wizard banner and first question come back
+  as the command's `agent_message_chunk`; every following `session/prompt` is
+  consumed as that step's answer (validation errors re-prompt the same step,
+  exactly as in the TUI) until the wizard finishes with the config written
+  and a completion summary. While the wizard is pending, answers are *not*
+  sent to the model.
+- **Escape hatches** (the TUI cancels with esc, which ACP doesn't have): a
+  plain `cancel` / `quit` / `abort` answer aborts the wizard, and any
+  recognized slash command cancels it first, then runs — so `/help` mid-wizard
+  works. Re-sending `/config init` restarts it.
+- **No restart needed.** When the wizard commits, the session rebuilds its
+  primary/escalation runners from the freshly written config, so the very next
+  prompt uses the agent that was just configured. Sessions created afterwards
+  get the new config too: `session/new` re-reads the config from disk rather
+  than the server's startup snapshot.
+- **No editor question.** The TUI's trailing "open config in editor now?" is
+  skipped — `/config open` answers with the path for the client's editor.
 
 ## Workflows, tasks and background agents
 
@@ -298,14 +326,16 @@ design doc:
 ## Shared with the TUI
 
 ACP and the TUI run the same turn loop (`runPrimary` / `runEscalation`) and
-the same workflow engine. They also share three host-independent cores, so a
-rule changed in one shows up in the other: **routing** (`turn_routing.go` —
+the same workflow engine. They also share host-independent cores, so a rule
+changed in one shows up in the other: **routing** (`turn_routing.go` —
 pins, single-turn `/escalate` and `/primary`, availability fallback,
 auto-sticky escalation after the router first escalates, turn metrics),
-**workflow launch/resume/clear** (`workflow_core.go`), and **when a background
-follow-up turn runs** (`followup_core.go`). Each host still does its own
-channel work: wiring agents to its output, deciding whether a turn is running,
-and rendering progress.
+**workflow launch/resume/clear** (`workflow_core.go`), **when a background
+follow-up turn runs** (`followup_core.go`), the **setup wizard**
+(`initwizard_core.go` — step machine, validation, config commit) and the
+**config display** (`configview.go` — `/config` and `/config show`). Each
+host still does its own channel work: wiring agents to its output, deciding
+whether a turn is running, and rendering progress.
 
 ## For implementers extending this
 

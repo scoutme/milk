@@ -760,11 +760,13 @@ func copilotHostname(u string) string {
 
 // --- Init wizard ---
 
-// handleConfigInitCmd starts the /config init TUI wizard.
+// handleConfigInitCmd starts the /config init (/init) TUI wizard. The shared
+// core in initwizard_core.go owns the state and the banner+first prompt; the
+// TUI's per-Enter answer handling is handleInitWizardKey below.
 func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
-	m.pendingInit = &initWizardState{step: initStepName, escCLI: true}
-	m.appendTranscript(milkTag() + " setup wizard — configure primary and escalation agents\n\n" +
-		milkTag() + " primary agent name [local]: ")
+	st, banner := initWizardStart()
+	m.pendingInit = st
+	m.appendTranscript(banner)
 	m.ta.Reset()
 	return m, nil
 }
@@ -983,232 +985,34 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		m.appendTranscript(answer + "\n")
 
-		st := m.pendingInit
-		providerMap := map[string]string{
-			"1": "local", "2": "bedrock", "3": "bearer",
-			"4": "claude-cli", "5": "aider-cli", "6": "subprocess",
+		res := initWizardApply(m.pendingInit, answer, initWizardOpts{
+			NumAgents:       len(m.st.cfg.Agents),
+			OfferOpenEditor: true,
+		})
+		if res.Committed != nil {
+			// Apply the new config to the live state so the session picks
+			// it up immediately.
+			m.st.cfg = *res.Committed
+			m.hasInferenceAgent = res.Committed.HasInferenceAgent()
 		}
-
-		switch st.step {
-		case initStepName:
-			if answer == "" {
-				answer = "local"
-			}
-			st.primary.Name = answer
-
-		case initStepProvider:
-			if answer == "" {
-				answer = "1"
-			}
-			provider, ok := providerMap[answer]
-			if !ok {
-				m.appendTranscript(milkTag() + " invalid choice — enter 1–6\n" + initWizardPrompt(st))
-				return m, nil
-			}
-			st.primary.Provider = provider
-
-		case initStepURL:
-			if answer == "" {
-				m.appendTranscript(milkTag() + " URL is required\n" + initWizardPrompt(st))
-				return m, nil
-			}
-			st.primary.URL = answer
-			// GitHub Copilot: preset the standard headers automatically.
-			if isCopilotURL(answer) {
-				st.primary.Headers = map[string]string{
-					"Copilot-Integration-Id": "vscode-chat",
-					"Editor-Plugin-Version":  "copilot-chat/0.49.0",
-					"Editor-Version":         "vscode/1.121.0",
-					"X-GitHub-Api-Version":   "2026-01-09",
-				}
-				m.appendTranscript(dim("  (GitHub Copilot detected — headers preset automatically)\n"))
-			} else if isAzureURL(answer) {
-				m.appendTranscript(dim("  (Azure OpenAI detected — api-key header will be used)\n"))
-			}
-
-		case initStepChatPath:
-			if answer == "" {
-				// apply the suggested default shown in the prompt
-				if isCopilotURL(st.primary.URL) {
-					answer = "/chat/completions"
-				} else if isAzureURL(st.primary.URL) {
-					dep := azureDeployment(st.primary.URL)
-					if dep == "" {
-						dep = st.primary.Model
-					}
-					answer = "/deployments/" + dep + "/chat/completions"
-				} else {
-					answer = "/v1/chat/completions"
-				}
-			}
-			// Only store if non-standard to keep config minimal.
-			if answer != "/v1/chat/completions" {
-				st.primary.ChatPath = answer
-			}
-
-		case initStepModel:
-			if answer == "" && initWizardNeedsModel(st.primary.Provider) {
-				m.appendTranscript(milkTag() + " model name is required\n" + initWizardPrompt(st))
-				return m, nil
-			}
-			st.primary.Model = answer
-
-		case initStepAuth:
-			// Azure: store key in headers["api-key"], not as a Bearer token.
-			if answer != "" && isAzureURL(st.primary.URL) {
-				if st.primary.Headers == nil {
-					st.primary.Headers = map[string]string{}
-				}
-				st.primary.Headers["api-key"] = answer
-			} else {
-				st.primary.APIKey = answer
-			}
-			// blank → next step will be initStepTokenCmd (handled by nextStep logic)
-
-		case initStepRunCmd:
-			st.primary.RunCmd = answer // blank = not set (omitempty keeps config clean)
-
-		case initStepTokenCmd:
-			// blank → apply the suggested default shown in brackets
-			if answer == "" && isCopilotURL(st.primary.URL) {
-				host := copilotHostname(st.primary.URL)
-				if host != "" {
-					answer = "gh auth token --hostname " + host
-				} else {
-					answer = "gh auth token"
-				}
-			}
-			st.primary.TokenCmd = answer
-
-		case initStepAWSRegion:
-			if answer == "" {
-				m.appendTranscript(milkTag() + " AWS region is required for Bedrock\n" + initWizardPrompt(st))
-				return m, nil
-			}
-			st.primary.AWSRegion = answer
-
-		case initStepEscalation:
-			lower := strings.ToLower(answer)
-			st.escCLI = lower != "n" && lower != "no"
-
-		case initStepAgentTools:
-			// answer is a comma-separated list of agent names to enable as tools.
-			// Blank means skip. We record the choices; they will be applied in commitInitWizard.
-			if strings.TrimSpace(answer) != "" {
-				st.toolAgentNames = splitCommaNames(answer)
-			}
-
-		case initStepLimits:
-			v := 0
-			if answer == "" {
-				if catalogV, ok := modelsdev.Lookup(st.primary.Model); ok {
-					v = catalogV
-				}
-			} else if n, err := strconv.Atoi(answer); err == nil && n > 0 {
-				v = n
-			}
-			st.contextWindowTokens = v
-
-		case initStepOpenConfig:
+		if res.Output != "" {
+			m.appendTranscript(res.Output)
+		}
+		if res.Done {
 			m.pendingInit = nil
-			lower := strings.ToLower(answer)
-			if lower == "y" || lower == "yes" {
-				newM, _ := m.handleConfigOpenCmd()
-				m = newM.(model)
-			}
-			return m, nil
 		}
-
-		st.step = initWizardNextStep(st)
-		// Skip the agent-tools step when the config has only one agent
-		// (no peer agents to expose as tools yet).
-		if st.step == initStepAgentTools && len(m.st.cfg.Agents) <= 1 {
-			st.step = initStepOpenConfig
+		if res.OpenEditor {
+			// The ExecProcess cmd is discarded exactly as this wizard has
+			// always done it (/config open itself does return it).
+			newM, _ := m.handleConfigOpenCmd()
+			m = newM.(model)
 		}
-		if st.step == initStepOpenConfig {
-			// Write config before asking about opening editor.
-			m = m.commitInitWizard(st)
-		}
-		if st.step == initStepDone {
-			m.pendingInit = nil
-			return m, nil
-		}
-		m.appendTranscript(initWizardPrompt(st))
 		return m, nil
 	}
 	var cmd tea.Cmd
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
-}
-
-// commitInitWizard writes the config and shows next steps.
-func (m model) commitInitWizard(st *initWizardState) model {
-	var escalation *config.AgentConfig
-	if st.escCLI {
-		e := config.AgentConfig{Name: "claude", Provider: "claude-cli"}
-		escalation = &e
-	}
-	// message_budget_chars/max_tool_iterations are auto-derived from
-	// context_window_tokens by AgentMessageBudget/AgentContextWindowTokens —
-	// no separate AgentLimits needed here.
-	if st.contextWindowTokens > 0 {
-		st.primary.ContextWindowTokens = st.contextWindowTokens
-	}
-	cfg := config.InitConfig(st.primary, escalation)
-	// Add tool-agent entries from wizard step.
-	for _, name := range st.toolAgentNames {
-		if strings.EqualFold(name, st.primary.Name) {
-			continue // skip self-reference
-		}
-		cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
-			Agent:       name,
-			Description: "Specialist agent. Describe its capabilities here.",
-		})
-	}
-	if err := saveLocalOrGlobal(cfg); err != nil {
-		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
-		return m
-	}
-
-	// Apply the new config to the live state so the session picks it up immediately.
-	m.st.cfg = cfg
-	m.hasInferenceAgent = cfg.HasInferenceAgent()
-
-	provider := st.primary.Provider
-	if provider == "" {
-		provider = "local"
-	}
-	m.appendTranscript("\n" + milkTag() + " config written to ~/.milk/config.json\n\n")
-	if strings.ToLower(provider) == "claude-cli" {
-		m.appendTranscript(fmt.Sprintf("%s primary: %s  (%s)\n", milkTag(), bold(st.primary.Name), provider))
-	} else {
-		chatPath := st.primary.ChatPath
-		if chatPath == "" {
-			chatPath = "/v1/chat/completions"
-		}
-		m.appendTranscript(fmt.Sprintf("%s primary: %s  (%s%s | %s | %s)\n",
-			milkTag(), bold(st.primary.Name), st.primary.URL, chatPath, st.primary.Model, provider))
-	}
-	if escalation != nil {
-		m.appendTranscript(fmt.Sprintf("%s escalation: %s  (claude-cli)\n", milkTag(), bold(escalation.Name)))
-	}
-	// Post-completion hints for fields the wizard doesn't ask for.
-	var hints []string
-	if st.primary.Provider == "bedrock" {
-		hints = append(hints, dim("  tip: if you use short-lived STS credentials, add aws_refresh_cmd to your agent config to auto-renew on 403"))
-	}
-	if isCopilotURL(st.primary.URL) || isAzureURL(st.primary.URL) {
-		hints = append(hints, dim("  tip: set limits.message_budget_chars in your agent config to cap context size (e.g. 800000 for Copilot/Azure)"))
-	}
-	if len(hints) > 0 {
-		m.appendTranscript("\n")
-		for _, h := range hints {
-			m.appendTranscript(h + "\n")
-		}
-	}
-	m.appendTranscript("\n" + milkTag() + " ready — type a message to start, or /help for all commands\n")
-	return m
 }
 
 // --- Switch-agent wizard ---

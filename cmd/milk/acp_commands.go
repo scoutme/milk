@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
@@ -58,6 +60,8 @@ func acpCommandTable() []acpCommand {
 		{cmdBg, "list, start or stop background agents", "[list|start <task>|stop <id>]", acpBg, nil},
 		{cmdSkipPerms, "approve every tool call without asking, or go back to asking", "[on|off]", acpSkipPerms, nil},
 		{cmdThink, "show or hide model reasoning in this session", "[on|off]", acpThink, nil},
+		{cmdConfig, "print the config, run the setup wizard, or open the config file", "[show|init|open]", acpConfig, nil},
+		{cmdInit, "run the setup wizard (alias for /config init)", "", acpInit, nil},
 		{cmdAgent, "list configured agents", "[list]", acpAgent, nil},
 		{"/help", "list the commands available in this session", "", acpHelp, nil},
 	}
@@ -107,6 +111,87 @@ func acpHelp(*acpSession, string) (string, string) {
 		fmt.Fprintf(&b, "  %s — %s\n", sig, c.desc)
 	}
 	return strings.TrimRight(b.String(), "\n"), ""
+}
+
+// acpConfig implements /config over ACP. print/show render the merged config,
+// open answers with the file path (an ACP agent runs headless inside somebody
+// else's editor — it can't suspend into an editor of its own, so the client
+// opens the path), init starts the setup wizard, driven one answer per prompt
+// while as.pendingInit is set.
+func acpConfig(as *acpSession, rest string) (string, string) {
+	switch sub := strings.ToLower(strings.TrimSpace(rest)); sub {
+	case "":
+		out, err := renderConfigJSON()
+		if err != nil {
+			return milkTag() + " error: " + err.Error(), ""
+		}
+		return out, ""
+	case "show":
+		out, err := renderConfigShow()
+		if err != nil {
+			return milkTag() + " error: " + err.Error(), ""
+		}
+		return out, ""
+	case "open":
+		return acpConfigOpen(), ""
+	case "init":
+		return acpStartInitWizard(as), ""
+	}
+	return milkTag() + " usage: /config | /config show | /config init | /config open", ""
+}
+
+// acpInit implements /init — the wizard's original name, kept as an alias of
+// /config init in both hosts (it is in slashCommands too, so extractSlashCommand
+// recognizes it over ACP and in the TUI).
+func acpInit(as *acpSession, _ string) (string, string) {
+	return acpStartInitWizard(as), ""
+}
+
+// acpStartInitWizard arms the session's wizard and returns the banner plus the
+// first prompt. Subsequent session/prompt calls are fed to initWizardApply
+// from runTurn until the wizard reports Done.
+func acpStartInitWizard(as *acpSession) string {
+	st, banner := initWizardStart()
+	as.pendingInit = st
+	return banner
+}
+
+// acpConfigOpen answers /config open. An ACP agent runs headless inside
+// somebody else's editor and cannot suspend into an editor of its own (the
+// TUI does, via tea.ExecProcess) — but it can still make the file appear:
+// openPathDetached hands it to the platform file opener on the machine milk
+// runs on (usually the machine the client's editor runs on too). The reply
+// reports exactly what happened and always carries the path(s) as well — it
+// never claims an editor opened when nothing did.
+func acpConfigOpen() string {
+	var b strings.Builder
+	if target, _, err := configOpenTarget(); err != nil {
+		fmt.Fprintf(&b, "%s could not resolve the config path: %v\n", milkTag(), err)
+	} else if opener, oerr := openPathDetached(target); oerr != nil {
+		fmt.Fprintf(&b, "%s could not open it here (%v) — open the config in your editor\n", milkTag(), oerr)
+	} else {
+		fmt.Fprintf(&b, "%s opening %s with %s — if no window appears, use the path below\n", milkTag(), target, opener)
+	}
+	if config.HasLocalConfig() {
+		if p, err := config.LocalConfigPath(); err == nil {
+			fmt.Fprintf(&b, "%s local config:  %s  (unset fields inherit from global)\n", milkTag(), p)
+		}
+	}
+	if dir, err := config.Dir(); err == nil {
+		fmt.Fprintf(&b, "%s global config: %s\n", milkTag(), filepath.Join(dir, "config.json"))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// initWizardRestartPrompt reports whether prompt is the command that (re)starts
+// the setup wizard — used to skip the "cancelled" note when a restart lands
+// mid-wizard (see runTurn).
+func initWizardRestartPrompt(prompt string) bool {
+	cmd, rest, ok := extractSlashCommand(prompt)
+	if !ok {
+		return false
+	}
+	return cmd == cmdInit || (cmd == cmdConfig && strings.EqualFold(strings.TrimSpace(rest), "init"))
 }
 
 // runSlashCommand executes prompt as a slash command if it is one. handled is
