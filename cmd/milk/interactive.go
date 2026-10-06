@@ -161,6 +161,7 @@ const interactiveHelp = `
 ── Background agents ───────────────────────────────────────────────────
   /bg                    list background agents (ID, status, label, elapsed)
   /bg list               same as bare /bg
+  /bg show <id>          print one job's full result
   /bg start <task>       spawn a background agent to research <task>
   /bg stop <id>          terminate a running background agent
 

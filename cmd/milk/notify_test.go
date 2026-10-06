@@ -757,8 +757,9 @@ func TestNewModelToastsOnBackgroundJobDone(t *testing.T) {
 	if cmd == nil {
 		t.Error("expected a tick Cmd to be batched into the Update result")
 	}
-	// Error stays transcript material (ADR-0048: warnings/errors persist).
-	if strings.Contains(got.transcript.String(), `background agent "x" completed`) {
-		t.Error("completion must not be appended to the transcript")
+	// The lifecycle notice itself stays toast-only (ADR-0048), but the job's
+	// result is content and lands in the transcript (renderBackgroundJobDoneBlock).
+	if !strings.Contains(got.transcript.String(), `background agent "x" completed`) {
+		t.Error("the job result block must be appended to the transcript")
 	}
 }

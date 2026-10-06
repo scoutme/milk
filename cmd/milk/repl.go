@@ -2277,6 +2277,11 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backgroundJobDoneMsg:
 		j := msg.job
+		// The toast (ADR-0048) stays the transient lifecycle notice; the
+		// job's *result* also lands in the transcript now, so it can't pass
+		// by unseen when the model never reports it (see
+		// renderBackgroundJobDoneBlock).
+		m.appendTranscript(renderBackgroundJobDoneBlock(j))
 		if j.Err != nil {
 			m.notify(fmt.Sprintf("background agent %q failed: %v", j.Label, j.Err), "/bg list")
 		} else {

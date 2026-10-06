@@ -16,8 +16,15 @@ import (
 
 // TestUpdate_BackgroundJobDoneMsg_NotifiesToast verifies a completed job
 // surfaces as a timestamped notification toast (issue #162 — turn-unrelated
-// job lifecycle events no longer pollute the transcript), for both success
-// and failure, independently of the turn-boundary drainBackgroundJobs path.
+// job lifecycle events don't pollute the transcript), for both success and
+// failure, independently of the turn-boundary drainBackgroundJobs path.
+//
+// Since the background-result-visibility fix, the job's *result* (or failure
+// and partial result) is additionally appended to the transcript as a
+// renderBackgroundJobDoneBlock block: issue #162's toast-only rule still
+// governs the lifecycle notice itself, but the result is the job's content —
+// it used to reach only the model's next-turn prompt and could pass by
+// completely unseen if the model never reported it.
 func TestUpdate_BackgroundJobDoneMsg_NotifiesToast(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sess, err := session.New("/repo", "")
@@ -32,8 +39,8 @@ func TestUpdate_BackgroundJobDoneMsg_NotifiesToast(t *testing.T) {
 	if !toastMentions(m2, `background agent "investigate X" completed`) {
 		t.Errorf("expected a completion toast, got %#v", m2.toastVisible)
 	}
-	if strings.Contains(m2.transcript.String(), `background agent "investigate X"`) {
-		t.Errorf("job completion must not be appended to the transcript (#162), got %q", m2.transcript.String())
+	if !strings.Contains(m2.transcript.String(), "found it") {
+		t.Errorf("job result must be visible in the transcript, got %q", m2.transcript.String())
 	}
 
 	updated2, _ := m2.Update(backgroundJobDoneMsg{job: &local.Job{Label: "investigate Y", Err: errors.New("boom")}})
@@ -41,8 +48,101 @@ func TestUpdate_BackgroundJobDoneMsg_NotifiesToast(t *testing.T) {
 	if !toastMentions(m3, `background agent "investigate Y" failed: boom`) {
 		t.Errorf("expected a failure toast, got %#v", m3.toastVisible)
 	}
-	if strings.Contains(m3.transcript.String(), `background agent "investigate Y"`) {
-		t.Errorf("job failure must not be appended to the transcript (#162), got %q", m3.transcript.String())
+	if !strings.Contains(m3.transcript.String(), `failed: boom`) {
+		t.Errorf("job failure must be visible in the transcript, got %q", m3.transcript.String())
+	}
+}
+
+// TestRenderBackgroundJobDoneBlock_TruncatesWithShowHint: a result over the
+// shared display budget is head+tail truncated with a /bg show <id> hint to
+// the full text; a short one renders inline with no hint.
+func TestRenderBackgroundJobDoneBlock_TruncatesWithShowHint(t *testing.T) {
+	long := strings.Repeat("x", backgroundJobResultMaxChars+500)
+	blk := renderBackgroundJobDoneBlock(&local.Job{ID: "7", Label: "l", Result: long})
+	if !strings.Contains(blk, "[... ") || !strings.Contains(blk, "chars omitted") {
+		t.Errorf("expected an omission marker in %q", blk)
+	}
+	if !strings.Contains(blk, "/bg show 7") {
+		t.Errorf("expected a /bg show 7 hint in %q", blk)
+	}
+	short := renderBackgroundJobDoneBlock(&local.Job{ID: "7", Label: "l", Result: "tiny"})
+	if !strings.Contains(short, "tiny") {
+		t.Errorf("expected the result inline in %q", short)
+	}
+	if strings.Contains(short, "/bg show") || strings.Contains(short, "omitted") {
+		t.Errorf("short result must render inline unhinted, got %q", short)
+	}
+}
+
+// TestRenderBackgroundJobDoneBlock_FailurePartialResult: a failed job's
+// preserved partial work is shown; an empty one doesn't claim any.
+func TestRenderBackgroundJobDoneBlock_FailurePartialResult(t *testing.T) {
+	withPartial := renderBackgroundJobDoneBlock(&local.Job{ID: "7", Label: "l", Result: "half-done", Err: errors.New("boom")})
+	if !strings.Contains(withPartial, "failed: boom") || !strings.Contains(withPartial, "partial result preserved") || !strings.Contains(withPartial, "half-done") {
+		t.Errorf("expected failure + partial result block, got %q", withPartial)
+	}
+	without := renderBackgroundJobDoneBlock(&local.Job{ID: "7", Label: "l", Err: errors.New("boom")})
+	if strings.Contains(without, "partial result preserved") {
+		t.Errorf("empty partial result must not be advertised, got %q", without)
+	}
+}
+
+// TestRenderBackgroundJobDoneBlock_StructuredMeta: the optional structured
+// result tag's status/files_touched surface in the header and the raw tag is
+// stripped from the shown text (same parsing as the model-side drain).
+func TestRenderBackgroundJobDoneBlock_StructuredMeta(t *testing.T) {
+	blk := renderBackgroundJobDoneBlock(&local.Job{ID: "7", Label: "l",
+		Result: "all done\n<result status=\"partial\" files_touched=\"a.go,b.go\"/>"})
+	if !strings.Contains(blk, "status=partial") || !strings.Contains(blk, "files_touched=a.go,b.go") {
+		t.Errorf("expected structured meta in header, got %q", blk)
+	}
+	if strings.Contains(blk, "<result") {
+		t.Errorf("raw result tag must not be shown, got %q", blk)
+	}
+	if !strings.Contains(blk, "all done") {
+		t.Errorf("expected the result text, got %q", blk)
+	}
+}
+
+// TestHandleBgCmd_Show covers the /bg show <id> full-result lookup both the
+// truncation hint and the "take its output" question target: full uncapped
+// text for a known job, a not-found line otherwise.
+func TestHandleBgCmd_Show(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess, err := session.New("/repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
+	mgr := local.NewManager(context.Background(), 1)
+	full := strings.Repeat("R", backgroundJobResultMaxChars+500)
+	job := mgr.Spawn("lbl", "task", "user", "m", func(ctx context.Context, jobID string, out io.Writer) (string, session.TokenUsage, error) {
+		return full, session.TokenUsage{}, nil
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if js := mgr.Jobs(); len(js) > 0 && js[0].Status != local.JobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background job did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
+	updated, _ := m.handleBgCmd("show " + job.ID)
+	got := updated.(model).transcript.String()
+	if !strings.Contains(got, full) {
+		t.Errorf("/bg show must print the full uncapped result, got %d chars", len(got))
+	}
+	if strings.Contains(got, "omitted") {
+		t.Errorf("/bg show must not truncate, got %q", got)
+	}
+
+	updated2, _ := updated.(model).handleBgCmd("show nope")
+	if miss := updated2.(model).transcript.String(); !strings.Contains(miss, "not found") {
+		t.Errorf("expected a not-found line for an unknown id, got %q", miss)
 	}
 }
 

@@ -199,6 +199,17 @@ func acpBg(as *acpSession, rest string) (string, string) {
 			return "usage: /bg start <task>", ""
 		}
 		return as.spawnUserJob(task), ""
+	case parts[0] == "show":
+		id := strings.TrimSpace(strings.TrimPrefix(arg, "show"))
+		if id == "" {
+			return "usage: /bg show <id>", ""
+		}
+		for _, j := range as.mgr.Jobs() {
+			if j.ID == id {
+				return renderBgShow(j), ""
+			}
+		}
+		return fmt.Sprintf("background agent %s not found", id), ""
 	case parts[0] == "stop":
 		id := strings.TrimSpace(strings.TrimPrefix(arg, "stop"))
 		if id == "" {
@@ -209,7 +220,7 @@ func acpBg(as *acpSession, rest string) (string, string) {
 		}
 		return fmt.Sprintf("background agent %s not found or already finished", id), ""
 	}
-	return "usage: /bg [list | start <task> | stop <id>]", ""
+	return "usage: /bg [list | show <id> | start <task> | stop <id>]", ""
 }
 
 func acpTasks(as *acpSession, _ string) (string, string) { return execTasks(as.taskStore), "" }
