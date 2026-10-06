@@ -278,8 +278,22 @@ func (m model) handleBgCmd(arg string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(fmt.Sprintf("%s background agent %s not found or already finished\n", milkTag(), id))
 		}
 		return m, nil
+	case parts[0] == "show":
+		id := strings.TrimSpace(strings.TrimPrefix(arg, "show"))
+		if id == "" {
+			m.appendTranscript(milkTag() + " usage: /bg show <id>\n")
+			return m, nil
+		}
+		for _, j := range mgr.Jobs() {
+			if j.ID == id {
+				m.appendTranscript(renderBgShow(j))
+				return m, nil
+			}
+		}
+		m.appendTranscript(fmt.Sprintf("%s background agent %s not found\n", milkTag(), id))
+		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /bg [list | start <task> | stop <id>]\n")
+		m.appendTranscript(milkTag() + " usage: /bg [list | show <id> | start <task> | stop <id>]\n")
 		return m, nil
 	}
 }

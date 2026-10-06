@@ -76,3 +76,13 @@ func (as *acpSession) runFollowup() {
 			"Background follow-up failed: "+err.Error()))
 	}
 }
+
+// announceFollowup tells the client why a synthetic turn is starting. Unlike
+// the TUI — which echoes the follow-up prompt under its [background] label —
+// an ACP client never sees the synthetic prompt at all: without this the
+// assistant would simply start talking (or say nothing) with no visible
+// cause. Sent as a plain agent message chunk before the turn runs.
+func (as *acpSession) announceFollowup() {
+	as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("followup-%d", as.msgCounter.Add(1))),
+		"[milk] background agents finished — running a follow-up turn to report their results.\n"))
+}

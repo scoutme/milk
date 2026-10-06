@@ -73,7 +73,7 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/config init`, `/init` | run the interactive setup wizard (see below) |
 | `/agent [list]` | list configured agents (switching is TUI-only) |
 | `/tasks`, `/task done <id>` | list / complete tasks (session and global) |
-| `/bg [list\|start <task>\|stop <id>]` | list, start or stop background agents |
+| `/bg [list\|show <id>\|start <task>\|stop <id>]` | list, inspect, start or stop background agents |
 | `/workflow <name> <task> [--<role> <agent>]` | run a workflow (see "Workflows, tasks and background agents") |
 | `/workflow resume\|status\|clear` | continue, inspect or clear the session's saved workflow |
 | `/help` | list the above |
@@ -120,11 +120,16 @@ as session updates instead.
   `blocked` has no ACP status and is sent as `pending` with a "(blocked)"
   suffix and `_meta.blocked`).
 - **Background agents.** The model's `spawn_background_agent` tool and
-  `/bg start|list|stop` work. Each job is a `tool_call_update` row
-  (`background_agent`, in_progress → completed/failed). Jobs outlive the turn
+  `/bg start|list|show|stop` work. Each job is a `tool_call_update` row
+  (`background_agent`, in_progress → completed/failed; the finished row
+  carries the result in `rawOutput`, and `/bg show <id>` prints it in full).
+  Jobs outlive the turn
   that started them, and `session/cancel` does not stop them (`/bg stop`
   does). **milk follows up on its own:** when a wave of agent-spawned jobs
-  finishes (or a `/bg start` job does) and no turn is running, it starts a
+  finishes (or a `/bg start` job does) and no turn is running, it announces
+  itself with a `[milk] background agents finished …` message chunk (the
+  client never sees the synthetic prompt, so without it the turn would start
+  with no visible cause) and starts a
   turn without a prompt — `state_update` `running`, the agent's report of the
   results as ordinary message chunks, then `idle` — as the TUI does. ACP v2
   permits this ("background activity MAY … emit updates while the Agent is
