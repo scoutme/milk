@@ -244,3 +244,43 @@ func TestConfigShowRendered(t *testing.T) {
 		t.Errorf("renderConfigJSON = %q, want the agent rendered as JSON", jout)
 	}
 }
+
+// TestInitWizardPicks: the clickable answers a host can offer per field —
+// the blank answer as a one-click button (the empty turn's stand-in), titled
+// choices for selects (closed set, default marked), one-click examples, and
+// the typed escape. Secrets never carry a value as a pick.
+func TestInitWizardPicks(t *testing.T) {
+	labels := func(picks []initWizardPick) string {
+		var s []string
+		for _, p := range picks {
+			s = append(s, p.Label+"="+p.Value)
+		}
+		return strings.Join(s, " | ")
+	}
+	// default-bearing text: the default is one click, plus the typed escape.
+	if got := labels(initWizardPicks(initWizardField{Name: "n", Kind: "text", Default: "local"})); got != "use default — local= | type my own value…=" {
+		t.Errorf("default text picks = %q", got)
+	}
+	// required text without a default: no skip button — examples are clicks.
+	if got := labels(initWizardPicks(initWizardField{Name: "u", Kind: "text", Required: true, Examples: []string{"http://localhost:8080"}})); got != "http://localhost:8080=http://localhost:8080 | type my own value…=" {
+		t.Errorf("required text picks = %q", got)
+	}
+	// select: closed set, default marked, no typed escape.
+	if got := labels(initWizardPicks(initWizardField{Kind: "select", Default: "y", Options: []initWizardChoice{{"y", "yes"}, {"n", "no"}}})); got != "yes (default)=y | no=n" {
+		t.Errorf("select picks = %q", got)
+	}
+	// secret: the value itself is never a pick — only skip vs type.
+	if got := labels(initWizardPicks(initWizardField{Kind: "text", Secret: true})); got != "skip — no credential= | type my own value…=" {
+		t.Errorf("secret picks = %q", got)
+	}
+	// multiselect: skip, enable-all (the comma form initWizardApply accepts),
+	// and the typed escape.
+	if got := labels(initWizardPicks(initWizardField{Kind: "multiselect", Options: []initWizardChoice{{"a", "a"}, {"b", "b"}}})); got != "skip — none= | enable all — a, b=a,b | type my own value…=" {
+		t.Errorf("multiselect picks = %q", got)
+	}
+	// required text with nothing to offer: the typed escape alone — hosts
+	// treat that as "nothing worth clicking".
+	if got := initWizardPicks(initWizardField{Kind: "text", Required: true}); len(got) != 1 || !got[0].Custom {
+		t.Errorf("bare required picks = %v, want the lone typed escape", got)
+	}
+}

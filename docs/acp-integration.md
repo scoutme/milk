@@ -39,11 +39,13 @@ milk serve --acp
 | `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity; the list itself is static for the process, while the config it may edit is re-read from disk at `session/new` — see "The setup wizard" below) |
 | `session/update` (`agent_message_chunk`) | agent → client | ✅ real, but **one per completed turn, not per token** — see caveat below |
 | `session/update` (`tool_call_update`) | agent → client | ✅ real, for both the local-provider and claude-cli-escalation paths |
-| `session/request_permission` | agent → client | ✅ real, but **local-provider agents only** — see caveat below |
+| `session/request_permission` | agent → client | ✅ real. Tool approvals are **local-provider agents only** — see caveat below. The setup wizard also uses it as clickable choice prompts for **any** provider (see "The setup wizard" below) |
+| `elicitation/create` | agent → client | ✅ real: sent by the setup wizard's form dialogs (form mode, session scope) |
+| `elicitation/complete` | agent → client (notification) | ✅ real: fire-and-forget once the user's answer has been consumed |
 
 Everything else a real ACP client might try — `session/list`, `session/resume`,
 `session/delete`, `session/close`, `auth/login`, `auth/logout`,
-`session/set_config_option`, `elicitation/create`, `$/cancel_request` as a
+`session/set_config_option`, `$/cancel_request` as a
 standalone per-request cancel — returns the standard JSON-RPC **`-32601`
 method not found** error. That's a deliberate, documented gap, not a bug: see
 [Deferred](#deferred-not-silently-missing) below.
@@ -93,27 +95,37 @@ who only ever meets milk through their editor can configure it:
 
 - **Form dialogs where the client supports them.** When the client advertises
   form-mode elicitation (`clientCapabilities.elicitation.form` at
-  `initialize`), the whole wizard runs inside the `/config init` turn as
-  `elicitation/create` form dialogs — one per step, that step's prompt as the
-  dialog message. Choices (provider, the escalation question) come back as
+  `initialize`), the wizard asks its steps as `elicitation/create` form
+  dialogs inside the `/config init` turn — one per step, that step's prompt as
+  the dialog message. Choices (provider, the escalation question) come back as
   titled single-selects and the agent-tools question as a multi-select, and
-  every step's default is pre-populated in the form — so "accept the default"
-  is one click, which matters because ACP clients generally refuse to send an
-  empty prompt (the TUI's press-Enter-for-default has no chat equivalent).
-- **One prompt per answer otherwise.** Without form support the wizard
-  banner and first question come back as the command's `agent_message_chunk`;
+  every step's default is pre-populated in the form — and spelled out in the
+  field description (`type 'default' to accept …`) for clients that
+  pre-populate nothing.
+- **Clickable choice prompts everywhere else.** Every non-secret step with
+  something worth clicking is also offered as `session/request_permission`
+  options — the one prompt surface every ACP client renders as buttons (it is
+  how tool approvals work): one button per choice or example, a
+  `use default — …` button standing in for the empty turn ACP chat can't
+  send, `type my own value…` handing that step to typed input, and
+  `cancel setup`. A client whose permission responses carry no recognizable
+  outcome is detected once and never asked again (its steps go to typed
+  input).
+- **One prompt per answer as the floor.** Questions the client can't render
+  as dialogs or buttons come back as the command's `agent_message_chunk`;
   every following `session/prompt` is consumed as that step's answer
   (validation errors re-prompt the same step, exactly as in the TUI) until
   the wizard finishes with the config written and a completion summary. While
   the wizard is pending, answers are *not* sent to the model. Since an empty
-  turn can't be sent, the words `default` / `-` stand in for it: they apply
-  the bracketed default like pressing Enter in the TUI.
-- **The credential step is always asked in chat.** Elicitation form mode must
-  not carry secrets (the spec forbids it — API keys included), so the API-key
-  question drops out of the form flow once and is answered in chat (still
-  never forwarded to the model); the remaining steps return to dialogs. A
-  dismissed dialog or a failed round trip likewise hands the current step to
-  chat with every applied answer kept.
+  turn can't be sent, every question states what the word `default` (or `-`)
+  means for that step, and it applies like pressing Enter in the TUI.
+- **The credential step is typed, never form-rendered.** Elicitation form
+  mode must not carry secrets (the spec forbids it — API keys included), so
+  the API-key question is skipped with one click (`skip — no credential`,
+  which routes to the token-command step) or typed in chat (still never
+  forwarded to the model); the remaining steps return to dialogs. A dismissed
+  dialog or a failed round trip likewise hands the current step to typed
+  input with every applied answer kept.
 - **Escape hatches** (the TUI cancels with esc, which ACP doesn't have): a
   plain `cancel` / `quit` / `abort` answer aborts the wizard, and any
   recognized slash command cancels it first, then runs — so `/help` mid-wizard
@@ -335,8 +347,9 @@ design doc:
 - `auth/login`, `auth/logout`
 - `session/set_config_option` (the internal handler exists, isn't wired to
   the dispatcher)
-- `elicitation/create` — `Elicit` always returns a cancelled result; nothing
-  will ever actually prompt the client with a form
+- the tool-facing `events.Host.Elicit` seam (`cmd/milk/host_acp.go`) — still a
+  stub returning a cancelled result; the setup wizard's form dialogs use the
+  form-capable `acp.ACPHost.Elicit` round trip instead
 - `terminal_update` (PTY/agent-owned terminal streaming)
 - The `_milk/notification` and `_milk/memory` extension channels — never
   emitted (`_milk/route` and `_milk/warning` are; see "Routing and warnings")

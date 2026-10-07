@@ -35,7 +35,7 @@ cmd/milk/host_acp.go          # events.Host adapter over ACP (local-provider age
 cmd/milk/acp_commands.go      # ACP slash-command table: one source for what is executed and what available_commands_update advertises
 cmd/milk/acp_features.go      # ACP: plan updates, task store, background manager, live-output streaming
 cmd/milk/acp_workflow.go      # ACP: runs workflows inside session/prompt (host half; core is workflow_core.go)
-cmd/milk/acp_initwizard.go    # ACP: /config init via elicitation form dialogs (choices + pre-populated defaults) with chat fallback for credentials/dismissals
+cmd/milk/acp_initwizard.go    # ACP: /config init input surfaces — elicitation forms (choices + pre-populated defaults), clickable choice prompts (session/request_permission options), typed chat floor with per-question 'default' hints
 cmd/milk/acp_followup.go      # ACP: automatic follow-up turn when background jobs finish
 cmd/milk/acp_signals.go       # ACP: route announcements and loop/consumption warnings
 cmd/milk/turn_routing.go      # host-independent routing core (pins, single-turn flags, availability fallback, auto-sticky, turn metrics) shared by TUI runTurn and ACP

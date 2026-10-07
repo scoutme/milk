@@ -47,14 +47,15 @@ func TitledMultiSelect(opts []EnumOption) MultiSelectItems {
 // are mutually exclusive single-select forms of the string type; Items turns
 // the array type into a multi-select.
 type ElicitationProperty struct {
-	Type     string            `json:"type"` // "string" | "number" | "integer" | "boolean" | "array" (open-set)
-	Title    string            `json:"title,omitempty"`
-	Enum     []string          `json:"enum,omitempty"`
-	OneOf    []EnumOption      `json:"oneOf,omitempty"`
-	Items    *MultiSelectItems `json:"items,omitempty"`
-	MinItems *int              `json:"minItems,omitempty"`
-	MaxItems *int              `json:"maxItems,omitempty"`
-	Default  any               `json:"default,omitempty"`
+	Type        string            `json:"type"` // "string" | "number" | "integer" | "boolean" | "array" (open-set)
+	Title       string            `json:"title,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Enum        []string          `json:"enum,omitempty"`
+	OneOf       []EnumOption      `json:"oneOf,omitempty"`
+	Items       *MultiSelectItems `json:"items,omitempty"`
+	MinItems    *int              `json:"minItems,omitempty"`
+	MaxItems    *int              `json:"maxItems,omitempty"`
+	Default     any               `json:"default,omitempty"`
 }
 
 // SelectProperty builds a titled single-select string property.

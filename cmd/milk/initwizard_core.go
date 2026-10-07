@@ -83,6 +83,15 @@ func initWizardCancelWord(answer string) bool {
 // machine, and commits the config when the flow reaches the end.
 func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) initWizardResult {
 	answer = strings.TrimSpace(answer)
+	// 'default' (or '-', 'enter') stands in for the empty answer that means
+	// "the step's default": the TUI can send an empty line, but ACP chat
+	// clients refuse to send an empty prompt and some form renderers refuse
+	// to submit an empty field. Mapping here — in the shared core — keeps
+	// every input channel (TUI, ACP chat, ACP forms, ACP choice buttons)
+	// honest at once.
+	if initWizardDefaultWord(answer) {
+		answer = ""
+	}
 	var out strings.Builder
 
 	// The TUI's trailing question, asked only after OfferOpenEditor's commit:
@@ -361,9 +370,10 @@ type initWizardField struct {
 	Label    string // human-readable title
 	Kind     string // "text" | "select" | "multiselect"
 	Options  []initWizardChoice
-	Default  string // suggested default ("" = none)
-	Required bool   // a blank answer is not accepted
-	Secret   bool   // a credential — must not go through form channels
+	Default  string   // suggested default ("" = none)
+	Required bool     // a blank answer is not accepted
+	Secret   bool     // a credential — must not go through form channels
+	Examples []string // one-click example answers (mirrors the prompt's "e.g." hints)
 }
 
 // initWizardFieldFor describes the wizard's current step.
@@ -381,19 +391,44 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 			{"subprocess", "subprocess — generic NDJSON subprocess"},
 		}}
 	case initStepURL:
-		return initWizardField{Name: "url", Label: "server URL", Kind: "text", Required: true}
+		f := initWizardField{Name: "url", Label: "server URL", Kind: "text", Required: true}
+		// Only directly-usable examples become one-click suggestions — the
+		// prompt's placeholder-shaped ones ("<org>", "<res>") stay text-only.
+		switch st.primary.Provider {
+		case "local":
+			f.Examples = []string{"http://localhost:8080"}
+		case "bearer":
+			f.Examples = []string{"https://openrouter.ai/api/v1"}
+		}
+		return f
 	case initStepChatPath:
 		return initWizardField{Name: "chat_path", Label: "chat path", Kind: "text",
 			Default: initWizardChatPathDefault(st.primary.URL, st.primary.Model)}
 	case initStepRunCmd:
 		return initWizardField{Name: "run_cmd", Label: "server start command (optional)", Kind: "text"}
 	case initStepModel:
-		return initWizardField{Name: "model", Label: "model name", Kind: "text",
+		f := initWizardField{Name: "model", Label: "model name", Kind: "text",
 			Required: initWizardNeedsModel(st.primary.Provider)}
+		// One-click examples mirror the prompt's "e.g." hints (placeholders
+		// like "<deployment>" stay text-only).
+		switch {
+		case isCopilotURL(st.primary.URL):
+			f.Examples = []string{"claude-sonnet-4.6", "gpt-4o"}
+		case isAzureURL(st.primary.URL):
+			f.Examples = []string{"gpt-4.1"}
+		case st.primary.Provider == "bearer":
+			f.Examples = []string{"meta-llama/llama-3.1-8b-instruct"}
+		case st.primary.Provider == "aider-cli":
+			f.Examples = []string{"gpt-4o"}
+		case st.primary.Provider == "local":
+			f.Examples = []string{"qwen2.5-coder"}
+		}
+		return f
 	case initStepAuth:
 		// A credential: elicitation form mode MUST NOT carry secrets (API
-		// keys included), so the wizard asks this one in chat — see
-		// acp_initwizard.go's runInitForms.
+		// keys included), so the wizard asks this one as typed input (with
+		// skip/type clicks first where the client has buttons) — see
+		// acp_initwizard.go's runInitDialogs.
 		return initWizardField{Name: "api_key", Label: "API key", Kind: "text", Secret: true}
 	case initStepTokenCmd:
 		f := initWizardField{Name: "token_cmd", Label: "token command", Kind: "text"}
@@ -403,10 +438,13 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 			} else {
 				f.Default = "gh auth token"
 			}
+		} else {
+			f.Examples = []string{"gh auth token", "op read op://vault/item/field"}
 		}
 		return f
 	case initStepAWSRegion:
-		return initWizardField{Name: "aws_region", Label: "AWS region", Kind: "text", Required: true}
+		return initWizardField{Name: "aws_region", Label: "AWS region", Kind: "text", Required: true,
+			Examples: []string{"us-east-1", "eu-west-1"}}
 	case initStepLimits:
 		f := initWizardField{Name: "context_window_tokens", Label: "context window in tokens", Kind: "text"}
 		if v, ok := modelsdev.Lookup(st.primary.Model); ok {
@@ -425,6 +463,61 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 		return f
 	}
 	return initWizardField{}
+}
+
+// initWizardPick is one clickable answer for a wizard step, offered by hosts
+// that can render buttons (the ACP choice prompt): a discrete choice, a
+// one-click example, or the step's blank answer ("use default" — the click
+// that stands in for the empty turn ACP chat can't send). Custom marks the
+// "type it myself" escape hatch, which hands the step to typed input.
+type initWizardPick struct {
+	Value  string // the answer fed to initWizardApply ("" = the blank answer)
+	Label  string
+	Custom bool
+}
+
+// initWizardPicks returns the clickable answers for a field. Selects are a
+// closed set of titled choices (default marked); text fields offer the blank
+// answer (the default, or skip) plus one-click examples; secrets never carry
+// a value — only "skip" vs "type it". Every open-ended list ends with the
+// Custom escape. A lone Custom entry means "nothing worth clicking" — hosts
+// ask for typed input directly.
+func initWizardPicks(f initWizardField) []initWizardPick {
+	var picks []initWizardPick
+	switch f.Kind {
+	case "select":
+		for _, o := range f.Options {
+			label := o.Label
+			if o.Value == f.Default {
+				label += " (default)"
+			}
+			picks = append(picks, initWizardPick{Value: o.Value, Label: label})
+		}
+		return picks // closed set — no typed escape
+	case "multiselect":
+		picks = append(picks, initWizardPick{Label: "skip — none"})
+		if len(f.Options) > 0 {
+			var all []string
+			for _, o := range f.Options {
+				all = append(all, o.Value)
+			}
+			picks = append(picks, initWizardPick{Value: strings.Join(all, ","), Label: "enable all — " + strings.Join(all, ", ")})
+		}
+	default:
+		switch {
+		case f.Secret:
+			picks = append(picks, initWizardPick{Label: "skip — no credential"})
+		case f.Default != "":
+			picks = append(picks, initWizardPick{Label: "use default — " + f.Default})
+		case !f.Required:
+			picks = append(picks, initWizardPick{Label: "skip"})
+		}
+		for _, ex := range f.Examples {
+			picks = append(picks, initWizardPick{Value: ex, Label: ex})
+		}
+	}
+	picks = append(picks, initWizardPick{Custom: true, Label: "type my own value…"})
+	return picks
 }
 
 // initWizardDefaultWord reports whether a plain answer stands in for the
