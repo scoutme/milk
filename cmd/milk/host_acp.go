@@ -84,9 +84,12 @@ func (h *acpHost) RequestPermission(ctx context.Context, req events.PermissionRe
 	return events.PermissionOutcome{Allow: outcome.OptionID == acpPermAllowOptionID}, nil
 }
 
-// Elicit is not wired this round (see the design doc's status note) —
-// returns a cancelled result rather than blocking on a round trip nothing
-// drives yet.
+// Elicit is the events.Host line-input seam and is still not wired (see the
+// design doc's status note) — it returns a cancelled result rather than
+// blocking on a round trip nothing drives. Note the setup wizard's form
+// dialogs do use elicitation, but the form-capable acp.ACPHost.Elicit
+// directly (acp_initwizard.go): this seam's Prompt/Label shape cannot
+// express a form schema.
 func (h *acpHost) Elicit(ctx context.Context, req events.ElicitationRequest) (events.ElicitationResult, error) {
 	return events.ElicitationResult{Cancelled: true}, nil
 }

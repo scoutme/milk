@@ -1,10 +1,14 @@
 package main
 
 // Host-independent core of the /config init setup wizard: starting it, feeding
-// it one answer per step, and committing the resulting config. Both hosts drive
-// this state machine — the TUI's handleInitWizardKey (one answer per Enter)
-// and the ACP server (one answer per session/prompt while acpSession.pendingInit
-// is set) — so the prompts, validation and config write cannot drift apart.
+// it one answer per step, and committing the resulting config. All three
+// drives share this state machine — the TUI's handleInitWizardKey (one answer
+// per Enter), the ACP server's chat flow (one answer per session/prompt while
+// acpSession.pendingInit is set), and the ACP server's elicitation form flow
+// (one form dialog per step, see acp_initwizard.go) — so the prompts,
+// validation and config write cannot drift apart. The step's structured
+// description (initWizardFieldFor: choices, default, required, secret) is
+// shared the same way, so form fields mirror the bracketed prompt defaults.
 
 import (
 	"fmt"
@@ -21,6 +25,9 @@ type initWizardOpts struct {
 	// agent or fewer there are no peer agents to expose as tools, so the
 	// agent-tools step is skipped (as in the TUI).
 	NumAgents int
+	// AgentNames are the configured agent names, offered as the agent-tools
+	// step's choices by hosts that can render a picker (the ACP form flow).
+	AgentNames []string
 	// OfferOpenEditor asks "open config in editor now? [y/N]" after the
 	// config is written (the TUI does). ACP finishes right after the commit
 	// instead: an ACP client is an editor — /config open hands the file to
@@ -30,12 +37,15 @@ type initWizardOpts struct {
 
 // initWizardResult is the outcome of feeding one answer to the wizard.
 type initWizardResult struct {
-	// Output is everything the host should display: mid-step notes, a
-	// validation error + re-prompt, the next step's prompt, or the
-	// completion summary. Never includes the answer itself — echoing it is
-	// host-specific (the TUI transcript shows it, an ACP client already
-	// rendered the prompt the user sent).
+	// Output is host-displayed text for this answer: mid-step notes, a
+	// validation error, or the completion summary. Never includes the
+	// answer itself — echoing it is host-specific (the TUI transcript shows
+	// it, an ACP client already rendered the prompt the user sent) — and
+	// never the next question, which lives in Prompt so a form-based host
+	// can show Output while asking Prompt as a dialog.
 	Output string
+	// Prompt is the question to ask next ("" once the wizard is done).
+	Prompt string
 	// Done means the wizard is finished and pendingInit should be cleared.
 	Done bool
 	// Committed is non-nil when this answer wrote the config file; the host
@@ -47,12 +57,13 @@ type initWizardResult struct {
 	OpenEditor bool
 }
 
-// initWizardStart starts the wizard: fresh state plus the banner and the first
-// prompt (agent name), ready for the first answer.
+// initWizardStart starts the wizard: fresh state plus the banner, ready for
+// the first question — initWizardPrompt(st). Hosts append that however they
+// ask it: the TUI and ACP's chat fallback echo it as the next transcript
+// line, ACP's form flow passes it as the first dialog's message.
 func initWizardStart() (*initWizardState, string) {
 	st := &initWizardState{step: initStepName, escCLI: true}
-	return st, milkTag() + " setup wizard — configure primary and escalation agents\n\n" +
-		milkTag() + " primary agent name [local]: "
+	return st, milkTag() + " setup wizard — configure primary and escalation agents\n\n"
 }
 
 // initWizardCancelWord reports whether a plain answer aborts the wizard. The
@@ -86,8 +97,12 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 	}
 
 	providerMap := map[string]string{
-		"1": "local", "2": "bedrock", "3": "bearer",
-		"4": "claude-cli", "5": "aider-cli", "6": "subprocess",
+		"1": "local", "local": "local",
+		"2": "bedrock", "bedrock": "bedrock",
+		"3": "bearer", "bearer": "bearer",
+		"4": "claude-cli", "claude-cli": "claude-cli",
+		"5": "aider-cli", "aider-cli": "aider-cli",
+		"6": "subprocess", "subprocess": "subprocess",
 	}
 
 	switch st.step {
@@ -101,17 +116,17 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 		if answer == "" {
 			answer = "1"
 		}
-		provider, ok := providerMap[answer]
+		provider, ok := providerMap[strings.ToLower(answer)]
 		if !ok {
-			out.WriteString(milkTag() + " invalid choice — enter 1–6\n" + initWizardPrompt(st))
-			return initWizardResult{Output: out.String()}
+			out.WriteString(milkTag() + " invalid choice — enter 1–6 or a provider name\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		st.primary.Provider = provider
 
 	case initStepURL:
 		if answer == "" {
-			out.WriteString(milkTag() + " URL is required\n" + initWizardPrompt(st))
-			return initWizardResult{Output: out.String()}
+			out.WriteString(milkTag() + " URL is required\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		st.primary.URL = answer
 		// GitHub Copilot: preset the standard headers automatically.
@@ -130,17 +145,7 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 	case initStepChatPath:
 		if answer == "" {
 			// apply the suggested default shown in the prompt
-			if isCopilotURL(st.primary.URL) {
-				answer = "/chat/completions"
-			} else if isAzureURL(st.primary.URL) {
-				dep := azureDeployment(st.primary.URL)
-				if dep == "" {
-					dep = st.primary.Model
-				}
-				answer = "/deployments/" + dep + "/chat/completions"
-			} else {
-				answer = "/v1/chat/completions"
-			}
+			answer = initWizardChatPathDefault(st.primary.URL, st.primary.Model)
 		}
 		// Only store if non-standard to keep config minimal.
 		if answer != "/v1/chat/completions" {
@@ -149,8 +154,8 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 
 	case initStepModel:
 		if answer == "" && initWizardNeedsModel(st.primary.Provider) {
-			out.WriteString(milkTag() + " model name is required\n" + initWizardPrompt(st))
-			return initWizardResult{Output: out.String()}
+			out.WriteString(milkTag() + " model name is required\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		st.primary.Model = answer
 
@@ -183,8 +188,8 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 
 	case initStepAWSRegion:
 		if answer == "" {
-			out.WriteString(milkTag() + " AWS region is required for Bedrock\n" + initWizardPrompt(st))
-			return initWizardResult{Output: out.String()}
+			out.WriteString(milkTag() + " AWS region is required for Bedrock\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		st.primary.AWSRegion = answer
 
@@ -234,8 +239,7 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 				return initWizardResult{Output: out.String(), Done: true}
 			}
 			// TUI parity: the editor question follows even a failed save.
-			out.WriteString(initWizardPrompt(st))
-			return initWizardResult{Output: out.String()}
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		committed = &cfg
 		out.WriteString(summary)
@@ -247,8 +251,7 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 	if st.step == initStepDone {
 		return initWizardResult{Output: out.String(), Done: true, Committed: committed}
 	}
-	out.WriteString(initWizardPrompt(st))
-	return initWizardResult{Output: out.String(), Committed: committed}
+	return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st), Committed: committed}
 }
 
 // commitInitWizardConfig builds the config from the wizard's answers and writes
@@ -322,4 +325,149 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 	}
 	sb.WriteString("\n" + milkTag() + " ready — type a message to start, or /help for all commands\n")
 	return cfg, sb.String(), nil
+}
+
+// initWizardChatPathDefault is the chat-path default proposed for a URL:
+// the provider-specific standard endpoint. model is the Azure deployment
+// fallback for URLs without a /deployments/<name>/ segment (the prompt
+// passes a "<deployment>" placeholder there, apply passes the model name
+// once known).
+func initWizardChatPathDefault(url, model string) string {
+	if isCopilotURL(url) {
+		return "/chat/completions"
+	}
+	if isAzureURL(url) {
+		dep := azureDeployment(url)
+		if dep == "" {
+			dep = model
+		}
+		return "/deployments/" + dep + "/chat/completions"
+	}
+	return "/v1/chat/completions"
+}
+
+// initWizardChoice is one titled choice of a select/multiselect field.
+type initWizardChoice struct{ Value, Label string }
+
+// initWizardField describes one wizard step as a structured input field so
+// hosts can offer more than a bare text prompt: ACP turns it into an
+// elicitation form field (titled choices, pre-populated defaults — see
+// acp_initwizard.go), and the Required/Default flags document exactly which
+// steps accept a blank answer and what it becomes. Every Default mirrors the
+// bracketed value initWizardPrompt shows and initWizardApply applies on a
+// blank — one source, no drift.
+type initWizardField struct {
+	Name     string // stable form-field key ("agent_name", "provider", ...)
+	Label    string // human-readable title
+	Kind     string // "text" | "select" | "multiselect"
+	Options  []initWizardChoice
+	Default  string // suggested default ("" = none)
+	Required bool   // a blank answer is not accepted
+	Secret   bool   // a credential — must not go through form channels
+}
+
+// initWizardFieldFor describes the wizard's current step.
+func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardField {
+	switch st.step {
+	case initStepName:
+		return initWizardField{Name: "agent_name", Label: "primary agent name", Kind: "text", Default: "local"}
+	case initStepProvider:
+		return initWizardField{Name: "provider", Label: "provider", Kind: "select", Default: "local", Options: []initWizardChoice{
+			{"local", "local — llama.cpp · Ollama · vLLM · LM Studio (plain HTTP)"},
+			{"bedrock", "bedrock — AWS Bedrock Converse API"},
+			{"bearer", "bearer — OpenRouter · Together.ai · Groq · GitHub Copilot · any Bearer-token API"},
+			{"claude-cli", "claude-cli — Claude Code CLI (no HTTP server needed)"},
+			{"aider-cli", "aider-cli — aider subprocess"},
+			{"subprocess", "subprocess — generic NDJSON subprocess"},
+		}}
+	case initStepURL:
+		return initWizardField{Name: "url", Label: "server URL", Kind: "text", Required: true}
+	case initStepChatPath:
+		return initWizardField{Name: "chat_path", Label: "chat path", Kind: "text",
+			Default: initWizardChatPathDefault(st.primary.URL, st.primary.Model)}
+	case initStepRunCmd:
+		return initWizardField{Name: "run_cmd", Label: "server start command (optional)", Kind: "text"}
+	case initStepModel:
+		return initWizardField{Name: "model", Label: "model name", Kind: "text",
+			Required: initWizardNeedsModel(st.primary.Provider)}
+	case initStepAuth:
+		// A credential: elicitation form mode MUST NOT carry secrets (API
+		// keys included), so the wizard asks this one in chat — see
+		// acp_initwizard.go's runInitForms.
+		return initWizardField{Name: "api_key", Label: "API key", Kind: "text", Secret: true}
+	case initStepTokenCmd:
+		f := initWizardField{Name: "token_cmd", Label: "token command", Kind: "text"}
+		if isCopilotURL(st.primary.URL) {
+			if host := copilotHostname(st.primary.URL); host != "" {
+				f.Default = "gh auth token --hostname " + host
+			} else {
+				f.Default = "gh auth token"
+			}
+		}
+		return f
+	case initStepAWSRegion:
+		return initWizardField{Name: "aws_region", Label: "AWS region", Kind: "text", Required: true}
+	case initStepLimits:
+		f := initWizardField{Name: "context_window_tokens", Label: "context window in tokens", Kind: "text"}
+		if v, ok := modelsdev.Lookup(st.primary.Model); ok {
+			f.Default = strconv.Itoa(v)
+		}
+		return f
+	case initStepEscalation:
+		return initWizardField{Name: "escalation", Label: "use Claude Code CLI as escalation agent?",
+			Kind: "select", Default: "y",
+			Options: []initWizardChoice{{"y", "yes"}, {"n", "no"}}}
+	case initStepAgentTools:
+		f := initWizardField{Name: "agent_tools", Label: "agents to enable as tools", Kind: "multiselect"}
+		for _, n := range opts.AgentNames {
+			f.Options = append(f.Options, initWizardChoice{Value: n, Label: n})
+		}
+		return f
+	}
+	return initWizardField{}
+}
+
+// initWizardDefaultWord reports whether a plain answer stands in for the
+// empty answer that means "take the default" in the TUI. ACP chat clients
+// generally refuse to send an empty message, so over ACP the words "default"
+// and "-" play that role: they feed initWizardApply as blank, which applies
+// the step's default where there is one and re-prompts where there isn't.
+func initWizardDefaultWord(answer string) bool {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "default", "-":
+		return true
+	}
+	return false
+}
+
+// initWizardFieldValue extracts the answer string for one field from an
+// accepted form's content (the elicitation spec's content values:
+// string/number/boolean/string[]). A missing key means the untouched
+// default was submitted — the empty answer initWizardApply already treats
+// as "take the default".
+func initWizardFieldValue(content map[string]any, f initWizardField) string {
+	v, ok := content[f.Name]
+	if !ok || v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case bool:
+		if x {
+			return "y"
+		}
+		return "n"
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := e.(string); ok && s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return fmt.Sprintf("%v", v)
 }

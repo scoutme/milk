@@ -16,6 +16,8 @@
 // correct way to express "not implemented yet" here, not a capability lie.
 package acp
 
+import "encoding/json"
+
 // Implementation describes the name/version of a client or agent (initialize
 // request/response).
 type Implementation struct {
@@ -41,19 +43,62 @@ type AgentCapabilities struct {
 type SessionCapabilities struct{}
 
 // ClientCapabilities is what InitializeRequest.Capabilities carries. milk
-// reads it but acts on none of it this round (no elicitation/auth wiring
-// yet) — kept as a typed field so a real client's request still decodes
-// cleanly instead of erroring on an unrecognized shape.
+// now acts on elicitation (the /config init wizard's form dialogs — see
+// FormElicitation and cmd/milk/acp_initwizard.go) and on nothing else yet;
+// the maps are kept as typed fields so a real client's request still
+// decodes cleanly instead of erroring on an unrecognized shape.
 type ClientCapabilities struct {
 	Auth        map[string]any `json:"auth,omitempty"`
 	Elicitation map[string]any `json:"elicitation,omitempty"`
 }
 
-// InitializeRequest is the client->agent initialize method's params.
+// FormElicitation reports whether the client advertised form-mode
+// elicitation support. Per the spec this is a presence check, not truthiness:
+// an omitted or null `elicitation.form` means no support, while an explicitly
+// supplied capability object — even the empty one — advertises it.
+func (c ClientCapabilities) FormElicitation() bool {
+	v, ok := c.Elicitation["form"]
+	return ok && v != nil
+}
+
+// InitializeRequest is the client->agent initialize method's params. Field
+// spellings vary across the protocol's versions: the released schema names
+// the client fields `clientInfo`/`clientCapabilities`, while v2-draft builds
+// use `info`/`capabilities` (the spellings Marshal emits, pinned by
+// TestLifecycleWireShapes). UnmarshalJSON accepts either — released names
+// win when both are present — since reading clientCapabilities is
+// load-bearing now: the setup wizard must know whether the client supports
+// elicitation before it may request a form.
 type InitializeRequest struct {
 	ProtocolVersion int                `json:"protocolVersion"`
 	Info            Implementation     `json:"info"`
 	Capabilities    ClientCapabilities `json:"capabilities"`
+}
+
+// UnmarshalJSON decodes both initialize field-name variants — see
+// InitializeRequest's doc comment.
+func (r *InitializeRequest) UnmarshalJSON(b []byte) error {
+	type wire struct {
+		ProtocolVersion int                `json:"protocolVersion"`
+		Info            Implementation     `json:"clientInfo"`
+		InfoAlt         Implementation     `json:"info"`
+		Capabilities    ClientCapabilities `json:"clientCapabilities"`
+		CapabilitiesAlt ClientCapabilities `json:"capabilities"`
+	}
+	var w wire
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	r.ProtocolVersion = w.ProtocolVersion
+	r.Info = w.Info
+	if r.Info == (Implementation{}) {
+		r.Info = w.InfoAlt
+	}
+	r.Capabilities = w.Capabilities
+	if r.Capabilities.Auth == nil && r.Capabilities.Elicitation == nil {
+		r.Capabilities = w.CapabilitiesAlt
+	}
+	return nil
 }
 
 // InitializeResponse is the initialize method's result.

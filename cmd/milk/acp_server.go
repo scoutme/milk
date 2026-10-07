@@ -26,6 +26,10 @@ type acpServer struct {
 	// (0 if it never did). milk always answers with its own version; this
 	// only selects the few wire shapes that differ for a v1 client (plans).
 	clientProtocol int
+	// clientCaps is what the client sent in initialize — read today for
+	// elicitation.form, which decides whether /config init may drive its
+	// wizard through form dialogs (acp_initwizard.go).
+	clientCaps acp.ClientCapabilities
 }
 
 func newACPServer(cfg config.Config, conn acp.Conn) *acpServer {
@@ -38,9 +42,11 @@ var _ acp.Handler = (*acpServer)(nil)
 // session/prompt are wired this round — see
 // docs/machine-readable-output-design.md's ACP status note for the full
 // deferred list (session/list|resume|delete|close, auth/*,
-// session/set_config_option, elicitation/create). Everything else gets the
-// standard JSON-RPC "method not found" error, the correct way to express
-// "not implemented yet" here (see MethodNotFoundError's doc comment).
+// session/set_config_option). Everything else gets the standard JSON-RPC
+// "method not found" error, the correct way to express "not implemented
+// yet" here (see MethodNotFoundError's doc comment). (elicitation is now
+// wired the other way — the setup wizard sends elicitation/create to the
+// client; see acp_initwizard.go.)
 func (s *acpServer) HandleRequest(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
 	case "initialize":
@@ -87,6 +93,7 @@ func (s *acpServer) handleInitialize(params json.RawMessage) (any, error) {
 	}
 	s.mu.Lock()
 	s.clientProtocol = req.ProtocolVersion
+	s.clientCaps = req.Capabilities
 	s.mu.Unlock()
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersion,
@@ -137,6 +144,7 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 	s.mu.Lock()
 	as.v1Client = s.clientProtocol == 1
 	as.host.host.V1 = as.v1Client
+	as.formElicit = s.clientCaps.FormElicitation()
 	s.sessions[id] = as
 	s.mu.Unlock()
 
