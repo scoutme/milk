@@ -91,12 +91,29 @@ command mid-sentence is an ordinary prompt. Routing pins from `/escalate` and
 the TUI runs, driven entirely over ACP — the whole point being that someone
 who only ever meets milk through their editor can configure it:
 
-- **One prompt per answer.** The wizard banner and first question come back
-  as the command's `agent_message_chunk`; every following `session/prompt` is
-  consumed as that step's answer (validation errors re-prompt the same step,
-  exactly as in the TUI) until the wizard finishes with the config written
-  and a completion summary. While the wizard is pending, answers are *not*
-  sent to the model.
+- **Form dialogs where the client supports them.** When the client advertises
+  form-mode elicitation (`clientCapabilities.elicitation.form` at
+  `initialize`), the whole wizard runs inside the `/config init` turn as
+  `elicitation/create` form dialogs — one per step, that step's prompt as the
+  dialog message. Choices (provider, the escalation question) come back as
+  titled single-selects and the agent-tools question as a multi-select, and
+  every step's default is pre-populated in the form — so "accept the default"
+  is one click, which matters because ACP clients generally refuse to send an
+  empty prompt (the TUI's press-Enter-for-default has no chat equivalent).
+- **One prompt per answer otherwise.** Without form support the wizard
+  banner and first question come back as the command's `agent_message_chunk`;
+  every following `session/prompt` is consumed as that step's answer
+  (validation errors re-prompt the same step, exactly as in the TUI) until
+  the wizard finishes with the config written and a completion summary. While
+  the wizard is pending, answers are *not* sent to the model. Since an empty
+  turn can't be sent, the words `default` / `-` stand in for it: they apply
+  the bracketed default like pressing Enter in the TUI.
+- **The credential step is always asked in chat.** Elicitation form mode must
+  not carry secrets (the spec forbids it — API keys included), so the API-key
+  question drops out of the form flow once and is answered in chat (still
+  never forwarded to the model); the remaining steps return to dialogs. A
+  dismissed dialog or a failed round trip likewise hands the current step to
+  chat with every applied answer kept.
 - **Escape hatches** (the TUI cancels with esc, which ACP doesn't have): a
   plain `cancel` / `quit` / `abort` answer aborts the wizard, and any
   recognized slash command cancels it first, then runs — so `/help` mid-wizard
@@ -337,7 +354,8 @@ pins, single-turn `/escalate` and `/primary`, availability fallback,
 auto-sticky escalation after the router first escalates, turn metrics),
 **workflow launch/resume/clear** (`workflow_core.go`), **when a background
 follow-up turn runs** (`followup_core.go`), the **setup wizard**
-(`initwizard_core.go` — step machine, validation, config commit) and the
+(`initwizard_core.go` — step machine, validation, field descriptors, config
+commit; `acp_initwizard.go` — the elicitation form drive) and the
 **config display** (`configview.go` — `/config` and `/config show`). Each
 host still does its own channel work: wiring agents to its output, deciding
 whether a turn is running, and rendering progress.

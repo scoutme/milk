@@ -84,6 +84,13 @@ type acpSession struct {
 	// touched under turnMu, like the rest of prompt handling.
 	pendingInit *initWizardState
 
+	// formElicit: the client advertised form-mode elicitation
+	// (clientCapabilities.elicitation.form at initialize), so the setup
+	// wizard runs its steps as elicitation form dialogs (titled choices,
+	// pre-populated defaults) instead of one chat prompt per answer — see
+	// acp_initwizard.go. Set once at session creation; read-only after.
+	formElicit bool
+
 	// v1Client: the client speaks ACP v1, which lacks v2's plan_update and
 	// tool_call_content_chunk (see notifyPlan, streamLive).
 	v1Client  bool
@@ -91,8 +98,9 @@ type acpSession struct {
 	plans     map[acp.PlanID][]acp.PlanEntry
 	planOrder []acp.PlanID
 
-	mu     sync.Mutex
-	cancel context.CancelFunc // set only while a turn is running
+	mu      sync.Mutex
+	cancel  context.CancelFunc // set only while a turn is running
+	turnCtx context.Context    // the running turn's context (cancelled with cancel)
 }
 
 // newACPSession builds one session's runners and wires tool-call/thinking
@@ -304,6 +312,19 @@ func (as *acpSession) onThinking(text string) {
 	as.notify(acp.AgentThoughtChunk(msgID, text))
 }
 
+// currentCtx returns the running turn's context (session/cancel aware) for
+// work a slash-command handler drives inside that turn — e.g. the setup
+// wizard's form dialogs. Returns a plain background context when no turn is
+// running.
+func (as *acpSession) currentCtx() context.Context {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.turnCtx != nil {
+		return as.turnCtx
+	}
+	return context.Background()
+}
+
 // prompt runs one turn for a session/prompt request. Blocks for the whole
 // turn — per the upstream schema, session/update notifications stream
 // throughout, a terminal state_update notification fires, and only then
@@ -337,10 +358,12 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	turnCtx, cancel := context.WithCancel(ctx)
 	as.mu.Lock()
 	as.cancel = cancel
+	as.turnCtx = turnCtx
 	as.mu.Unlock()
 	defer func() {
 		as.mu.Lock()
 		as.cancel = nil
+		as.turnCtx = nil
 		as.mu.Unlock()
 		cancel()
 	}()
@@ -374,24 +397,29 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 			as.notify(acp.IdleState(acp.StopReasonEndTurn))
 			return acp.PromptResponse{MessageID: msgID}, nil
 		} else {
-			res := initWizardApply(as.pendingInit, prompt, initWizardOpts{
-				NumAgents:       len(as.st.cfg.Agents),
-				OfferOpenEditor: false,
-			})
-			if res.Committed != nil {
-				// Save already happened inside the wizard; rebuild this
-				// session's runners so the next prompt actually uses the
-				// agent the user just configured — no restart needed.
-				if err := as.buildRunners(*res.Committed); err != nil {
-					res.Output += "\n" + milkTag() + " config saved, but this session could not reload it (" +
-						err.Error() + ") — new sessions will pick it up\n"
-				}
+			// 'default' / '-' stands in for the empty answer that means
+			// "take the bracketed default" in the TUI — ACP chat clients
+			// generally refuse to send an empty prompt.
+			answer := prompt
+			if initWizardDefaultWord(answer) {
+				answer = ""
 			}
+			res := initWizardApply(as.pendingInit, answer, as.initWizardOptions())
+			out := res.Output + as.commitInitWizard(res) + res.Prompt
 			if res.Done {
 				as.pendingInit = nil
+			} else if as.formElicit {
+				// The one question forms can't ask (the API key) has just
+				// been answered in chat; the remaining steps go straight
+				// back to form dialogs.
+				more, done := as.runInitForms(turnCtx, as.pendingInit)
+				out += more
+				if done {
+					as.pendingInit = nil
+				}
 			}
-			if res.Output != "" {
-				say(stripANSI(res.Output))
+			if out != "" {
+				say(stripANSI(out))
 			}
 			as.notify(acp.IdleState(acp.StopReasonEndTurn))
 			return acp.PromptResponse{MessageID: msgID}, nil

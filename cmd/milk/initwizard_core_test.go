@@ -25,8 +25,11 @@ func TestInitWizardApply_LocalProviderFlow(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	st, banner := initWizardStart()
-	if !strings.Contains(banner, "setup wizard") || !strings.Contains(banner, "primary agent name") {
-		t.Fatalf("banner = %q, want setup-wizard banner ending in the name prompt", banner)
+	if !strings.Contains(banner, "setup wizard") {
+		t.Fatalf("banner = %q, want the setup-wizard banner", banner)
+	}
+	if p := initWizardPrompt(st); !strings.Contains(p, "primary agent name") {
+		t.Fatalf("first prompt = %q, want the name question", p)
 	}
 
 	steps := []struct {
@@ -43,8 +46,8 @@ func TestInitWizardApply_LocalProviderFlow(t *testing.T) {
 	var res initWizardResult
 	for i, s := range steps {
 		res = initWizardApply(st, s.in, localWizardOpts(1))
-		if !strings.Contains(res.Output, s.want) {
-			t.Errorf("step %d (input %q): output = %q, want substring %q", i, s.in, res.Output, s.want)
+		if shown := res.Output + res.Prompt; !strings.Contains(shown, s.want) {
+			t.Errorf("step %d (input %q): output+prompt = %q, want substring %q", i, s.in, shown, s.want)
 		}
 		wantDone := i == len(steps)-1
 		if res.Done != wantDone {
@@ -89,16 +92,16 @@ func TestInitWizardApply_BearerFlow(t *testing.T) {
 	initWizardApply(st, "3", opts)                            // provider → bearer → URL
 	initWizardApply(st, "https://openrouter.ai/api/v1", opts) // → chat path
 	res := initWizardApply(st, "", opts)                      // default chat path
-	if !strings.Contains(res.Output, "model name") {
-		t.Fatalf("after blank chat path: output = %q, want the model prompt", res.Output)
+	if !strings.Contains(res.Output+res.Prompt, "model name") {
+		t.Fatalf("after blank chat path: output+prompt = %q, want the model prompt", res.Output+res.Prompt)
 	}
 	res = initWizardApply(st, "meta-llama/llama-3.1-8b-instruct", opts) // → auth
-	if !strings.Contains(res.Output, "API key") {
-		t.Fatalf("bearer must ask for an API key, output = %q", res.Output)
+	if !strings.Contains(res.Output+res.Prompt, "API key") {
+		t.Fatalf("bearer must ask for an API key, output+prompt = %q", res.Output+res.Prompt)
 	}
 	res = initWizardApply(st, "sk-test", opts) // → limits (non-empty key skips token_cmd)
-	if !strings.Contains(res.Output, "context window") {
-		t.Fatalf("after API key: output = %q, want the limits prompt (token_cmd must be skipped)", res.Output)
+	if !strings.Contains(res.Output+res.Prompt, "context window") {
+		t.Fatalf("after API key: output+prompt = %q, want the limits prompt (token_cmd must be skipped)", res.Output+res.Prompt)
 	}
 	initWizardApply(st, "", opts)        // limits
 	res = initWizardApply(st, "y", opts) // escalation → commit
@@ -168,8 +171,8 @@ func TestInitWizardApply_OpenEditorQuestionTUI(t *testing.T) {
 	if res.Done {
 		t.Error("wizard must not be Done before the editor question is answered")
 	}
-	if !strings.Contains(res.Output, "open config in editor now?") {
-		t.Errorf("output = %q, want the open-editor question", res.Output)
+	if !strings.Contains(res.Prompt, "open config in editor now?") {
+		t.Errorf("prompt = %q, want the open-editor question", res.Prompt)
 	}
 	res = initWizardApply(st, "y", opts)
 	if !res.Done || !res.OpenEditor || res.Output != "" {

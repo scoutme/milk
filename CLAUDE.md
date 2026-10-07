@@ -35,12 +35,13 @@ cmd/milk/host_acp.go          # events.Host adapter over ACP (local-provider age
 cmd/milk/acp_commands.go      # ACP slash-command table: one source for what is executed and what available_commands_update advertises
 cmd/milk/acp_features.go      # ACP: plan updates, task store, background manager, live-output streaming
 cmd/milk/acp_workflow.go      # ACP: runs workflows inside session/prompt (host half; core is workflow_core.go)
+cmd/milk/acp_initwizard.go    # ACP: /config init via elicitation form dialogs (choices + pre-populated defaults) with chat fallback for credentials/dismissals
 cmd/milk/acp_followup.go      # ACP: automatic follow-up turn when background jobs finish
 cmd/milk/acp_signals.go       # ACP: route announcements and loop/consumption warnings
 cmd/milk/turn_routing.go      # host-independent routing core (pins, single-turn flags, availability fallback, auto-sticky, turn metrics) shared by TUI runTurn and ACP
 cmd/milk/workflow_core.go     # host-independent workflow launch plan, saved-workflow lookup and clear, shared by TUI and ACP
 cmd/milk/followup_core.go     # host-independent rules for when finished background jobs trigger a follow-up turn, shared by TUI and ACP
-cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, config commit) shared by TUI handleInitWizardKey and ACP pendingInit
+cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, field descriptors/defaults, config commit) shared by TUI handleInitWizardKey, ACP pendingInit chat flow and ACP form dialogs
 cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json
 internal/transport/acp/       # ACP v2 wire vocabulary + stdio.go's JSON-RPC transport (StdioConn)

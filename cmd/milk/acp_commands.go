@@ -116,8 +116,9 @@ func acpHelp(*acpSession, string) (string, string) {
 // acpConfig implements /config over ACP. print/show render the merged config,
 // open answers with the file path (an ACP agent runs headless inside somebody
 // else's editor — it can't suspend into an editor of its own, so the client
-// opens the path), init starts the setup wizard, driven one answer per prompt
-// while as.pendingInit is set.
+// opens the path), init starts the setup wizard: elicitation form dialogs
+// when the client supports them, otherwise one chat prompt per answer while
+// as.pendingInit is set.
 func acpConfig(as *acpSession, rest string) (string, string) {
 	switch sub := strings.ToLower(strings.TrimSpace(rest)); sub {
 	case "":
@@ -147,13 +148,23 @@ func acpInit(as *acpSession, _ string) (string, string) {
 	return acpStartInitWizard(as), ""
 }
 
-// acpStartInitWizard arms the session's wizard and returns the banner plus the
-// first prompt. Subsequent session/prompt calls are fed to initWizardApply
-// from runTurn until the wizard reports Done.
+// acpStartInitWizard starts the setup wizard. With a form-capable client
+// (clientCapabilities.elicitation.form) the whole flow runs as elicitation
+// form dialogs inside this turn — titled choices and pre-populated defaults
+// instead of a typed answer per step — with chat picking up wherever forms
+// can't go (see runInitForms). Otherwise it's the chat wizard: one prompt
+// per answer in subsequent turns while as.pendingInit is set.
 func acpStartInitWizard(as *acpSession) string {
 	st, banner := initWizardStart()
+	if as.formElicit {
+		text, done := as.runInitForms(as.currentCtx(), st)
+		if !done {
+			as.pendingInit = st
+		}
+		return banner + text
+	}
 	as.pendingInit = st
-	return banner
+	return banner + initWizardPrompt(st) + initWizardChatHint
 }
 
 // acpConfigOpen answers /config open. An ACP agent runs headless inside

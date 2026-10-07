@@ -766,7 +766,7 @@ func copilotHostname(u string) string {
 func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
 	st, banner := initWizardStart()
 	m.pendingInit = st
-	m.appendTranscript(banner)
+	m.appendTranscript(banner + initWizardPrompt(st))
 	m.ta.Reset()
 	return m, nil
 }
@@ -880,6 +880,8 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 // initWizardPrompt returns the prompt text for a given wizard step.
 func initWizardPrompt(st *initWizardState) string {
 	switch st.step {
+	case initStepName:
+		return milkTag() + " primary agent name [local]: "
 	case initStepProvider:
 		return milkTag() + " provider — select:\n" +
 			"  1) local       llama.cpp · Ollama · vLLM · LM Studio (plain HTTP)\n" +
@@ -898,16 +900,7 @@ func initWizardPrompt(st *initWizardState) string {
 		}
 		return milkTag() + " server URL" + hint + ": "
 	case initStepChatPath:
-		defPath := "/v1/chat/completions"
-		if isCopilotURL(st.primary.URL) {
-			defPath = "/chat/completions"
-		} else if isAzureURL(st.primary.URL) {
-			dep := azureDeployment(st.primary.URL)
-			if dep == "" {
-				dep = "<deployment>"
-			}
-			defPath = "/deployments/" + dep + "/chat/completions"
-		}
+		defPath := initWizardChatPathDefault(st.primary.URL, "<deployment>")
 		return milkTag() + fmt.Sprintf(" chat path [%s]: ", defPath)
 	case initStepModel:
 		hint := ""
@@ -995,8 +988,8 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.st.cfg = *res.Committed
 			m.hasInferenceAgent = res.Committed.HasInferenceAgent()
 		}
-		if res.Output != "" {
-			m.appendTranscript(res.Output)
+		if res.Output != "" || res.Prompt != "" {
+			m.appendTranscript(res.Output + res.Prompt)
 		}
 		if res.Done {
 			m.pendingInit = nil
