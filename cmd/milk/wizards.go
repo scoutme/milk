@@ -930,7 +930,7 @@ func initWizardPrompt(st *initWizardState) string {
 				hint = "\n" + dim("  hint: leave blank and use token_cmd = 'gh auth token'")
 			}
 		}
-		return milkTag() + " API key (leave blank to use token_cmd instead)" + hint + "\n" + milkTag() + " API key: "
+		return milkTag() + " API key (leave blank or type 'default' to use token_cmd instead)" + hint + "\n" + milkTag() + " API key: "
 	case initStepTokenCmd:
 		hint := ""
 		if isCopilotURL(st.primary.URL) {
@@ -945,7 +945,7 @@ func initWizardPrompt(st *initWizardState) string {
 		}
 		return milkTag() + " token command" + hint + ": "
 	case initStepRunCmd:
-		return milkTag() + " server start command (leave blank to skip)\n" +
+		return milkTag() + " server start command (leave blank or type 'default' to skip)\n" +
 			dim("  e.g. llama-server -m ~/models/qwen2.5-coder-7b-q4_k_m.gguf --port 8080 -ngl 99") + "\n" +
 			milkTag() + " run_cmd: "
 	case initStepAWSRegion:
@@ -954,11 +954,11 @@ func initWizardPrompt(st *initWizardState) string {
 		if v, ok := modelsdev.Lookup(st.primary.Model); ok {
 			return milkTag() + fmt.Sprintf(" context window in tokens (matched %q in the models.dev catalog) [%d]: ", st.primary.Model, v)
 		}
-		return milkTag() + " context window in tokens, if known (blank to skip): "
+		return milkTag() + " context window in tokens, if known (leave blank or type 'default' to skip): "
 	case initStepEscalation:
 		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
 	case initStepAgentTools:
-		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated) or leave blank to skip: "
+		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated), or leave blank / type 'default' to skip: "
 	case initStepOpenConfig:
 		return milkTag() + " open config in editor now? [y/N]: "
 	}

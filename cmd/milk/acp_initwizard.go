@@ -1,26 +1,32 @@
 package main
 
-// ACP's form-driven /config init wizard. The step machine itself lives in
-// initwizard_core.go (shared with the TUI); this file drives it through ACP
-// elicitation form dialogs (elicitation/create, form mode) when the client
-// advertised form support — one dialog per step, that step's prompt as the
-// dialog message, the field's choices as a titled select/multi-select and
-// its default pre-populated. That is the input surface the chat flow cannot
-// offer: ACP clients generally won't send an empty prompt (so "accept the
-// default" has nothing to click), and typing six answers blind is exactly
-// the adoption friction this removes.
+// ACP's /config init wizard drive. The step machine itself lives in
+// initwizard_core.go (shared with the TUI); this file feeds it answers over
+// the richest input surface the client supports for each step:
 //
-// Two deliberate fallbacks keep the wizard working everywhere:
-//   - credentials never go through form elicitation (the spec forbids
-//     secrets in form mode), so the API-key step — and the rest of the run
-//     if the user prefers typing — continues in chat, where the words
-//     "default" / "-" stand in for the empty answer (initWizardDefaultWord);
-//   - a dismissed dialog or a failed round trip hands the current step back
-//     to chat with every applied answer kept.
+//  1. elicitation form dialogs (elicitation/create, form mode) on
+//     form-capable clients — the standard's structured input: titled
+//     selects and pre-populated defaults;
+//  2. clickable choice prompts (session/request_permission options) — the
+//     one prompt surface every ACP client renders as buttons (it is how
+//     tool approvals work): one click per choice or example, a "use
+//     default" button standing in for the empty turn ACP chat can't send,
+//     and "type my own value…" handing the step to typed input;
+//  3. typed chat answers in later turns (as.pendingInit) — the universal
+//     floor, every question carrying what 'default' means for it.
 //
-// The dialogs run inside the triggering turn (like session/request_permission
-// prompts do), so /config init can finish a whole first-run setup in one
-// command.
+// Two rules cross all surfaces. Credentials never go through the form
+// surface (the spec forbids secrets in form mode): the API-key step is
+// skipped with one click or typed in chat, and chat text is never sent to
+// the model. And nothing user-visible ever degrades into an error: a
+// dismissed dialog, a dismissed prompt, or a client whose permission
+// responses carry no recognizable outcome all fall back to typed input with
+// every applied answer kept (the last case is remembered in
+// acpSession.noChoice so that client is not asked again).
+//
+// The dialogs and prompts run inside the triggering turn (like tool
+// permission prompts), so /config init can finish a whole first-run setup
+// in one command on a client with forms or buttons.
 
 import (
 	"context"
@@ -30,13 +36,9 @@ import (
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
-// initWizardChatHint is appended to the chat wizard's first prompt: the
-// stand-ins for the empty turn ACP chat can't send, and the escape hatch.
-const initWizardChatHint = "[milk] (type 'default' to accept the bracketed default, 'cancel' to abort)\n"
-
-// initWizardFormFallbackNote is emitted when a question hands back to chat:
-// forms can't carry it (the step holds a credential), the user dismissed the
-// dialog, or the dialog round trip failed.
+// initWizardFormFallbackNote is emitted when a question hands back to typed
+// input after a dialog was shown: forms can't carry it (the step holds a
+// credential), the user dismissed the dialog, or the round trip failed.
 const initWizardFormFallbackNote = "[milk] continuing the setup wizard in chat — type your answer, 'default' to accept the bracketed default, or 'cancel' to abort\n"
 
 // initWizardOptions is the ACP flavor of the wizard's host options: no
@@ -70,13 +72,105 @@ func (as *acpSession) commitInitWizard(res initWizardResult) string {
 	return ""
 }
 
-// runInitForms drives st through elicitation form dialogs — one per step,
-// that step's prompt as the dialog message — as far as it safely can, and
-// returns the text to show plus whether the wizard finished. It hands the
-// current step back to the chat flow (done=false, prompt appended) at the
-// credential step and whenever the user dismisses a dialog or the round trip
-// fails; every answer already applied is kept either way.
-func (as *acpSession) runInitForms(ctx context.Context, st *initWizardState) (string, bool) {
+// initWizardFieldHint describes what the blank/'default' answer does for a
+// field — attached to form fields so the client can show it next to the
+// input (initWizardChatHintFor is the typed-input flavour).
+func initWizardFieldHint(f initWizardField) string {
+	switch {
+	case f.Default != "":
+		return "leave empty or type 'default' to accept '" + f.Default + "'"
+	case f.Required:
+		return "an answer is required"
+	default:
+		return "leave empty or type 'default' to skip"
+	}
+}
+
+// initWizardChatHintFor is the typed-input flavour of the same hint: no
+// "leave empty" (ACP chat can't send an empty turn), plus the escape hatch.
+// Appended to every question asked as typed input — not just the first.
+func initWizardChatHintFor(f initWizardField) string {
+	what := "type 'default' to skip"
+	if f.Default != "" {
+		what = "type 'default' to accept '" + f.Default + "'"
+	} else if f.Required {
+		return milkTag() + " (an answer is required — or 'cancel' to abort)\n"
+	}
+	return milkTag() + " (" + what + ", or 'cancel' to abort)\n"
+}
+
+// initWizardQuestionText is one question as typed input: the step's prompt
+// plus its per-question 'default' hint.
+func initWizardQuestionText(st *initWizardState, f initWizardField) string {
+	return initWizardPrompt(st) + initWizardChatHintFor(f)
+}
+
+// acpChoiceKind says where a step's answer came from over the choice prompt
+// (or why there is none).
+type acpChoiceKind int
+
+const (
+	acpChoicePicked acpChoiceKind = iota // the answer carries the clicked value
+	acpChoiceChat                        // nothing clicked — hand the step to typed input
+	acpChoiceAbort                       // the user cancelled the whole wizard
+)
+
+// askInitChoice offers a field's picks as clickable options over
+// session/request_permission — rendered as buttons by every ACP client —
+// and returns the clicked answer. "type my own value…", an explicit dismiss
+// and unknown option IDs all yield acpChoiceChat (typed input, no blame);
+// a client whose response carries no recognizable outcome at all (or errors)
+// is remembered in as.noChoice and never asked again — see
+// acp.PermissionOutcome.Outcome's "" case, whose doc anticipates exactly
+// this caller.
+func (as *acpSession) askInitChoice(ctx context.Context, st *initWizardState, f initWizardField) (string, acpChoiceKind) {
+	picks := initWizardPicks(f)
+	if as.noChoice || len(picks) <= 1 {
+		return "", acpChoiceChat
+	}
+	opts := make([]acp.PermissionOption, 0, len(picks)+1)
+	for i, p := range picks {
+		opts = append(opts, acp.PermissionOption{
+			OptionID: fmt.Sprintf("pick-%d", i),
+			Name:     p.Label,
+			Kind:     acp.PermissionAllowOnce,
+		})
+	}
+	opts = append(opts, acp.PermissionOption{OptionID: "cancel", Name: "cancel setup", Kind: acp.PermissionRejectOnce})
+	out, err := as.host.host.RequestPermission(ctx, acp.PermissionRequest{
+		Title:       "milk setup — " + f.Label,
+		Description: stripANSI(initWizardPrompt(st)),
+		Options:     opts,
+	})
+	switch {
+	case err != nil || out.Outcome == "":
+		as.noChoice = true
+		return "", acpChoiceChat
+	case out.Outcome != "selected": // dismissed — typed input
+		return "", acpChoiceChat
+	case out.OptionID == "cancel":
+		return "", acpChoiceAbort
+	}
+	for i, p := range picks {
+		if out.OptionID == fmt.Sprintf("pick-%d", i) {
+			if p.Custom {
+				return "", acpChoiceChat
+			}
+			return p.Value, acpChoicePicked
+		}
+	}
+	return "", acpChoiceChat
+}
+
+// runInitDialogs drives st as far as the client's input surfaces allow in
+// this turn and returns the text to show plus whether the wizard finished.
+// Per step: a form dialog (form-capable clients, non-secret steps), else a
+// clickable choice prompt, else typed input — the question then comes back
+// with its hint and the answer arrives in a later turn (see
+// acpSession.runTurn). The next question is never echoed twice: whatever
+// asks it (dialog message, prompt description, returned text) *is* the
+// question. Every applied answer is kept on any fallback.
+func (as *acpSession) runInitDialogs(ctx context.Context, st *initWizardState) (string, bool) {
 	opts := as.initWizardOptions()
 	var b strings.Builder
 	for {
@@ -86,39 +180,52 @@ func (as *acpSession) runInitForms(ctx context.Context, st *initWizardState) (st
 			return b.String(), true
 		}
 		field := initWizardFieldFor(st, opts)
-		if field.Secret {
-			b.WriteString(initWizardSecretNote())
-			b.WriteString(initWizardPrompt(st))
-			return b.String(), false
+		var answer string
+		if as.formElicit && !field.Secret {
+			res, err := as.host.host.Elicit(ctx, acp.ElicitationRequest{
+				Message: stripANSI(initWizardPrompt(st)),
+				Schema:  initWizardSchema(field),
+			})
+			if err != nil {
+				fmt.Fprintf(&b, "%s form dialog failed (%v) — ", milkTag(), err)
+				b.WriteString(initWizardFormFallbackNote)
+				b.WriteString(initWizardQuestionText(st, field))
+				return b.String(), false
+			}
+			if res.Action != acp.ElicitationAccept {
+				b.WriteString(initWizardFormFallbackNote)
+				b.WriteString(initWizardQuestionText(st, field))
+				return b.String(), false
+			}
+			answer = initWizardFieldValue(res.Content, field)
+		} else {
+			pick, kind := as.askInitChoice(ctx, st, field)
+			switch kind {
+			case acpChoiceAbort:
+				b.WriteString(milkTag() + " setup wizard cancelled — restart with /config init\n")
+				return b.String(), true
+			case acpChoiceChat:
+				if field.Secret && as.formElicit {
+					b.WriteString(initWizardSecretNote())
+				}
+				b.WriteString(initWizardQuestionText(st, field))
+				return b.String(), false
+			default:
+				answer = pick
+			}
 		}
-		res, err := as.host.host.Elicit(ctx, acp.ElicitationRequest{
-			Message: stripANSI(initWizardPrompt(st)),
-			Schema:  initWizardSchema(field),
-		})
-		if err != nil {
-			fmt.Fprintf(&b, "%s form dialog failed (%v) — ", milkTag(), err)
-			b.WriteString(initWizardFormFallbackNote)
-			b.WriteString(initWizardPrompt(st))
-			return b.String(), false
-		}
-		if res.Action != acp.ElicitationAccept {
-			b.WriteString(initWizardFormFallbackNote)
-			b.WriteString(initWizardPrompt(st))
-			return b.String(), false
-		}
-		wr := initWizardApply(st, initWizardFieldValue(res.Content, field), opts)
+		wr := initWizardApply(st, answer, opts)
 		b.WriteString(wr.Output)
 		b.WriteString(as.commitInitWizard(wr))
 		if wr.Done {
 			return b.String(), true
 		}
-		// wr.Prompt is not echoed as text: the next dialog's message *is*
-		// the question (it gets appended only on the chat fallback).
 	}
 }
 
-// initWizardSecretNote explains why the credential step dropped out of the
-// form flow — the spec forbids secrets in form mode (see runInitForms' doc).
+// initWizardSecretNote explains why the credential step dropped to typed
+// input on a form-capable client — the spec forbids secrets in form mode
+// (see runInitDialogs' doc).
 func initWizardSecretNote() string {
 	return milkTag() + " credentials can't go through form dialogs — this step is asked in chat (the chat text is never sent to the model)\n" +
 		initWizardFormFallbackNote
@@ -128,9 +235,11 @@ func initWizardSecretNote() string {
 // flat single-field form (the elicitation spec allows primitive and select
 // property kinds only). Selects carry titled choices — clients render them
 // as clickable options — and every Default rides along so clients that
-// support schema defaults pre-populate the field. A missing content key on
-// accept therefore means "the untouched default", which initWizardFieldValue
-// already maps to the blank answer initWizardApply treats as the default.
+// support schema defaults pre-populate the field; the property description
+// spells out the 'default' word for clients that pre-populate nothing. A
+// missing content key on accept therefore means "the untouched default",
+// which initWizardFieldValue already maps to the blank answer
+// initWizardApply treats as the default.
 func initWizardSchema(f initWizardField) acp.ElicitationSchema {
 	var prop acp.ElicitationProperty
 	switch f.Kind {
@@ -150,6 +259,7 @@ func initWizardSchema(f initWizardField) acp.ElicitationSchema {
 	default:
 		prop = acp.ElicitationProperty{Type: "string", Title: f.Label, Default: f.Default}
 	}
+	prop.Description = initWizardFieldHint(f)
 	s := acp.ElicitationSchema{
 		Type:       "object",
 		Title:      f.Label,

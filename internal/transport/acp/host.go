@@ -60,6 +60,13 @@ type PermissionRequest struct {
 type PermissionOutcome struct {
 	Cancelled bool
 	OptionID  string
+	// Outcome is the raw response outcome ("selected" | "cancelled",
+	// open-set). "" means the client returned nothing recognizable — a
+	// client that does not really implement session/request_permission.
+	// Callers offering non-permission choices (the /config init wizard)
+	// must tell that apart from an explicit dismissal: fall back to text
+	// input silently instead of blaming the user for a client gap.
+	Outcome string
 }
 
 // Allow reports whether the selected option's kind is an allow kind.
@@ -169,9 +176,9 @@ func (h *ACPHost) RequestPermission(ctx context.Context, req PermissionRequest) 
 		return PermissionOutcome{Cancelled: true}, err
 	}
 	if resp.Outcome.Outcome == "selected" {
-		return PermissionOutcome{OptionID: resp.Outcome.OptionID}, nil
+		return PermissionOutcome{OptionID: resp.Outcome.OptionID, Outcome: "selected"}, nil
 	}
-	return PermissionOutcome{Cancelled: true}, nil
+	return PermissionOutcome{Cancelled: true, Outcome: resp.Outcome.Outcome}, nil
 }
 
 // Elicit implements Host (structured user-input form/select prompts).

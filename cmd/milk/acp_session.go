@@ -86,10 +86,16 @@ type acpSession struct {
 
 	// formElicit: the client advertised form-mode elicitation
 	// (clientCapabilities.elicitation.form at initialize), so the setup
-	// wizard runs its steps as elicitation form dialogs (titled choices,
-	// pre-populated defaults) instead of one chat prompt per answer — see
+	// wizard can ask its steps as elicitation form dialogs (titled choices,
+	// pre-populated defaults) instead of typed answers — see
 	// acp_initwizard.go. Set once at session creation; read-only after.
 	formElicit bool
+
+	// noChoice: this client's session/request_permission responses carry no
+	// recognizable outcome (or fail), so the setup wizard skips its clickable
+	// choice prompts and asks steps as typed input directly. Set on the
+	// first such response; read-only after.
+	noChoice bool
 
 	// v1Client: the client speaks ACP v1, which lacks v2's plan_update and
 	// tool_call_content_chunk (see notifyPlan, streamLive).
@@ -397,22 +403,19 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 			as.notify(acp.IdleState(acp.StopReasonEndTurn))
 			return acp.PromptResponse{MessageID: msgID}, nil
 		} else {
-			// 'default' / '-' stands in for the empty answer that means
-			// "take the bracketed default" in the TUI — ACP chat clients
-			// generally refuse to send an empty prompt.
-			answer := prompt
-			if initWizardDefaultWord(answer) {
-				answer = ""
-			}
-			res := initWizardApply(as.pendingInit, answer, as.initWizardOptions())
-			out := res.Output + as.commitInitWizard(res) + res.Prompt
+			// initWizardApply maps the 'default' word onto the blank answer
+			// itself (the empty turn ACP chat can't send), on every input
+			// surface.
+			res := initWizardApply(as.pendingInit, prompt, as.initWizardOptions())
+			out := res.Output + as.commitInitWizard(res)
 			if res.Done {
 				as.pendingInit = nil
-			} else if as.formElicit {
-				// The one question forms can't ask (the API key) has just
-				// been answered in chat; the remaining steps go straight
-				// back to form dialogs.
-				more, done := as.runInitForms(turnCtx, as.pendingInit)
+			} else {
+				// Keep going on the best surface the client has (form
+				// dialogs / clickable choice prompts), or hand the next
+				// question back to typed input — its text comes back with
+				// it, so res.Prompt is never echoed twice.
+				more, done := as.runInitDialogs(turnCtx, as.pendingInit)
 				out += more
 				if done {
 					as.pendingInit = nil
