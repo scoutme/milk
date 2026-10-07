@@ -66,3 +66,50 @@ func TestPromptResponse_NoStopReason(t *testing.T) {
 		t.Error("PromptResponse must not carry stopReason — see its doc comment")
 	}
 }
+
+// TestInitializeRequest_CapabilitiesWireNames: initialize field spellings
+// vary across protocol versions, and decoding them is load-bearing (the
+// setup wizard checks elicitation.form before requesting a form) — both the
+// released `clientCapabilities`/`clientInfo` names and the v2-draft
+// `capabilities`/`info` ones must decode.
+func TestInitializeRequest_CapabilitiesWireNames(t *testing.T) {
+	for _, wire := range []string{
+		`{"protocolVersion":1,"clientInfo":{"name":"zed"},"clientCapabilities":{"elicitation":{"form":{}}}}`,
+		`{"protocolVersion":2,"info":{"name":"zed"},"capabilities":{"elicitation":{"form":{}}}}`,
+	} {
+		var req InitializeRequest
+		if err := json.Unmarshal([]byte(wire), &req); err != nil {
+			t.Fatalf("Unmarshal(%s): %v", wire, err)
+		}
+		if req.Info.Name != "zed" {
+			t.Errorf("(%s) Info.Name = %q, want zed", wire, req.Info.Name)
+		}
+		if !req.Capabilities.FormElicitation() {
+			t.Errorf("(%s) FormElicitation() = false, want true", wire)
+		}
+	}
+}
+
+// TestClientCapabilities_FormElicitation: presence semantics per the spec —
+// only an explicitly present, non-null `form` advertises form support.
+func TestClientCapabilities_FormElicitation(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want bool
+	}{
+		{"no capabilities", `{"protocolVersion":1}`, false},
+		{"elicitation without form", `{"capabilities":{"elicitation":{}}}`, false},
+		{"null form", `{"capabilities":{"elicitation":{"form":null}}}`, false},
+		{"empty form object", `{"capabilities":{"elicitation":{"form":{}}}}`, true},
+	}
+	for _, tc := range cases {
+		var req InitializeRequest
+		if err := json.Unmarshal([]byte(tc.json), &req); err != nil {
+			t.Fatalf("%s: Unmarshal: %v", tc.name, err)
+		}
+		if got := req.Capabilities.FormElicitation(); got != tc.want {
+			t.Errorf("%s: FormElicitation() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
