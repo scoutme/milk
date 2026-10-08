@@ -54,7 +54,7 @@ const cmdNotifications = "/notifications"
 
 var slashCommands = []string{
 	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdInit, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash, cmdBg, cmdNotifications,
-	"/new", "/clear", "/drop", "/list", "/help", "/exit", "/quit",
+	cmdNew, cmdClear, cmdDrop, cmdSessions, cmdResume, cmdListLegacy, "/help", "/exit", "/quit",
 }
 
 // initWizardState tracks state for the /config init TUI wizard.
@@ -119,10 +119,11 @@ const interactiveHelp = `
   /primary <msg>         force this turn to primary agent, then resume routing
 
 ── Sessions ─────────────────────────────────────────────────────────────
-  /list                  list sessions for current directory
-  /new                   start a fresh session
-  /clear                 alias for /new — start a fresh session
-  /drop                  delete current session
+  /sessions [all]        list stored sessions for this directory (* = current)
+  /resume <id|prefix|name>  switch to a stored session (transcript is reseeded)
+  /new [name]            start a fresh session (the current one stays resumable)
+  /clear [name]          alias for /new — start a fresh session
+  /drop [<id|prefix|name>]  delete the current session, or the referenced one
   /export                print session transcript (text)
   /export json           print session transcript as JSON
   /export <path>         write session transcript to file
@@ -513,8 +514,10 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	switch cmd {
 	case "/exit", "/quit":
 		return true, "", ""
-	case "/help", "/new", "/clear", "/drop", "/list", cmdPaste:
+	case "/help", cmdPaste:
 		output = execNonPromptCmd(cmd, prompt, st)
+	case cmdNew, cmdClear, cmdDrop, cmdSessions, cmdResume, cmdListLegacy:
+		output = execSessionCmd(cmd, prompt, st)
 	case cmdLearn:
 		output = execLearn(prompt, st)
 	case cmdOtel:
@@ -621,27 +624,62 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 	switch cmd {
 	case "/help":
 		fmt.Fprint(&out, renderHelp(interactiveHelp, 0))
-	case "/new", "/clear":
-		var err error
-		st.sess, err = session.New(st.cwd, "")
-		if err != nil {
-			fmt.Fprintf(&out, errFmt, err)
-			return out.String()
-		}
-		obs.ResetSessionTokens()
-		fmt.Fprintf(&out, "%s new session %s", milkTag(), st.sess.ID[:8])
-	case "/drop":
-		if err := dropAndNewSession(st, &out); err != nil {
-			fmt.Fprintf(&out, red("error: ")+"%v", err)
-		}
-	case "/list":
-		if err := listSessions(st.cwd, &out); err != nil {
-			fmt.Fprintf(&out, errFmt, err)
-		}
 	case cmdPaste:
 		fmt.Fprint(&out, milkTag()+" probing clipboard for non-text content (image, PDF, …)")
 	}
 	return out.String()
+}
+
+// execSessionCmd runs the session-management surface (plan D1) in the TUI:
+// /sessions [all], /new [name], /clear [name] (alias of /new), /resume <ref>,
+// /drop [<ref>] and the deprecated /list alias. The semantics live in the
+// host-neutral core (sessionmgmt_core.go); this wrapper only adopts the op's
+// binding — handleSlashInput's refreshSessionScopedState notices the st.sess
+// swap and rebuilds session-scoped state (and, for /resume, reseeds the
+// transcript so the view matches the binding).
+func execSessionCmd(cmd, args string, st *interactiveState) string {
+	args = strings.TrimSpace(args)
+	currentID := ""
+	if st.sess != nil {
+		currentID = st.sess.ID
+	}
+	var res sessionOpResult
+	switch cmd {
+	case cmdNew, cmdClear:
+		res = opSessionNew(st.cwd, args)
+	case cmdResume:
+		if args == "" {
+			listing, err := sessionListText(st.cwd, currentID, false)
+			if err != nil {
+				return fmt.Sprintf(errFmt, err)
+			}
+			return fmt.Sprintf("%s usage: /resume <%s>\n\n%s", milkTag(), sessionRefHint, listing)
+		}
+		res = opSessionResume(st.sess, st.cwd, args)
+	case cmdDrop:
+		res = opSessionDrop(st.sess, st.cwd, args)
+	case cmdSessions, cmdListLegacy:
+		all := strings.EqualFold(args, "all")
+		if args != "" && !all {
+			return milkTag() + " usage: /sessions [all]"
+		}
+		listing, err := sessionListText(st.cwd, currentID, all)
+		if err != nil {
+			return fmt.Sprintf(errFmt, err)
+		}
+		if cmd == cmdListLegacy {
+			return milkTag() + " /list is deprecated — use /sessions\n\n" + listing
+		}
+		return listing
+	}
+	if res.err != nil {
+		return renderOpResult(res, args)
+	}
+	if res.bind != nil {
+		st.sess = res.bind
+		obs.ResetSessionTokens()
+	}
+	return res.out
 }
 
 // execUsage prints token usage by agent role and model, plus current-session totals.
@@ -927,45 +965,6 @@ func agentLine(role string, ac config.AgentConfig) string {
 	}
 	return fmt.Sprintf("%s %s agent: %s\n  url:    %s\n  model:  %s\n  auth:   %s%s",
 		milkTag(), role, bold(name), bold(ac.URL), bold(ac.Model), authDesc, headerNote)
-}
-
-// dropAndNewSession drops the current session, creates a fresh one, and writes output to w.
-func dropAndNewSession(st *interactiveState, w *strings.Builder) error {
-	id := st.sess.ID
-	if err := session.Drop(id, st.cwd); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "%s dropped session %s\n", milkTag(), id[:8])
-	var err error
-	st.sess, err = session.New(st.cwd, "")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "%s new session %s", milkTag(), st.sess.ID[:8])
-	return nil
-}
-
-// listSessions writes the session list for cwd to w.
-func listSessions(cwd string, w *strings.Builder) error {
-	entries, err := session.List(cwd)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		fmt.Fprint(w, "no sessions found")
-		return nil
-	}
-	for dir, list := range entries {
-		fmt.Fprintf(w, "%s\n", dir)
-		for _, e := range list {
-			name := e.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			fmt.Fprintf(w, "  %s  %-20s  %s", e.ID[:8], name, e.LastUsed.Format("2006-01-02 15:04"))
-		}
-	}
-	return nil
 }
 
 // execAgentTool dispatches /agent tool <verb> [args] subcommands.

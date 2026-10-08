@@ -99,6 +99,13 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		}
 		output += fmt.Sprintf("%s warning: session switch state refresh failed: %v", milkTag(), err)
 	}
+	// /resume switches conversations, not just state: reseed the transcript
+	// from the newly bound session so the view matches the binding. /new,
+	// /clear and /drop land on fresh sessions and leave the visible
+	// transcript as it was.
+	if cmd == cmdResume && m.st != nil && m.st.sess != nil && oldSessionID != "" && m.st.sess.ID != oldSessionID {
+		m.reseedTranscriptFromHistory()
+	}
 	m.refreshPrompt()
 	if exit {
 		return m, tea.Quit
