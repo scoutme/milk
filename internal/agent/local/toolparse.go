@@ -148,3 +148,19 @@ func parseToolCallJSON(raw string) (toolCall, bool) {
 		},
 	}, true
 }
+
+// reUnparsedToolBlock matches a <tool_call>…</tool_call> block whose body is
+// XML-style (<parameter=…>, </function>, or a name-less "=name>" remnant)
+// rather than the JSON extractToolCalls understands — i.e. a call some
+// servers leak into content when their own streaming parser fails.
+var reUnparsedToolBlock = regexp.MustCompile(`(?s)<tool_call>(?:<?=|\s*<function=)?[^<]*?(?:<parameter=|</function>).*?</tool_call>`)
+
+// stripUnparsedToolMarkup removes leaked XML-style tool-call blocks from a
+// final response, reporting whether any were found. Only meant for text that
+// already failed extractToolCalls, so the blocks never carried a runnable call.
+func stripUnparsedToolMarkup(s string) (string, bool) {
+	if !reUnparsedToolBlock.MatchString(s) {
+		return s, false
+	}
+	return strings.TrimSpace(reUnparsedToolBlock.ReplaceAllString(s, "")), true
+}

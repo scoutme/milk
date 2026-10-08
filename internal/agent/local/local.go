@@ -157,6 +157,14 @@ type toolCall struct {
 	Index    int              `json:"index,omitempty"` // streaming-only; omitted when serialising history
 	Type     string           `json:"type"`
 	Function toolCallFunction `json:"function"`
+
+	// displaced holds earlier calls that shared this call's stream index —
+	// streaming-only bookkeeping for accumulateNativeToolCalls, never
+	// serialised.
+	displaced []toolCall
+	// orphans holds nameless argument fragments dropped when a later header
+	// took over this index — kept only to corroborate recovered leaked calls.
+	orphans []string
 }
 
 func (tc *toolCall) UnmarshalJSON(data []byte) error {
@@ -517,6 +525,12 @@ type Agent struct {
 	// monitor detects repetition during streaming.  The main loop checks
 	// this flag after streamCompletion returns.
 	reasoningNgramTriggered bool
+	// malformedToolCallTriggered is set by streamCompletionOnce when a
+	// response ended with finish_reason "tool_calls" (or a dangling nameless
+	// tool-call fragment) but yielded no runnable call, and a retry is still
+	// available. malformedToolCallRetries counts those retries within a turn.
+	malformedToolCallTriggered bool
+	malformedToolCallRetries   int
 	// jobID tags this instance as a background-job clone (set by
 	// RunBackgroundTask): every obs log line and metric label it emits
 	// carries the job ID and a ":subagent" role tag (see logRole/jobAttrs),
@@ -1491,6 +1505,8 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 	ngramRecoveryCount := 0
 	a.reasoningNgram = ngram
 	a.reasoningNgramTriggered = false
+	a.malformedToolCallTriggered = false
+	a.malformedToolCallRetries = 0
 
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
@@ -1558,6 +1574,13 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			continue
 		}
 
+		if a.malformedToolCallTriggered {
+			a.malformedToolCallTriggered = false
+			a.malformedToolCallRetries++
+			msgs = append(msgs, Message{Role: "user", Content: malformedToolCallNudge})
+			continue
+		}
+
 		if len(toolCalls) == 0 {
 			// No tool calls: either a final text response, or the model emitting EOS
 			// after completing its tool loop (empty response). Both are terminal.
@@ -1572,6 +1595,19 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				// summary), not a loop — it falls through to the same
 				// terminal return as any other final response, below.
 				resp = summarizeToolTrail(msgs, resp)
+			} else if clean, found := stripUnparsedToolMarkup(resp); found {
+				// The server leaked a tool call as text instead of a usable
+				// tool_calls entry, so the turn is ending on markup rather
+				// than an answer. Persisting that verbatim would leave the
+				// next turn with neither the turn's work nor a clean history
+				// (the markup is replayed to the model and can prime it to
+				// repeat the format) — swap it for the tool trail.
+				a.logWarn("turn ended on unparsed tool-call markup",
+					"model", a.model, "agent", a.logRole(), "session_id", sess.ID)
+				resp = summarizeToolTrailWithHeader(msgs, clean, unparsedToolCallTrailHeader)
+				if resp == "" {
+					resp = unparsedToolCallNoActionNote
+				}
 			}
 			if a.onResponseSegment != nil && resp != "" {
 				a.onResponseSegment(resp)
@@ -2669,7 +2705,21 @@ func toolDiff(name, argsJSON string) string {
 // unchanged when the turn made no tool calls at all — a genuinely empty,
 // non-erroring response with nothing to summarize.
 func summarizeToolTrail(msgs []Message, resp string) string {
-	var trail strings.Builder
+	return summarizeToolTrailWithHeader(msgs, resp, noFinalSummaryTrailHeader)
+}
+
+const (
+	noFinalSummaryTrailHeader    = "[turn ended without a final summary — tool activity this turn:]"
+	unparsedToolCallTrailHeader  = "[turn ended on a tool call the server failed to deliver — tool activity before it:]"
+	unparsedToolCallNoActionNote = "[the model's tool call was not delivered by the server and nothing was executed this turn]"
+	maxToolTrailChars            = 6000
+)
+
+// summarizeToolTrailWithHeader is summarizeToolTrail with a caller-chosen
+// header. The trail is capped at maxToolTrailChars, keeping the most recent
+// entries: a very long turn would otherwise persist tens of KB into history.
+func summarizeToolTrailWithHeader(msgs []Message, resp, header string) string {
+	var entries []string
 	for _, m := range msgs {
 		switch {
 		case m.Role == "assistant" && len(m.ToolCalls) > 0:
@@ -2678,22 +2728,33 @@ func summarizeToolTrail(msgs []Message, resp string) string {
 				if len(args) > 200 {
 					args = args[:200] + "…"
 				}
-				fmt.Fprintf(&trail, "- %s(%s)\n", tc.Function.Name, args)
+				entries = append(entries, fmt.Sprintf("- %s(%s)\n", tc.Function.Name, args))
 			}
 		case m.Role == "tool" && m.Content != "":
 			content := m.Content
 			if len(content) > 300 {
 				content = content[:300] + "…"
 			}
-			fmt.Fprintf(&trail, "  → %s\n", content)
+			entries = append(entries, fmt.Sprintf("  → %s\n", content))
 		}
 	}
-	if trail.Len() == 0 {
+	if len(entries) == 0 {
 		return resp
 	}
+	keep, size := len(entries), 0
+	for keep > 0 && size+len(entries[keep-1]) <= maxToolTrailChars {
+		keep--
+		size += len(entries[keep])
+	}
 	var b strings.Builder
-	b.WriteString("[turn ended without a final summary — tool activity this turn:]\n")
-	b.WriteString(trail.String())
+	b.WriteString(header)
+	b.WriteString("\n")
+	if keep > 0 {
+		fmt.Fprintf(&b, "(%d earlier entries omitted)\n", keep)
+	}
+	for _, e := range entries[keep:] {
+		b.WriteString(e)
+	}
 	if resp != "" {
 		b.WriteString("\n[reasoning at cutoff:]\n")
 		b.WriteString(resp)
@@ -3142,9 +3203,42 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// truncated open-delimiter-only response skip both the WARN below and
 	// Run()'s summarizeToolTrail fallback, silently committing an empty
 	// assistant turn to session history with no trace of what happened.
+	// Leaked calls (see toolrecover.go) are recovered before anything else
+	// looks at toolCalls, so a recovered turn is indistinguishable from a
+	// healthy one downstream.
+	if finishReason == "tool_calls" && len(tools) > 0 {
+		leaked := textBuf.String() + det.ActiveOpen() + det.RawBlock()
+		if recovered := recoverLeakedToolCalls(tools, toolCalls, leaked, orphanArgText(partialTools)); len(recovered) > 0 {
+			for _, rc := range recovered {
+				a.logWarn("recovered tool call leaked into content",
+					"model", a.model, "agent", a.logRole(),
+					"tool", rc.Function.Name, "args_bytes", len(rc.Function.Arguments))
+			}
+			toolCalls = append(recovered, toolCalls...)
+			cleaned, _ := stripUnparsedToolMarkup(textBuf.String())
+			textBuf.Reset()
+			textBuf.WriteString(cleaned)
+		}
+	}
 	danglingToolFragment := len(toolCalls) == 0 && len(partialTools) > 0
 	emptyFallback := textBuf.Len() == 0 && len(toolCalls) == 0 && det.RawBlock() == ""
-	if emptyFallback && (reasoningText != "" || finishReason == "length" || det.InBlock() || danglingToolFragment) {
+	// The server claimed tool calls but delivered none we can run (its own
+	// parser failed and leaked the markup as text). Ending the turn here would
+	// surface raw markup as the answer and silently abandon the task, so hide
+	// this response and let Run() ask for a re-issue.
+	classifyOut := out
+	retryMalformed := (finishReason == "tool_calls" || danglingToolFragment) &&
+		a.malformedToolCallRetries < maxMalformedToolCallRetries &&
+		!streamHasRunnableToolCall(det, toolCalls, textBuf.String())
+	a.malformedToolCallTriggered = retryMalformed
+	if retryMalformed {
+		classifyOut = io.Discard
+		a.logWarn("tool call not delivered, retrying",
+			"model", a.model, "agent", a.logRole(),
+			"finish_reason", finishReason, "retry", a.malformedToolCallRetries+1,
+			"dangling_fragment", danglingToolFragment, "content_bytes", textBuf.Len())
+	}
+	if emptyFallback && !retryMalformed && (reasoningText != "" || finishReason == "length" || det.InBlock() || danglingToolFragment) {
 		a.logWarn("empty completion", "model", a.model, "agent", a.logRole(),
 			"reasoning_seen", reasoningText != "", "finish_reason", finishReason,
 			"unclosed_block", det.InBlock(), "dangling_tool_fragment", danglingToolFragment)
@@ -3199,8 +3293,29 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	if det.Format != ToolFormatUnknown {
 		a.detectedFormat = det.Format
 	}
-	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), out)
+	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), classifyOut)
 	return text, fallbackRaw, tcs, emptyFallback, reasoningText, imageTokens, err
+}
+
+// maxMalformedToolCallRetries bounds how often one turn re-asks after a tool
+// call the server failed to deliver; past it the turn ends as before (the
+// leaked markup is swapped for the tool trail — see stripUnparsedToolMarkup).
+const maxMalformedToolCallRetries = 2
+
+const malformedToolCallNudge = "Your previous tool call was not delivered and was NOT executed: the server could not parse it. " +
+	"Re-issue it now as a proper tool call with valid JSON arguments. Do not write tool-call markup as text."
+
+// streamHasRunnableToolCall reports whether a finished stream carries at least
+// one call classifyStreamResult would return: native deltas, a detector block
+// that parses, or a post-hoc parse of the accumulated text.
+func streamHasRunnableToolCall(det *StreamDetector, nativeCalls []toolCall, rawText string) bool {
+	if len(nativeCalls) > 0 {
+		return true
+	}
+	if (det.InBlock() || det.RawBlock() != "") && len(det.Extract()) > 0 {
+		return true
+	}
+	return rawText != "" && len(extractToolCalls(rawText)) > 0
 }
 
 // classifyStreamResult interprets what the stream produced and returns the
@@ -3405,6 +3520,12 @@ func processContentToken(token string, det *StreamDetector, textBuf *strings.Bui
 	}
 }
 
+// accumulateNativeToolCalls folds streamed tool_calls deltas into partialTools,
+// keyed by stream index. A delta carrying a fresh id opens a new call: MiMo's
+// streaming parser has been observed reusing one index for several calls
+// (and sending a failed call's arguments before any id/name), and plain
+// concatenation then fused them into one unparseable call — destroying the
+// valid ones alongside the broken one.
 func accumulateNativeToolCalls(tcs []toolCall, partialTools map[int]*toolCall) {
 	for _, tc := range tcs {
 		pt, ok := partialTools[tc.Index]
@@ -3412,12 +3533,51 @@ func accumulateNativeToolCalls(tcs []toolCall, partialTools map[int]*toolCall) {
 			pt = &toolCall{Type: "function"}
 			partialTools[tc.Index] = pt
 		}
+		if tc.ID != "" && tc.ID != pt.ID {
+			switch {
+			case pt.ID != "":
+				// The server moved on to a new call on this index; the previous
+				// one is done. It is the server — not a cut stream — that
+				// dropped its closing brace in the observed cases, so repair it.
+				if pt.Function.Name != "" {
+					prev := toolCall{ID: pt.ID, Type: pt.Type, Function: pt.Function, Index: pt.Index}
+					prev.Function.Arguments = normalizeToolArgs(prev.Function.Arguments, true)
+					pt.displaced = append(pt.displaced, prev)
+				}
+				pt.ID, pt.Function = "", toolCallFunction{}
+			case pt.Function.Name == "":
+				// Arguments with no id/name ahead of this header belong to a call
+				// the server failed to announce (its text was leaked into content).
+				if pt.Function.Arguments != "" {
+					pt.orphans = append(pt.orphans, pt.Function.Arguments)
+				}
+				pt.Function = toolCallFunction{}
+			}
+		}
 		if tc.ID != "" {
 			pt.ID = tc.ID
 		}
 		pt.Function.Name += tc.Function.Name
 		pt.Function.Arguments += tc.Function.Arguments
 	}
+}
+
+// normalizeToolArgs returns args unchanged when valid JSON. Otherwise it
+// keeps the first complete JSON value when several were concatenated, and —
+// only when repairBrace is set — retries with a closing "}" appended.
+func normalizeToolArgs(args string, repairBrace bool) string {
+	if args == "" || json.Valid([]byte(args)) {
+		return args
+	}
+	dec := json.NewDecoder(strings.NewReader(args))
+	var first json.RawMessage
+	if err := dec.Decode(&first); err == nil {
+		return string(first)
+	}
+	if repairBrace && json.Valid([]byte(args+"}")) {
+		return args + "}"
+	}
+	return args
 }
 
 func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
@@ -3430,8 +3590,16 @@ func collectNativeToolCalls(partialTools map[int]*toolCall) []toolCall {
 	sort.Ints(indices)
 	var out []toolCall
 	for _, i := range indices {
-		if tc := partialTools[i]; tc != nil && tc.Function.Name != "" {
-			out = append(out, *tc)
+		tc := partialTools[i]
+		if tc == nil {
+			continue
+		}
+		out = append(out, tc.displaced...)
+		if tc.Function.Name != "" {
+			c := *tc
+			c.displaced = nil
+			c.Function.Arguments = normalizeToolArgs(c.Function.Arguments, false)
+			out = append(out, c)
 		}
 	}
 	return out
