@@ -202,6 +202,10 @@ type prefixChunkMsg struct{ text string }
 // separate from regular content so it can be shown or hidden independently.
 type thinkChunkMsg struct{ text string }
 
+// retractMsg tells the TUI that the agent replaced already-streamed response
+// text (from) with a clean one (to) — see Agent.WithOnRetract.
+type retractMsg struct{ from, to string }
+
 // reasoningPromotedMsg signals that the current turn's already-streamed
 // reasoning text has been promoted (by the local agent) to become the
 // turn's actual final answer, so the accumulated thinking for this turn
@@ -1895,6 +1899,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case retractMsg:
+		m.retractStreamed(msg.from, msg.to)
+		return m, nil
+
 	case thinkChunkMsg:
 		m.currentTurnChars += int64(len(msg.text))
 		m.currentTurnThinking.WriteString(msg.text)
@@ -3314,6 +3322,9 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		send(openFileMsg{path: path, respCh: respCh})
 		return <-respCh
 	}
+	localOnRetract := func(from, to string) {
+		send(retractMsg{from: from, to: to})
+	}
 	localOnToolUse := func(id, name, summary string, rawInput map[string]any) {
 		if st.cfg.RemoteOversight.NotifyToolsEnabled() {
 			st.notifier.NotifyToolUse(context.Background(), name, summary)
@@ -3329,6 +3340,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
+			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
@@ -3342,6 +3354,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
+			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).

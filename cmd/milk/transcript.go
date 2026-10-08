@@ -77,6 +77,54 @@ func (m *model) appendTranscriptStreamed(text string) {
 	m.syncViewportThrottled()
 }
 
+// retractFallbackNote is appended in place of an exact retraction when the
+// retracted text can't be found verbatim in the transcript (see
+// retractStreamed). Honest about what happened — a tool call was NOT executed
+// and the clean summary replaced it — instead of silently leaving raw markup
+// as the transcript's final state.
+const retractFallbackNote = "[milk] an unparsed tool call was not executed — the summary above replaces it"
+
+// retractStreamed repairs the transcript after the agent retracted response
+// from in favor of to (a turn that ended on unparsed tool-call markup, whose
+// raw text already streamed out before the source-side strip replaced it —
+// see local.stripUnparsedToolMarkup and Agent.WithOnRetract). The LAST
+// occurrence of from is replaced with to in both transcript variants — exact
+// verbatim surgery, no fuzzy matching, so ordinary text is never touched.
+// When from isn't found (the streamed form diverged from the final response —
+// interleaved status lines or thinking-block breaks), the honest replacement
+// is appended instead: to followed by a yellow note, so raw markup is never
+// the transcript's final state.
+func (m *model) retractStreamed(from, to string) {
+	for _, b := range []*strings.Builder{m.transcript, m.transcriptNoThink} {
+		s := b.String()
+		idx := -1
+		if from != "" {
+			idx = strings.LastIndex(s, from)
+		}
+		b.Reset()
+		switch {
+		case idx >= 0:
+			b.WriteString(s[:idx] + to + s[idx+len(from):])
+		default:
+			b.WriteString(s)
+			if s != "" && !strings.HasSuffix(s, "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString(to + "\n" + yellow(retractFallbackNote) + "\n")
+		}
+	}
+	// Content changed mid-transcript, so the offset-keyed colorize caches
+	// can't be trusted any more — force a full re-colorize.
+	m.colorizeForce = true
+	if m.ready {
+		atBottom := m.vp.AtBottom()
+		m.setViewportContent()
+		if atBottom {
+			m.vp.GotoBottom()
+		}
+	}
+}
+
 // appendThinkingStreamed adds thinking/reasoning text to the full transcript
 // (dim-styled) and a single "[thinking…]" placeholder to transcriptNoThink
 // (only on the first chunk of a new thinking block, to avoid repeated
