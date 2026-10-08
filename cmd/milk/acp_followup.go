@@ -78,6 +78,7 @@ func (as *acpSession) runFollowup() {
 	defer func() {
 		as.turnMu.Unlock()
 		as.flushPendingFollowup()
+		as.flushRemoteInputs()
 	}()
 	if _, err := as.runTurn(context.Background(), backgroundFollowupPrompt); err != nil {
 		as.notify(acp.AgentMessageChunk(as.liveID("followup"),

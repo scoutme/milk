@@ -60,6 +60,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// network checks.
 	go server.backgroundUpdateCheck(ctx)
 
+	// Remote oversight (Telegram): process-level notifier + polling, same
+	// rule as the update check — built here, not in newACPServer, so tests
+	// never ping Telegram (acp_oversight.go).
+	server.startOversight(ctx)
+
 	err = conn.Serve(ctx, os.Stdin)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err

@@ -40,3 +40,8 @@ func newNotifier(cfg config.Config) oversight.Notifier {
 		return oversight.Noop{}
 	}
 }
+
+// newNotifierFor is newNotifier behind a seam: the ACP serve process builds
+// its notifier through it (acp_oversight.go's resetNotifier), so tests can
+// substitute a fake and never ping Telegram or spawn a poller.
+var newNotifierFor = newNotifier

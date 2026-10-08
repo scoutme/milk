@@ -16,6 +16,7 @@ import (
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tasks"
@@ -109,6 +110,16 @@ type acpSession struct {
 	// first such response; read-only after.
 	noChoice bool
 
+	// pendingRemoteInputs queues remote-oversight (Telegram) messages that
+	// arrived while a turn was running — drained at turn end by
+	// flushRemoteInputs (acp_oversight.go). Guarded by mu.
+	pendingRemoteInputs []string
+
+	// lastActive is when this session last started a prompt: routes
+	// remote-oversight input to the session the user is actually using
+	// (acp_oversight.go's handleRemoteInput).
+	lastActive atomic.Int64
+
 	// updateAnnounced: the "update available" notice has been sent to this
 	// session (once per session; see acpServer.announceUpdate). Guarded by
 	// srv.mu, not by any session lock.
@@ -148,6 +159,7 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 	}
 
 	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id, runID: newRunID()}
+	as.lastActive.Store(time.Now().UnixNano())
 	as.st = &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, toolFutures: map[string]chan string{}}
 	// Thoughts have always been forwarded over ACP; keep that unless the
 	// config explicitly opts out.
@@ -203,7 +215,7 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 	wireLocal := func(a *local.Agent) *local.Agent {
 		permStore, _ := local.OpenPermStore(cwd) //nolint:errcheck // nil disables persistent grants, same as every other best-effort call site
 		wired := a.
-			WithPermissions(permStore, makeLocalPermAsk(as.host, permStore)).
+			WithPermissions(permStore, as.askPermissionWithOversight).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
 			WithOnToolUse(as.onLocalToolUse).
@@ -328,7 +340,7 @@ func (as *acpSession) emitToolCall(id, name string, status acp.ToolCallStatus, r
 	})
 }
 
-func (as *acpSession) onLocalToolUse(id, name, _ string, rawInput map[string]any) {
+func (as *acpSession) onLocalToolUse(id, name, summary string, rawInput map[string]any) {
 	as.callsMu.Lock()
 	if as.openCalls == nil {
 		as.openCalls = map[string][]acp.ToolCallID{}
@@ -336,6 +348,9 @@ func (as *acpSession) onLocalToolUse(id, name, _ string, rawInput map[string]any
 	as.openCalls[name] = append(as.openCalls[name], acp.ToolCallID(id))
 	as.callsMu.Unlock()
 	as.emitToolCall(id, name, acp.ToolCallInProgress, rawInput, nil)
+	if as.notifyTools() {
+		as.notifier().NotifyToolUse(context.Background(), name, summary)
+	}
 }
 
 func (as *acpSession) onLocalToolResult(id, name, result string, isError bool) {
@@ -356,6 +371,9 @@ func (as *acpSession) onLocalToolResult(id, name, result string, isError bool) {
 		status = acp.ToolCallFailed
 	}
 	as.emitToolCall(id, name, status, nil, result)
+	if as.notifyTools() {
+		as.notifier().NotifyToolResult(context.Background(), name, result, isError)
+	}
 }
 
 func (as *acpSession) onClaudeToolUse(id, name string) {
@@ -364,6 +382,9 @@ func (as *acpSession) onClaudeToolUse(id, name string) {
 
 func (as *acpSession) onClaudeToolUseReady(id, name string, input map[string]any) {
 	as.emitToolCall(id, name, acp.ToolCallInProgress, input, nil)
+	if as.notifyTools() {
+		as.notifier().NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+	}
 }
 
 func (as *acpSession) onClaudeToolResult(id, name, result string, isError bool) {
@@ -372,6 +393,9 @@ func (as *acpSession) onClaudeToolResult(id, name, result string, isError bool) 
 		status = acp.ToolCallFailed
 	}
 	as.emitToolCall(id, name, status, nil, result)
+	if as.notifyTools() {
+		as.notifier().NotifyToolResult(context.Background(), name, result, isError)
+	}
 }
 
 func (as *acpSession) onThinking(text string) {
@@ -411,10 +435,12 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 	// automatic background follow-up is running waits for it rather than
 	// cancelling it: the follow-up has already drained the finished jobs'
 	// results, so cancelling would lose them.
+	as.lastActive.Store(time.Now().UnixNano())
 	as.turnMu.Lock()
 	defer func() {
 		as.turnMu.Unlock()
 		as.flushPendingFollowup()
+		as.flushRemoteInputs()
 	}()
 	return as.runTurn(ctx, strings.TrimSpace(text.String()))
 }
@@ -506,6 +532,14 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 		}
 		if output != "" {
 			say(output)
+			// Mirror the TUI's slash-output notification (handleSlashInput):
+			// command results reach remote oversight too. Wizard state churn
+			// (the cancel note above) is not a command result — not sent.
+			if wizardCancelNote == "" {
+				if cmd, _, ok := extractSlashCommand(prompt); ok {
+					as.notifier().NotifyResponse(turnCtx, "milk", cmd+": "+output)
+				}
+			}
 		}
 		if dispatch == "" {
 			as.notify(acp.IdleState(acp.StopReasonEndTurn))
@@ -526,9 +560,40 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	}
 	decision, target := rt.Decision, rt.Target
 	source, turnStart := turnSource(as.st), time.Now()
+	var runner TurnRunner
+	if r := map[router.Target]TurnRunner{router.TargetLocal: as.primaryRunner, router.TargetEscalation: as.escalationRunner}[target]; r != nil {
+		runner = r
+	}
 	var routeMeta map[string]any
-	if runner := map[router.Target]TurnRunner{router.TargetLocal: as.primaryRunner, router.TargetEscalation: as.escalationRunner}[target]; runner != nil {
+	if runner != nil {
 		routeMeta = as.announceRoute(decision, target, runner.Name())
+	}
+
+	// Remote-oversight turn hooks — the TUI's runTurn notifications mirrored
+	// (repl.go): start before dispatch, response segments as they complete,
+	// done + the final response at the end.
+	notify := as.notifier()
+	targetName := "local"
+	agentName := as.cfg.ActiveAgent().Name
+	if target == router.TargetEscalation {
+		targetName = "escalation"
+		agentName = as.cfg.EscalationAgentConfig().Name
+	}
+	notify.NotifyTurnStart(turnCtx, agentName, targetName, prompt)
+
+	// onResponse keeps feeding the client via say and captures the final
+	// text; onSegment notifies remote oversight per completed segment (the
+	// TUI's exact split — when no segment fires, the end-of-turn response
+	// below covers runners that only report the final text).
+	var lastResponseText string
+	onResponse = func(text string) {
+		lastResponseText = text
+		say(text)
+	}
+	var segmentsFired bool
+	onSegment := func(text string) {
+		segmentsFired = true
+		notify.NotifyResponse(turnCtx, agentName, text)
 	}
 
 	onWorkflowStart := func(ws *local.WorkflowStartSignal) { as.startWorkflowFromTool(turn, ws) }
@@ -536,15 +601,21 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		turnErr = runPrimary(turnCtx, as.cfg, as.sess, as.primaryRunner, as.escalationRunner, as.mem, prompt, io.Discard, as.da, onResponse, nil, onWorkflowStart)
+		turnErr = runPrimary(turnCtx, as.cfg, as.sess, as.primaryRunner, as.escalationRunner, as.mem, prompt, io.Discard, as.da, onResponse, onSegment, onWorkflowStart)
 	case router.TargetEscalation:
-		turnErr = runEscalation(turnCtx, as.cfg, as.sess, as.escalationRunner, "", as.mem, prompt, io.Discard, as.da, onResponse, nil, onWorkflowStart)
+		turnErr = runEscalation(turnCtx, as.cfg, as.sess, as.escalationRunner, "", as.mem, prompt, io.Discard, as.da, onResponse, onSegment, onWorkflowStart)
 	default:
 		turnErr = fmt.Errorf("unknown routing target: %s", target)
 	}
 
 	recordTurn(turnCtx, target, source, turnStart, turnErr)
+	// Remote-oversight turn end — the TUI's ordering: done first (errors
+	// included), then the final response when no segment already carried it.
+	notify.NotifyTurnDone(turnCtx, agentName, turnErr)
 	if turnErr == nil {
+		if !segmentsFired && lastResponseText != "" {
+			notify.NotifyResponse(turnCtx, agentName, lastResponseText)
+		}
 		noteTurnSucceeded(as.st, target)
 	}
 
@@ -596,17 +667,27 @@ func (as *acpSession) permissionFailed(tool string, err error) {
 			"The client must answer session/request_permission; /skip-permissions on approves tools without asking.", tool, err)))
 }
 
-// backgroundPermissionAsk asks the client whether a background job may use a
-// tool, attributed to the job's own tool-call row. The wait is bounded by the
-// job timeout, so an unanswered question denies the tool instead of holding
-// the job's concurrency slot forever.
+// backgroundPermissionAsk asks whether a background job may use a tool,
+// attributed to the job's own tool-call row, raced against remote oversight
+// when one is configured (first answer wins — the interactive race's shape,
+// bounded here by the job timeout so an unanswered question denies the tool
+// instead of holding the job's concurrency slot forever).
 func (as *acpSession) backgroundPermissionAsk(jobID, tool, summary string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), as.cfg.EffectiveBackgroundAgentTimeout())
 	defer cancel()
-	out, err := as.host.RequestPermission(ctx, events.PermissionRequest{
-		Tool:       tool,
-		Summary:    strings.TrimSpace(summary + " — requested by background agent " + jobID),
-		ToolCallID: string(acp.JobToolCallID(jobID)),
-	})
-	return err == nil && out.Allow
+	sum := strings.TrimSpace(summary + " — requested by background agent " + jobID)
+	askClient := func(c context.Context) bool {
+		out, err := as.host.RequestPermission(c, events.PermissionRequest{
+			Tool:       tool,
+			Summary:    sum,
+			ToolCallID: string(acp.JobToolCallID(jobID)),
+		})
+		return err == nil && out.Allow
+	}
+	n := as.notifier()
+	if !oversightRemote(n) {
+		return askClient(ctx)
+	}
+	return racePermAsk(ctx, n, askClient,
+		oversight.PermRequest{ToolName: tool, Input: sum})
 }

@@ -85,7 +85,7 @@ func (as *acpSession) runWorkflow(t *acpTurn, def workflow.Definition, task stri
 		return "workflow error: " + err.Error()
 	}
 	runners, err := buildWorkflowRunners(plan.AgentNames, as.cfg, as.sess, as.mem, as.da, as.cliPC,
-		func() inputReader { return acpDenyInput{} }, nil, nil)
+		func() inputReader { return acpDenyInput{} }, as.notifier(), nil)
 	if err != nil {
 		return "workflow error: " + err.Error()
 	}

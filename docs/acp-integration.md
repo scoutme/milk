@@ -228,6 +228,31 @@ already granted, matches `bash_allowed_patterns`, or skip-permissions is on.
   are denied by default over ACP, and no request is ever sent), and agents
   that a workflow role or a tool-agent entry builds separately from the
   session's primary/escalation agents.
+- **Remote oversight races along.** When `remote_oversight` is configured,
+  the backend's allow/deny (or its `timeout_action` on timeout) is asked in
+  parallel with the client and the first answer wins — the TUI's rule. The
+  remote side is serialized process-wide: the Telegram backend has a single
+  prompt slot, so concurrent sessions queue their remote asks instead of
+  stealing each other's.
+
+## Remote oversight (Telegram)
+
+`milk serve --acp` runs the same remote oversight as the TUI
+(docs/operations.md's "Remote oversight (Telegram)") — one notifier per
+serve process, built at serve start from `remote_oversight` in the config
+and rebuilt when `/setup telegram` changes it:
+
+- **Turn and tool notifications** — turn start/response/done, slash-command
+  output, and (gated by `notify_tools`) tool use/results forward to the
+  backend for both providers, plus workflow turns (`workflow:<role>`).
+- **Permission prompts race the client** — `session/request_permission`
+  goes to the editor as always; the remote answer wins the race if it
+  arrives first (see the Tool permissions section above).
+- **Bot messages run as turns** — a message you send the bot runs in the
+  live session with the most recent activity, echoed to the client as an
+  ordinary user message; it queues while a turn is running and runs at turn
+  end. Messages that arrive before any session exists are held and run on
+  the next `session/new`.
 
 ## Routing and warnings
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/transport/acp"
 	"github.com/scoutme/milk/internal/updater"
@@ -47,6 +48,16 @@ type acpServer struct {
 	updateRelease    *updater.Release // last known available release (nil: none known)
 	updateInstalled  string           // tag applied this process — pending restart
 	updateInstalling bool             // /update install is running
+
+	// Remote oversight (Telegram): one notifier per serve process — created
+	// by startOversight at serve start, rebuilt by /setup telegram on|off.
+	// notifierStop cancels the current notifier's polling loop on rebuild.
+	// remoteQueue holds messages that arrived with no live session yet.
+	// All guarded by mu. See acp_oversight.go.
+	notifier     oversight.Notifier
+	notifierStop context.CancelFunc
+	serveCtx     context.Context
+	remoteQueue  []string
 }
 
 func newACPServer(cfg config.Config, conn acp.Conn) *acpServer {
@@ -114,6 +125,9 @@ func (s *acpServer) AfterResponse(method string, result any) {
 			// A session created after the startup check completed hears about
 			// the release now — once per session (announceUpdateTo).
 			s.announceUpdateTo(as)
+			// Telegram messages that arrived before any session existed run
+			// on this one (acp_oversight.go).
+			s.drainRemoteQueue(as)
 		}
 	case "session/resume":
 		resp, ok := result.(resumeResult)
@@ -122,6 +136,7 @@ func (s *acpServer) AfterResponse(method string, result any) {
 		}
 		if as := s.session(resp.sessionID); as != nil {
 			s.announceUpdateTo(as)
+			s.drainRemoteQueue(as)
 		}
 	}
 }
