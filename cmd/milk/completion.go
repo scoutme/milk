@@ -790,6 +790,73 @@ func (m *model) commitHintSelection() bool {
 	return true
 }
 
+// acceptActiveCompletion applies Enter's autocompletion semantics: accept the
+// tab-cycled completion (tabMatches), or commit the arrow-key hint selection
+// (hintIdx), then clear the first <param>/[opt] placeholder and park the cursor
+// there so the user can type the value directly. Returns false when no
+// completion is active (or the hint commit failed) so the caller falls through
+// to normal Enter handling — submission on the idle path, the busy-state trap
+// while an agent turn is running. Shared by handleKey and handleBusyKey so
+// Enter accepts completions identically in both states: while busy, only
+// Enter-as-submit is trapped, never Enter-as-accept-completion.
+func (m model) acceptActiveCompletion() (model, bool) {
+	if len(m.tabMatches) > 0 {
+		// Tab cycling is active: accept the already-inserted completion.
+		current := m.ta.Value()
+		m.tabMatches = nil
+		m.tabIdx = -1
+		m.tabCmdIdx = 0
+		m.tabVarIdx = 0
+		m.tabBeforeCursor = ""
+		m.tabAfterCursor = ""
+		m.tabPrefix = ""
+		m.tabSubcmdMode = false
+		m.tabValueMode = false
+		m.tabNsLabel = ""
+		m.tabSegPrefix = ""
+		m.tabHints = nil
+		m.tabHintsBase = nil
+		m.hintIdx = -1
+		if cleared, pos := clearFirstPlaceholder(current); pos >= 0 {
+			m.ta.SetValue(cleared)
+			m.ta.SetCursor(pos)
+			m.rebuildInlineHints()
+		}
+		m.syncLayout()
+		return m, true
+	}
+	if m.hintIdx >= 0 {
+		if m.commitHintSelection() {
+			// Same: position cursor at first placeholder if present.
+			if cleared, pos := clearFirstPlaceholder(m.ta.Value()); pos >= 0 {
+				m.ta.SetValue(cleared)
+				m.ta.SetCursor(pos)
+				m.rebuildInlineHints()
+			}
+			m.syncLayout()
+			return m, true
+		}
+		m.hintIdx = -1
+	}
+	return m, false
+}
+
+// handleTabKey applies Tab (dir=+1) / Shift+Tab (dir=-1) semantics: commit the
+// highlighted hint selection when one is active (forward Tab only), otherwise
+// cycle through completions. Shared by handleKey and handleBusyKey — tab
+// completion only edits the input buffer, so it works while an agent turn is
+// running too (only Enter-as-submit is trapped there).
+func (m model) handleTabKey(dir int) model {
+	if dir > 0 && m.hintIdx >= 0 && len(m.tabMatches) == 0 {
+		m.commitHintSelection()
+		m.syncLayout()
+		return m
+	}
+	m = m.handleTab(dir)
+	m.syncLayout()
+	return m
+}
+
 // clearFirstPlaceholder finds the first <param> or [opt] token that follows a
 // slash-command word in s, strips it and everything after it on that line, and
 // returns (result, runeOffset) where runeOffset is the cursor position to set.

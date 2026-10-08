@@ -1013,6 +1013,15 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", "ctrl+m":
+		// Enter-as-accept (tab completion / arrow-hint selection) is not a
+		// submission, so it is not trapped while busy — only Enter below,
+		// which would send the buffer as a prompt, is. Completion only
+		// edits the input buffer, safe to use mid-turn.
+		var accepted bool
+		m, accepted = m.acceptActiveCompletion()
+		if accepted {
+			return m, nil
+		}
 		input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
 		// Bang mode consumed the "!" at keystroke time (same as handleEnter's
 		// idle path); re-prepend it so stripBangPrefix below still recognizes
@@ -1074,9 +1083,15 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.spawnUserBackgroundAgent(input)
-	case "tab":
-		// Tab completion not available while busy — ignore silently.
-		return m, nil
+	case "tab", "shift+tab":
+		// Completion only edits the input buffer, so Tab cycling and hint
+		// commit are not trapped while busy — the same handleTabKey
+		// semantics as idle. Only Enter-as-submission is trapped.
+		dir := 1
+		if msg.String() == "shift+tab" {
+			dir = -1
+		}
+		return m.handleTabKey(dir), nil
 	}
 	return m.handleKey(msg)
 }
@@ -2511,45 +2526,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	case "enter":
-		if len(m.tabMatches) > 0 {
-			// Tab cycling is active: accept the already-inserted completion.
-			// If the inserted sig has a parameter placeholder, position the cursor
-			// there and clear the placeholder so the user can type the value directly.
-			current := m.ta.Value()
-			m.tabMatches = nil
-			m.tabIdx = -1
-			m.tabCmdIdx = 0
-			m.tabVarIdx = 0
-			m.tabBeforeCursor = ""
-			m.tabAfterCursor = ""
-			m.tabPrefix = ""
-			m.tabSubcmdMode = false
-			m.tabValueMode = false
-			m.tabNsLabel = ""
-			m.tabSegPrefix = ""
-			m.tabHints = nil
-			m.tabHintsBase = nil
-			m.hintIdx = -1
-			if cleared, pos := clearFirstPlaceholder(current); pos >= 0 {
-				m.ta.SetValue(cleared)
-				m.ta.SetCursor(pos)
-				m.rebuildInlineHints()
-			}
-			m.syncLayout()
+		// Tab-completion accept and arrow-hint commit live in
+		// acceptActiveCompletion so handleBusyKey uses the exact same
+		// semantics; only submission (handleEnter) is state-specific.
+		var accepted bool
+		m, accepted = m.acceptActiveCompletion()
+		if accepted {
 			return m, nil
-		}
-		if m.hintIdx >= 0 {
-			if m.commitHintSelection() {
-				// Same: position cursor at first placeholder if present.
-				if cleared, pos := clearFirstPlaceholder(m.ta.Value()); pos >= 0 {
-					m.ta.SetValue(cleared)
-					m.ta.SetCursor(pos)
-					m.rebuildInlineHints()
-				}
-				m.syncLayout()
-				return m, nil
-			}
-			m.hintIdx = -1
 		}
 		return m.handleEnter()
 	case "up":
@@ -2617,19 +2600,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.extendTranscriptSel(msg)
 		}
 		return m.handleShiftArrow(msg)
-	case "tab":
-		if m.hintIdx >= 0 && len(m.tabMatches) == 0 {
-			m.commitHintSelection()
-			m.syncLayout()
-			return m, nil
+	case "tab", "shift+tab":
+		dir := 1
+		if msg.String() == "shift+tab" {
+			dir = -1
 		}
-		m = m.handleTab(1)
-		m.syncLayout()
-		return m, nil
-	case "shift+tab":
-		m = m.handleTab(-1)
-		m.syncLayout()
-		return m, nil
+		return m.handleTabKey(dir), nil
 	case "ctrl+t":
 		m = m.toggleThinking()
 		return m, nil
