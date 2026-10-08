@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,24 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 )
+
+// ErrNotFound is returned by Resolve when no stored session matches a
+// reference. Callers match it with errors.Is to render their own
+// "how to create one" hint on top of the generic failure.
+var ErrNotFound = errors.New("session not found")
+
+// AmbiguousError is returned by Resolve when a reference matches more than one
+// session — an ID prefix shared by several sessions, or a name reused within
+// one cwd. Never a guess: the caller must refine the reference (same
+// convention as memory.FindByIDPrefix).
+type AmbiguousError struct {
+	Ref     string
+	Matches int
+}
+
+func (e *AmbiguousError) Error() string {
+	return fmt.Sprintf("session reference %q is ambiguous (%d matches) — use more characters", e.Ref, e.Matches)
+}
 
 // indexMu guards index.json's read-modify-write cycle (loadIndex→upsertIndex→
 // saveIndex) in Save. Harmless with one session per process (the only case
@@ -339,4 +358,54 @@ func Lookup(idOrPrefix string) (*Session, error) {
 func CWDHash(cwd string) string {
 	h := sha256.Sum256([]byte(cwd))
 	return fmt.Sprintf("%x", h[:6])
+}
+
+// Resolve finds a stored session by reference: an exact ID always wins, then
+// an unambiguous ID prefix, then an exact name within cwd (name matching is
+// cwd-scoped like Resume). An empty ref means the cwd's most recent session
+// (index order is LastUsed desc). Resolve never guesses — ambiguity is an
+// *AmbiguousError — and never creates; the creation paths are New/Resume.
+func Resolve(cwd, ref string) (*Session, error) {
+	idx, err := loadIndex()
+	if err != nil {
+		return nil, err
+	}
+	idx, err = repairIndex(idx)
+	if err != nil {
+		return nil, err
+	}
+	if ref == "" {
+		if entries := idx[cwd]; len(entries) > 0 {
+			return Load(entries[0].ID)
+		}
+		return nil, fmt.Errorf("%w: no stored session for %q", ErrNotFound, cwd)
+	}
+	var prefixMatches, nameMatches []string
+	for dir, entries := range idx {
+		for _, e := range entries {
+			if e.ID == ref {
+				return Load(e.ID) // exact match wins outright
+			}
+			if strings.HasPrefix(e.ID, ref) {
+				prefixMatches = append(prefixMatches, e.ID)
+			}
+			if dir == cwd && e.Name != "" && e.Name == ref {
+				nameMatches = append(nameMatches, e.ID)
+			}
+		}
+	}
+	if len(prefixMatches) == 1 {
+		return Load(prefixMatches[0])
+	}
+	if len(prefixMatches) > 1 {
+		return nil, &AmbiguousError{Ref: ref, Matches: len(prefixMatches)}
+	}
+	// ID resolution exhausted — fall through to the cwd-scoped name match.
+	if len(nameMatches) == 1 {
+		return Load(nameMatches[0])
+	}
+	if len(nameMatches) > 1 {
+		return nil, &AmbiguousError{Ref: ref, Matches: len(nameMatches)}
+	}
+	return nil, fmt.Errorf("%w: %q", ErrNotFound, ref)
 }
