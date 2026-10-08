@@ -503,7 +503,9 @@ design doc:
   (`/agent` is list-only), so there would be nothing for a setter to call.
   `routing` only reflects *explicit* pins: the router's own auto-sticky
   escalation reads as `auto`, and a pin is not persisted across a process
-  restart (`session/resume` of a stored session starts at `auto`)
+  restart (`session/resume` of a stored session starts at `auto`). A
+  `routing` change that arrives while a turn is running is queued and applied
+  when that turn ends (the response already reports the requested value)
 - the tool-facing `events.Host.Elicit` seam (`cmd/milk/host_acp.go`) — still a
   stub returning a cancelled result; the setup wizard's form dialogs use the
   form-capable `acp.ACPHost.Elicit` round trip instead
