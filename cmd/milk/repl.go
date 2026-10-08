@@ -3522,7 +3522,7 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 // --- runREPL entry point ---
 
 func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSession string, startupWarning string) error {
-	sess, err := loadSession(cwd, initialFlagNew, initialFlagSession)
+	sess, err := openSession(cwd, initialFlagNew, initialFlagSession)
 	if err != nil {
 		return fmt.Errorf("loading session: %w", err)
 	}

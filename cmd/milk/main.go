@@ -94,8 +94,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagEscalate, "escalate", false, "Force route to escalation agent for this turn")
 	rootCmd.Flags().BoolVar(&flagPrimary, "primary", false, "Force route to primary agent for this turn")
 	rootCmd.Flags().BoolVar(&flagNew, "new", false, "Start a new session")
-	rootCmd.Flags().StringVar(&flagSession, "session", "", "Target session by name")
-	rootCmd.Flags().BoolVarP(&flagContinue, "continue", "c", false, "Resume current session (default behavior, explicit alias)")
+	rootCmd.Flags().StringVar(&flagSession, "session", "", "Target session by id, id prefix, or name (with --new: the new session's name)")
+	rootCmd.Flags().BoolVarP(&flagContinue, "continue", "c", false, "Explicit alias of the default behavior (resume the most recent session for this directory)")
 	rootCmd.Flags().BoolVar(&flagList, "list", false, "List sessions for current cwd")
 	rootCmd.Flags().BoolVar(&flagListAll, "all", false, "With --list: show all sessions across all directories")
 	rootCmd.Flags().BoolVar(&flagDrop, "drop", false, "Delete the current session")
@@ -838,10 +838,7 @@ func initObs(cfg config.Config) (shutdown func(context.Context) error) {
 }
 
 func loadSessionForRun(cwd string) (*session.Session, error) {
-	if flagNew {
-		return session.New(cwd, flagSession)
-	}
-	return session.Resume(cwd, flagSession)
+	return openSession(cwd, flagNew, flagSession)
 }
 
 func checkAgentAvailability(ctx context.Context, localAgent *local.Agent, cliAgent *claude.Agent) (bool, bool, error) {
@@ -1708,28 +1705,17 @@ func runList(all bool) error {
 	if err != nil {
 		return fmt.Errorf(errGettingCWD, err)
 	}
-	target := cwd
-	if all {
-		target = ""
+	// The headless CLI has no bound session; "*" marks the session a plain
+	// `milk` would open — the cwd's most recent (Resolve(cwd, "")).
+	currentID := ""
+	if cur, err := session.Resolve(cwd, ""); err == nil {
+		currentID = cur.ID
 	}
-	entries, err := session.List(target)
+	out, err := sessionListText(cwd, currentID, all)
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		fmt.Println("no sessions found")
-		return nil
-	}
-	for dir, list := range entries {
-		fmt.Printf("%s\n", dir)
-		for _, e := range list {
-			name := e.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			fmt.Printf("  %s  %-20s  %s\n", e.ID[:8], name, e.LastUsed.Format("2006-01-02 15:04"))
-		}
-	}
+	fmt.Println(out)
 	return nil
 }
 
@@ -1738,19 +1724,14 @@ func runDrop() error {
 	if err != nil {
 		return fmt.Errorf(errGettingCWD, err)
 	}
-	sess, err := session.Resume(cwd, flagSession)
-	if err != nil {
-		return fmt.Errorf("loading session: %w", err)
+	// --drop [--session <ref>]: a ref drops that session exactly (no
+	// create-then-drop); bare --drop drops the cwd's most recent. Dropping
+	// the current session lands on a fresh one and says so (opSessionDrop).
+	res := opSessionDrop(nil, cwd, flagSession)
+	if res.err != nil {
+		return cliSessionErr(res.err, flagSession)
 	}
-	if err := session.Drop(sess.ID, cwd); err != nil {
-		return err
-	}
-	fmt.Printf("dropped session %s\n", sess.ID[:8])
-	// Pre-create a fresh empty session so the next plain `milk` invocation
-	// starts clean rather than resuming the next oldest session in the index.
-	if _, err := session.New(cwd, flagSession); err != nil {
-		fmt.Fprintf(os.Stderr, "%s warning: could not create fresh session: %v\n", milkTag(), err)
-	}
+	fmt.Println(res.out)
 	return nil
 }
 
