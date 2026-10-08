@@ -2514,7 +2514,7 @@ func init() {
 
 			fmt.Printf("current version: %s\n", version)
 			fmt.Println("checking for updates…")
-			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			rel, err := updateCheck(ctx, &cfg)
 			if err != nil {
 				return fmt.Errorf("update check: %w", err)
 			}
