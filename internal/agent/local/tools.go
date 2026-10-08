@@ -256,7 +256,7 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 			"type": "function",
 			"function": map[string]any{
 				"name":        "open_file",
-				"description": "Open a file in the user's editor (interactive TUI mode only). Uses the same editor list as /config open: $EDITOR, $VISUAL, nano, vim, vi — or config_editors if set.",
+				"description": "Open a file for the user to view. In the TUI this uses the same editor list as /config open: $EDITOR, $VISUAL, nano, vim, vi — or config_editors if set; over ACP the file is handed to the platform opener instead. Refused where no opener is wired (single-prompt mode, background jobs).",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
