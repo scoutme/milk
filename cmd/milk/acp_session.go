@@ -52,6 +52,8 @@ type acpSession struct {
 	// agent_thought_chunk forwarding (/think).
 	st           *interactiveState
 	showThinking atomic.Bool
+	// config is the session/set_config_option surface (acp_config_options.go).
+	config *acp.ConfigState
 
 	// skipPerms is /skip-permissions (seeded from dangerously_skip_permissions,
 	// like the TUI); openCalls maps a tool name to its in-flight tool-call
@@ -173,6 +175,7 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 	host.callID = as.pendingCallID
 	host.failed = as.permissionFailed
 	as.skipPerms.Store(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	as.config = as.newACPConfigState()
 
 	as.loop = loop.New(cfg.LoopDetectionCfg())
 	as.cliPC = permContext{cwd: cwd, toolFutures: map[string]chan string{}}
@@ -222,6 +225,7 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 			WithPermissions(permStore, as.askPermissionWithOversight).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
+			WithOnOpenFile(func(path string) error { return acpOpenFile(cwd, path) }).
 			WithOnToolUse(as.onLocalToolUse).
 			WithOnToolResult(as.onLocalToolResult).
 			WithOnThinking(as.onThinking)
@@ -560,6 +564,7 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	}
 
 	if handled, output, dispatch := as.runSlashCommand(turn, prompt); handled {
+		as.pushConfigOptions()
 		if wizardCancelNote != "" {
 			output = wizardCancelNote + output
 		}

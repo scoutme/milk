@@ -204,3 +204,25 @@ func TestStore_OnChangeMustNotHoldLock(t *testing.T) {
 		t.Fatal("Create deadlocked: onChange must not run while s.mu is held")
 	}
 }
+
+func TestStore_CreateDedupesOpenTitle(t *testing.T) {
+	s, err := New(t.TempDir(), "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.Create("Render guard", nil)
+	b, _ := s.Create("  render   GUARD ", nil)
+	if a.ID != b.ID {
+		t.Fatalf("open duplicate created a new task: %s vs %s", a.ID, b.ID)
+	}
+	if err := s.Complete(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := s.Create("Render guard", nil)
+	if c.ID == a.ID {
+		t.Fatal("a done task must not absorb a new one")
+	}
+	if got, _ := s.List(ListOpts{}); len(got) != 2 {
+		t.Fatalf("want 2 tasks, got %d", len(got))
+	}
+}

@@ -267,6 +267,8 @@ The CLI equivalent is `milk update check` and `milk update install` (non-interac
 | `--drop` | Delete current session |
 | `--output-format text\|json\|stream-json` | Single-prompt mode only (ignored by the REPL); `text` (default) is unchanged, `json`/`stream-json` emit machine-readable output — see [docs/tooling.md](tooling.md#machine-readable-output) |
 
+**Resumed sessions in the TUI.** When the TUI starts on a stored session (the default for the cwd, or `--session`/`--continue`), the transcript is pre-populated with its prior user/assistant turns instead of the welcome screen, under a `[milk] resumed session …` banner. The window mirrors ACP's history replay: the first 10 and last 200 turns, each message capped at 8 KB, with a gap marker pointing at `/export` for the rest; tool calls and reasoning are not replayed. `--new` (and a session with no history) starts empty; `/new`, `/clear` and `/drop` keep the visible transcript as is.
+
 ---
 
 ## Configuration

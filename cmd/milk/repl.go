@@ -202,6 +202,10 @@ type prefixChunkMsg struct{ text string }
 // separate from regular content so it can be shown or hidden independently.
 type thinkChunkMsg struct{ text string }
 
+// retractMsg tells the TUI that the agent replaced already-streamed response
+// text (from) with a clean one (to) — see Agent.WithOnRetract.
+type retractMsg struct{ from, to string }
+
 // reasoningPromotedMsg signals that the current turn's already-streamed
 // reasoning text has been promoted (by the local agent) to become the
 // turn's actual final answer, so the accumulated thinking for this turn
@@ -933,7 +937,7 @@ type model struct {
 
 func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
-	return model{
+	m := model{
 		histIdx:             -1,
 		hintIdx:             -1,
 		ctx:                 ctx,
@@ -963,6 +967,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
 		loopDetector:        loop.New(st.cfg.LoopDetectionCfg()),
 	}
+	m.seedTranscriptFromHistory()
+	return m
 }
 
 // refreshPrompt updates the textarea prompt label and width to match the current mode.
@@ -1891,6 +1897,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		return m, nil
+
+	case retractMsg:
+		m.retractStreamed(msg.from, msg.to)
 		return m, nil
 
 	case thinkChunkMsg:
@@ -3022,6 +3032,14 @@ func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model
 		m.pendingUserBackgroundFollowup = false
 		return m, nil
 	}
+	if mgr.PendingCount() == 0 {
+		// A user-job completion fires both the per-job and the batch-done
+		// message; the first one's turn drains the results, so the second
+		// (deferred until that turn ends) finds nothing to report and would
+		// only burn a turn.
+		applyFollowupDecision(waitForWholeWave, followupSkip, &m.pendingBackgroundFollowup, &m.pendingUserBackgroundFollowup)
+		return m, nil
+	}
 	busy := m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil
 	d := decideFollowup(waitForWholeWave, mgr.ActiveCount(), busy)
 	applyFollowupDecision(waitForWholeWave, d, &m.pendingBackgroundFollowup, &m.pendingUserBackgroundFollowup)
@@ -3312,6 +3330,9 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		send(openFileMsg{path: path, respCh: respCh})
 		return <-respCh
 	}
+	localOnRetract := func(from, to string) {
+		send(retractMsg{from: from, to: to})
+	}
 	localOnToolUse := func(id, name, summary string, rawInput map[string]any) {
 		if st.cfg.RemoteOversight.NotifyToolsEnabled() {
 			st.notifier.NotifyToolUse(context.Background(), name, summary)
@@ -3327,6 +3348,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
+			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
@@ -3340,6 +3362,7 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
 			WithOnOpenFile(localOpenFile).
+			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
 			WithOnToolResult(localOnToolResult).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).

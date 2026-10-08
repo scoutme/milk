@@ -64,10 +64,19 @@ func NewAvailableCommandsUpdate(cmds []AvailableCommand) AvailableCommandsUpdate
 //	think → /think on|off
 //	agent → /agent switch <name>
 //	model → /model <id>
+//	routing → /escalate, /primary (pin all turns) / neither (router decides)
 const (
-	ConfigIDThink SessionConfigID = "think"
-	ConfigIDAgent SessionConfigID = "agent"
-	ConfigIDModel SessionConfigID = "model"
+	ConfigIDThink   SessionConfigID = "think"
+	ConfigIDAgent   SessionConfigID = "agent"
+	ConfigIDModel   SessionConfigID = "model"
+	ConfigIDRouting SessionConfigID = "routing"
+)
+
+// Routing option values: which agent handles turns.
+const (
+	RoutingAuto       = "auto"       // the router decides each turn (no pin)
+	RoutingPrimary    = "primary"    // /primary — pinned to the primary agent
+	RoutingEscalation = "escalation" // /escalate — pinned to the escalation agent
 )
 
 // SessionConfigOptionCategory values used by milk's options (the upstream
@@ -163,6 +172,23 @@ func ModelOption(models []string, current string) SessionConfigOption {
 	}
 }
 
+// RoutingOption builds the routing select option (current is one of the
+// Routing* values).
+func RoutingOption(current string) SessionConfigOption {
+	return SessionConfigOption{
+		ConfigID: ConfigIDRouting,
+		Name:     "Routing (/escalate, /primary)",
+		Category: ConfigCategoryMode,
+		Type:     ConfigTypeSelect,
+		Options: []SessionConfigSelectOption{
+			{Value: RoutingAuto, Name: "Auto (router decides)"},
+			{Value: RoutingPrimary, Name: "Primary agent (pinned)"},
+			{Value: RoutingEscalation, Name: "Escalation agent (pinned)"},
+		},
+		CurrentValue: current,
+	}
+}
+
 // MilkConfigOptions builds milk's full session-config surface.
 func MilkConfigOptions(thinkOn bool, agents []string, activeAgent string, models []string, activeModel string) []SessionConfigOption {
 	return []SessionConfigOption{
@@ -235,6 +261,26 @@ func (c *ConfigState) Options() []SessionConfigOption {
 // Update is the config_option_update for the current set.
 func (c *ConfigState) Update() ConfigOptionUpdate {
 	return ConfigOptionUpdate{SessionUpdate: "config_option_update", ConfigOptions: c.Options()}
+}
+
+// Sync records a value that changed outside session/set_config_option (a
+// slash command flipped the same knob) without running the setter, which
+// already happened. It reports whether the stored value actually changed, so
+// the caller knows whether a config_option_update is due.
+func (c *ConfigState) Sync(id SessionConfigID, value any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.options {
+		if c.options[i].ConfigID != id {
+			continue
+		}
+		if c.options[i].CurrentValue == value {
+			return false
+		}
+		c.options[i].CurrentValue = value
+		return true
+	}
+	return false
 }
 
 // SetThink applies /think on|off through the option surface.

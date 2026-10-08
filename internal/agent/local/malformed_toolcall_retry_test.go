@@ -124,3 +124,54 @@ func TestRun_WellFormedToolCall_NoRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestReasoningEndsMidMarkup(t *testing.T) {
+	for s, want := range map[string]bool{
+		"does the detector suppress `":      true,
+		"it ends with a dangling <":         true,
+		"use `foo` here":                    false,
+		"all balanced `a` and `b`.":         false,
+		"```go\nfmt.Println()\n```":         false,
+		"":                                  false,
+		"plain sentence without markup.\n ": false,
+	} {
+		if got := reasoningEndsMidMarkup(s); got != want {
+			t.Errorf("reasoningEndsMidMarkup(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+func TestRun_ReasoningCutMidMarkup_RetriesWithLostReasoning(t *testing.T) {
+	var reqs atomic.Int32
+	var secondBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reqs.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"The plan: patch the detector. Does it suppress `+"`"+`"}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		secondBody.Store(string(b))
+		okStream(w, "patched")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	var out strings.Builder
+	msgs, err := agent.Run(context.Background(), nil, "fix it", &out, &session.Session{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := reqs.Load(); got != 2 {
+		t.Fatalf("want 2 requests, got %d", got)
+	}
+	body, _ := secondBody.Load().(string)
+	if !strings.Contains(body, "cut off by the server") || !strings.Contains(body, "patch the detector") {
+		t.Errorf("retry lacks the lost reasoning: %s", body)
+	}
+	if last := msgs[len(msgs)-1]; last.Content != "patched" {
+		t.Errorf("final = %q", last.Content)
+	}
+}

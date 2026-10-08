@@ -37,9 +37,11 @@ milk serve --acp
 | `session/resume` | client → agent | ✅ real: attach the stored session (the request `cwd` must match the session's, else `-32602`; unknown ID → `-32002`), idempotent reattach when it is already open in this process; `replayFrom` — omitted/`null` resumes without replaying, `{"type":"start"}` replays all retained history before the response (message upserts, see "Session resume, list, and history replay" below), any other cursor → `-32602` before anything is emitted; returns `availableCommands` |
 | `session/close` | client → agent | ✅ real: cancel any running turn + suppress follow-ups + persist + free (idempotent, the file is kept — close ≠ delete) |
 | `session/delete` | client → agent | ✅ real, behind the `session.delete` capability (`{}`): close-if-open, then drop the session file and index entry (accepts an unambiguous ID prefix) |
+| `session/set_config_option` | client → agent | ✅ real: two options, advertised as `configOptions` in the `session/new` and `session/resume` responses — `think` (boolean, = `/think on\|off`) and `routing` (select `auto`\|`primary`\|`escalation`, = clear pins / `/primary` / `/escalate`). The response carries the full updated option set. Unknown `configId`, a value outside the declared set, or the wrong value `type` → `-32602`; unknown session → `-32002` |
 | `session/prompt` | client → agent | ✅ real |
 | `session/cancel` | client → agent (notification) | ✅ real |
 | `session/update` (`state_update`) | agent → client | ✅ real: `running` at turn start, `idle` at turn end |
+| `session/update` (`config_option_update`) | agent → client | ✅ real: pushed when a slash command (`/think`, `/escalate`, `/primary`) moves an option's value, so the client's settings UI never drifts from the commands. Not sent for changes made through `session/set_config_option` itself (its response already carries the state) |
 | `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity; the list itself is static for the process, while the config it may edit is re-read from disk at `session/new` — see "The setup wizard" below) |
 | `session/update` (`agent_message_chunk`) | agent → client | ✅ real: turn output as **one chunk per completed turn, not per token** (see caveat below), plus occasional out-of-turn notices — the background-follow-up and update-available announcements |
 | `session/update` (`user_message` / `agent_message` / `agent_thought` upserts) | agent → client | ✅ real: chat-history replay on `session/resume` (and resume-by-default adoption) plus the accept-echo of each user message at turn start (same `messageId` the `session/prompt` response returns). Upsert semantics: the same `messageId` patches rather than duplicates |
@@ -50,7 +52,7 @@ milk serve --acp
 | `elicitation/complete` | agent → client (notification) | ✅ real: fire-and-forget once the user's answer has been consumed |
 
 Everything else a real ACP client might try — `auth/login`, `auth/logout`,
-`session/set_config_option`, the legacy v1 `session/load` (client-supplied
+the legacy v1 `session/load` (client-supplied
 history — the old wrong shape; history replay is standardized via
 `session/resume`'s `replayFrom` instead), `$/cancel_request` as a
 standalone per-request cancel — returns the standard JSON-RPC **`-32601`
@@ -94,7 +96,9 @@ TUI-only commands (`/panel`, `/colorize`, `/paste`, `/attach`, `/mcp`,
 `/task add`, …) are **not** advertised. If sent anyway they get a "only available in the
 milk TUI" reply instead of reaching the model. Text that merely mentions a
 command mid-sentence is an ordinary prompt. Routing pins from `/escalate` and
-`/primary` are per ACP session.
+`/primary` are per ACP session. `/think` and the two pins are also exposed as
+session config options (`think`, `routing`) — see `session/set_config_option`
+above; the commands and the options are two views of the same state.
 
 ### The setup wizard
 
@@ -493,8 +497,13 @@ design doc:
 - the legacy v1 `session/load` (client-supplied history): the old wrong
   shape — history lives client-side there. Stays `-32601` by design; use
   `session/resume` with `replayFrom` for history replay.
-- `session/set_config_option` (the internal handler exists, isn't wired to
-  the dispatcher)
+- `agent` and `model` config options: the transport vocabulary exists
+  (`acp.AgentOption`, `acp.ModelOption`) but they are deliberately not
+  advertised — `/agent switch` and `/model` have no ACP command today
+  (`/agent` is list-only), so there would be nothing for a setter to call.
+  `routing` only reflects *explicit* pins: the router's own auto-sticky
+  escalation reads as `auto`, and a pin is not persisted across a process
+  restart (`session/resume` of a stored session starts at `auto`)
 - the tool-facing `events.Host.Elicit` seam (`cmd/milk/host_acp.go`) — still a
   stub returning a cancelled result; the setup wizard's form dialogs use the
   form-capable `acp.ACPHost.Elicit` round trip instead

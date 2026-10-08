@@ -68,10 +68,10 @@ var _ acp.Handler = (*acpServer)(nil)
 
 // HandleRequest implements acp.Handler. Wired: initialize, session/new,
 // session/list, session/resume, session/close, session/delete,
-// session/prompt. Everything else gets the standard JSON-RPC "method not
+// session/set_config_option, session/prompt. Everything else gets the standard JSON-RPC "method not
 // found" error — the correct way to express "not implemented yet" here (see
 // MethodNotFoundError's doc comment); the remaining deferred surface
-// (auth/*, the legacy v1 session/load, session/set_config_option) is listed
+// (auth/*, the legacy v1 session/load) is listed
 // in docs/acp-integration.md's known gaps. (elicitation is wired the other
 // way — the setup wizard sends elicitation/create to the client; see
 // acp_initwizard.go.)
@@ -89,6 +89,8 @@ func (s *acpServer) HandleRequest(ctx context.Context, method string, params jso
 		return s.handleSessionClose(params)
 	case "session/delete":
 		return s.handleSessionDelete(params)
+	case acp.MethodSessionSetConfigOption:
+		return s.handleSetConfigOption(params)
 	case "session/prompt":
 		return s.handlePrompt(ctx, params)
 	default:
@@ -191,7 +193,7 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 		as.notify(acp.AgentMessageChunk(as.liveID("resume"), fmt.Sprintf(
 			"resumed session %.8s — %d earlier turns; /export prints the full transcript",
 			sess.ID, len(sess.History))))
-		return acp.NewSessionResponse{SessionID: as.id}, nil
+		return acp.NewSessionResponse{SessionID: as.id, ConfigOptions: as.config.Options()}, nil
 	}
 
 	sess, err := session.New(req.CWD, "")
@@ -202,7 +204,7 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session/new: %w", err)
 	}
-	return acp.NewSessionResponse{SessionID: as.id}, nil
+	return acp.NewSessionResponse{SessionID: as.id, ConfigOptions: as.config.Options()}, nil
 }
 
 // adoptCandidate returns the stored session session/new should adopt, or nil
@@ -455,6 +457,7 @@ func (s *acpServer) handleSessionResume(params json.RawMessage) (any, error) {
 		as.replayHistory()
 	}
 	return resumeResult{ResumeSessionResponse: acp.ResumeSessionResponse{
+		ConfigOptions:     as.config.Options(),
 		AvailableCommands: acpAdvertisedCommands(),
 	}, sessionID: as.id}, nil
 }

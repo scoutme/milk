@@ -217,3 +217,29 @@ func TestToolCallContentReplaceSendsFullContentOnlyWhenGrown(t *testing.T) {
 		t.Fatalf("unchanged buffer re-sent content: %v", got)
 	}
 }
+
+func TestConfigState_SyncAndRoutingOption(t *testing.T) {
+	ran := 0
+	c := NewConfigState(
+		[]SessionConfigOption{ThinkOption(true), RoutingOption(RoutingAuto)},
+		map[SessionConfigID]ConfigSetter{ConfigIDRouting: func(any) error { ran++; return nil }},
+	)
+	if !c.Sync(ConfigIDRouting, RoutingEscalation) {
+		t.Fatal("Sync to a new value must report a change")
+	}
+	if c.Sync(ConfigIDRouting, RoutingEscalation) {
+		t.Error("Sync to the same value must not report a change")
+	}
+	if c.Sync("nope", true) {
+		t.Error("Sync of an unknown option must report no change")
+	}
+	if ran != 0 {
+		t.Errorf("Sync ran the setter %d times; the command already applied the effect", ran)
+	}
+	if _, err := c.Set(SetSessionConfigOptionRequest{ConfigID: ConfigIDRouting, Type: "id", Value: "bogus"}); err == nil {
+		t.Error("a routing value outside the declared set must be rejected")
+	}
+	if _, err := c.Set(SetSessionConfigOptionRequest{ConfigID: ConfigIDRouting, Type: "id", Value: RoutingPrimary}); err != nil || ran != 1 {
+		t.Errorf("Set routing: err=%v setterRuns=%d", err, ran)
+	}
+}

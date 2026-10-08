@@ -65,6 +65,17 @@ func routeTurn(ctx context.Context, st *interactiveState, rtr *router.Router, in
 	return rt, nil
 }
 
+// clearRoutingPins drops every routing pin — explicit and automatic — so the
+// router decides again (the TUI's Ctrl+C on empty input). An ACP client's
+// "auto" routing option does the same.
+func clearRoutingPins(st *interactiveState) {
+	st.forceEscalate = false
+	st.forcePrimary = false
+	st.stickyEscalate = false
+	st.stickyPrimary = false
+	st.autoStickyEscalate = false
+}
+
 // noteTurnSucceeded applies the auto-sticky rule after a turn that finished
 // without error: if the router (not an explicit /escalate pin) sent the turn
 // to the escalation agent, keep later turns there so the escalation agent

@@ -1,8 +1,13 @@
 package local
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/scoutme/milk/internal/session"
 )
 
 func TestStripUnparsedToolMarkup(t *testing.T) {
@@ -48,5 +53,51 @@ func TestSummarizeToolTrail_CapsLongTurns(t *testing.T) {
 	}
 	if got := summarizeToolTrail(nil, "keep"); got != "keep" {
 		t.Fatalf("no tool activity must return resp unchanged, got %q", got)
+	}
+}
+
+func TestRun_UnparsedMarkupTurn_RetractsStreamedText(t *testing.T) {
+	const markup = `<tool_call>=bash><parameter=command>ls</parameter></function></tool_call>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okStream(w, markup)
+	}))
+	defer srv.Close()
+
+	var from, to string
+	agent := New(srv.URL, "test-model").WithOnRetract(func(f, t string) { from, to = f, t })
+	var out strings.Builder
+	msgs, err := agent.Run(context.Background(), nil, "list files", &out, &session.Session{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if from == "" || !strings.Contains(out.String(), from) {
+		t.Fatalf("retraction must name text that actually streamed: from=%q streamed=%q", from, out.String())
+	}
+	if last := msgs[len(msgs)-1]; last.Content != to || strings.Contains(to, "<tool_call>") || to == "" {
+		t.Fatalf("persisted %q, retracted-to %q", last.Content, to)
+	}
+}
+
+type fakeTaskStore []TaskEntry
+
+func (f fakeTaskStore) Create(string, []string) (TaskEntry, error) { return TaskEntry{}, nil }
+func (f fakeTaskStore) Update(string, string, string) error        { return nil }
+func (f fakeTaskStore) Complete(string) error                      { return nil }
+func (f fakeTaskStore) List(bool) ([]TaskEntry, error)             { return f, nil }
+
+func TestOpenTasksReminder(t *testing.T) {
+	if got := openTasksReminder(nil); got != "" {
+		t.Errorf("nil store: %q", got)
+	}
+	if got := openTasksReminder(fakeTaskStore{{ID: "a1", Title: "t", Status: "done"}}); got != "" {
+		t.Errorf("only done tasks must yield nothing: %q", got)
+	}
+	got := openTasksReminder(fakeTaskStore{
+		{ID: "a1", Title: "Render guard", Status: "pending"},
+		{ID: "b2", Title: "zzz-closed", Status: "done"},
+		{ID: "c3", Title: "Open file", Status: "in_progress"},
+	})
+	if !strings.Contains(got, "a1 [pending] Render guard") || !strings.Contains(got, "c3 [in_progress] Open file") || strings.Contains(got, "zzz-closed") {
+		t.Errorf("reminder = %q", got)
 	}
 }

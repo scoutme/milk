@@ -188,6 +188,7 @@ func TestMaybeAutoFollowup_IdleAndDone_DispatchesFollowupTurn(t *testing.T) {
 	}
 	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
 	mgr := local.NewManager(context.Background(), 1)
+	seedFinishedJob(t, mgr)
 	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
 	m.pendingBackgroundFollowup = true // simulate: set when the batch finished while busy
 
@@ -219,6 +220,7 @@ func TestMaybeAutoFollowup_Busy_DefersUntilIdle(t *testing.T) {
 	}
 	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
 	mgr := local.NewManager(context.Background(), 1)
+	seedFinishedJob(t, mgr)
 	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
 	m.busy = true
 	before := m.transcript.String()
@@ -404,6 +406,7 @@ func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T
 	}
 	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
 	mgr := local.NewManager(context.Background(), 2)
+	seedFinishedJob(t, mgr)
 	m := newModel(context.Background(), st, nil, dispatchAgents{backgroundMgr: mgr}, nil)
 
 	release := make(chan struct{})

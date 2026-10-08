@@ -23,7 +23,7 @@ The primary agent (HTTP or Bedrock backends) has these tools available with no c
 | `http_request(method, url, headers, body, max_bytes)` | — | body, status — permission-gated |
 | `get_session_context()` | — | full shared session history (both agents), so the primary model can see prior escalation turns |
 | `get_context_stats()` | — | current history turn counts and total character size, so the agent can self-regulate before hitting context limits |
-| `open_file(path)` | — | ok — opens the file in the configured editor |
+| `open_file(path)` | — | ok — opens the file: the configured editor in the TUI, the platform opener over ACP; refused (TUI-only note) where no opener is wired, e.g. single-prompt mode or background jobs |
 | `current_need(goal)` | one-sentence goal | ok — same effect as the user typing `/need <goal>` |
 | `export_session(format, output_path)` | `"text"`\|`"json"`, optional file path | transcript inline, or written to `output_path` |
 | `milk_config_help(topic)` | e.g. `"mcp add"`, `"agent add"` | a section of milk's own embedded reference docs — lets the agent look up how to manage milk's own config instead of guessing the schema; omit `topic` to list what's available. Backed by `internal/selfdocs`, which indexes `docs/spec.md`/`providers.md`/`workflows.md`/`tooling.md`/`operations.md` by heading — same content this site is built from |

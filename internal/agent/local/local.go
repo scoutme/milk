@@ -455,6 +455,15 @@ type Agent struct {
 	// should discard any reasoning/thinking text already accumulated for
 	// this turn so it isn't also persisted as a duplicate of the answer.
 	onReasoningPromoted func()
+	// onRetract is called when the turn's final response is rewritten after
+	// it streamed — currently when a turn ends on unparsed tool-call markup
+	// (see stripUnparsedToolMarkup): from is exactly what streamed out live,
+	// to is the replacement that gets persisted. Hosts that mirrored the
+	// live stream (the TUI) use it to repair their transcript, so raw
+	// markup is never the transcript's final state even when history is
+	// already clean. Optional; background-job clones deliberately leave it
+	// nil (their output lives in livebuf, not the transcript).
+	onRetract func(from, to string)
 	// mcpToolSet holds connected MCP servers whose tools are exposed to this agent.
 	// Nil when no MCP servers are configured for this agent.
 	mcpToolSet mcpToolSet
@@ -531,6 +540,9 @@ type Agent struct {
 	// available. malformedToolCallRetries counts those retries within a turn.
 	malformedToolCallTriggered bool
 	malformedToolCallRetries   int
+	// malformedToolCallNudge is the nudge Run() sends for the pending retry;
+	// a stream cut off mid-reasoning gets one carrying the lost reasoning.
+	malformedToolCallNudge string
 	// jobID tags this instance as a background-job clone (set by
 	// RunBackgroundTask): every obs log line and metric label it emits
 	// carries the job ID and a ":subagent" role tag (see logRole/jobAttrs),
@@ -1008,6 +1020,13 @@ func (a *Agent) WithOnOpenFile(fn func(path string) error) *Agent {
 	return a
 }
 
+// WithOnRetract registers a callback invoked when a turn's streamed response
+// is replaced by a clean one (see the onRetract field). Optional.
+func (a *Agent) WithOnRetract(fn func(from, to string)) *Agent {
+	a.onRetract = fn
+	return a
+}
+
 // WithOnTokens registers a callback invoked after each inference call with the
 // model name, agent role, and real prompt/completion/cache token counts.
 func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion, cacheRead, cacheCreation int64)) *Agent {
@@ -1148,6 +1167,48 @@ const backgroundAgentGuidance = `spawn_background_agent's main value is keeping 
 // same reasoning behind Claude Code's own TodoWrite guidance — so this
 // spells out the "when" as well as an explicit "skip it" case, to avoid
 // overcorrecting into creating a task for every trivial request.
+const (
+	maxReminderTasks      = 15
+	maxReminderTitleChars = 100
+)
+
+// openTasksReminder renders the session's unfinished tasks as a trailing
+// system-reminder on the user message, or "" when there are none. Without it
+// an agent whose context was trimmed (or whose turn was cut short) has no way
+// to know the tasks exist, re-plans the same work and creates duplicates.
+func openTasksReminder(ts TaskStore) string {
+	if ts == nil {
+		return ""
+	}
+	all, err := ts.List(false)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	n := 0
+	for _, t := range all {
+		if t.Status == "done" {
+			continue
+		}
+		n++
+		if n > maxReminderTasks {
+			continue
+		}
+		title := t.Title
+		if len(title) > maxReminderTitleChars {
+			title = title[:maxReminderTitleChars] + "…"
+		}
+		fmt.Fprintf(&b, "- %s [%s] %s\n", t.ID, t.Status, title)
+	}
+	if n == 0 {
+		return ""
+	}
+	if n > maxReminderTasks {
+		fmt.Fprintf(&b, "(+%d more — list_tasks shows all)\n", n-maxReminderTasks)
+	}
+	return "\n\n<system-reminder>Open tasks for this session (do not re-create them; update_task/complete_task as you finish each, and mark finished ones done):\n" + b.String() + "</system-reminder>"
+}
+
 const taskToolGuidance = `create_task/update_task/list_tasks/complete_task track multi-step work outside your own context — unlike your conversation history, tasks survive context trimming, fresh-start resets, and hand-offs between primary and escalation. Use them for a request that will span several turns or tool calls: break the work into tasks up front, mark each in_progress/done as you go, and call list_tasks if you need to recover what's left. Skip them for anything you can finish in one turn — creating a task for a trivial, single-step request just adds noise.`
 
 // memoryToolGuidance is appended to the system prompt whenever the memory
@@ -1443,11 +1504,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	pendingImages := a.pendingImageParts
 	a.pendingImageParts = nil
 
-	userMsg := Message{Role: "user", Content: userPrompt}
+	modelPrompt := userPrompt
+	if a.jobID == "" && !a.workflowRole && !a.isToolAgent {
+		modelPrompt += openTasksReminder(a.taskStore)
+	}
+	userMsg := Message{Role: "user", Content: modelPrompt}
 	if len(pendingImages) > 0 {
 		if a.supportsVision {
 			// Build a multipart message: text part + image parts.
-			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, pendingImages...)
+			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: modelPrompt}}, pendingImages...)
 		} else if len(a.toolAgentEntries) > 0 {
 			// Sending an image_url part to a non-vision endpoint is a hard API
 			// error ("No endpoints found that support image input"), not a
@@ -1456,11 +1521,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			// an agent_<name> call this turn can forward them to a
 			// vision-capable tool-agent instead of the model trying (and
 			// failing) to see them itself.
-			userMsg.Content = userPrompt + fmt.Sprintf(
+			userMsg.Content = modelPrompt + fmt.Sprintf(
 				"\n\n<system-reminder>%d image attachment(s) are pending. This agent (%s) is not configured for vision input and cannot see them directly — call one of your agent_* tool-agents (if any is vision-capable) and the image(s) will be forwarded to it automatically.</system-reminder>",
 				len(pendingImages), a.model)
 		} else {
-			userMsg.Content = userPrompt + fmt.Sprintf(
+			userMsg.Content = modelPrompt + fmt.Sprintf(
 				"\n\n<system-reminder>%d image attachment(s) were dropped — this agent (%s) is not configured for vision input. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input.</system-reminder>",
 				len(pendingImages), a.model)
 			pendingImages = nil // nothing can use them this turn — don't forward stale images to an unrelated later tool call
@@ -1577,7 +1642,11 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		if a.malformedToolCallTriggered {
 			a.malformedToolCallTriggered = false
 			a.malformedToolCallRetries++
-			msgs = append(msgs, Message{Role: "user", Content: malformedToolCallNudge})
+			nudge := malformedToolCallNudge
+			if a.malformedToolCallNudge != "" {
+				nudge, a.malformedToolCallNudge = a.malformedToolCallNudge, ""
+			}
+			msgs = append(msgs, Message{Role: "user", Content: nudge})
 			continue
 		}
 
@@ -1604,9 +1673,16 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				// repeat the format) — swap it for the tool trail.
 				a.logWarn("turn ended on unparsed tool-call markup",
 					"model", a.model, "agent", a.logRole(), "session_id", sess.ID)
+				markup := resp
 				resp = summarizeToolTrailWithHeader(msgs, clean, unparsedToolCallTrailHeader)
 				if resp == "" {
 					resp = unparsedToolCallNoActionNote
+				}
+				// The raw markup already streamed out live (the TUI
+				// transcript has it) — hand the host the exact retraction so
+				// it can replace what it showed with the clean response.
+				if a.onRetract != nil {
+					a.onRetract(markup, resp)
 				}
 			}
 			if a.onResponseSegment != nil && resp != "" {
@@ -2564,7 +2640,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		if err := a.onOpenFile(openArgs.Path); err != nil {
 			return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Error: err.Error()}.String(), ToolCallID: tc.ID}}
 		}
-		return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Output: "file opened in editor"}.String(), ToolCallID: tc.ID}}
+		return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Output: "file opened"}.String(), ToolCallID: tc.ID}}
 	}
 
 	// MCP tools dispatched before built-ins.
@@ -3227,10 +3303,21 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// surface raw markup as the answer and silently abandon the task, so hide
 	// this response and let Run() ask for a re-issue.
 	classifyOut := out
-	retryMalformed := (finishReason == "tool_calls" || danglingToolFragment) &&
-		a.malformedToolCallRetries < maxMalformedToolCallRetries &&
+	undelivered := (finishReason == "tool_calls" || danglingToolFragment) &&
 		!streamHasRunnableToolCall(det, toolCalls, textBuf.String())
+	// The server ends the stream (finish_reason=stop, no content) the moment
+	// the model writes literal tool-call markup inside its reasoning, which
+	// discards the whole thought. Treating that as a finished turn loses the
+	// work; re-ask instead, handing the lost reasoning back.
+	cutMidMarkup := emptyFallback && !danglingToolFragment && finishReason == "stop" &&
+		reasoningEndsMidMarkup(reasoningText)
+	retryMalformed := (undelivered || cutMidMarkup) &&
+		a.malformedToolCallRetries < maxMalformedToolCallRetries
 	a.malformedToolCallTriggered = retryMalformed
+	a.malformedToolCallNudge = ""
+	if retryMalformed && cutMidMarkup && !undelivered {
+		a.malformedToolCallNudge = truncatedReasoningNudge(reasoningText)
+	}
 	if retryMalformed {
 		classifyOut = io.Discard
 		a.logWarn("tool call not delivered, retrying",
@@ -3301,6 +3388,37 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 // call the server failed to deliver; past it the turn ends as before (the
 // leaked markup is swapped for the tool trail — see stripUnparsedToolMarkup).
 const maxMalformedToolCallRetries = 2
+
+// reasoningEndsMidMarkup reports whether reasoning stops inside an unclosed
+// inline code span (an odd number of backticks on its last line, which is not
+// a ``` fence) or on a dangling '<' — the signature of the server cutting the
+// stream as the model started writing tool-call markup.
+func reasoningEndsMidMarkup(reasoning string) bool {
+	r := strings.TrimRight(reasoning, " \t\r\n")
+	if r == "" {
+		return false
+	}
+	if strings.HasSuffix(r, "<") {
+		return true
+	}
+	line := r[strings.LastIndex(r, "\n")+1:]
+	if strings.HasPrefix(strings.TrimSpace(line), "```") {
+		return false
+	}
+	return strings.Count(line, "`")%2 == 1
+}
+
+const truncatedReasoningTailChars = 3000
+
+func truncatedReasoningNudge(reasoning string) string {
+	tail := reasoning
+	if len(tail) > truncatedReasoningTailChars {
+		tail = "…" + tail[len(tail)-truncatedReasoningTailChars:]
+	}
+	return "Your previous response was cut off by the server mid-thought and discarded: it ends where you began writing literal tool-call markup (angle-bracket tags such as <tool_call>, <function=…>, <parameter=…>). " +
+		"Here is the end of the reasoning that was lost:\n\n" + tail + "\n\n" +
+		"Continue from there. Describe tool-call syntax in words instead of writing the literal tags, and issue real tool calls only as proper tool calls."
+}
 
 const malformedToolCallNudge = "Your previous tool call was not delivered and was NOT executed: the server could not parse it. " +
 	"Re-issue it now as a proper tool call with valid JSON arguments. Do not write tool-call markup as text."

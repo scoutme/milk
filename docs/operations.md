@@ -172,6 +172,8 @@ A lightweight task tracker for the primary agent (HTTP/Bedrock backends only —
 
 The panel also opens itself the first time a task is created in the session (see [Keyboard shortcuts](#keyboard-shortcuts) for the auto-open/manual-override rule shared by all four side panels).
 
+Two guards keep an agent that lost its context from re-planning the same work: the primary agent's user message carries a bounded system-reminder of the session's open tasks (15 tasks, 100 chars per title; background-job, workflow and tool-agent prompts don't get it), and `create_task` returns the existing open task when the new title matches an open one (case- and whitespace-insensitive) instead of piling up a copy.
+
 ---
 
 ## Background sub-agents

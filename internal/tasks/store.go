@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,11 +86,23 @@ func (s *Store) createLocked(title string, tags []string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	// An agent that lost its context re-plans the same work and re-creates
+	// the same tasks; hand back the open one instead of piling up a copy.
+	want := normalizeTitle(title)
+	for _, e := range tasks {
+		if e.Status != StatusDone && normalizeTitle(e.Title) == want {
+			return e, nil
+		}
+	}
 	tasks = append(tasks, t)
 	if err := s.writeSession(tasks); err != nil {
 		return Task{}, err
 	}
 	return t, nil
+}
+
+func normalizeTitle(t string) string {
+	return strings.ToLower(strings.Join(strings.Fields(t), " "))
 }
 
 // Update sets the status (and optionally title) of a task by ID.
