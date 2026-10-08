@@ -77,3 +77,27 @@ func TestRun_UnparsedMarkupTurn_RetractsStreamedText(t *testing.T) {
 		t.Fatalf("persisted %q, retracted-to %q", last.Content, to)
 	}
 }
+
+type fakeTaskStore []TaskEntry
+
+func (f fakeTaskStore) Create(string, []string) (TaskEntry, error) { return TaskEntry{}, nil }
+func (f fakeTaskStore) Update(string, string, string) error        { return nil }
+func (f fakeTaskStore) Complete(string) error                      { return nil }
+func (f fakeTaskStore) List(bool) ([]TaskEntry, error)             { return f, nil }
+
+func TestOpenTasksReminder(t *testing.T) {
+	if got := openTasksReminder(nil); got != "" {
+		t.Errorf("nil store: %q", got)
+	}
+	if got := openTasksReminder(fakeTaskStore{{ID: "a1", Title: "t", Status: "done"}}); got != "" {
+		t.Errorf("only done tasks must yield nothing: %q", got)
+	}
+	got := openTasksReminder(fakeTaskStore{
+		{ID: "a1", Title: "Render guard", Status: "pending"},
+		{ID: "b2", Title: "zzz-closed", Status: "done"},
+		{ID: "c3", Title: "Open file", Status: "in_progress"},
+	})
+	if !strings.Contains(got, "a1 [pending] Render guard") || !strings.Contains(got, "c3 [in_progress] Open file") || strings.Contains(got, "zzz-closed") {
+		t.Errorf("reminder = %q", got)
+	}
+}

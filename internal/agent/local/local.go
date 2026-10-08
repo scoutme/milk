@@ -1167,6 +1167,48 @@ const backgroundAgentGuidance = `spawn_background_agent's main value is keeping 
 // same reasoning behind Claude Code's own TodoWrite guidance — so this
 // spells out the "when" as well as an explicit "skip it" case, to avoid
 // overcorrecting into creating a task for every trivial request.
+const (
+	maxReminderTasks      = 15
+	maxReminderTitleChars = 100
+)
+
+// openTasksReminder renders the session's unfinished tasks as a trailing
+// system-reminder on the user message, or "" when there are none. Without it
+// an agent whose context was trimmed (or whose turn was cut short) has no way
+// to know the tasks exist, re-plans the same work and creates duplicates.
+func openTasksReminder(ts TaskStore) string {
+	if ts == nil {
+		return ""
+	}
+	all, err := ts.List(false)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	n := 0
+	for _, t := range all {
+		if t.Status == "done" {
+			continue
+		}
+		n++
+		if n > maxReminderTasks {
+			continue
+		}
+		title := t.Title
+		if len(title) > maxReminderTitleChars {
+			title = title[:maxReminderTitleChars] + "…"
+		}
+		fmt.Fprintf(&b, "- %s [%s] %s\n", t.ID, t.Status, title)
+	}
+	if n == 0 {
+		return ""
+	}
+	if n > maxReminderTasks {
+		fmt.Fprintf(&b, "(+%d more — list_tasks shows all)\n", n-maxReminderTasks)
+	}
+	return "\n\n<system-reminder>Open tasks for this session (do not re-create them; update_task/complete_task as you finish each, and mark finished ones done):\n" + b.String() + "</system-reminder>"
+}
+
 const taskToolGuidance = `create_task/update_task/list_tasks/complete_task track multi-step work outside your own context — unlike your conversation history, tasks survive context trimming, fresh-start resets, and hand-offs between primary and escalation. Use them for a request that will span several turns or tool calls: break the work into tasks up front, mark each in_progress/done as you go, and call list_tasks if you need to recover what's left. Skip them for anything you can finish in one turn — creating a task for a trivial, single-step request just adds noise.`
 
 // memoryToolGuidance is appended to the system prompt whenever the memory
@@ -1462,11 +1504,15 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	pendingImages := a.pendingImageParts
 	a.pendingImageParts = nil
 
-	userMsg := Message{Role: "user", Content: userPrompt}
+	modelPrompt := userPrompt
+	if a.jobID == "" && !a.workflowRole && !a.isToolAgent {
+		modelPrompt += openTasksReminder(a.taskStore)
+	}
+	userMsg := Message{Role: "user", Content: modelPrompt}
 	if len(pendingImages) > 0 {
 		if a.supportsVision {
 			// Build a multipart message: text part + image parts.
-			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: userPrompt}}, pendingImages...)
+			userMsg.ContentParts = append([]ContentPart{{Type: "text", Text: modelPrompt}}, pendingImages...)
 		} else if len(a.toolAgentEntries) > 0 {
 			// Sending an image_url part to a non-vision endpoint is a hard API
 			// error ("No endpoints found that support image input"), not a
@@ -1475,11 +1521,11 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			// an agent_<name> call this turn can forward them to a
 			// vision-capable tool-agent instead of the model trying (and
 			// failing) to see them itself.
-			userMsg.Content = userPrompt + fmt.Sprintf(
+			userMsg.Content = modelPrompt + fmt.Sprintf(
 				"\n\n<system-reminder>%d image attachment(s) are pending. This agent (%s) is not configured for vision input and cannot see them directly — call one of your agent_* tool-agents (if any is vision-capable) and the image(s) will be forwarded to it automatically.</system-reminder>",
 				len(pendingImages), a.model)
 		} else {
-			userMsg.Content = userPrompt + fmt.Sprintf(
+			userMsg.Content = modelPrompt + fmt.Sprintf(
 				"\n\n<system-reminder>%d image attachment(s) were dropped — this agent (%s) is not configured for vision input. Set \"vision\": true on its entry in ~/.milk/config.json if the model actually supports image input.</system-reminder>",
 				len(pendingImages), a.model)
 			pendingImages = nil // nothing can use them this turn — don't forward stale images to an unrelated later tool call
