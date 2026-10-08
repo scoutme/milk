@@ -21,6 +21,12 @@ import (
 // cannot be replaced in-place; the caller should print the temp file path.
 var ErrWindowsManual = errors.New("cannot replace running binary on Windows; download saved to temp path")
 
+// ReleasesURL is the GitHub releases API endpoint CheckLatest fetches. A
+// variable so tests can point it at a stub release feed — the only seam the
+// fetch path needs (asset URLs are taken from the response's
+// browser_download_url, so a stub can self-host those too).
+var ReleasesURL = "https://api.github.com/repos/scoutme/milk/releases"
+
 // Release holds the fields of a GitHub release that the updater cares about.
 type Release struct {
 	Tag          string `json:"tag_name"`
@@ -67,7 +73,7 @@ func checksumAssetName() string {
 // that release is skipped.
 // The string "dev" is treated as "0.0.0" so any real release appears newer.
 func CheckLatest(ctx context.Context, currentVersion string, includePrerelease bool) (*Release, error) {
-	url := "https://api.github.com/repos/scoutme/milk/releases"
+	url := ReleasesURL
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("updater: build request: %w", err)

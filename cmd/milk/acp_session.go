@@ -97,6 +97,16 @@ type acpSession struct {
 	// first such response; read-only after.
 	noChoice bool
 
+	// updateAnnounced: the "update available" notice has been sent to this
+	// session (once per session; see acpServer.announceUpdate). Guarded by
+	// srv.mu, not by any session lock.
+	updateAnnounced bool
+
+	// srv is the owning server: the shared update state (/update …) and the
+	// startup check live one level above sessions. Set once at session
+	// creation under srv.mu; read-only after.
+	srv *acpServer
+
 	// v1Client: the client speaks ACP v1, which lacks v2's plan_update and
 	// tool_call_content_chunk (see notifyPlan, streamLive).
 	v1Client  bool

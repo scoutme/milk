@@ -54,6 +54,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	server := newACPServer(cfg, connFunc(func() acp.Conn { return conn }))
 	conn = acp.NewStdioConn(os.Stdout, server)
 
+	// Background release check: debounced (config.ShouldCheckUpdate), silent
+	// on failure, announcing any new release to sessions as it is found —
+	// acp_update.go. Launched here (not in newACPServer) so tests don't spawn
+	// network checks.
+	go server.backgroundUpdateCheck(ctx)
+
 	err = conn.Serve(ctx, os.Stdin)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err

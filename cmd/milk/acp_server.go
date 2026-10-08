@@ -9,6 +9,7 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/transport/acp"
+	"github.com/scoutme/milk/internal/updater"
 )
 
 // acpServer dispatches incoming ACP JSON-RPC requests/notifications
@@ -30,6 +31,13 @@ type acpServer struct {
 	// elicitation.form, which decides whether /config init may drive its
 	// wizard through form dialogs (acp_initwizard.go).
 	clientCaps acp.ClientCapabilities
+
+	// Shared self-update state (/update …, the startup check): one release
+	// cache and one in-flight guard per serve process, not per session.
+	// Guarded by mu.
+	updateRelease    *updater.Release // last known available release (nil: none known)
+	updateInstalled  string           // tag applied this process — pending restart
+	updateInstalling bool             // /update install is running
 }
 
 func newACPServer(cfg config.Config, conn acp.Conn) *acpServer {
@@ -83,6 +91,9 @@ func (s *acpServer) AfterResponse(method string, result any) {
 	}
 	if as := s.session(resp.SessionID); as != nil {
 		as.notify(acp.NewAvailableCommandsUpdate(acpAdvertisedCommands()))
+		// A session created after the startup check completed hears about
+		// the release now — once per session (announceUpdateTo).
+		s.announceUpdateTo(as)
 	}
 }
 
@@ -145,6 +156,7 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 	as.v1Client = s.clientProtocol == 1
 	as.host.host.V1 = as.v1Client
 	as.formElicit = s.clientCaps.FormElicitation()
+	as.srv = s
 	s.sessions[id] = as
 	s.mu.Unlock()
 

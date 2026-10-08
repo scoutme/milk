@@ -37,7 +37,7 @@ milk serve --acp
 | `session/cancel` | client → agent (notification) | ✅ real |
 | `session/update` (`state_update`) | agent → client | ✅ real: `running` at turn start, `idle` at turn end |
 | `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity; the list itself is static for the process, while the config it may edit is re-read from disk at `session/new` — see "The setup wizard" below) |
-| `session/update` (`agent_message_chunk`) | agent → client | ✅ real, but **one per completed turn, not per token** — see caveat below |
+| `session/update` (`agent_message_chunk`) | agent → client | ✅ real: turn output as **one chunk per completed turn, not per token** (see caveat below), plus occasional out-of-turn notices — the background-follow-up and update-available announcements |
 | `session/update` (`tool_call_update`) | agent → client | ✅ real, for both the local-provider and claude-cli-escalation paths |
 | `session/request_permission` | agent → client | ✅ real. Tool approvals are **local-provider agents only** — see caveat below. The setup wizard also uses it as clickable choice prompts for **any** provider (see "The setup wizard" below) |
 | `elicitation/create` | agent → client | ✅ real: sent by the setup wizard's form dialogs (form mode, session scope) |
@@ -74,6 +74,7 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/config open` | open the config file: launches the platform file opener (`xdg-open` / `open` / `start`) detached on the machine milk runs on and reports exactly what happened — an ACP agent is headless and never launches an interactive editor itself; when no opener is available it says so and falls back to the config path(s) for the client's editor |
 | `/config init`, `/init` | run the interactive setup wizard (see below) |
 | `/agent [list]` | list configured agents (switching is TUI-only) |
+| `/update check\|status\|install\|skip` | check for milk updates, install one, or skip a release (honored by every later check). `install` replaces the binary under the running process, so the reply says to restart the milk agent — and on Windows, where the running binary cannot be replaced, it reports the saved download path instead of claiming success |
 | `/tasks`, `/task done <id>` | list / complete tasks (session and global) |
 | `/bg [list\|show <id>\|start <task>\|stop <id>]` | list, inspect, start or stop background agents |
 | `/workflow <name> <task> [--<role> <agent>]` | run a workflow (see "Workflows, tasks and background agents") |
@@ -252,6 +253,12 @@ rendering will instead see the full text arrive in one notification right
 before the `idle` `state_update`. Real partial-token streaming would need a
 new, lower-level hook in `internal/agent/local`/`internal/agent/claude` that
 doesn't exist yet.
+
+Outside of turn output, `agent_message_chunk` is also milk's channel for the
+occasional one-line notices that fire while the agent is `idle`: why a
+background-follow-up turn is starting, and the one-shot "new release
+available" announcement (debounced across sessions — at most one per session,
+never for a release chosen via `/update skip`).
 
 ### Caveat: permission prompts only cover local-provider agents
 

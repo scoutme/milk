@@ -18,7 +18,6 @@ import (
 	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/tasks"
-	"github.com/scoutme/milk/internal/updater"
 )
 
 func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
@@ -1173,14 +1172,14 @@ func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			rel, err := updateCheck(ctx, &cfg)
 			if err != nil {
 				return errMsg{err: fmt.Errorf("update check: %w", err)}
 			}
 			if rel == nil {
 				return errMsg{err: fmt.Errorf("already up to date (%s)", version)}
 			}
-			return updateAvailableMsg{release: rel}
+			return updateAvailableMsg{release: rel, checkedAt: cfg.UpdateLastCheck}
 		}
 
 	case "install":
@@ -1201,14 +1200,9 @@ func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			dest, err := updater.CurrentBinaryPath()
-			if err != nil {
-				return updateDoneMsg{err: err}
-			}
-			err = updater.Apply(ctx, rel, dest, func(done, total int64) {
+			return updateDoneMsg{err: updateInstall(ctx, rel, func(done, total int64) {
 				send(updateProgressMsg{done: done, total: total})
-			})
-			return updateDoneMsg{err: err}
+			})}
 		}
 
 	case "skip":
@@ -1216,10 +1210,7 @@ func (m model) handleUpdateCmd(sub string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + " no pending update\n")
 			return m, nil
 		}
-		cfg := m.st.cfg
-		cfg.UpdateSkippedVersion = m.pendingUpdate.Tag
-		_ = saveLocalOrGlobal(cfg)
-		m.st.cfg = cfg
+		skipUpdateRelease(&m.st.cfg, m.pendingUpdate.Tag)
 		m.pendingUpdate = nil
 		m.appendTranscript(milkTag() + " update skipped\n")
 		return m, nil

@@ -347,7 +347,12 @@ type configReloadMsg struct {
 type errMsg struct{ err error }
 
 // updateAvailableMsg is sent when the background update check finds a newer release.
-type updateAvailableMsg struct{ release *updater.Release }
+type updateAvailableMsg struct {
+	release *updater.Release
+	// checkedAt is the UpdateLastCheck timestamp updateCheck already wrote to
+	// disk, so the in-memory config copy can sync without a re-read.
+	checkedAt string
+}
 
 // workflowResumeCheckMsg is sent at startup when a saved workflow state file
 // was found for the current session. The TUI prints a one-line resume offer.
@@ -1621,11 +1626,14 @@ func (m model) Init() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+			// updateCheck (not the raw updater call): the skipped-release
+			// filter and the last-check write-back apply to the startup
+			// check too — a skipped release must not nag again on restart.
+			rel, err := updateCheck(ctx, &cfg)
 			if err != nil || rel == nil {
 				return nil
 			}
-			return updateAvailableMsg{release: rel}
+			return updateAvailableMsg{release: rel, checkedAt: cfg.UpdateLastCheck}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -2334,11 +2342,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case updateAvailableMsg:
 		m.pendingUpdate = msg.release
-		// Record last-check time so we don't spam on every startup.
-		cfg := m.st.cfg
-		cfg.UpdateLastCheck = time.Now().UTC().Format(time.RFC3339)
-		_ = config.SaveScope(cfg, preferredSaveScope())
-		m.st.cfg = cfg
+		// Last-check bookkeeping was already written (and saved) by
+		// updateCheck — which also records it when up to date, so the shared
+		// 24h debounce holds. Just sync the in-memory copy here.
+		m.st.cfg.UpdateLastCheck = msg.checkedAt
 		return m, nil
 
 	case updateProgressMsg:

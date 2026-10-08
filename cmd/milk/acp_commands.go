@@ -35,9 +35,11 @@ type acpTurn struct {
 	say func(string)
 }
 
-// acpCommandTable lists the headless-capable subset of the TUI's commands.
-// TUI-only commands (panels, colorization, attachments, wizards, workflows,
-// background jobs, …) are deliberately absent — see docs/acp-integration.md.
+// acpCommandTable lists the headless-capable subset of the TUI's commands —
+// nearly all of them these days (wizards, workflows and background jobs
+// included). Only genuinely TUI-bound commands (panels, colorization,
+// attachments, editor launching, …) are deliberately absent — see
+// docs/acp-integration.md.
 func acpCommandTable() []acpCommand {
 	viaTUI := func(cmd string) func(*acpSession, string) (string, string) {
 		return func(as *acpSession, rest string) (string, string) {
@@ -63,6 +65,7 @@ func acpCommandTable() []acpCommand {
 		{cmdConfig, "print the config, run the setup wizard, or open the config file", "[show|init|open]", acpConfig, nil},
 		{cmdInit, "run the setup wizard (alias for /config init)", "", acpInit, nil},
 		{cmdAgent, "list configured agents", "[list]", acpAgent, nil},
+		{name: cmdUpdate, desc: "check for milk updates, install one, or skip a release", hint: "check|status|install|skip", runTurn: acpUpdate},
 		{"/help", "list the commands available in this session", "", acpHelp, nil},
 	}
 }
