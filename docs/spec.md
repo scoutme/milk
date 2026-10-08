@@ -172,7 +172,7 @@ and, for ACP integration specifically, [docs/acp-integration.md](acp-integration
 
 **Slash commands:** `/escalate`, `/primary`, `/new`, `/clear`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/init`, `/open`, `/update`, `/notifications`, `/help`, `/exit`
 
-**Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
+**Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [session <id|prefix>] [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
 **Panel commands:** `/panel memory`, `/panel tasks`, `/panel background`, `/panel workflow` (also F1-F4) — see [docs/operations.md — Keyboard shortcuts](operations.md#keyboard-shortcuts) and [docs/workflows.md](workflows.md#the-native-workflow-engine).
 
@@ -281,6 +281,7 @@ The CLI equivalent is `milk update check` and `milk update install` (non-interac
   "colorization": "balanced",
   "show_reasoning": true,
   "sticky_escalation": true,
+  "acp_resume": true,
   "experimental_lazy_history_management": false,
   "aws_auth_refresh": false,
   "update_check": true,
@@ -321,6 +322,14 @@ Whether milk checks GitHub for new releases at startup (TUI and `milk serve --ac
 ### `update_channel` field
 
 Which releases count as updates: `"pre"` (default) includes pre-releases, `"stable"` only final releases.
+
+### `acp_resume` field
+
+Resume-by-default adoption over ACP (`milk serve --acp`): when on (the default), `session/new` adopts the working directory's most recent stored session — with mandatory bounded history replay and a one-line notice — instead of starting empty. It is the TUI's `--continue` default mapped onto the entry point ACP clients actually call. Set `false` for strict-spec behavior (`session/new` always starts fresh); the per-request escape hatch is `_meta.milk.fresh: true`. Full semantics in [docs/acp-integration.md — Session resume, list, and history replay](acp-integration.md#session-resume-list-and-history-replay).
+
+### ACP session parity
+
+The TUI and `milk serve --acp` share one session model — one conversation per working directory — and one session store, so a conversation continues the same way whichever surface opens it: TUI `--continue` ≈ ACP `session/new` adopting (the `acp_resume` default), TUI `--new` ≈ `acp_resume: false` or a per-request `_meta.milk.fresh: true`. Session management over ACP (`session/list`/`resume`/`close`/delete, `/list`, `/export [session <id|prefix>] [json|<path>]`) and standard chat-history replay are specified in [docs/acp-integration.md](acp-integration.md).
 
 ### `experimental_lazy_history_management` field
 

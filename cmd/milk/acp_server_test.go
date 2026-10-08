@@ -171,7 +171,7 @@ func TestACPServer_PromptUnknownSession(t *testing.T) {
 func TestACPServer_UnknownMethod(t *testing.T) {
 	server, _ := acpTestServer(t, "ok")
 
-	_, err := server.HandleRequest(context.Background(), "session/list", json.RawMessage(`{}`))
+	_, err := server.HandleRequest(context.Background(), "session/load", json.RawMessage(`{}`))
 	if _, ok := err.(*acp.MethodNotFoundError); !ok {
 		t.Fatalf("err = %v (%T), want *acp.MethodNotFoundError", err, err)
 	}

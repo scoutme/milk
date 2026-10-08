@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -295,6 +296,43 @@ func List(cwd string) (map[string][]IndexEntry, error) {
 		return idx, nil
 	}
 	return map[string][]IndexEntry{cwd: idx[cwd]}, nil
+}
+
+// Lookup resolves a session by exact ID or unambiguous ID prefix across all
+// cwds — the /export session <id|prefix> and session/delete paths (mirroring
+// memory.FindByIDPrefix conventions: an exact ID always wins; a prefix must
+// match exactly one session or it is an error, never a guess).
+func Lookup(idOrPrefix string) (*Session, error) {
+	if idOrPrefix == "" {
+		return nil, fmt.Errorf("session: empty id")
+	}
+	idx, err := loadIndex()
+	if err != nil {
+		return nil, err
+	}
+	idx, err = repairIndex(idx)
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	for _, entries := range idx {
+		for _, e := range entries {
+			if e.ID == idOrPrefix {
+				return Load(e.ID) // exact match wins outright
+			}
+			if strings.HasPrefix(e.ID, idOrPrefix) {
+				matches = append(matches, e.ID)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("session %q not found", idOrPrefix)
+	case 1:
+		return Load(matches[0])
+	default:
+		return nil, fmt.Errorf("session id prefix %q is ambiguous (%d matches) — use more characters", idOrPrefix, len(matches))
+	}
 }
 
 // CWDHash returns a short hash of a path, used for display/debug purposes only.

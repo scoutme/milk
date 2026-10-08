@@ -49,7 +49,7 @@ func (as *acpSession) announceRoute(d router.Decision, target router.Target, age
 		if d.Reason != "" {
 			line += ": " + d.Reason
 		}
-		as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("route-%d", as.msgCounter.Add(1))), line))
+		as.notify(acp.AgentMessageChunk(as.liveID("route"), line))
 	}
 	return map[string]any{"milk/route": map[string]any{
 		"agent": agent, "target": string(target), "reason": d.Reason,
@@ -74,7 +74,7 @@ func (as *acpSession) surfaceVerdicts(vs []loop.Verdict) {
 		if v.ShouldInterrupt {
 			line += " — turn auto-interrupted"
 		}
-		as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("warn-%d", as.msgCounter.Add(1))), line))
+		as.notify(acp.AgentMessageChunk(as.liveID("warn"), line))
 		n := (&acp.Mapper{Session: as.id}).LoopWarning(v, 0, 0)
 		as.conn.Notify(n.Method, n.Params) //nolint:errcheck // see above
 		if v.ShouldInterrupt {

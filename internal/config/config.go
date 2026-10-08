@@ -163,6 +163,9 @@ func DeepMerge(dst, src Config) Config {
 	if src.UpdateCheck != nil {
 		dst.UpdateCheck = src.UpdateCheck
 	}
+	if src.ACPResume != nil {
+		dst.ACPResume = src.ACPResume
+	}
 	if src.UpdateChannel != "" {
 		dst.UpdateChannel = src.UpdateChannel
 	}
@@ -995,6 +998,15 @@ type Config struct {
 	// UpdateCheck controls whether milk checks GitHub for new releases on startup.
 	// Default: true. Set to false to disable entirely.
 	UpdateCheck *bool `json:"update_check,omitempty"`
+
+	// ACPResume controls resume-by-default adoption over ACP (milk serve
+	// --acp): when on (the default), session/new adopts the most-recent
+	// stored session for the request's cwd instead of starting empty — the
+	// TUI's --continue default mapped onto ACP. Set to false for strict
+	// spec behavior (session/new always starts fresh); the per-request
+	// escape hatch is _meta.milk.fresh: true. See docs/spec.md's "ACP
+	// session parity" note.
+	ACPResume *bool `json:"acp_resume,omitempty"`
 
 	// UpdateChannel selects which releases are considered: "stable" skips pre-releases,
 	// "pre" includes them. Default: "pre" (all current releases are pre-releases).
@@ -2272,6 +2284,14 @@ func InitConfig(primary AgentConfig, escalation *AgentConfig) Config {
 		cfg.EscalationAgent = escalation.Name
 	}
 	return cfg
+}
+
+// ACPResumeEnabled reports whether session/new adopts the most-recent stored
+// session for its cwd over ACP (resume-by-default). On unless explicitly
+// disabled — the TUI's --continue default, mirrored 1:1 (docs/spec.md's "ACP
+// session parity" note).
+func (c Config) ACPResumeEnabled() bool {
+	return c.ACPResume == nil || *c.ACPResume
 }
 
 // ShouldCheckUpdate returns true when the update check is enabled and at least

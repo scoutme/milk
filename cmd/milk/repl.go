@@ -507,14 +507,23 @@ func (r *tuiInputReader) readLineLabeled(prompt, label string) (string, error) {
 // handled by the caller via WithSkipPermissions before this is ever called.
 func makeLocalPermAsk(host events.Host, ps *local.PermStore) func(tool, summary string) bool {
 	return func(tool, summary string) bool {
-		prompt := fmt.Sprintf("\n%s permission request — primary agent tool: %s", milkTag(), bold(tool))
-		if summary != "" {
-			prompt += fmt.Sprintf("  (%s)", dim(summary))
-		}
-		prompt += fmt.Sprintf("\n%s Allow? [Y/n] ", milkTag())
-		outcome, _ := host.RequestPermission(context.Background(), events.PermissionRequest{Prompt: prompt, Tool: tool, Summary: summary})
+		outcome, _ := host.RequestPermission(context.Background(), events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
 		return outcome.Allow
 	}
+}
+
+// permAskPrompt builds the human-readable permission prompt for a local-agent
+// tool ask — the text both hosts show (the TUI verbatim; over ACP it rides on
+// session/request_permission's description and on the remote-oversight
+// request). Shared so a question can't read differently depending on which
+// surface asked it.
+func permAskPrompt(tool, summary string) string {
+	prompt := fmt.Sprintf("\n%s permission request — primary agent tool: %s", milkTag(), bold(tool))
+	if summary != "" {
+		prompt += fmt.Sprintf("  (%s)", dim(summary))
+	}
+	prompt += fmt.Sprintf("\n%s Allow? [Y/n] ", milkTag())
+	return prompt
 }
 
 // --- Styles ---

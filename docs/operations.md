@@ -264,6 +264,8 @@ Forward agent activity and permission prompts to a mobile device.
 
 **Remote input**: any message sent to the bot is injected as a new turn (`[telegram] …` in the transcript); queued while a turn is in progress, delivered as the next turn once it completes.
 
+**Over ACP** (`milk serve --acp`): everything above runs too, with one notifier per serve process — permission prompts race the ACP client (first answer wins, remote asks serialized process-wide), and bot messages run as turns in the live session the user touched most recently (queued until one exists if none do), echoed to the client as ordinary user messages. See docs/acp-integration.md's "Remote oversight (Telegram)" section.
+
 ---
 
 ## Inline diff view

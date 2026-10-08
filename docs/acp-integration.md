@@ -32,20 +32,27 @@ milk serve --acp
 | Method | Direction | Status |
 |---|---|---|
 | `initialize` | client → agent | ✅ real |
-| `session/new` | client → agent | ✅ real |
+| `session/new` | client → agent | ✅ real: starts a fresh session — or, by default, **adopts** the cwd's most recent stored session (resume-by-default; see "Session resume, list, and history replay" below) |
+| `session/list` | client → agent | ✅ real: every stored session sorted by last use descending (all cwds, or `cwd` filter), `SessionInfo{sessionId, cwd, title, updatedAt}` (title = session name, else the first user turn truncated), opaque `base64("o:<n>")` offset cursor, 50 per page |
+| `session/resume` | client → agent | ✅ real: attach the stored session (the request `cwd` must match the session's, else `-32602`; unknown ID → `-32002`), idempotent reattach when it is already open in this process; `replayFrom` — omitted/`null` resumes without replaying, `{"type":"start"}` replays all retained history before the response (message upserts, see "Session resume, list, and history replay" below), any other cursor → `-32602` before anything is emitted; returns `availableCommands` |
+| `session/close` | client → agent | ✅ real: cancel any running turn + suppress follow-ups + persist + free (idempotent, the file is kept — close ≠ delete) |
+| `session/delete` | client → agent | ✅ real, behind the `session.delete` capability (`{}`): close-if-open, then drop the session file and index entry (accepts an unambiguous ID prefix) |
 | `session/prompt` | client → agent | ✅ real |
 | `session/cancel` | client → agent (notification) | ✅ real |
 | `session/update` (`state_update`) | agent → client | ✅ real: `running` at turn start, `idle` at turn end |
 | `session/update` (`available_commands_update`) | agent → client | ✅ real, sent once right after the `session/new` response. Advertises exactly the commands listed under "Slash commands" below (no per-argument granularity; the list itself is static for the process, while the config it may edit is re-read from disk at `session/new` — see "The setup wizard" below) |
 | `session/update` (`agent_message_chunk`) | agent → client | ✅ real: turn output as **one chunk per completed turn, not per token** (see caveat below), plus occasional out-of-turn notices — the background-follow-up and update-available announcements |
+| `session/update` (`user_message` / `agent_message` / `agent_thought` upserts) | agent → client | ✅ real: chat-history replay on `session/resume` (and resume-by-default adoption) plus the accept-echo of each user message at turn start (same `messageId` the `session/prompt` response returns). Upsert semantics: the same `messageId` patches rather than duplicates |
+| `session/update` (`user_message_chunk`) | agent → client | ✅ real: the v1-client fallback shape of the accept-echo and replay (v1 has no message upserts; same `messageId` appends into one message) |
 | `session/update` (`tool_call_update`) | agent → client | ✅ real, for both the local-provider and claude-cli-escalation paths |
 | `session/request_permission` | agent → client | ✅ real. Tool approvals are **local-provider agents only** — see caveat below. The setup wizard also uses it as clickable choice prompts for **any** provider (see "The setup wizard" below) |
 | `elicitation/create` | agent → client | ✅ real: sent by the setup wizard's form dialogs (form mode, session scope) |
 | `elicitation/complete` | agent → client (notification) | ✅ real: fire-and-forget once the user's answer has been consumed |
 
-Everything else a real ACP client might try — `session/list`, `session/resume`,
-`session/delete`, `session/close`, `auth/login`, `auth/logout`,
-`session/set_config_option`, `$/cancel_request` as a
+Everything else a real ACP client might try — `auth/login`, `auth/logout`,
+`session/set_config_option`, the legacy v1 `session/load` (client-supplied
+history — the old wrong shape; history replay is standardized via
+`session/resume`'s `replayFrom` instead), `$/cancel_request` as a
 standalone per-request cancel — returns the standard JSON-RPC **`-32601`
 method not found** error. That's a deliberate, documented gap, not a bug: see
 [Deferred](#deferred-not-silently-missing) below.
@@ -75,6 +82,7 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/config init`, `/init` | run the interactive setup wizard (see below) |
 | `/agent [list]` | list configured agents (switching is TUI-only) |
 | `/update check\|status\|install\|skip` | check for milk updates, install one, or skip a release (honored by every later check). `install` replaces the binary under the running process, so the reply says to restart the milk agent — and on Windows, where the running binary cannot be replaced, it reports the saved download path instead of claiming success |
+| `/setup telegram [on\|off\|status]` | configure Telegram remote oversight (see "Remote oversight (Telegram)"). The bare form runs the interactive wizard: the bot token is typed in chat and consumed by the wizard (never sent to the model; `cancel` aborts), then a clickable confirm — or typed `done` as the floor. `on`/`off` flip the backend without touching stored credentials, `status` reports the current state |
 | `/tasks`, `/task done <id>` | list / complete tasks (session and global) |
 | `/bg [list\|show <id>\|start <task>\|stop <id>]` | list, inspect, start or stop background agents |
 | `/workflow <name> <task> [--<role> <agent>]` | run a workflow (see "Workflows, tasks and background agents") |
@@ -221,6 +229,31 @@ already granted, matches `bash_allowed_patterns`, or skip-permissions is on.
   are denied by default over ACP, and no request is ever sent), and agents
   that a workflow role or a tool-agent entry builds separately from the
   session's primary/escalation agents.
+- **Remote oversight races along.** When `remote_oversight` is configured,
+  the backend's allow/deny (or its `timeout_action` on timeout) is asked in
+  parallel with the client and the first answer wins — the TUI's rule. The
+  remote side is serialized process-wide: the Telegram backend has a single
+  prompt slot, so concurrent sessions queue their remote asks instead of
+  stealing each other's.
+
+## Remote oversight (Telegram)
+
+`milk serve --acp` runs the same remote oversight as the TUI
+(docs/operations.md's "Remote oversight (Telegram)") — one notifier per
+serve process, built at serve start from `remote_oversight` in the config
+and rebuilt when `/setup telegram` changes it:
+
+- **Turn and tool notifications** — turn start/response/done, slash-command
+  output, and (gated by `notify_tools`) tool use/results forward to the
+  backend for both providers, plus workflow turns (`workflow:<role>`).
+- **Permission prompts race the client** — `session/request_permission`
+  goes to the editor as always; the remote answer wins the race if it
+  arrives first (see the Tool permissions section above).
+- **Bot messages run as turns** — a message you send the bot runs in the
+  live session with the most recent activity, echoed to the client as an
+  ordinary user message; it queues while a turn is running and runs at turn
+  end. Messages that arrive before any session exists are held and run on
+  the next `session/new`.
 
 ## Routing and warnings
 
@@ -256,9 +289,11 @@ doesn't exist yet.
 
 Outside of turn output, `agent_message_chunk` is also milk's channel for the
 occasional one-line notices that fire while the agent is `idle`: why a
-background-follow-up turn is starting, and the one-shot "new release
+background-follow-up turn is starting, the one-shot "new release
 available" announcement (debounced across sessions — at most one per session,
-never for a release chosen via `/update skip`).
+never for a release chosen via `/update skip`), and the `resumed session …`
+notice that resume-by-default adoption sends (see "Session resume, list, and
+history replay" below).
 
 ### Caveat: permission prompts only cover local-provider agents
 
@@ -276,16 +311,14 @@ local-provider agent as `escalation_agent` instead of the `claude-cli` default
 
 ### Capability negotiation note
 
-`initialize`'s response advertises `capabilities.session: {}`. Per the
-upstream ACP schema, supplying *any* value for `session` (even `{}`) declares
-support for the **entire** baseline — `session/new`, `session/list`,
+`initialize`'s response advertises `capabilities.session: {"delete": {}}`.
+Per the upstream ACP schema, supplying *any* value for `session` (even `{}`)
+declares support for the **entire** baseline — `session/new`, `session/list`,
 `session/resume`, `session/close`, `session/prompt`, `session/cancel`, and
-`session/update` — as one bundle; there's no finer-grained flag to advertise
-only the subset milk actually implements. milk advertises the baseline
-because that's the only way to turn on the four methods it does support;
-calling one of the three it doesn't gets `-32601`, which is the correct way
-a client should discover the gap (check the response's `error.code`, don't
-assume success from the capability flag alone).
+`session/update` — as one bundle; there's no finer-grained flag for a subset.
+milk now implements the whole bundle, so the advertisement is simply
+accurate; the one add-on flag is `delete` (`{}`), which additionally
+advertises `session/delete`.
 
 ## Example exchange
 
@@ -298,7 +331,7 @@ readability):
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"info":{"name":"my-editor"}}}
 
 // ← agent responds
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"info":{"name":"milk","version":"0.9.0"},"capabilities":{"session":{}}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"info":{"name":"milk","version":"0.9.0"},"capabilities":{"session":{"delete":{}}}}}
 
 // → client sends
 {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/me/myproject"}}
@@ -321,23 +354,129 @@ readability):
 {"jsonrpc":"2.0","id":3,"result":{"messageId":"msg-1"}}
 ```
 
-Trying an unimplemented method:
+Continuing an earlier conversation (see "Session resume, list, and history
+replay" below for the full semantics):
+
+```jsonc
+// → client asks what conversations exist for this workspace
+{"jsonrpc":"2.0","id":4,"method":"session/list","params":{"cwd":"/home/me/myproject"}}
+
+// ← agent responds (last-use first; title falls back to the first user turn)
+{"jsonrpc":"2.0","id":4,"result":{"sessions":[{"sessionId":"d4c3b2a1-...","cwd":"/home/me/myproject","title":"rename the config flag","updatedAt":"2026-09-28T09:30:00Z"}]}}
+
+// → client continues that conversation
+{"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":"d4c3b2a1-...","cwd":"/home/me/myproject"}}
+
+// ← agent responds (commands come inline; an update-available notice, if
+//   any, follows as a session/update)
+{"jsonrpc":"2.0","id":5,"result":{"availableCommands":[{"name":"/export","description":"print the session transcript (or another session's), or write it to a file","input":{"type":"text","hint":"[json|<path>|session <id>]"}}]}}
+```
+
+Trying an unimplemented method (the legacy v1 history-load — deliberately not
+implemented, see "Known gaps"):
 
 ```jsonc
 // → client sends
-{"jsonrpc":"2.0","id":4,"method":"session/list","params":{}}
+{"jsonrpc":"2.0","id":6,"method":"session/load","params":{"sessionId":"d4c3b2a1-...","history":[]}}
 
 // ← agent responds
-{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"method not found: session/list"}}
+{"jsonrpc":"2.0","id":6,"error":{"code":-32601,"message":"method not found: session/load"}}
 ```
+
+## Session resume, list, and history replay
+
+`session/list`, `session/resume`, `session/close` and `session/delete` are the
+ACP v2 standard session-management surface; this section is their full
+semantics, including milk's one deliberate extension: resume-by-default on
+`session/new`.
+
+### Resume-by-default: `session/new` adopts
+
+milk's session model is one-conversation-per-cwd — launching the TUI in a
+terminal continues that directory's conversation unless asked not to
+(`--continue` is the default, `--new` opts out). Over ACP, `session/new` is
+the entry point clients actually call, so it gets the same default: it
+**adopts** the cwd's most-recent stored session (equivalent to resuming that
+session) iff **all five** conditions hold:
+
+1. config `acp_resume` is on (default: on; `false` restores strict-spec
+   behavior — `session/new` always starts empty),
+2. the request's `_meta.milk.fresh` is not `true` (the per-request escape
+   hatch — `_meta` is ACP's sanctioned channel for exactly this),
+3. this serve process has no live session whose cwd is the request's `cwd`
+   (the second `session/new` for a workspace is therefore always fresh —
+   "new thread" keeps working inside a running client),
+4. the candidate session was not closed earlier in this process (an
+   explicitly closed thread is never silently resurrected), and
+5. the store holds at least one session for the cwd.
+
+Anything else behaves exactly as before. On adopt, the response returns the
+**adopted session's id** — the id the client keeps using for this
+conversation — and adoption never hides state: the bounded history replay
+below is mandatory (the client's panel is empty), and a one-line notice
+precedes it (`resumed session … — N earlier turns; /export prints the full
+transcript`). A spec-strict client that expects `session/new` to be empty
+therefore sees old context at most once per workspace open — announced and
+replayed, never silently. TUI parity: `--continue` ≈ adopt; `--new` ≈
+`acp_resume: false` or `_meta.milk.fresh: true`.
+
+### History replay (`replayFrom`)
+
+- omitted or `null` → resume without replaying anything.
+- `{"type":"start"}` → replay all retained history **before the response**,
+  as `session/update` message upserts (`user_message` / `agent_message` /
+  `agent_thought`) plus `tool_call_update` rows for tool trails (each
+  `rawOutput` paired from the recorded tool result). A v1 client gets the
+  chunk-form fallback instead (`user_message_chunk` etc. — same `messageId`
+  appends into one message).
+- any other cursor type (including future `_`-prefixed extensions) →
+  `-32602`, rejected before anything is emitted — milk refuses rather than
+  guessing where to replay from.
+
+**Message identity.** Replayed messages carry deterministic ids derived from
+their history index (`hist-u3`, `hist-a5`, `hist-t5-0`, …), so replaying twice
+patches the client's existing messages instead of duplicating them. Live ids
+are suffixed with a per-process run id, so they can never collide with
+`hist-*` or with ids minted before a restart. One documented deviation: milk
+does not retain the original ACP `messageId`s in its session file ("Agents …
+are not required to retain" them), so replayed messages carry synthesized
+stable ids.
+
+**Bounds.** "All *retained* history" is windowed to keep the notification
+blast finite: each message's text is capped (~8 KB head+tail), and the replay
+covers the first 10 and last 200 turns, with one explicit marker message in
+the gap — `[… N earlier turns omitted from replay — /export prints the full
+transcript …]`.
+
+### Exploring after resume: `/export session <id|prefix>`
+
+`/export` prints the current session's transcript — including pre-resume
+turns on a resumed session. To preview *another* session without attaching
+it, `/export session <id|prefix>` dumps that session (exact id or unambiguous
+prefix; ambiguity and misses are errors, never a guess), composable with
+`json` or a file path: `/export [session <id|prefix>] [json|<path>]`. The
+exploration flow is `/list` → `/export session a1b2` → `session/resume`.
+
+### close vs delete
+
+`session/close` cancels a running turn, drops pending follow-ups, persists
+the session file and frees the in-process resources (idempotent; the file is
+kept — close ≠ delete). `session/delete` closes an open session first, then
+removes its file and index entry. Either way the id joins this process's
+closed-set: the next `session/new` will not resurrect it (condition 4 above).
 
 ## Error handling
 
 - **`-32601`** (JSON-RPC reserved "method not found"): the method isn't
-  implemented. This is the only error code milk's dispatcher assigns
-  deliberately; every other failure (bad params, unknown `sessionId`, a
-  turn-level error) comes back as a generic `-32000` with a human-readable
-  `message` — don't pattern-match on its text, just surface it.
+  implemented at all (see the gap list below).
+- **`-32602`** ("invalid params"): a well-formed request whose params fail
+  validation — e.g. `session/resume` with a `cwd` that doesn't match the
+  session's, or an unknown `replayFrom` cursor type.
+- **`-32002`** ("resource not found"): the requested session doesn't exist
+  (`session/resume`, `session/delete`).
+- **`-32000`** (generic server error): every other failure (a turn-level
+  error, an internal store failure) — don't pattern-match on its text, just
+  surface it.
 - `session/cancel` is a **notification** (no `id`, no response). Sending one
   for a session with no turn currently running is a safe no-op.
 - A malformed JSON-RPC line on stdin is silently dropped, not reported —
@@ -350,8 +489,10 @@ Tracked explicitly in `docs/machine-readable-output-design.md`'s Phase 2
 status note, repeated here for integrators who don't want to read the whole
 design doc:
 
-- `session/list`, `session/resume`, `session/delete`, `session/close`
 - `auth/login`, `auth/logout`
+- the legacy v1 `session/load` (client-supplied history): the old wrong
+  shape — history lives client-side there. Stays `-32601` by design; use
+  `session/resume` with `replayFrom` for history replay.
 - `session/set_config_option` (the internal handler exists, isn't wired to
   the dispatcher)
 - the tool-facing `events.Host.Elicit` seam (`cmd/milk/host_acp.go`) — still a

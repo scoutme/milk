@@ -428,8 +428,11 @@ func (m model) handleSetupCmd(arg string) (tea.Model, tea.Cmd) {
 	case "telegram off":
 		m = m.setTelegramEnabled(false)
 		return m, nil
+	case "telegram status":
+		m.appendTranscript(telegramStatusText(m.st.cfg) + "\n")
+		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram off\n")
+		m.appendTranscript(milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram off | /setup telegram status\n")
 		return m, nil
 	}
 }
@@ -566,22 +569,8 @@ func resolveTelegramChatID(token string) (int64, error) {
 // setTelegramEnabled enables or disables Telegram oversight without touching
 // the stored credentials. Saves config and reinitialises the notifier.
 func (m model) setTelegramEnabled(on bool) model {
-	ro := m.st.cfg.RemoteOversight
-	if ro == nil {
-		ro = &config.RemoteOversightConfig{}
-		m.st.cfg.RemoteOversight = ro
-	}
-	if on {
-		if ro.Telegram == nil || ro.Telegram.Token == "" || ro.Telegram.ChatID == 0 {
-			m.appendTranscript(milkTag() + " no Telegram credentials configured — run /setup telegram first\n")
-			return m
-		}
-		ro.Backend = "telegram"
-	} else {
-		ro.Backend = ""
-	}
-	if err := saveLocalOrGlobal(m.st.cfg); err != nil {
-		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
+	if err := setTelegramEnabledCfg(&m.st.cfg, on); err != nil {
+		m.appendTranscript(milkTag() + " " + err.Error() + "\n")
 		return m
 	}
 	m.st.notifier = newNotifier(m.st.cfg)

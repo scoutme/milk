@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -129,7 +130,12 @@ func (c *StdioConn) handleRequest(ctx context.Context, msg wireMessage) {
 	resp := Response{JSONRPC: "2.0", ID: json.RawMessage(msg.ID)}
 	if err != nil {
 		code := -32000
-		if _, ok := err.(*MethodNotFoundError); ok {
+		var coder interface{ RPCCode() int }
+		var mnfe *MethodNotFoundError
+		switch {
+		case errors.As(err, &coder):
+			code = coder.RPCCode() // deliberate code chosen by the handler (see CodedError)
+		case errors.As(err, &mnfe):
 			code = -32601 // JSON-RPC 2.0 reserved "method not found"
 		}
 		resp.Error = &RPCError{Code: code, Message: err.Error()}
@@ -145,16 +151,24 @@ func (c *StdioConn) handleRequest(ctx context.Context, msg wireMessage) {
 }
 
 // MethodNotFoundError signals a method a Handler doesn't implement — mapped
-// to JSON-RPC's reserved -32601 code by handleRequest above. The correct,
-// standard way for milk serve --acp to express "not implemented yet" for a
-// method a client's advertised capability technically covers (e.g.
-// session/list|resume|close, bundled into the same monolithic
-// SessionCapabilities baseline as session/new|prompt|cancel — see
-// lifecycle.go's package doc) without a capability flag granular enough to
-// say so up front.
+// to JSON-RPC's reserved -32601 code by handleRequest above. The standard way
+// for milk serve --acp to express "not implemented yet" for a method nothing
+// wires up (e.g. the legacy v1 session/load), as opposed to CodedError, which
+// carries deliberate codes for methods that ARE wired but reject the request.
 type MethodNotFoundError struct{ Method string }
 
 func (e *MethodNotFoundError) Error() string { return "method not found: " + e.Method }
+
+// CodedError is a handler error carrying its own deliberate JSON-RPC error
+// code (e.g. CodeResourceNotFound / CodeInvalidParams from sessions.go).
+// handleRequest honors RPCCode instead of falling back to the generic -32000.
+type CodedError struct {
+	Code    int
+	Message string
+}
+
+func (e *CodedError) Error() string { return e.Message }
+func (e *CodedError) RPCCode() int  { return e.Code }
 
 func (c *StdioConn) resolvePending(msg wireMessage) {
 	key := string(msg.ID)

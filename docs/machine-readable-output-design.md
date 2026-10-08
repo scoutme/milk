@@ -103,12 +103,12 @@
 > providers (local-agent's result order is call-order only by incidental
 > implementation choice; claude-cli's tool execution order is opaque to milk
 > entirely). `AgentCapabilities.Session` is advertised as the upstream
-> schema's monolithic baseline (there's no finer-grained flag covering only
-> new/prompt/cancel/update) — `session/list|resume|close` calls get the
-> standard JSON-RPC "method not found" error (`acp.MethodNotFoundError`,
-> -32601), the correct way to say "not implemented yet," not a capability
-> lie. Deferred, unchanged from the design's own catalog: `auth/*`,
-> `session/list|resume|delete|close`, `session/set_config_option` dispatch
+> schema's monolithic baseline plus the `session.delete` capability flag —
+> the baseline is now fully implemented (session/new|list|resume|close|
+> prompt|cancel|update, `internal/transport/acp/sessions.go` + `cmd/milk/
+> acp_server.go`; deliberate error codes via `acp.CodedError`: -32002
+> resource-not-found, -32602 invalid-params). Deferred, unchanged from the
+> design's own catalog: `auth/*`, `session/set_config_option` dispatch
 > (`ConfigState` already exists, stays unwired), `elicitation/create` wiring,
 > `plan_update`/workflow mapping, `terminal_update`, the `milk/*`
 > `ExtNotification` channels, `available_commands_update`. One fix to shared

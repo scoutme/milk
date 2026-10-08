@@ -224,3 +224,47 @@ func TestLoad_TimeBasedNeedExpiry_Disabled(t *testing.T) {
 		t.Errorf("expected CurrentNeed preserved when expiry disabled, got %q", loaded.CurrentNeed)
 	}
 }
+
+func TestLookup_ByIDPrefix(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	a, _ := New("/proj/one", "")
+	b, _ := New("/proj/two", "")
+
+	// Exact ID wins outright…
+	got, err := Lookup(a.ID)
+	if err != nil || got.ID != a.ID {
+		t.Fatalf("Lookup(exact) = %v, %v; want %s", got, err, a.ID)
+	}
+	// …and an unambiguous prefix resolves.
+	got, err = Lookup(a.ID[:8])
+	if err != nil || got.ID != a.ID {
+		t.Fatalf("Lookup(prefix) = %v, %v; want %s", got, err, a.ID)
+	}
+
+	// A prefix matching more than one session is an error, never a guess.
+	s1 := &Session{ID: "abcd-1", CWD: "/proj/amb", History: []Turn{}, LastUsed: time.Now(), CreatedAt: time.Now()}
+	s2 := &Session{ID: "abcd-2", CWD: "/proj/amb", History: []Turn{}, LastUsed: time.Now(), CreatedAt: time.Now()}
+	if err := Save(s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(s2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Lookup("abcd"); err == nil {
+		t.Error("Lookup(ambiguous) = nil error, want ambiguity error")
+	}
+	// Exact IDs still resolve even when their prefixes are ambiguous.
+	if got, err := Lookup("abcd-2"); err != nil || got.ID != "abcd-2" {
+		t.Fatalf("Lookup(exact amid ambiguity) = %v, %v; want abcd-2", got, err)
+	}
+
+	if _, err := Lookup("no-such-session"); err == nil {
+		t.Error("Lookup(miss) = nil error, want not-found")
+	}
+	if _, err := Lookup(""); err == nil {
+		t.Error("Lookup(\"\") = nil error, want error")
+	}
+	_ = b
+}

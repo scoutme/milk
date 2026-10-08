@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tasks"
@@ -40,6 +43,9 @@ type acpSession struct {
 	escalationRunner TurnRunner
 
 	msgCounter atomic.Int64
+	// runID is a random per-acpSession suffix that makes live message IDs
+	// collision-free across restarts — see liveID.
+	runID string
 
 	// st carries the slash-command/routing state (sticky and forced routing,
 	// cwd, cfg copy) shared with the TUI's handlers; showThinking gates
@@ -83,6 +89,17 @@ type acpSession struct {
 	// being routed to a model (see runTurn and initwizard_core.go). Only
 	// touched under turnMu, like the rest of prompt handling.
 	pendingInit *initWizardState
+	// pendingTelegram is the /setup telegram wizard (acp_setup.go): while
+	// set, each prompt is consumed as its next answer. Mutually exclusive
+	// with pendingInit — starting either wizard clears the other.
+	pendingTelegram *telegramSetupState
+
+	// closed: session/close (or session/delete) tore this session down —
+	// the turn was cancelled, the state persisted, and no further automatic
+	// work (background follow-ups) may start. Set once via close(); the flag
+	// survives the removal from acpServer.sessions so late job-done signals
+	// still see it. See acp_followup.go.
+	closed atomic.Bool
 
 	// formElicit: the client advertised form-mode elicitation
 	// (clientCapabilities.elicitation.form at initialize), so the setup
@@ -96,6 +113,16 @@ type acpSession struct {
 	// choice prompts and asks steps as typed input directly. Set on the
 	// first such response; read-only after.
 	noChoice bool
+
+	// pendingRemoteInputs queues remote-oversight (Telegram) messages that
+	// arrived while a turn was running — drained at turn end by
+	// flushRemoteInputs (acp_oversight.go). Guarded by mu.
+	pendingRemoteInputs []string
+
+	// lastActive is when this session last started a prompt: routes
+	// remote-oversight input to the session the user is actually using
+	// (acp_oversight.go's handleRemoteInput).
+	lastActive atomic.Int64
 
 	// updateAnnounced: the "update available" notice has been sent to this
 	// session (once per session; see acpServer.announceUpdate). Guarded by
@@ -135,7 +162,8 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 		mem = nil // best-effort, same as main.go's one-shot path
 	}
 
-	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id}
+	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id, runID: newRunID()}
+	as.lastActive.Store(time.Now().UnixNano())
 	as.st = &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, toolFutures: map[string]chan string{}}
 	// Thoughts have always been forwarded over ACP; keep that unless the
 	// config explicitly opts out.
@@ -191,7 +219,7 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 	wireLocal := func(a *local.Agent) *local.Agent {
 		permStore, _ := local.OpenPermStore(cwd) //nolint:errcheck // nil disables persistent grants, same as every other best-effort call site
 		wired := a.
-			WithPermissions(permStore, makeLocalPermAsk(as.host, permStore)).
+			WithPermissions(permStore, as.askPermissionWithOversight).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
 			WithOnToolUse(as.onLocalToolUse).
@@ -251,6 +279,49 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 	return nil
 }
 
+// close tears the session down per the schema's session/close contract:
+// cancel any running turn (the same effect as session/cancel), suppress
+// pending background follow-ups (the closed flag gates them — see
+// acp_followup.go), and persist the session file. The file is kept — close
+// frees resources, session/delete removes data. Idempotent.
+func (as *acpSession) close() {
+	as.closed.Store(true)
+	as.mu.Lock()
+	cancel := as.cancel
+	as.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	// Best-effort persist: the file is saved at every turn end already, so
+	// this only flushes whatever changed since. Nothing useful to do with
+	// the error on a teardown path (same convention as other save sites).
+	_ = session.Save(as.sess) //nolint:errcheck // teardown-path best effort
+}
+
+// newRunID returns the 6-hex-char per-process suffix live message IDs carry.
+func newRunID() string {
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%04x", time.Now().UnixNano()&0xffff) //nolint:gosec // fallback uniqueness only
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// liveID returns a fresh process-unique message ID — `<kind>-<run6>-<n>`. The
+// runID suffix keeps live IDs from colliding across restarts: without it a
+// post-resume live `msg-1` would patch over a pre-restart `msg-1` the client
+// still holds. Replayed history messages use the deterministic `hist-*` IDs
+// instead (acp_history.go).
+func (as *acpSession) liveID(kind string) acp.MessageID {
+	return acp.MessageID(fmt.Sprintf("%s-%s-%d", kind, as.runID, as.msgCounter.Add(1)))
+}
+
+// liveStreamID is liveID without consuming a counter slot: the successive
+// chunks that make up one streamed message share it (same-ID chunks append).
+func (as *acpSession) liveStreamID(kind string) acp.MessageID {
+	return acp.MessageID(fmt.Sprintf("%s-%s-%d", kind, as.runID, as.msgCounter.Load()))
+}
+
 // notify sends a session/update notification for this session.
 func (as *acpSession) notify(u acp.SessionUpdate) {
 	n := (&acp.Mapper{Session: as.id}).Update(u)
@@ -273,7 +344,7 @@ func (as *acpSession) emitToolCall(id, name string, status acp.ToolCallStatus, r
 	})
 }
 
-func (as *acpSession) onLocalToolUse(id, name, _ string, rawInput map[string]any) {
+func (as *acpSession) onLocalToolUse(id, name, summary string, rawInput map[string]any) {
 	as.callsMu.Lock()
 	if as.openCalls == nil {
 		as.openCalls = map[string][]acp.ToolCallID{}
@@ -281,6 +352,9 @@ func (as *acpSession) onLocalToolUse(id, name, _ string, rawInput map[string]any
 	as.openCalls[name] = append(as.openCalls[name], acp.ToolCallID(id))
 	as.callsMu.Unlock()
 	as.emitToolCall(id, name, acp.ToolCallInProgress, rawInput, nil)
+	if as.notifyTools() {
+		as.notifier().NotifyToolUse(context.Background(), name, summary)
+	}
 }
 
 func (as *acpSession) onLocalToolResult(id, name, result string, isError bool) {
@@ -301,6 +375,9 @@ func (as *acpSession) onLocalToolResult(id, name, result string, isError bool) {
 		status = acp.ToolCallFailed
 	}
 	as.emitToolCall(id, name, status, nil, result)
+	if as.notifyTools() {
+		as.notifier().NotifyToolResult(context.Background(), name, result, isError)
+	}
 }
 
 func (as *acpSession) onClaudeToolUse(id, name string) {
@@ -309,6 +386,9 @@ func (as *acpSession) onClaudeToolUse(id, name string) {
 
 func (as *acpSession) onClaudeToolUseReady(id, name string, input map[string]any) {
 	as.emitToolCall(id, name, acp.ToolCallInProgress, input, nil)
+	if as.notifyTools() {
+		as.notifier().NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+	}
 }
 
 func (as *acpSession) onClaudeToolResult(id, name, result string, isError bool) {
@@ -317,6 +397,9 @@ func (as *acpSession) onClaudeToolResult(id, name, result string, isError bool) 
 		status = acp.ToolCallFailed
 	}
 	as.emitToolCall(id, name, status, nil, result)
+	if as.notifyTools() {
+		as.notifier().NotifyToolResult(context.Background(), name, result, isError)
+	}
 }
 
 func (as *acpSession) onThinking(text string) {
@@ -324,7 +407,7 @@ func (as *acpSession) onThinking(text string) {
 	if !as.showThinking.Load() {
 		return
 	}
-	msgID := acp.MessageID(fmt.Sprintf("thought-%d", as.msgCounter.Load()))
+	msgID := as.liveStreamID("thought")
 	as.notify(acp.AgentThoughtChunk(msgID, text))
 }
 
@@ -356,10 +439,12 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 	// automatic background follow-up is running waits for it rather than
 	// cancelling it: the follow-up has already drained the finished jobs'
 	// results, so cancelling would lose them.
+	as.lastActive.Store(time.Now().UnixNano())
 	as.turnMu.Lock()
 	defer func() {
 		as.turnMu.Unlock()
 		as.flushPendingFollowup()
+		as.flushRemoteInputs()
 	}()
 	return as.runTurn(ctx, strings.TrimSpace(text.String()))
 }
@@ -367,9 +452,15 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 // runTurn runs one turn for prompt text, with as.turnMu held by the caller.
 func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptResponse, error) {
 
-	as.notify(acp.RunningState())
+	msgID := as.liveID("msg")
+	// Accept-echo of the user's message under the exact ID this turn's
+	// PromptResponse returns (the schema's messageId identity rule). milk's
+	// synthetic follow-up prompt is never echoed — the client never sent it.
+	if prompt != backgroundFollowupPrompt {
+		as.emitHistoryMessage(histUser, msgID, prompt)
+	}
 
-	msgID := acp.MessageID(fmt.Sprintf("msg-%d", as.msgCounter.Add(1)))
+	as.notify(acp.RunningState())
 
 	turnCtx, cancel := context.WithCancel(ctx)
 	as.mu.Lock()
@@ -404,7 +495,7 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	if as.pendingInit != nil && prompt != backgroundFollowupPrompt {
 		if _, _, found := extractSlashCommand(prompt); found {
 			as.pendingInit = nil
-			if !initWizardRestartPrompt(prompt) {
+			if !wizardSwapPrompt(prompt) {
 				wizardCancelNote = stripANSI(milkTag()) + " setup wizard cancelled — restart with /config init\n\n"
 			}
 		} else if initWizardCancelWord(prompt) {
@@ -439,12 +530,49 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 		}
 	}
 
+	// A pending /setup telegram wizard consumes the prompt the same way —
+	// same escape hatches (any slash command cancels it and runs, a cancel
+	// word aborts, synthetic follow-ups are never wizard input). The two
+	// wizards are mutually exclusive, so this block only runs when the init
+	// wizard above didn't.
+	if as.pendingTelegram != nil && prompt != backgroundFollowupPrompt {
+		if _, _, found := extractSlashCommand(prompt); found {
+			as.pendingTelegram = nil
+			if !wizardSwapPrompt(prompt) {
+				wizardCancelNote = stripANSI(milkTag()) + " telegram setup cancelled — restart with /setup telegram\n\n"
+			}
+		} else if initWizardCancelWord(prompt) {
+			as.pendingTelegram = nil
+			say(stripANSI(milkTag() + " telegram setup cancelled\n"))
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		} else {
+			out, done := as.telegramWizardAnswer(turnCtx, prompt)
+			if done {
+				as.pendingTelegram = nil
+			}
+			if out != "" {
+				say(stripANSI(out))
+			}
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		}
+	}
+
 	if handled, output, dispatch := as.runSlashCommand(turn, prompt); handled {
 		if wizardCancelNote != "" {
 			output = wizardCancelNote + output
 		}
 		if output != "" {
 			say(output)
+			// Mirror the TUI's slash-output notification (handleSlashInput):
+			// command results reach remote oversight too. Wizard state churn
+			// (the cancel note above) is not a command result — not sent.
+			if wizardCancelNote == "" {
+				if cmd, _, ok := extractSlashCommand(prompt); ok {
+					as.notifier().NotifyResponse(turnCtx, "milk", cmd+": "+output)
+				}
+			}
 		}
 		if dispatch == "" {
 			as.notify(acp.IdleState(acp.StopReasonEndTurn))
@@ -465,9 +593,40 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	}
 	decision, target := rt.Decision, rt.Target
 	source, turnStart := turnSource(as.st), time.Now()
+	var runner TurnRunner
+	if r := map[router.Target]TurnRunner{router.TargetLocal: as.primaryRunner, router.TargetEscalation: as.escalationRunner}[target]; r != nil {
+		runner = r
+	}
 	var routeMeta map[string]any
-	if runner := map[router.Target]TurnRunner{router.TargetLocal: as.primaryRunner, router.TargetEscalation: as.escalationRunner}[target]; runner != nil {
+	if runner != nil {
 		routeMeta = as.announceRoute(decision, target, runner.Name())
+	}
+
+	// Remote-oversight turn hooks — the TUI's runTurn notifications mirrored
+	// (repl.go): start before dispatch, response segments as they complete,
+	// done + the final response at the end.
+	notify := as.notifier()
+	targetName := "local"
+	agentName := as.cfg.ActiveAgent().Name
+	if target == router.TargetEscalation {
+		targetName = "escalation"
+		agentName = as.cfg.EscalationAgentConfig().Name
+	}
+	notify.NotifyTurnStart(turnCtx, agentName, targetName, prompt)
+
+	// onResponse keeps feeding the client via say and captures the final
+	// text; onSegment notifies remote oversight per completed segment (the
+	// TUI's exact split — when no segment fires, the end-of-turn response
+	// below covers runners that only report the final text).
+	var lastResponseText string
+	onResponse = func(text string) {
+		lastResponseText = text
+		say(text)
+	}
+	var segmentsFired bool
+	onSegment := func(text string) {
+		segmentsFired = true
+		notify.NotifyResponse(turnCtx, agentName, text)
 	}
 
 	onWorkflowStart := func(ws *local.WorkflowStartSignal) { as.startWorkflowFromTool(turn, ws) }
@@ -475,15 +634,21 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
-		turnErr = runPrimary(turnCtx, as.cfg, as.sess, as.primaryRunner, as.escalationRunner, as.mem, prompt, io.Discard, as.da, onResponse, nil, onWorkflowStart)
+		turnErr = runPrimary(turnCtx, as.cfg, as.sess, as.primaryRunner, as.escalationRunner, as.mem, prompt, io.Discard, as.da, onResponse, onSegment, onWorkflowStart)
 	case router.TargetEscalation:
-		turnErr = runEscalation(turnCtx, as.cfg, as.sess, as.escalationRunner, "", as.mem, prompt, io.Discard, as.da, onResponse, nil, onWorkflowStart)
+		turnErr = runEscalation(turnCtx, as.cfg, as.sess, as.escalationRunner, "", as.mem, prompt, io.Discard, as.da, onResponse, onSegment, onWorkflowStart)
 	default:
 		turnErr = fmt.Errorf("unknown routing target: %s", target)
 	}
 
 	recordTurn(turnCtx, target, source, turnStart, turnErr)
+	// Remote-oversight turn end — the TUI's ordering: done first (errors
+	// included), then the final response when no segment already carried it.
+	notify.NotifyTurnDone(turnCtx, agentName, turnErr)
 	if turnErr == nil {
+		if !segmentsFired && lastResponseText != "" {
+			notify.NotifyResponse(turnCtx, agentName, lastResponseText)
+		}
 		noteTurnSucceeded(as.st, target)
 	}
 
@@ -530,22 +695,32 @@ func (as *acpSession) pendingCallID(tool string) acp.ToolCallID {
 // permission request itself could not be answered. Without this the agent
 // only reports "denied by user", which hides that nobody was ever asked.
 func (as *acpSession) permissionFailed(tool string, err error) {
-	as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("perm-%d", as.msgCounter.Add(1))),
+	as.notify(acp.AgentMessageChunk(as.liveID("perm"),
 		fmt.Sprintf("Could not ask for permission to run %s (%v), so it was denied. "+
 			"The client must answer session/request_permission; /skip-permissions on approves tools without asking.", tool, err)))
 }
 
-// backgroundPermissionAsk asks the client whether a background job may use a
-// tool, attributed to the job's own tool-call row. The wait is bounded by the
-// job timeout, so an unanswered question denies the tool instead of holding
-// the job's concurrency slot forever.
+// backgroundPermissionAsk asks whether a background job may use a tool,
+// attributed to the job's own tool-call row, raced against remote oversight
+// when one is configured (first answer wins — the interactive race's shape,
+// bounded here by the job timeout so an unanswered question denies the tool
+// instead of holding the job's concurrency slot forever).
 func (as *acpSession) backgroundPermissionAsk(jobID, tool, summary string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), as.cfg.EffectiveBackgroundAgentTimeout())
 	defer cancel()
-	out, err := as.host.RequestPermission(ctx, events.PermissionRequest{
-		Tool:       tool,
-		Summary:    strings.TrimSpace(summary + " — requested by background agent " + jobID),
-		ToolCallID: string(acp.JobToolCallID(jobID)),
-	})
-	return err == nil && out.Allow
+	sum := strings.TrimSpace(summary + " — requested by background agent " + jobID)
+	askClient := func(c context.Context) bool {
+		out, err := as.host.RequestPermission(c, events.PermissionRequest{
+			Tool:       tool,
+			Summary:    sum,
+			ToolCallID: string(acp.JobToolCallID(jobID)),
+		})
+		return err == nil && out.Allow
+	}
+	n := as.notifier()
+	if !oversightRemote(n) {
+		return askClient(ctx)
+	}
+	return racePermAsk(ctx, n, askClient,
+		oversight.PermRequest{ToolName: tool, Input: sum})
 }

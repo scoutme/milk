@@ -16,6 +16,7 @@ func TestStripCompletionPlaceholders(t *testing.T) {
 		{"/agent add name=… url=… model=… [provider=…]", "/agent add name=… url=… model=…"},
 		{"/primary", "/primary"},
 		{"/export <path>", "/export"},
+		{"/export session <id|prefix>", "/export session"},
 		// No placeholders — unchanged.
 		{"/memory global", "/memory global"},
 		// Nested not supported but shouldn't crash — no slash cmd, left untouched.
