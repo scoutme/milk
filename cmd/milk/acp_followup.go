@@ -76,7 +76,7 @@ func (as *acpSession) flushPendingFollowup() {
 // runFollowup runs the follow-up turn; the caller holds turnMu.
 func (as *acpSession) runFollowup() {
 	defer func() {
-		as.turnMu.Unlock()
+		as.releaseTurn()
 		as.flushPendingFollowup()
 		as.flushRemoteInputs()
 	}()

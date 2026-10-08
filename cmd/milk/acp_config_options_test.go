@@ -153,3 +153,59 @@ func TestACPConfigOptions_Rejections(t *testing.T) {
 		t.Error("unknown session must error")
 	}
 }
+
+// While a turn is running its router owns the routing pins: a routing change
+// arriving then is queued (and already reported as the option's value), and
+// applied when the turn releases turnMu.
+func TestACPConfigOptions_RoutingChangeDuringTurnIsQueued(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	id := acpNewSession(t, server)
+	as := server.session(id)
+
+	as.turnMu.Lock() // a turn is running
+	resp, err := acpSetOption(t, server, id, acp.SetSessionConfigOptionRequest{ConfigID: acp.ConfigIDRouting, Type: "id", Value: acp.RoutingEscalation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if as.st.stickyEscalate {
+		t.Fatal("pins changed under a running turn")
+	}
+	if got := acpOptionValue(resp.ConfigOptions, acp.ConfigIDRouting); got != acp.RoutingEscalation {
+		t.Errorf("response routing = %v, want the requested value", got)
+	}
+	if got := as.routingValue(); got != acp.RoutingEscalation {
+		t.Errorf("routingValue while queued = %v, want the pending value (a slash command's re-sync must not revert it)", got)
+	}
+
+	as.releaseTurn()
+	if !as.st.stickyEscalate {
+		t.Error("queued routing change not applied at turn end")
+	}
+	if !as.turnMu.TryLock() {
+		t.Fatal("releaseTurn must release turnMu")
+	}
+	as.turnMu.Unlock()
+}
+
+// Hammer the queue against concurrent turn boundaries under -race.
+func TestACPConfigOptions_RoutingRaceWithTurns(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	id := acpNewSession(t, server)
+	as := server.session(id)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			as.turnMu.Lock()
+			as.st.forceEscalate = false // what routeTurn does to the pins mid-turn
+			as.releaseTurn()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		v := []string{acp.RoutingEscalation, acp.RoutingPrimary, acp.RoutingAuto}[i%3]
+		if err := as.setRouting(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
+}

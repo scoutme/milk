@@ -44,6 +44,12 @@ func (as *acpSession) newACPConfigState() *acp.ConfigState {
 // auto-sticky escalation is the router's own choice, not a pin, so it still
 // reads as "auto".
 func (as *acpSession) routingValue() string {
+	as.mu.Lock()
+	pending := as.pendingRouting
+	as.mu.Unlock()
+	if pending != "" {
+		return pending
+	}
 	as.loopMu.Lock()
 	defer as.loopMu.Unlock()
 	switch {
@@ -57,7 +63,28 @@ func (as *acpSession) routingValue() string {
 
 // setRouting applies a routing value through the /escalate and /primary
 // executors themselves (pins, ESCALATION_WAITING reset, repetition baseline).
+// While a turn is running the pins belong to its router, so the change is
+// queued and applied by releaseTurn when the turn ends instead.
 func (as *acpSession) setRouting(value string) error {
+	switch value {
+	case acp.RoutingEscalation, acp.RoutingPrimary, acp.RoutingAuto:
+	default:
+		return fmt.Errorf("unknown routing value %q", value)
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.turnMu.TryLock() {
+		defer as.turnMu.Unlock()
+		as.pendingRouting = ""
+		as.applyRouting(value)
+		return nil
+	}
+	as.pendingRouting = value
+	return nil
+}
+
+// applyRouting changes the pins; the caller holds turnMu (no turn is routing).
+func (as *acpSession) applyRouting(value string) {
 	as.loopMu.Lock()
 	defer as.loopMu.Unlock()
 	switch value {
@@ -67,10 +94,20 @@ func (as *acpSession) setRouting(value string) error {
 		handleSlashCommand(cmdPrimary, "", as.st)
 	case acp.RoutingAuto:
 		clearRoutingPins(as.st)
-	default:
-		return fmt.Errorf("unknown routing value %q", value)
 	}
-	return nil
+}
+
+// releaseTurn ends a turn: it applies a routing change queued during the turn
+// and releases turnMu in one as.mu critical section, so a concurrent
+// setRouting either lands in the queue before this runs or sees turnMu free.
+func (as *acpSession) releaseTurn() {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if v := as.pendingRouting; v != "" {
+		as.pendingRouting = ""
+		as.applyRouting(v)
+	}
+	as.turnMu.Unlock()
 }
 
 // pushConfigOptions re-reads the state behind each option after a slash

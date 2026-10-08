@@ -143,9 +143,13 @@ type acpSession struct {
 	plans     map[acp.PlanID][]acp.PlanEntry
 	planOrder []acp.PlanID
 
-	mu      sync.Mutex
-	cancel  context.CancelFunc // set only while a turn is running
-	turnCtx context.Context    // the running turn's context (cancelled with cancel)
+	mu sync.Mutex
+	// pendingRouting is a routing option change that arrived while a turn was
+	// running; releaseTurn applies it once the turn ends (the pins belong to
+	// the running turn until then).
+	pendingRouting string
+	cancel         context.CancelFunc // set only while a turn is running
+	turnCtx        context.Context    // the running turn's context (cancelled with cancel)
 }
 
 // newACPSession builds one session's runners and wires tool-call/thinking
@@ -446,7 +450,7 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 	as.lastActive.Store(time.Now().UnixNano())
 	as.turnMu.Lock()
 	defer func() {
-		as.turnMu.Unlock()
+		as.releaseTurn()
 		as.flushPendingFollowup()
 		as.flushRemoteInputs()
 	}()

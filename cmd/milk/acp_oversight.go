@@ -220,7 +220,7 @@ func (as *acpSession) requestRemoteInput(text string) {
 // another channel.
 func (as *acpSession) runRemoteTurn(text string) {
 	defer func() {
-		as.turnMu.Unlock()
+		as.releaseTurn()
 		as.flushPendingFollowup()
 		as.flushRemoteInputs()
 	}()
