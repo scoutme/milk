@@ -158,6 +158,8 @@ milk                          # interactive REPL mode
 milk [flags] <prompt>         # single-prompt mode
 milk [flags] <prompt> --output-format json|stream-json  # machine-readable single-prompt mode
 milk serve --acp              # long-lived ACP v2 agent server (editor embedding)
+milk update check             # check GitHub for a newer milk release
+milk update install           # download and install it (replaces the milk binary)
 ```
 
 `--output-format` and `milk serve --acp` are machine-readable output
@@ -168,7 +170,7 @@ and, for ACP integration specifically, [docs/acp-integration.md](acp-integration
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/primary`, `/new`, `/clear`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/open`, `/update`, `/notifications`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/new`, `/clear`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/init`, `/open`, `/update`, `/notifications`, `/help`, `/exit`
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
@@ -221,16 +223,27 @@ Persisted to config immediately, effective on next render.
 | Subcommand | Action |
 |---|---|
 | `/config` | Print current config JSON in the transcript |
-| `/config init` | Run the interactive setup wizard |
+| `/config show` | The same, annotated per field `[global]`/`[local]`/`[default]` (merging a local `.milk/config.json` when present) |
+| `/config init` | Run the interactive setup wizard (alias: `/init`) |
 | `/config open` | Open `~/.milk/config.json` in the configured editor |
 
-Same commands on the CLI as `milk config`, `milk config init`, `milk config open`. Editor selection uses `config_editors` (see below).
+Same commands on the CLI as `milk config`, `milk config init`, `milk config show`, `milk config open`. Editor selection uses `config_editors` (see below).
 
 **`milk otel`** manages observability settings — see [docs/operations.md — Observability](operations.md#observability).
 
 **/open** opens any file in the configured editor: `/open <path>` (or `/open @<path>`, `@` stripped automatically). The agent can also open files via the `open_file` tool.
 
-**/update** checks GitHub for newer milk releases, compares versions, and (with confirmation) downloads and installs the appropriate binary for the current platform.
+**/update** manages self-updates: it checks GitHub for newer milk releases, compares versions, and downloads and installs the appropriate binary for the current platform.
+
+| Subcommand | Action |
+|---|---|
+| `/update` / `/update check` | Check GitHub now (15s timeout); explicit checks bypass the 24h throttle. In the TUI, a release already found is reported without a new request |
+| `/update install` | Download and apply the newest release (status-bar progress in the TUI). The binary is replaced in place; the running milk process must be restarted to use it. On Windows the running binary cannot be replaced, so milk reports the saved download path instead of claiming success |
+| `/update skip` | Suppress the pending release: its tag is written to `update_skipped_version` and filtered from every later check (including the startup check) until a newer release appears |
+
+Startup/background release checks are throttled by `update_last_check` (at most once per 24h, shared between the TUI and ACP) and gated by `update_check`/`update_channel` (see Configuration). When a newer release is found at startup, the TUI shows a status-bar badge (`⬆ <tag> available — /update install`); `milk serve --acp` sends an equivalent one-shot notice per session (see [docs/acp-integration.md](acp-integration.md)).
+
+The CLI equivalent is `milk update check` and `milk update install` (non-interactive; `install` ignores `/update skip` and always takes the latest release).
 
 **Multi-line input**: Shift+Enter/Alt+Enter inserts a newline; Enter submits. Bracketed paste is handled transparently.
 
@@ -269,7 +282,9 @@ Same commands on the CLI as `milk config`, `milk config init`, `milk config open
   "show_reasoning": true,
   "sticky_escalation": true,
   "experimental_lazy_history_management": false,
-  "aws_auth_refresh": false
+  "aws_auth_refresh": false,
+  "update_check": true,
+  "update_channel": "pre"
 }
 ```
 
@@ -298,6 +313,14 @@ Per-job hard timeout for a `spawn_background_agent` job (ADR-0043), in minutes, 
 ```json
 "config_editors": ["code --wait", "$EDITOR", "nano"]
 ```
+
+### `update_check` field
+
+Whether milk checks GitHub for new releases at startup (TUI and `milk serve --acp`). Checks are additionally throttled to one per 24h via `update_last_check`, and a release suppressed with `/update skip` is remembered in `update_skipped_version`. Default: `true`.
+
+### `update_channel` field
+
+Which releases count as updates: `"pre"` (default) includes pre-releases, `"stable"` only final releases.
 
 ### `experimental_lazy_history_management` field
 
@@ -333,13 +356,4 @@ milk's own, not ports:
 
 The full comparison (findings, what was and wasn't adopted, and why) lives in a design analysis
 kept out of this published site — see the `prompt-context-management-review.md` doc in the
-repository root's `docs/` directory on [GitHub](https://github.com/scoutme/milk).
-
-repository root's `docs/` directory on [GitHub](https://github.com/scoutme/milk).
-Code](https://github.com/anomalyco/opencode)** — compared for `AGENTS.md` project-instruction loading, sub-agent context isolation (`ForkContext`), and prompt-caching strategy.
-
-The full comparison (findings, what was and wasn't adopted, and why) lives in a design analysis
-kept out of this published site — see the `prompt-context-management-review.md` doc in the
-repository root's `docs/` directory on [GitHub](https://github.com/scoutme/milk).
-
 repository root's `docs/` directory on [GitHub](https://github.com/scoutme/milk).
