@@ -21,7 +21,7 @@ func TestSessionInfoUpdateMeta(t *testing.T) {
 		StickyEscalation: true,
 		RouteHistory:     []RouteHistoryEntry{{Turn: 0, Target: "primary"}, {Turn: 2, Target: "escalation"}},
 	}
-	upd := SessionInfo("wire contract sprint", time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), meta)
+	upd := NewSessionInfoUpdate("wire contract sprint", time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), meta)
 	if upd.SessionUpdate != "session_info_update" {
 		t.Fatalf("sessionUpdate = %q", upd.SessionUpdate)
 	}

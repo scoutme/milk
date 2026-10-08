@@ -37,10 +37,17 @@ type AgentCapabilities struct {
 	Meta map[string]any `json:"_meta,omitempty"`
 }
 
-// SessionCapabilities is intentionally empty: milk advertises only the
-// baseline (see package doc), no additional prompt/mcp capabilities this
-// round.
-type SessionCapabilities struct{}
+// SessionCapabilities carries the schema's optional capability flags. Zero
+// value = the monolithic baseline per the upstream schema itself ("supplying
+// {} means the agent supports... session/new, session/list, session/resume,
+// session/close, session/prompt, session/cancel, and session/update") — there
+// is no finer-grained capability flag to advertise only a subset of that
+// baseline. Delete is the one add-on flag: set to &SessionDeleteCapabilities{}
+// to advertise session/delete ("only available if the Agent supports the
+// session.delete capability").
+type SessionCapabilities struct {
+	Delete *SessionDeleteCapabilities `json:"delete,omitempty"`
+}
 
 // ClientCapabilities is what InitializeRequest.Capabilities carries. milk
 // now acts on elicitation (the /config init wizard's form dialogs — see

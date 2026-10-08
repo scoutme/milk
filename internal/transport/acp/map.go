@@ -169,8 +169,10 @@ type SessionInfoUpdate struct {
 
 func (SessionInfoUpdate) isSessionUpdate() {}
 
-// SessionInfo builds the session_info_update with milk's _meta snapshot.
-func SessionInfo(title string, updatedAt time.Time, meta SessionInfoMeta) SessionInfoUpdate {
+// NewSessionInfoUpdate builds the session_info_update with milk's _meta
+// snapshot. (Named after its variant, not the schema's unrelated SessionInfo
+// list-entry type in sessions.go.)
+func NewSessionInfoUpdate(title string, updatedAt time.Time, meta SessionInfoMeta) SessionInfoUpdate {
 	upd := SessionInfoUpdate{SessionUpdate: "session_info_update", Title: title}
 	if !updatedAt.IsZero() {
 		upd.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
@@ -182,7 +184,7 @@ func SessionInfo(title string, updatedAt time.Time, meta SessionInfoMeta) Sessio
 // SessionInfoNotification maps a session-info change (with the route/state
 // snapshot) onto its session/update notification.
 func (m Mapper) SessionInfoNotification(title string, updatedAt time.Time, meta SessionInfoMeta) Notification {
-	return m.Update(SessionInfo(title, updatedAt, meta))
+	return m.Update(NewSessionInfoUpdate(title, updatedAt, meta))
 }
 
 // --- background-agent tool trees + tool_call_content_chunk -----------------
