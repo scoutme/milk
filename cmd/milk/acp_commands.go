@@ -64,6 +64,7 @@ func acpCommandTable() []acpCommand {
 		{cmdThink, "show or hide model reasoning in this session", "[on|off]", acpThink, nil},
 		{cmdConfig, "print the config, run the setup wizard, or open the config file", "[show|init|open]", acpConfig, nil},
 		{cmdInit, "run the setup wizard (alias for /config init)", "", acpInit, nil},
+		{name: cmdSetup, desc: "configure Telegram remote oversight (status, enable, disable, or the setup wizard)", hint: "telegram [on|off|status]", run: acpSetup},
 		{cmdAgent, "list configured agents", "[list]", acpAgent, nil},
 		{name: cmdUpdate, desc: "check for milk updates, install one, or skip a release", hint: "check|status|install|skip", runTurn: acpUpdate},
 		{"/help", "list the commands available in this session", "", acpHelp, nil},
@@ -157,6 +158,10 @@ func acpInit(as *acpSession, _ string) (string, string) {
 // in later turns for whatever remains (as.pendingInit) — every question
 // carrying what 'default' means for it, so no empty turn is ever needed.
 func acpStartInitWizard(as *acpSession) string {
+	// One wizard at a time: runTurn has already cancelled a pending
+	// telegram wizard for this slash command; keep the invariant even if a
+	// future call path skips that block.
+	as.pendingTelegram = nil
 	st, banner := initWizardStart()
 	text, done := as.runInitDialogs(as.currentCtx(), st)
 	if !done {
@@ -192,15 +197,24 @@ func acpConfigOpen() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// initWizardRestartPrompt reports whether prompt is the command that (re)starts
-// the setup wizard — used to skip the "cancelled" note when a restart lands
-// mid-wizard (see runTurn).
-func initWizardRestartPrompt(prompt string) bool {
+// wizardSwapPrompt reports whether prompt launches a wizard — /init,
+// /config init, or /setup telegram — whichever one. runTurn uses it to keep
+// the "cancelled — restart with …" note out of the new wizard's banner (a
+// slash command cancels whichever wizard is pending before it runs).
+func wizardSwapPrompt(prompt string) bool {
 	cmd, rest, ok := extractSlashCommand(prompt)
 	if !ok {
 		return false
 	}
-	return cmd == cmdInit || (cmd == cmdConfig && strings.EqualFold(strings.TrimSpace(rest), "init"))
+	switch cmd {
+	case cmdInit:
+		return true
+	case cmdConfig:
+		return strings.EqualFold(strings.TrimSpace(rest), "init")
+	case cmdSetup:
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(rest)), "telegram")
+	}
+	return false
 }
 
 // runSlashCommand executes prompt as a slash command if it is one. handled is

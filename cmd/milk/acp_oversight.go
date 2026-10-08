@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/transport/acp"
@@ -88,6 +89,40 @@ func (s *acpServer) notifierOrNil() oversight.Notifier {
 		return oversight.Noop{}
 	}
 	return s.notifier
+}
+
+// applyOversight publishes a config whose remote_oversight section changed
+// (/setup telegram on|off, the wizard's commit): keep the server's startup
+// copy in step, refresh every live session's copy (the notify_tools gate
+// and status replies read as.st.cfg), and rebuild the process notifier.
+// The per-session copies are plain struct writes — the same unsynchronized
+// swap buildRunners already does when /config init commits a new config.
+func (s *acpServer) applyOversight(cfg config.Config) {
+	s.mu.Lock()
+	s.cfg = cfg
+	sessions := make([]*acpSession, 0, len(s.sessions))
+	for _, as := range s.sessions {
+		sessions = append(sessions, as)
+	}
+	s.mu.Unlock()
+	for _, as := range sessions {
+		as.cfg = cfg
+		as.st.cfg = cfg
+	}
+	s.resetNotifier()
+}
+
+// applyOversight is the session-level entry point for the server method
+// above (acpSetup's on|off and the wizard's commit); a session built
+// without a server — bare unit-test setups — just takes the config in
+// place.
+func (as *acpSession) applyOversight(cfg config.Config) {
+	if as.srv != nil {
+		as.srv.applyOversight(cfg)
+		return
+	}
+	as.cfg = cfg
+	as.st.cfg = cfg
 }
 
 // notifier returns the owning server's notifier for this session (Noop when

@@ -82,6 +82,7 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/config init`, `/init` | run the interactive setup wizard (see below) |
 | `/agent [list]` | list configured agents (switching is TUI-only) |
 | `/update check\|status\|install\|skip` | check for milk updates, install one, or skip a release (honored by every later check). `install` replaces the binary under the running process, so the reply says to restart the milk agent — and on Windows, where the running binary cannot be replaced, it reports the saved download path instead of claiming success |
+| `/setup telegram [on\|off\|status]` | configure Telegram remote oversight (see "Remote oversight (Telegram)"). The bare form runs the interactive wizard: the bot token is typed in chat and consumed by the wizard (never sent to the model; `cancel` aborts), then a clickable confirm — or typed `done` as the floor. `on`/`off` flip the backend without touching stored credentials, `status` reports the current state |
 | `/tasks`, `/task done <id>` | list / complete tasks (session and global) |
 | `/bg [list\|show <id>\|start <task>\|stop <id>]` | list, inspect, start or stop background agents |
 | `/workflow <name> <task> [--<role> <agent>]` | run a workflow (see "Workflows, tasks and background agents") |

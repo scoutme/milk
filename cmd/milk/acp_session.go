@@ -89,6 +89,10 @@ type acpSession struct {
 	// being routed to a model (see runTurn and initwizard_core.go). Only
 	// touched under turnMu, like the rest of prompt handling.
 	pendingInit *initWizardState
+	// pendingTelegram is the /setup telegram wizard (acp_setup.go): while
+	// set, each prompt is consumed as its next answer. Mutually exclusive
+	// with pendingInit — starting either wizard clears the other.
+	pendingTelegram *telegramSetupState
 
 	// closed: session/close (or session/delete) tore this session down —
 	// the turn was cancelled, the state persisted, and no further automatic
@@ -491,7 +495,7 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 	if as.pendingInit != nil && prompt != backgroundFollowupPrompt {
 		if _, _, found := extractSlashCommand(prompt); found {
 			as.pendingInit = nil
-			if !initWizardRestartPrompt(prompt) {
+			if !wizardSwapPrompt(prompt) {
 				wizardCancelNote = stripANSI(milkTag()) + " setup wizard cancelled — restart with /config init\n\n"
 			}
 		} else if initWizardCancelWord(prompt) {
@@ -517,6 +521,35 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptRes
 				if done {
 					as.pendingInit = nil
 				}
+			}
+			if out != "" {
+				say(stripANSI(out))
+			}
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		}
+	}
+
+	// A pending /setup telegram wizard consumes the prompt the same way —
+	// same escape hatches (any slash command cancels it and runs, a cancel
+	// word aborts, synthetic follow-ups are never wizard input). The two
+	// wizards are mutually exclusive, so this block only runs when the init
+	// wizard above didn't.
+	if as.pendingTelegram != nil && prompt != backgroundFollowupPrompt {
+		if _, _, found := extractSlashCommand(prompt); found {
+			as.pendingTelegram = nil
+			if !wizardSwapPrompt(prompt) {
+				wizardCancelNote = stripANSI(milkTag()) + " telegram setup cancelled — restart with /setup telegram\n\n"
+			}
+		} else if initWizardCancelWord(prompt) {
+			as.pendingTelegram = nil
+			say(stripANSI(milkTag() + " telegram setup cancelled\n"))
+			as.notify(acp.IdleState(acp.StopReasonEndTurn))
+			return acp.PromptResponse{MessageID: msgID}, nil
+		} else {
+			out, done := as.telegramWizardAnswer(turnCtx, prompt)
+			if done {
+				as.pendingTelegram = nil
 			}
 			if out != "" {
 				say(stripANSI(out))

@@ -38,6 +38,7 @@ cmd/milk/acp_workflow.go      # ACP: runs workflows inside session/prompt (host 
 cmd/milk/acp_initwizard.go    # ACP: /config init input surfaces — elicitation forms (choices + pre-populated defaults), clickable choice prompts (session/request_permission options), typed chat floor with per-question 'default' hints
 cmd/milk/acp_followup.go      # ACP: automatic follow-up turn when background jobs finish
 cmd/milk/acp_oversight.go     # ACP: remote oversight (Telegram) — process notifier lifecycle, permission race vs the client, remote-input routing
+cmd/milk/acp_setup.go         # ACP: /setup telegram — status/enable/disable plus the interactive wizard (token as typed chat, confirm over elicitation/choice/typed floors; core is telegram_setup_core.go)
 cmd/milk/acp_signals.go       # ACP: route announcements and loop/consumption warnings
 cmd/milk/acp_update.go        # ACP: /update check|status|install|skip + the one-shot update-available notice (core is update_core.go)
 cmd/milk/acp_history.go       # ACP: standard chat-history replay (message upserts/chunks, deterministic hist-* IDs, bounded head+tail window)
