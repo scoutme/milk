@@ -126,6 +126,7 @@ const interactiveHelp = `
   /export                print session transcript (text)
   /export json           print session transcript as JSON
   /export <path>         write session transcript to file
+  /export session <id>   export another session (id or unambiguous prefix)
 
 ── Agents ───────────────────────────────────────────────────────────────
   /agent                 show active primary and escalation agents
@@ -723,10 +724,27 @@ func execOtel(sub string, st *interactiveState) string {
 	}
 }
 
-// execExport dumps the current session as text or JSON, optionally to a file.
-// sub may be "json", a file path, or empty (text to stdout).
+// execExport dumps a session as text or JSON, optionally to a file. Grammar
+// (docs/acp-session-resume-plan.md D6):
+// `/export [session <id|prefix>] [json|<path>]` — with a `session` target it
+// exports *that* session without attaching it (the /list → /export session
+// a1b2 → session/resume preview flow); without one it exports the current
+// session (on a resumed session that includes pre-resume turns).
 func execExport(sub string, st *interactiveState) string {
 	sub = strings.TrimSpace(sub)
+	sess := st.sess
+	if sub == "session" || strings.HasPrefix(sub, "session ") {
+		id, after, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(sub, "session")), " ")
+		if id == "" {
+			return milkTag() + " usage: /export [session <id|prefix>] [json|<path>]"
+		}
+		target, err := session.Lookup(id) // exact ID or unambiguous prefix
+		if err != nil {
+			return fmt.Sprintf("%s export error: %v", milkTag(), err)
+		}
+		sess = target
+		sub = strings.TrimSpace(after)
+	}
 	format := "text"
 	outputPath := ""
 	if sub == "json" {
@@ -738,16 +756,16 @@ func execExport(sub string, st *interactiveState) string {
 	var content string
 	switch format {
 	case "json":
-		data, err := session.ExportJSON(st.sess)
+		data, err := session.ExportJSON(sess)
 		if err != nil {
 			return fmt.Sprintf("%s export error: %v", milkTag(), err)
 		}
 		content = string(data)
 	default:
 		if outputPath != "" {
-			content = session.ExportText(st.sess) // plain — no ANSI in files
+			content = session.ExportText(sess) // plain — no ANSI in files
 		} else {
-			content = session.ExportTextColorized(st.sess) // colorized for terminal
+			content = session.ExportTextColorized(sess) // colorized for terminal
 		}
 	}
 

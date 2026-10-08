@@ -55,7 +55,7 @@ func acpCommandTable() []acpCommand {
 		{cmdMemory, "list stored percepts (session and global)", "[global|session|<pattern>]", viaTUI(cmdMemory), nil},
 		{cmdUsage, "show token usage by model and role", "", viaTUI(cmdUsage), nil},
 		{cmdMetrics, "show recent metric values", "", viaTUI(cmdMetrics), nil},
-		{cmdExport, "print the session transcript, or write it to a file", "[json|<path>]", viaTUI(cmdExport), nil},
+		{cmdExport, "print the session transcript (or another session's), or write it to a file", "[json|<path>|session <id>]", viaTUI(cmdExport), nil},
 		{"/list", "list sessions for the current directory", "", viaTUI("/list"), nil},
 		{cmdTasks, "list the session's and global tasks", "", acpTasks, nil},
 		{cmdTask, "mark a task done", "done <id>", acpTask, nil},

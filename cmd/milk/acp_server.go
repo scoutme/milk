@@ -160,6 +160,25 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("session/new: cwd is required")
 	}
 
+	// Resume-by-default adoption (docs/acp-session-resume-plan.md D2): when
+	// the request is clearly the continuation case, session/new continues
+	// the cwd's most recent conversation instead of starting empty — the
+	// TUI's --continue default mapped onto the entry point clients actually
+	// call. See adoptCandidate for the full five-condition rule.
+	if sess := s.adoptCandidate(req); sess != nil {
+		as, err := s.registerACPSession(sess)
+		if err != nil {
+			return nil, fmt.Errorf("session/new: %w", err)
+		}
+		// Adoption never hides state: mandatory bounded replay (the client's
+		// panel is empty) plus a one-line notice pointing at /export.
+		as.replayHistory()
+		as.notify(acp.AgentMessageChunk(as.liveID("resume"), fmt.Sprintf(
+			"resumed session %.8s — %d earlier turns; /export prints the full transcript",
+			sess.ID, len(sess.History))))
+		return acp.NewSessionResponse{SessionID: as.id}, nil
+	}
+
 	sess, err := session.New(req.CWD, "")
 	if err != nil {
 		return nil, fmt.Errorf("session/new: %w", err)
@@ -169,6 +188,57 @@ func (s *acpServer) handleSessionNew(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("session/new: %w", err)
 	}
 	return acp.NewSessionResponse{SessionID: as.id}, nil
+}
+
+// adoptCandidate returns the stored session session/new should adopt, or nil
+// to start fresh. Full adoption rule (docs/acp-session-resume-plan.md D2):
+// adopt the most-recent stored session for req.cwd iff
+//  1. config acp_resume is on (default on),
+//  2. the request's _meta.milk.fresh is not true,
+//  3. this process has no live session whose cwd is req.cwd,
+//  4. the candidate was not closed earlier in this process, and
+//  5. the store holds at least one session for req.cwd.
+//
+// Anything else behaves exactly as session/new always did — conditions 3+4
+// preserve "new thread" inside a running client and stop an explicitly closed
+// thread from resurrecting; only the first open of a workspace adopts.
+func (s *acpServer) adoptCandidate(req acp.NewSessionRequest) *session.Session {
+	if !s.currentConfig().ACPResumeEnabled() { // 1
+		return nil
+	}
+	if milkMeta, _ := req.Meta["milk"].(map[string]any); milkMeta["fresh"] == true { // 2
+		return nil
+	}
+	s.mu.Lock()
+	for _, as := range s.sessions {
+		if as.sess.CWD == req.CWD { // 3
+			s.mu.Unlock()
+			return nil
+		}
+	}
+	s.mu.Unlock()
+
+	byCWD, err := session.List(req.CWD) // 5
+	if err != nil {
+		return nil // store trouble: fresh beats failing session/new
+	}
+	entries := byCWD[req.CWD]
+	if len(entries) == 0 {
+		return nil
+	}
+	cand := entries[0] // sorted LastUsed desc — the most recent
+
+	s.mu.Lock()
+	closed := s.closedIDs[acp.SessionID(cand.ID)] // 4
+	s.mu.Unlock()
+	if closed {
+		return nil
+	}
+	sess, err := session.Load(cand.ID)
+	if err != nil {
+		return nil
+	}
+	return sess
 }
 
 // currentConfig returns the freshest usable config: re-read from disk — a
