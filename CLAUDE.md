@@ -263,10 +263,3 @@ Note: consecutive reasoning chunk repetition was removed from TUI signals — no
 ```
 
 Default: detection ON, auto-interrupt OFF (warn only). Set `auto_interrupt: true` for unattended sessions.
-n_velocity_threshold": 300000,
-    "auto_interrupt": false
-  }
-}
-```
-
-Default: detection ON, auto-interrupt OFF (warn only). Set `auto_interrupt: true` for unattended sessions.
