@@ -274,9 +274,9 @@ When an agent calls `edit_file`/`write_file` (primary) or `Edit`/`Write` (Claude
 
 | Shortcut | Action |
 |---|---|
-| **Enter** | Submit prompt / accept tab completion |
+| **Enter** | Submit prompt / accept tab completion (accepting a completion or hint works while an agent turn is running too — only plain Enter-as-submission is trapped mid-turn) |
 | **Ctrl+Enter** | Spawn a background agent from the current input (while an agent turn is in progress). **Ctrl+J** works as a universal fallback in terminals without extended key protocols. |
-| **Tab** | Cycle slash-command and @-path completions |
+| **Tab** | Cycle slash-command and @-path completions (also available while a turn is in progress) |
 | **Shift-Tab** | Reverse cycle completions |
 | **Ctrl-C** | Copy selection → clear input → cancel workflow/turn → quit (double press) |
 | **Ctrl-D** | Quit (when input is empty) |
