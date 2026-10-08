@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -23,17 +24,19 @@ const (
 	nsTool     = "tool"
 	nsPanel    = "panel"
 	nsWorkflow = "workflow"
+	nsSession  = "session"
 )
 
 // nsByPlaceholder maps the text inside <...> to a name space.
 var nsByPlaceholder = map[string]string{
-	"agent":       nsAgent,
-	"server":      nsMCP,
-	"server-name": nsMCP,
-	"tool":        nsTool,
-	"tool-agent":  nsTool,
-	"panel":       nsPanel,
-	"workflow":    nsWorkflow,
+	"agent":          nsAgent,
+	"server":         nsMCP,
+	"server-name":    nsMCP,
+	"tool":           nsTool,
+	"tool-agent":     nsTool,
+	"panel":          nsPanel,
+	"workflow":       nsWorkflow,
+	"id|prefix|name": nsSession,
 }
 
 // nsByCmdScoped resolves generic placeholders (<name>) per command, so that
@@ -473,6 +476,21 @@ func (m model) paramLookup(ns string) []string {
 			return nil
 		}
 		return reg.Names()
+	case nsSession:
+		// Live session refs for the cwd (plan D2): short IDs — what the
+		// listings show — plus names. /resume and /drop accept either.
+		entries, err := session.List(m.st.cwd)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range entries[m.st.cwd] {
+			out = append(out, shortID(e.ID))
+			if e.Name != "" {
+				out = append(out, e.Name)
+			}
+		}
+		return out
 	}
 	return nil
 }

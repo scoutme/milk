@@ -468,27 +468,58 @@ func dragResetCmd(gen uint64) tea.Cmd {
 // gap marker between, each message capped at replayMaxMessageChars) and
 // rendered with the live transcript's own styling. Tool turns and reasoning
 // are not replayed. A fresh session (no history) leaves the transcript empty.
-// Only startup needs this: /new, /clear and /drop always land on a fresh
-// session and leave the visible transcript as it was.
+// Startup needs this; /new, /clear and /drop land on a fresh session and
+// leave the visible transcript as it was. A /resume switch reseeds
+// explicitly via reseedTranscriptFromHistory.
 func (m *model) seedTranscriptFromHistory() {
 	if m.st == nil || m.st.sess == nil || m.transcript.Len() > 0 {
 		return
 	}
-	hist := m.st.sess.History
-	if len(hist) == 0 {
+	if text := seedTranscriptText(m.st, false); text != "" {
+		m.transcript.WriteString(text)
+		m.transcriptNoThink.WriteString(text)
+	}
+}
+
+// reseedTranscriptFromHistory replaces the visible transcript with the newly
+// bound session's retained conversation — the /resume switch, where keeping
+// the old conversation on screen would misrepresent the binding. Unlike the
+// startup seed it always writes a banner (even for an empty session), so a
+// switch never silently erases the view.
+func (m *model) reseedTranscriptFromHistory() {
+	if m.st == nil || m.st.sess == nil {
 		return
 	}
-	var b strings.Builder
-	id := m.st.sess.ID
-	if len(id) > 8 {
-		id = id[:8]
+	m.transcript.Reset()
+	m.transcriptNoThink.Reset()
+	m.thinkingActiveInTurn = false
+	if text := seedTranscriptText(m.st, true); text != "" {
+		m.appendTranscript(text)
 	}
-	fmt.Fprintf(&b, "%s resumed session %s (%d turns) — /export prints the full transcript\n\n", milkTag(), id, len(hist))
+}
+
+// seedTranscriptText renders the seeded transcript for st.sess: the banner
+// plus the windowed turns. switched selects the /resume wording ("switched
+// to", banner also for an empty session) over the startup "resumed" form.
+func seedTranscriptText(st *interactiveState, switched bool) string {
+	hist := st.sess.History
+	verb := "resumed"
+	if switched {
+		verb = "switched to"
+	}
+	if len(hist) == 0 {
+		if !switched {
+			return ""
+		}
+		return fmt.Sprintf("%s %s session %s — no turns yet\n", milkTag(), verb, sessLabel(st.sess))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s session %s (%d turns) — /export prints the full transcript\n\n", milkTag(), verb, sessLabel(st.sess), len(hist))
 
 	n := len(hist)
 	writeRange := func(from, to int) {
 		for i := from; i < to; i++ {
-			writeSeedTurn(&b, m.st, hist[i])
+			writeSeedTurn(&b, st, hist[i])
 		}
 	}
 	if n > replayHeadTurns+replayTailTurns {
@@ -498,8 +529,7 @@ func (m *model) seedTranscriptFromHistory() {
 	} else {
 		writeRange(0, n)
 	}
-	m.transcript.WriteString(b.String())
-	m.transcriptNoThink.WriteString(b.String())
+	return b.String()
 }
 
 func writeSeedTurn(b *strings.Builder, st *interactiveState, t session.Turn) {
