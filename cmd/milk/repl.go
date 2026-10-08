@@ -933,7 +933,7 @@ type model struct {
 
 func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, agents dispatchAgents, mem *memory.Store) model {
 	ta := buildTextarea()
-	return model{
+	m := model{
 		histIdx:             -1,
 		hintIdx:             -1,
 		ctx:                 ctx,
@@ -963,6 +963,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
 		loopDetector:        loop.New(st.cfg.LoopDetectionCfg()),
 	}
+	m.seedTranscriptFromHistory()
+	return m
 }
 
 // refreshPrompt updates the textarea prompt label and width to match the current mode.

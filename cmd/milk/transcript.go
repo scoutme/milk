@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -10,6 +11,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/textbudget"
 )
 
 // colorizeLineThresh is the number of new lines that must accumulate before
@@ -407,4 +411,69 @@ func quitPendingClearCmd() tea.Cmd {
 // the handler can discard stale timeouts from earlier scheduling calls.
 func dragResetCmd(gen uint64) tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return dragResetMsg{gen: gen} })
+}
+
+// seedTranscriptFromHistory pre-populates an empty transcript with the
+// retained conversation of a resumed session, so reopening milk shows where
+// the last session left off instead of the welcome screen. Windowed like the
+// ACP history replay (first replayHeadTurns + last replayTailTurns turns, a
+// gap marker between, each message capped at replayMaxMessageChars) and
+// rendered with the live transcript's own styling. Tool turns and reasoning
+// are not replayed. A fresh session (no history) leaves the transcript empty.
+// Only startup needs this: /new, /clear and /drop always land on a fresh
+// session and leave the visible transcript as it was.
+func (m *model) seedTranscriptFromHistory() {
+	if m.st == nil || m.st.sess == nil || m.transcript.Len() > 0 {
+		return
+	}
+	hist := m.st.sess.History
+	if len(hist) == 0 {
+		return
+	}
+	var b strings.Builder
+	id := m.st.sess.ID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	fmt.Fprintf(&b, "%s resumed session %s (%d turns) — /export prints the full transcript\n\n", milkTag(), id, len(hist))
+
+	n := len(hist)
+	writeRange := func(from, to int) {
+		for i := from; i < to; i++ {
+			writeSeedTurn(&b, m.st, hist[i])
+		}
+	}
+	if n > replayHeadTurns+replayTailTurns {
+		writeRange(0, replayHeadTurns)
+		b.WriteString(dim(fmt.Sprintf("[… %d earlier turns omitted — /export prints the full transcript …]", n-replayHeadTurns-replayTailTurns)) + "\n\n")
+		writeRange(n-replayTailTurns, n)
+	} else {
+		writeRange(0, n)
+	}
+	m.transcript.WriteString(b.String())
+	m.transcriptNoThink.WriteString(b.String())
+}
+
+func writeSeedTurn(b *strings.Builder, st *interactiveState, t session.Turn) {
+	text := textbudget.SummarizeLong(t.Content, replayMaxMessageChars)
+	switch t.Role {
+	case session.RoleUser:
+		if text == "" {
+			return
+		}
+		b.WriteString(promptLabel(st) + colorizeTokens(text) + "\n")
+	case session.RoleAssistant:
+		if text == "" {
+			return
+		}
+		name := t.AgentName
+		paint := green
+		if t.Agent == session.AgentEscalation {
+			paint = blue
+		}
+		if name == "" {
+			name = string(t.Agent)
+		}
+		b.WriteString(bold(paint(name+":")) + " " + text + "\n\n")
+	}
 }
