@@ -968,13 +968,6 @@ func listSessions(cwd string, w *strings.Builder) error {
 	return nil
 }
 
-func loadSession(cwd string, flagNew bool, flagSession string) (*session.Session, error) {
-	if flagNew {
-		return session.New(cwd, flagSession)
-	}
-	return session.Resume(cwd, flagSession)
-}
-
 // execAgentTool dispatches /agent tool <verb> [args] subcommands.
 func execAgentTool(sub string, st *interactiveState) string {
 	parts := strings.Fields(sub)
