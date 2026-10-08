@@ -29,7 +29,7 @@ cmd/milk/attach.go            # TUI attach view: swap main transcript for a back
 cmd/milk/background_ui.go     # background-job result block written to the transcript on completion + /bg show full-result renderer
 cmd/milk/outputformat.go      # --output-format text|json|stream-json builders, wired in main.go's run()
 cmd/milk/serve.go             # `milk serve --acp` cobra command
-cmd/milk/acp_server.go        # ACP method dispatch (initialize, session/new|list|resume|close|delete, prompt, cancel) — see docs/acp-integration.md
+cmd/milk/acp_server.go        # ACP method dispatch (initialize, session/new|list|resume|close|delete, set_config_option, prompt, cancel) — see docs/acp-integration.md
 cmd/milk/acp_session.go       # per-ACP-session state + turn dispatch, mirrors repl.go's buildTUIAgents
 cmd/milk/host_acp.go          # events.Host adapter over ACP (local-provider agents only)
 cmd/milk/acp_commands.go      # ACP slash-command table: one source for what is executed and what available_commands_update advertises
@@ -257,6 +257,13 @@ Note: consecutive reasoning chunk repetition was removed from TUI signals — no
     "reasoning_max_consecutive_similar_responses": 6,
     "token_velocity_window_seconds": 60,
     "token_velocity_threshold": 300000,
+    "auto_interrupt": false
+  }
+}
+```
+
+Default: detection ON, auto-interrupt OFF (warn only). Set `auto_interrupt: true` for unattended sessions.
+n_velocity_threshold": 300000,
     "auto_interrupt": false
   }
 }
