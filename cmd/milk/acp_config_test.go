@@ -344,3 +344,27 @@ func TestACPCommands_AdvertisedIncludeConfigAndInit(t *testing.T) {
 		t.Errorf("/config advertised without a hint: %+v", cfg)
 	}
 }
+
+func TestAcpOpenFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var opened []string
+	prev := openPathDetached
+	openPathDetached = func(p string) (string, error) { opened = append(opened, p); return "stub", nil }
+	t.Cleanup(func() { openPathDetached = prev })
+
+	if err := acpOpenFile(dir, "a.txt"); err != nil || len(opened) != 1 || opened[0] != filepath.Join(dir, "a.txt") {
+		t.Fatalf("relative path: err=%v opened=%v", err, opened)
+	}
+	if err := acpOpenFile(dir, "missing.txt"); err == nil {
+		t.Error("missing file must error")
+	}
+	if err := acpOpenFile(dir, dir); err == nil {
+		t.Error("a directory must be refused")
+	}
+	if len(opened) != 1 {
+		t.Errorf("refused paths reached the opener: %v", opened)
+	}
+}

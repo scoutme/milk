@@ -2564,7 +2564,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		if err := a.onOpenFile(openArgs.Path); err != nil {
 			return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Error: err.Error()}.String(), ToolCallID: tc.ID}}
 		}
-		return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Output: "file opened in editor"}.String(), ToolCallID: tc.ID}}
+		return toolCallOutcome{msg: Message{Role: "tool", Content: toolResult{Output: "file opened"}.String(), ToolCallID: tc.ID}}
 	}
 
 	// MCP tools dispatched before built-ins.

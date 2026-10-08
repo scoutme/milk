@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -168,6 +169,27 @@ func acpStartInitWizard(as *acpSession) string {
 		as.pendingInit = st
 	}
 	return banner + text
+}
+
+// acpOpenFile backs the open_file tool for an ACP session. There is no TTY to
+// suspend into $EDITOR, so — like /config open — it hands the file to the
+// platform opener. Only existing regular files are opened: the path comes from
+// the model, and an opener will happily launch whatever it is pointed at.
+func acpOpenFile(cwd, path string) error {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if _, err := openPathDetached(path); err != nil {
+		return fmt.Errorf("could not open %s here: %w", path, err)
+	}
+	return nil
 }
 
 // acpConfigOpen answers /config open. An ACP agent runs headless inside
