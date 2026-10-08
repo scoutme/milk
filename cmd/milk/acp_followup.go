@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/scoutme/milk/internal/transport/acp"
 )
@@ -24,8 +23,13 @@ import (
 
 // requestFollowup starts a follow-up turn now if the session is idle and
 // finished-job results are waiting, else remembers it for turn end. The
-// when-to-follow-up rules are decideFollowup's, shared with the TUI.
+// when-to-follow-up rules are decideFollowup's, shared with the TUI. A closed
+// session (session/close) runs no further automatic work — job results stay
+// in the manager store for the next attach.
 func (as *acpSession) requestFollowup(waitForWholeWave bool) {
+	if as.closed.Load() {
+		return
+	}
 	mgr := as.mgr
 	if mgr == nil {
 		return
@@ -52,8 +56,12 @@ func (as *acpSession) requestFollowup(waitForWholeWave bool) {
 	}
 }
 
-// flushPendingFollowup retries a follow-up requested while a turn was running.
+// flushPendingFollowup retries a follow-up requested while a turn was
+// running. No-op after session/close (the closed flag).
 func (as *acpSession) flushPendingFollowup() {
+	if as.closed.Load() {
+		return
+	}
 	as.mu.Lock()
 	wave, user := as.pendingWaveFollowup, as.pendingUserFollowup
 	as.mu.Unlock()
@@ -72,7 +80,7 @@ func (as *acpSession) runFollowup() {
 		as.flushPendingFollowup()
 	}()
 	if _, err := as.runTurn(context.Background(), backgroundFollowupPrompt); err != nil {
-		as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("followup-%d", as.msgCounter.Add(1))),
+		as.notify(acp.AgentMessageChunk(as.liveID("followup"),
 			"Background follow-up failed: "+err.Error()))
 	}
 }
@@ -83,6 +91,6 @@ func (as *acpSession) runFollowup() {
 // assistant would simply start talking (or say nothing) with no visible
 // cause. Sent as a plain agent message chunk before the turn runs.
 func (as *acpSession) announceFollowup() {
-	as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("followup-%d", as.msgCounter.Add(1))),
+	as.notify(acp.AgentMessageChunk(as.liveID("followup"),
 		"[milk] background agents finished — running a follow-up turn to report their results.\n"))
 }

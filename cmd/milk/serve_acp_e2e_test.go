@@ -345,12 +345,15 @@ func TestACPServe_ConcurrentSessionsDontBlock(t *testing.T) {
 	}
 }
 
+// TestACPServe_UnknownMethodGetsMethodNotFound: a method nothing wires (the
+// legacy v1 session/load — client-supplied history, the old wrong shape) gets
+// the standard JSON-RPC "method not found" error.
 func TestACPServe_UnknownMethodGetsMethodNotFound(t *testing.T) {
 	bin := buildMilkBinary(t)
 	home := scratchHome(t, "http://127.0.0.1:1") // unreachable; this test never dispatches a turn
 	c := startACPClient(t, bin, home, t.TempDir())
 
-	id := c.request("session/list", map[string]any{})
+	id := c.request("session/load", map[string]any{})
 	_, resp := c.readUntilResponse(id, 10*time.Second)
 	errObj, ok := resp["error"].(map[string]any)
 	if !ok {

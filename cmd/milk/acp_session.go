@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -40,6 +42,9 @@ type acpSession struct {
 	escalationRunner TurnRunner
 
 	msgCounter atomic.Int64
+	// runID is a random per-acpSession suffix that makes live message IDs
+	// collision-free across restarts — see liveID.
+	runID string
 
 	// st carries the slash-command/routing state (sticky and forced routing,
 	// cwd, cfg copy) shared with the TUI's handlers; showThinking gates
@@ -83,6 +88,13 @@ type acpSession struct {
 	// being routed to a model (see runTurn and initwizard_core.go). Only
 	// touched under turnMu, like the rest of prompt handling.
 	pendingInit *initWizardState
+
+	// closed: session/close (or session/delete) tore this session down —
+	// the turn was cancelled, the state persisted, and no further automatic
+	// work (background follow-ups) may start. Set once via close(); the flag
+	// survives the removal from acpServer.sessions so late job-done signals
+	// still see it. See acp_followup.go.
+	closed atomic.Bool
 
 	// formElicit: the client advertised form-mode elicitation
 	// (clientCapabilities.elicitation.form at initialize), so the setup
@@ -135,7 +147,7 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 		mem = nil // best-effort, same as main.go's one-shot path
 	}
 
-	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id}
+	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id, runID: newRunID()}
 	as.st = &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, toolFutures: map[string]chan string{}}
 	// Thoughts have always been forwarded over ACP; keep that unless the
 	// config explicitly opts out.
@@ -251,6 +263,49 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 	return nil
 }
 
+// close tears the session down per the schema's session/close contract:
+// cancel any running turn (the same effect as session/cancel), suppress
+// pending background follow-ups (the closed flag gates them — see
+// acp_followup.go), and persist the session file. The file is kept — close
+// frees resources, session/delete removes data. Idempotent.
+func (as *acpSession) close() {
+	as.closed.Store(true)
+	as.mu.Lock()
+	cancel := as.cancel
+	as.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	// Best-effort persist: the file is saved at every turn end already, so
+	// this only flushes whatever changed since. Nothing useful to do with
+	// the error on a teardown path (same convention as other save sites).
+	_ = session.Save(as.sess) //nolint:errcheck // teardown-path best effort
+}
+
+// newRunID returns the 6-hex-char per-process suffix live message IDs carry.
+func newRunID() string {
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%04x", time.Now().UnixNano()&0xffff) //nolint:gosec // fallback uniqueness only
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// liveID returns a fresh process-unique message ID — `<kind>-<run6>-<n>`. The
+// runID suffix keeps live IDs from colliding across restarts: without it a
+// post-resume live `msg-1` would patch over a pre-restart `msg-1` the client
+// still holds. Replayed history messages use the deterministic `hist-*` IDs
+// instead (acp_history.go).
+func (as *acpSession) liveID(kind string) acp.MessageID {
+	return acp.MessageID(fmt.Sprintf("%s-%s-%d", kind, as.runID, as.msgCounter.Add(1)))
+}
+
+// liveStreamID is liveID without consuming a counter slot: the successive
+// chunks that make up one streamed message share it (same-ID chunks append).
+func (as *acpSession) liveStreamID(kind string) acp.MessageID {
+	return acp.MessageID(fmt.Sprintf("%s-%s-%d", kind, as.runID, as.msgCounter.Load()))
+}
+
 // notify sends a session/update notification for this session.
 func (as *acpSession) notify(u acp.SessionUpdate) {
 	n := (&acp.Mapper{Session: as.id}).Update(u)
@@ -324,7 +379,7 @@ func (as *acpSession) onThinking(text string) {
 	if !as.showThinking.Load() {
 		return
 	}
-	msgID := acp.MessageID(fmt.Sprintf("thought-%d", as.msgCounter.Load()))
+	msgID := as.liveStreamID("thought")
 	as.notify(acp.AgentThoughtChunk(msgID, text))
 }
 
@@ -367,9 +422,15 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 // runTurn runs one turn for prompt text, with as.turnMu held by the caller.
 func (as *acpSession) runTurn(ctx context.Context, prompt string) (acp.PromptResponse, error) {
 
-	as.notify(acp.RunningState())
+	msgID := as.liveID("msg")
+	// Accept-echo of the user's message under the exact ID this turn's
+	// PromptResponse returns (the schema's messageId identity rule). milk's
+	// synthetic follow-up prompt is never echoed — the client never sent it.
+	if prompt != backgroundFollowupPrompt {
+		as.emitHistoryMessage(histUser, msgID, prompt)
+	}
 
-	msgID := acp.MessageID(fmt.Sprintf("msg-%d", as.msgCounter.Add(1)))
+	as.notify(acp.RunningState())
 
 	turnCtx, cancel := context.WithCancel(ctx)
 	as.mu.Lock()
@@ -530,7 +591,7 @@ func (as *acpSession) pendingCallID(tool string) acp.ToolCallID {
 // permission request itself could not be answered. Without this the agent
 // only reports "denied by user", which hides that nobody was ever asked.
 func (as *acpSession) permissionFailed(tool string, err error) {
-	as.notify(acp.AgentMessageChunk(acp.MessageID(fmt.Sprintf("perm-%d", as.msgCounter.Add(1))),
+	as.notify(acp.AgentMessageChunk(as.liveID("perm"),
 		fmt.Sprintf("Could not ask for permission to run %s (%v), so it was denied. "+
 			"The client must answer session/request_permission; /skip-permissions on approves tools without asking.", tool, err)))
 }

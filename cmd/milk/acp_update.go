@@ -202,7 +202,7 @@ func (s *acpServer) announceUpdate(rel *updater.Release) {
 	s.mu.Unlock()
 	for _, as := range targets {
 		as.notify(acp.AgentMessageChunk(
-			acp.MessageID(fmt.Sprintf("update-%d", as.msgCounter.Add(1))),
+			as.liveID("update"),
 			stripANSI(updateAvailableNotice(rel))))
 	}
 }
@@ -221,6 +221,6 @@ func (s *acpServer) announceUpdateTo(as *acpSession) {
 	as.updateAnnounced = true
 	s.mu.Unlock()
 	as.notify(acp.AgentMessageChunk(
-		acp.MessageID(fmt.Sprintf("update-%d", as.msgCounter.Add(1))),
+		as.liveID("update"),
 		stripANSI(updateAvailableNotice(rel))))
 }

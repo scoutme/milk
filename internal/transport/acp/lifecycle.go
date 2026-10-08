@@ -1,19 +1,18 @@
 // Session-lifecycle wire shapes (initialize, session/new, session/prompt,
 // session/cancel, $/cancel_request) — the inbound (client->agent) structs
 // acp.go/host.go/map.go never needed, since nothing wired a server loop
-// until milk serve --acp. Field names and shapes are verified against the
-// upstream agentclientprotocol/agent-client-protocol schema/v2/schema.json,
-// not guessed from this design's own prose tables.
+// until milk serve --acp. (session/list|resume|close|delete live in
+// sessions.go.) Field names and shapes are verified against the upstream
+// agentclientprotocol/agent-client-protocol schema/v2/schema.json, not
+// guessed from this design's own prose tables.
 //
 // Scope note: SessionCapabilities{} is a monolithic baseline per the
 // upstream schema itself ("supplying {} means the agent supports... session/
 // new, session/list, session/resume, session/close, session/prompt,
 // session/cancel, and session/update") — there is no finer-grained capability
-// flag to advertise only the subset milk serve --acp actually implements
-// this round (new/prompt/cancel/update). Advertising the baseline is required
-// to turn those four on at all; session/list|resume|close calls from a real
-// client get the standard JSON-RPC "method not found" error, which is the
-// correct way to express "not implemented yet" here, not a capability lie.
+// flag to advertise only a subset. milk now implements the full baseline, so
+// advertising it is simply accurate; the only add-on flag is `delete`
+// (session/delete), advertised separately via SessionCapabilities.Delete.
 package acp
 
 import "encoding/json"
@@ -127,6 +126,12 @@ type NewSessionRequest struct {
 	CWD                   string            `json:"cwd"`
 	AdditionalDirectories []string          `json:"additionalDirectories,omitempty"`
 	MCPServers            []McpServerConfig `json:"mcpServers,omitempty"`
+	// Meta is the request's `_meta` extension object — ACP's sanctioned
+	// channel for implementation-specific hints. milk reads
+	// `_meta.milk.fresh: true` as the per-request opt-out of resume-by-
+	// default adoption ("start an empty conversation"; see
+	// docs/acp-session-resume-plan.md D2).
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 // NewSessionResponse is session/new's result.
