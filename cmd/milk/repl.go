@@ -3032,6 +3032,14 @@ func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model
 		m.pendingUserBackgroundFollowup = false
 		return m, nil
 	}
+	if mgr.PendingCount() == 0 {
+		// A user-job completion fires both the per-job and the batch-done
+		// message; the first one's turn drains the results, so the second
+		// (deferred until that turn ends) finds nothing to report and would
+		// only burn a turn.
+		applyFollowupDecision(waitForWholeWave, followupSkip, &m.pendingBackgroundFollowup, &m.pendingUserBackgroundFollowup)
+		return m, nil
+	}
 	busy := m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil
 	d := decideFollowup(waitForWholeWave, mgr.ActiveCount(), busy)
 	applyFollowupDecision(waitForWholeWave, d, &m.pendingBackgroundFollowup, &m.pendingUserBackgroundFollowup)
