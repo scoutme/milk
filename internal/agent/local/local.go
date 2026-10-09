@@ -1630,7 +1630,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, ngramRecoveryCount, ngramMaxRecovery,
 				recoveryNgramRemind, recoveryNgramReplan,
 				"the model was stuck in a reasoning repetition loop and could not self-recover after multiple attempts",
-				"reasoning n-gram", reasoningText, sess.ID, totalRecoveryCount)
+				"reasoning n-gram", reasoningText, sess.ID, totalRecoveryCount, 0)
 			if escalate {
 				return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: reasoning n-gram)", totalRecoveryCount)}
 			}
@@ -1798,7 +1798,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, duplicateRecoveryCount, duplicateToolMaxRecovery,
 				recoveryDuplicateToolMild, recoveryDuplicateToolStrong,
 				"the model kept repeating the same tool call and could not self-recover after multiple attempts",
-				"duplicate tool call", reasoningText, sess.ID, totalRecoveryCount)
+				"duplicate tool call", reasoningText, sess.ID, totalRecoveryCount, 0)
 			if escalate {
 				return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: duplicate tool call)", totalRecoveryCount)}
 			}
@@ -1833,6 +1833,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// This prevents re-reads after edits from being flagged as duplicates
 		// (the read-edit-verify pattern is legitimate and expected).
 		invalidateReadsForEditedFiles(executedKeys, toolCalls)
+		resetExecutedKeysAfterMutation(executedKeys, toolCalls)
 
 		// Loop streak detection: reasoning models (mimo-v2.5, DeepSeek) can
 		// get stuck producing near-identical reasoning that drives
@@ -1848,7 +1849,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, streak.recoveryCount, 2,
 					recoveryNudgeMild, recoveryNudgeStrong,
 					"the model was stuck repeating the same reasoning/tool-call pattern and could not self-recover after multiple attempts",
-					"loop streak", reasoningText, sess.ID, totalRecoveryCount)
+					"loop streak", reasoningText, sess.ID, totalRecoveryCount, streakTriggerCount)
 				if escalate {
 					return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: loop streak)", totalRecoveryCount)}
 				}
@@ -1886,7 +1887,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, textLoopRecoveryCount, textLoopMaxRecovery,
 					recoveryNudgeMild, recoveryNudgeStrong,
 					"the model kept repeating identical output text and could not self-recover after multiple attempts",
-					"text loop", reasoningText, sess.ID, totalRecoveryCount)
+					"text loop", reasoningText, sess.ID, totalRecoveryCount, textLoopTriggerCount)
 				if escalate {
 					return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: text loop)", totalRecoveryCount)}
 				}
@@ -2837,6 +2838,34 @@ func summarizeToolTrailWithHeader(msgs []Message, resp, header string) string {
 		b.WriteString(resp)
 	}
 	return b.String()
+}
+
+// resetExecutedKeysAfterMutation forgets every earlier call once a batch has
+// changed files, keeping only that batch's own keys. A repeat is evidence of a
+// stuck loop only while nothing changed in between: a verification command
+// (go build, go test, git diff, cat) re-run after an edit is the normal
+// edit-verify cycle, and flagging it used to trigger loop recovery mid-turn.
+// The batch's own keys stay so that re-issuing the same edit immediately is
+// still caught.
+func resetExecutedKeysAfterMutation(executedKeys map[string]bool, toolCalls []toolCall) {
+	mutated := false
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "edit_file", "write_file", "delete_file", "move_file", "apply_patch":
+			mutated = true
+		}
+	}
+	if !mutated {
+		return
+	}
+	clear(executedKeys)
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "read_file", "list_dir", "grep", "glob", "current_need":
+			continue
+		}
+		executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
+	}
 }
 
 // invalidateReadsForEditedFiles clears executedKeys entries for read_file
