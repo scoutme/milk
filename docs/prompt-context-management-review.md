@@ -396,6 +396,6 @@ Comparison of the other harnesses, and what milk did about each difference:
 
 Model limits come from models.dev in OpenCode and MiMo-Code; milk now also reads the catalog's
 output limit, and resolves providers that disagree about a model by majority instead of map order.
-Not done: spilling over-cap output to a file (OpenCode / MiMo-Code do), and cache-cold gating of
-pruning (MiMo-Code's soft trim) — milk's replay boundary moves once per turn, which costs one
-partial prefix-cache miss at that point.
+Spilling over-cap output to a file (OpenCode / MiMo-Code do) is done too: `~/.milk/tool-output/`, 7-day
+sweep, not for `read_file`. Not done: cache-cold gating of pruning (MiMo-Code's soft trim) — milk's
+replay boundary moves once per turn, which costs one partial prefix-cache miss at that point.

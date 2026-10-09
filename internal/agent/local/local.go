@@ -256,6 +256,9 @@ type MemConfig struct {
 	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
 	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
 	MaxToolIterations    int  // max consecutive tool-call cycles per turn; 0 = use default (20)
+	// ToolOutputDir is where the full output of a result cut by
+	// ToolResultMaxBytes is saved so the model can read the rest; "" disables.
+	ToolOutputDir string
 }
 
 // agentRoleForMetrics returns "escalation" when the agent is configured as the
@@ -2790,7 +2793,11 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		// Every other tool (bash, read_file, …) has no cap of its own — a
 		// single verbose shell/build/test output can otherwise dominate a
 		// turn's payload well before the payload-size trim loop ever runs.
-		result = capToolResultHint(result, a.memCfg.ToolResultMaxBytes, toolResultCutHint(tc.Function.Name))
+		hint := toolResultCutHint(tc.Function.Name)
+		if path := spillToolOutput(a.memCfg.ToolOutputDir, tc.Function.Name, tc.ID, result, a.memCfg.ToolResultMaxBytes); path != "" {
+			hint = spillCutHint(path)
+		}
+		result = capToolResultHint(result, a.memCfg.ToolResultMaxBytes, hint)
 	}
 	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 }

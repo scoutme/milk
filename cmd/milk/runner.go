@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -203,6 +204,7 @@ func (r *localRunner) Execute(
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, role == RolePrimary),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
+		ToolOutputDir:        toolOutputDir(),
 	}).WithToolTimeout(cfg.AgentToolTimeout(ac)).
 		WithMaxPayloadBytes(cfg.AgentMaxPayloadBytes(ac)).
 		WithCompactionTrigger(cfg.AgentCompactionTriggerTokens(ac)).
@@ -989,4 +991,14 @@ func buildPromptVars(sess *session.Session, percepts []string, _ config.Config) 
 		Escalation: escSummary,
 		Tools:      localBuiltinTools,
 	}
+}
+
+// toolOutputDir is where over-cap tool output is saved for the model to read
+// back ("" when the milk directory can't be resolved: no spill, plain cap).
+func toolOutputDir() string {
+	d, err := config.Dir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "tool-output")
 }
