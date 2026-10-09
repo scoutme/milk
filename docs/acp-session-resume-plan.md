@@ -325,9 +325,9 @@ per the branching strategy.
   client-side there); stays `-32601`, documented as a gap with rationale.
 - Retaining original ACP `messageId`s in `session.Turn` (nice-to-have;
   synthesized stable IDs are conformant — "not required to retain").
-- TUI in-process `/resume <id>` switch (the TUI already resumes at startup;
-  `/export session <id>` gives preview). Natural small follow-up, not required
-  for parity.
+- TUI in-process `/resume <id>` switch — **done** by the session-management
+  refactor (step 2 of `docs/session-management-refactor-plan.md`); ACP got
+  parity via view rebinding (ADR-0051).
 - `session/set_config_option`, `auth/*`, `additionalDirectories`, `mcpServers`
   merge — unchanged gaps.
 - Keyset pagination for `session/list`; `SessionInfoUpdate`-based titling.

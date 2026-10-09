@@ -170,7 +170,7 @@ and, for ACP integration specifically, [docs/acp-integration.md](acp-integration
 
 `milk` with no prompt argument starts a REPL built on charmbracelet/bubbletea. The input prompt uses `❯` as the prefix. The status bar reflects the current routing state and active agent.
 
-**Slash commands:** `/escalate`, `/primary`, `/new`, `/clear`, `/drop`, `/list`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/init`, `/open`, `/update`, `/notifications`, `/help`, `/exit`
+**Slash commands:** `/escalate`, `/primary`, `/sessions`, `/new`, `/clear`, `/resume`, `/drop`, `/paste`, `/skip-permissions`, `/agent`, `/colorize`, `/think`, `/need`, `/workflow`, `/config`, `/init`, `/open`, `/update`, `/notifications`, `/help`, `/exit` (`/list` is a deprecated hidden alias of `/sessions`, kept one release)
 
 **Memory commands:** `/learn <statement>`, `/memory [global|session|<pattern>]`, `/memory show <pattern or #id>`, `/forget <pattern or #id>`, `/export [session <id|prefix>] [json|<path>]` — see [docs/operations.md — Memory](operations.md#memory).
 
@@ -260,11 +260,11 @@ The CLI equivalent is `milk update check` and `milk update install` (non-interac
 | `--escalate` | Force route to escalation agent for this turn |
 | `--primary` | Force route to primary agent for this turn; breaks ESCALATION_WAITING state |
 | `--new` | Start a new session (old sessions for cwd untouched) |
-| `--session <name>` | Target session by name (resume or create) |
-| `--continue` | Alias for default resume behavior (explicit) |
+| `--session <id|prefix|name>` | Target a stored session by exact id, unambiguous id prefix, or cwd-scoped name; with `--new`, the new session's name. An unknown reference is an error (no silent create) unless `--new` is also given |
+| `--continue` | No-op explicit alias of the default resume behavior (the default already resumes) |
 | `--list` | List sessions for current cwd |
 | `--list --all` | List all sessions across all directories |
-| `--drop` | Delete current session |
+| `--drop [--session <ref>]` | Delete the referenced session, or — without a ref — the cwd's current session |
 | `--output-format text\|json\|stream-json` | Single-prompt mode only (ignored by the REPL); `text` (default) is unchanged, `json`/`stream-json` emit machine-readable output — see [docs/tooling.md](tooling.md#machine-readable-output) |
 
 **Resumed sessions in the TUI.** When the TUI starts on a stored session (the default for the cwd, or `--session`/`--continue`), the transcript is pre-populated with its prior user/assistant turns instead of the welcome screen, under a `[milk] resumed session …` banner. The window mirrors ACP's history replay: the first 10 and last 200 turns, each message capped at 8 KB, with a gap marker pointing at `/export` for the rest; tool calls and reasoning are not replayed. `--new` (and a session with no history) starts empty; `/new`, `/clear` and `/drop` keep the visible transcript as is.
@@ -331,7 +331,7 @@ Resume-by-default adoption over ACP (`milk serve --acp`): when on (the default),
 
 ### ACP session parity
 
-The TUI and `milk serve --acp` share one session model — one conversation per working directory — and one session store, so a conversation continues the same way whichever surface opens it: TUI `--continue` ≈ ACP `session/new` adopting (the `acp_resume` default), TUI `--new` ≈ `acp_resume: false` or a per-request `_meta.milk.fresh: true`. Session management over ACP (`session/list`/`resume`/`close`/delete, `/list`, `/export [session <id|prefix>] [json|<path>]`) and standard chat-history replay are specified in [docs/acp-integration.md](acp-integration.md).
+The TUI and `milk serve --acp` share one session model — one conversation per working directory — and one session store, so a conversation continues the same way whichever surface opens it: TUI `--continue` ≈ ACP `session/new` adopting (the `acp_resume` default), TUI `--new` ≈ `acp_resume: false` or a per-request `_meta.milk.fresh: true`, and the in-chat vocabulary is one set on both surfaces: `/sessions` (renamed from `/list`), `/new`/`/clear`, `/resume <id|prefix|name>` ≈ `session/resume`, `/drop`. Over ACP a switch rebinds the conversation's store session behind its fixed wire handle (view rebinding — see [ADR-0051](adr/0051-acp-conversation-view-rebinding.md)). Session management over ACP (`session/list`/`resume`/`close`/delete, the session slash commands, `/export [session <id|prefix>] [json|<path>]`) and standard chat-history replay are specified in [docs/acp-integration.md](acp-integration.md).
 
 ### `experimental_lazy_history_management` field
 

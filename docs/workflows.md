@@ -127,7 +127,7 @@ If the topic has switched, or `returning_fresh_start_local_turns` local turns (d
 └── <uuid>.json     # full session: history, state, escalation_session_id, escalation_nonce
 ```
 
-`milk <prompt>` resumes the most recent session for the current directory; `milk --new` always creates a fresh one; `milk --session <name>` targets a named session (cwd-scoped — the same name can exist in different projects).
+`milk <prompt>` resumes the most recent session for the current directory; `milk --new` always creates a fresh one; `milk --session <id|prefix|name>` targets an existing session by exact id, unambiguous id prefix, or name (cwd-scoped — the same name can exist in different projects) — or, with `--new`, names the fresh session.
 
 ---
 
