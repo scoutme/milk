@@ -127,13 +127,15 @@ func TestRun_WellFormedToolCall_NoRetry(t *testing.T) {
 
 func TestReasoningEndsMidMarkup(t *testing.T) {
 	for s, want := range map[string]bool{
-		"does the detector suppress `":      true,
-		"it ends with a dangling <":         true,
-		"use `foo` here":                    false,
-		"all balanced `a` and `b`.":         false,
-		"```go\nfmt.Println()\n```":         false,
-		"":                                  false,
-		"plain sentence without markup.\n ": false,
+		"does the detector suppress `":                         true,
+		"it ends with a dangling <":                            true,
+		"old\nnew text</parameter></function></tool_call>":     true,
+		"explains the </function> tag in prose, then moves on": false,
+		"use `foo` here":                                       false,
+		"all balanced `a` and `b`.":                            false,
+		"```go\nfmt.Println()\n```":                            false,
+		"":                                                     false,
+		"plain sentence without markup.\n ":                    false,
 	} {
 		if got := reasoningEndsMidMarkup(s); got != want {
 			t.Errorf("reasoningEndsMidMarkup(%q) = %v, want %v", s, got, want)
@@ -172,6 +174,40 @@ func TestRun_ReasoningCutMidMarkup_RetriesWithLostReasoning(t *testing.T) {
 		t.Errorf("retry lacks the lost reasoning: %s", body)
 	}
 	if last := msgs[len(msgs)-1]; last.Content != "patched" {
+		t.Errorf("final = %q", last.Content)
+	}
+}
+
+func TestRun_ReasoningEndsInClosedToolMarkup_Retries(t *testing.T) {
+	var reqs atomic.Int32
+	var secondBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reqs.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"reasoning_content":"Edit #4: rewrite the closed-set paragraph.\nnew text</parameter></function></tool_call>"}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		secondBody.Store(string(b))
+		okStream(w, "edited")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model")
+	var out strings.Builder
+	msgs, err := agent.Run(context.Background(), nil, "fix it", &out, &session.Session{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := reqs.Load(); got != 2 {
+		t.Fatalf("a tool call written into reasoning must be re-asked, want 2 requests, got %d", got)
+	}
+	if body, _ := secondBody.Load().(string); !strings.Contains(body, "closed-set paragraph") {
+		t.Errorf("retry lacks the lost reasoning: %s", body)
+	}
+	if last := msgs[len(msgs)-1]; last.Content != "edited" {
 		t.Errorf("final = %q", last.Content)
 	}
 }

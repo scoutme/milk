@@ -3391,12 +3391,19 @@ const maxMalformedToolCallRetries = 2
 
 // reasoningEndsMidMarkup reports whether reasoning stops inside an unclosed
 // inline code span (an odd number of backticks on its last line, which is not
-// a ``` fence) or on a dangling '<' — the signature of the server cutting the
-// stream as the model started writing tool-call markup.
+// a ``` fence), on a dangling '<', or on a closing tool-call tag — the
+// signature of the server cutting the stream as the model wrote (or finished
+// writing) a tool call as text inside its reasoning. The closing-tag case is a
+// whole call that was never executed; observed with a long edit_file call.
 func reasoningEndsMidMarkup(reasoning string) bool {
 	r := strings.TrimRight(reasoning, " \t\r\n")
 	if r == "" {
 		return false
+	}
+	for _, closer := range []string{"</tool_call>", "</function>", "</parameter>"} {
+		if strings.HasSuffix(r, closer) {
+			return true
+		}
 	}
 	if strings.HasSuffix(r, "<") {
 		return true
