@@ -75,7 +75,10 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/memory [global\|session\|<pattern>]` | list percepts |
 | `/usage`, `/metrics` | token usage / recent metrics |
 | `/export [json\|<path>]` | print the transcript, or write it to a file |
-| `/list` | list sessions for the working directory |
+| `/sessions [all]` | list stored sessions for this directory (`all`: every directory), `*` marking this conversation's current binding |
+| `/new [name]`, `/clear [name]` | start a fresh (optionally named) session and rebind this conversation to it; the previous binding stays on disk, resumable (see "Session commands and view rebinding") |
+| `/resume <id\|prefix\|name>` | switch this conversation to a stored session — exact id, unambiguous id prefix, or cwd-scoped name; bare `/resume` lists what is resumable |
+| `/drop [<id\|prefix\|name>]` | delete the current session (the conversation lands on a fresh one), or exactly the referenced one (conversation untouched) |
 | `/skip-permissions [on\|off]` | approve every tool call without asking (seeded from `dangerously_skip_permissions`, like the TUI) |
 | `/think [on\|off]` | show or hide `agent_thought_chunk` updates for this session (default on, as before, unless `show_reasoning` is set to false) |
 | `/config` | print the merged config as fenced JSON |
@@ -92,9 +95,11 @@ table (`cmd/milk/acp_commands.go`), so nothing is advertised that doesn't run.
 | `/help` | list the above |
 
 TUI-only commands (`/panel`, `/colorize`, `/paste`, `/attach`, `/mcp`,
-`/reload`, `/new`, `/workflow reconfigure`,
+`/reload`, `/workflow reconfigure`,
 `/task add`, …) are **not** advertised. If sent anyway they get a "only available in the
-milk TUI" reply instead of reaching the model. Text that merely mentions a
+milk TUI" reply instead of reaching the model. `/list` is executable but no
+longer advertised — the deprecated alias of `/sessions`, kept one release with
+a rename hint. Text that merely mentions a
 command mid-sentence is an ordinary prompt. Routing pins from `/escalate` and
 `/primary` are per ACP session. `/think` and the two pins are also exposed as
 session config options (`think`, `routing`) — see `session/set_config_option`
@@ -441,10 +446,15 @@ replayed, never silently. TUI parity: `--continue` ≈ adopt; `--new` ≈
 their history index (`hist-u3`, `hist-a5`, `hist-t5-0`, …), so replaying twice
 patches the client's existing messages instead of duplicating them. Live ids
 are suffixed with a per-process run id, so they can never collide with
-`hist-*` or with ids minted before a restart. One documented deviation: milk
-does not retain the original ACP `messageId`s in its session file ("Agents …
-are not required to retain" them), so replayed messages carry synthesized
-stable ids.
+`hist-*` or with ids minted before a restart. After a conversation view
+rebinds to another store session (see "Session commands and view rebinding"
+below) the replay ids are session-qualified (`hist-<sess8>-u3`), so a new
+binding's replay can never patch a message left by a previous binding's; the
+view's first binding keeps the plain form (and returns to it when the view
+switches back), so already-replayed panes keep patching. One documented
+deviation: milk does not retain the original ACP `messageId`s in its session
+file ("Agents … are not required to retain" them), so replayed messages carry
+synthesized stable ids.
 
 **Bounds.** "All *retained* history" is windowed to keep the notification
 blast finite: each message's text is capped (~8 KB head+tail), and the replay
@@ -459,7 +469,7 @@ turns on a resumed session. To preview *another* session without attaching
 it, `/export session <id|prefix>` dumps that session (exact id or unambiguous
 prefix; ambiguity and misses are errors, never a guess), composable with
 `json` or a file path: `/export [session <id|prefix>] [json|<path>]`. The
-exploration flow is `/list` → `/export session a1b2` → `session/resume`.
+exploration flow is `/sessions` → `/export session a1b2` → `session/resume`.
 
 ### close vs delete
 
@@ -468,6 +478,40 @@ the session file and frees the in-process resources (idempotent; the file is
 kept — close ≠ delete). `session/delete` closes an open session first, then
 removes its file and index entry. Either way the id joins this process's
 closed-set: the next `session/new` will not resurrect it (condition 4 above).
+
+### Session commands and view rebinding (ADR-0051)
+
+`/sessions`, `/new`, `/clear`, `/resume` and `/drop` (and the deprecated
+`/list` alias) manage sessions from inside the chat. A chat-typed switch
+cannot change the handle the client holds — `session/resume`'s response
+carries no `sessionId` — so an ACP session is a **conversation view**: the
+wire handle is fixed at creation, and the view's **current binding** (the
+store session it talks to) can move. Full rationale:
+[ADR-0051](adr/0051-acp-conversation-view-rebinding.md).
+
+- **Handle invariant.** A view's handle is the store session it was created
+  with; a store session is bound by at most one live view. `/resume` onto a
+  session another conversation holds is refused ("open in another
+  conversation — close it there first") — never split-written from two panes.
+- **Rebind, don't respawn.** `/new`, `/resume` and `/drop` swap the binding
+  in place: memory store, task store and the agents' session context follow
+  the binding; view/user state survives (the `think`/`routing` config
+  options, routing pins, `skip-permissions`, client capabilities).
+- **Switching never hides state.** A switch replays the new binding's
+  retained history (the same bounded replay as adoption) with a one-line
+  notice naming it; a fresh binding replays nothing and says so.
+- **`session/resume(X)` resolution.** (1) X is a live view's current binding
+  → that view answers, and X becomes an alias handle for it (dispatch,
+  `session/cancel` and `session/close` accept every alias); (2) a live view
+  has handle X → it rebinds back to X ("the conversation that started at X")
+  and answers; (3) otherwise a new view opens on X.
+- **`session/close(H)`** closes the view behind H and its current binding —
+  every handle of the view joins the closed-set, as does the binding.
+- **`session/delete(X)`** where X is only the current binding of another
+  conversation: X is dropped and that conversation is rebound to a fresh
+  session, told with a notice (no pane keeps showing a deleted
+  conversation). `/drop` over ACP behaves the same way, and its dropped id
+  joins the closed-set.
 
 ## Error handling
 

@@ -61,6 +61,10 @@ type sessionOpResult struct {
 	bind *session.Session
 	out  string
 	err  error
+	// droppedID is the store session ID the op deleted from disk (set by
+	// opSessionDrop). ACP records it in the server's closed-set so
+	// resume-by-default cannot resurrect a just-dropped session.
+	droppedID string
 }
 
 // renderOpResult renders an op result for an interactive host: the success
@@ -185,13 +189,13 @@ func opSessionDrop(cur *session.Session, cwd, ref string) sessionOpResult {
 	}
 	lines := fmt.Sprintf("%s dropped session %s", milkTag(), sessDropLabel(target))
 	if !wasCurrent {
-		return sessionOpResult{out: lines}
+		return sessionOpResult{out: lines, droppedID: target.ID}
 	}
 	fresh, err := session.New(cwd, "")
 	if err != nil {
-		return sessionOpResult{out: lines + fmt.Sprintf("\n%s warning: could not create fresh session: %v", milkTag(), err)}
+		return sessionOpResult{out: lines + fmt.Sprintf("\n%s warning: could not create fresh session: %v", milkTag(), err), droppedID: target.ID}
 	}
-	return sessionOpResult{bind: fresh, out: lines + fmt.Sprintf("\n%s new session %s", milkTag(), sessLabel(fresh))}
+	return sessionOpResult{bind: fresh, out: lines + fmt.Sprintf("\n%s new session %s", milkTag(), sessLabel(fresh)), droppedID: target.ID}
 }
 
 // sessionListText renders the /sessions listing for cwd (all: every

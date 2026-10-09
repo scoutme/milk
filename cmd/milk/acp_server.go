@@ -419,11 +419,26 @@ func decodeSessionCursor(c acp.SessionListCursor) (int, error) {
 	return offset, nil
 }
 
-// handleSessionResume implements session/resume (D1): attach the stored
-// session (idempotent reattach when it is already open in this process),
-// honoring the replayFrom cursor. Unknown session → -32002; cwd mismatch or
-// an unknown replay cursor → -32602, the latter rejected before anything is
-// emitted ("reject the request rather than guessing where to replay from").
+// handleSessionResume implements session/resume (D1 + ADR-0051): attach the
+// stored session X to a live conversation view, honoring the replayFrom
+// cursor. Resolution rules, in priority order —
+//
+//  1. X is the current binding of a live view V → return V and register X as
+//     an alias handle for it (dispatch, session/cancel and session/close
+//     accept every alias). Winning over the handle rule below in the one
+//     collision case where both match different views is deliberate: the
+//     one-view-per-binding invariant (ADR-0051) outranks handle identity, so
+//     a reattach can never split-write one store session from two panes.
+//  2. a live view has handle X → rebind that view back to store session X
+//     ("the conversation that started at X") and return it — the idempotent
+//     reattach, and the way back after the view /new'ed or /resume'd away.
+//     The switch replays the binding's retained history (switching never
+//     hides state); without a switch, replayFrom alone decides.
+//  3. otherwise register a new view with handle X (the classic path).
+//
+// Unknown session → -32002; cwd mismatch or an unknown replay cursor →
+// -32602, the latter rejected before anything is emitted ("reject the
+// request rather than guessing where to replay from").
 func (s *acpServer) handleSessionResume(params json.RawMessage) (any, error) {
 	var req acp.ResumeSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -444,22 +459,89 @@ func (s *acpServer) handleSessionResume(params json.RawMessage) (any, error) {
 			Message: fmt.Sprintf("session/resume: cwd %q does not match the session's cwd %q", req.CWD, sess.CWD)}
 	}
 
-	// Already attached in this process (the client re-issued resume):
-	// idempotent reattach — never rebuild, that would clobber a possibly
-	// running turn. replayFrom is still honored (replay reads sess.History).
-	as := s.session(req.SessionID)
-	if as == nil {
-		if as, err = s.registerACPSession(sess); err != nil {
-			return nil, fmt.Errorf("session/resume: %w", err)
+	// Rule 1: X is already some live view's current binding.
+	if v := s.viewBinding(sess.ID); v != nil {
+		s.addAlias(req.SessionID, v)
+		if cursor != nil { // {"type":"start"} — the only cursor ParseReplayFrom accepts
+			v.replayHistory()
 		}
+		return s.resumeResultFor(v), nil
 	}
-	if cursor != nil { // {"type":"start"} — the only cursor ParseReplayFrom accepts
+
+	// Rule 2: a view holds handle X — rebind it back to X if it drifted.
+	if as := s.session(req.SessionID); as != nil {
+		if as.sess == nil || as.sess.ID != sess.ID {
+			if err := as.rebind(sess); err != nil {
+				return nil, fmt.Errorf("session/resume: %w", err)
+			}
+			as.replayBinding(len(sess.History) > 0,
+				fmt.Sprintf("switched this conversation to session %.8s", sess.ID))
+		} else if cursor != nil {
+			as.replayHistory()
+		}
+		return s.resumeResultFor(as), nil
+	}
+
+	// Rule 3: brand-new view for X.
+	as, err := s.registerACPSession(sess)
+	if err != nil {
+		return nil, fmt.Errorf("session/resume: %w", err)
+	}
+	if cursor != nil {
 		as.replayHistory()
 	}
+	return s.resumeResultFor(as), nil
+}
+
+// resumeResultFor builds session/resume's wire response for a view. The
+// response carries no sessionId — the client keeps the handle it asked with
+// (resumeResult's sessionID is internal, for AfterResponse correlation).
+func (s *acpServer) resumeResultFor(as *acpSession) resumeResult {
 	return resumeResult{ResumeSessionResponse: acp.ResumeSessionResponse{
 		ConfigOptions:     as.config.Options(),
 		AvailableCommands: acpAdvertisedCommands(),
-	}, sessionID: as.id}, nil
+	}, sessionID: as.id}
+}
+
+// addAlias maps an extra handle to a live view (ADR-0051): after a rebind,
+// the store session a conversation moved to can be resumed by its own ID and
+// reaches the same view. Every key in sessions dispatches, cancels and closes
+// the view it points at.
+func (s *acpServer) addAlias(id acp.SessionID, as *acpSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[id] = as
+}
+
+// viewBinding returns the live view whose current binding is the store
+// session id (nil when none is) — the lookup behind the one-view-per-binding
+// invariant (ADR-0051). Alias keys can map one view to several handles, so
+// the scan dedupes by pointer.
+func (s *acpServer) viewBinding(sessID string) *acpSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[*acpSession]bool{}
+	for _, as := range s.sessions {
+		if seen[as] {
+			continue
+		}
+		seen[as] = true
+		if as.sess != nil && as.sess.ID == sessID {
+			return as
+		}
+	}
+	return nil
+}
+
+// markClosed records handle IDs in the closed-set (D2.4): a thread the user
+// explicitly closed or dropped must not silently resurrect on the next
+// session/new.
+func (s *acpServer) markClosed(ids ...acp.SessionID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		s.closedIDs[id] = true
+	}
 }
 
 // handleSessionClose implements session/close (D3): cancel any running turn,
@@ -477,21 +559,40 @@ func (s *acpServer) handleSessionClose(params json.RawMessage) (any, error) {
 }
 
 // closeSession is the teardown shared by session/close and session/delete.
+// Every handle that maps to the view (its own plus any aliases) is removed
+// and joins the closed-set (D2.4), as does the view's current binding —
+// closing the conversation closes the thread it is on, so resume-by-default
+// must not resurrect either. Idempotent: an unknown handle still joins the
+// closed-set.
 func (s *acpServer) closeSession(id acp.SessionID) {
 	s.mu.Lock()
 	as := s.sessions[id]
-	delete(s.sessions, id)
-	s.closedIDs[id] = true
-	s.mu.Unlock()
-	if as != nil {
-		as.close()
+	if as == nil {
+		s.closedIDs[id] = true
+		s.mu.Unlock()
+		return
 	}
+	for key, v := range s.sessions {
+		if v == as {
+			delete(s.sessions, key)
+			s.closedIDs[key] = true
+		}
+	}
+	if as.sess != nil {
+		s.closedIDs[acp.SessionID(as.sess.ID)] = true
+	}
+	s.mu.Unlock()
+	as.close()
 }
 
-// handleSessionDelete implements session/delete (D3): close the session if it
-// is open (same teardown as session/close), then drop its file and index
-// entry. Unknown session → -32002. Accepts an unambiguous ID prefix like
-// /export session does (delete-by-prefix consistency).
+// handleSessionDelete implements session/delete (D3 + ADR-0051): close the
+// session if it is open (same teardown as session/close), then drop its file
+// and index entry. When the deleted store session is merely the *current
+// binding* of a surviving view (a conversation that /resume'd onto it while
+// another handle owns it), that view is rebound to a fresh session and told —
+// no pane keeps showing a deleted conversation. Unknown session → -32002.
+// Accepts an unambiguous ID prefix like /export session does (delete-by-
+// prefix consistency).
 func (s *acpServer) handleSessionDelete(params json.RawMessage) (any, error) {
 	var req acp.DeleteSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -501,9 +602,39 @@ func (s *acpServer) handleSessionDelete(params json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, &acp.CodedError{Code: acp.CodeResourceNotFound, Message: "session/delete: " + err.Error()}
 	}
+
+	// Views bound to the doomed session besides the one behind its own
+	// handle (collected before closeSession tears that one down).
+	s.mu.Lock()
+	viaHandle := s.sessions[acp.SessionID(sess.ID)]
+	var bound []*acpSession
+	seen := map[*acpSession]bool{viaHandle: true}
+	for _, v := range s.sessions {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		if v.sess != nil && v.sess.ID == sess.ID {
+			bound = append(bound, v)
+		}
+	}
+	s.mu.Unlock()
+
 	s.closeSession(acp.SessionID(sess.ID))
 	if err := session.Drop(sess.ID, sess.CWD); err != nil {
 		return nil, fmt.Errorf("session/delete: %w", err)
+	}
+	s.markClosed(acp.SessionID(sess.ID))
+	for _, v := range bound {
+		fresh, err := session.New(sess.CWD, "")
+		if err != nil {
+			continue // the view keeps its binding; nothing better available
+		}
+		if err := v.rebind(fresh); err != nil {
+			continue
+		}
+		v.notify(acp.AgentMessageChunk(v.liveID("rebind"), fmt.Sprintf(
+			"session %.8s was deleted — this conversation is now a fresh session", sess.ID)))
 	}
 	return acp.DeleteSessionResponse{}, nil
 }

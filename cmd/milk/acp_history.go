@@ -10,7 +10,10 @@
 // their history index, so a second replay **patches** the same messages
 // instead of duplicating them (upsert semantics). Live IDs are runID-suffixed
 // (see acpSession.liveID) so they can never collide with `hist-*` or with
-// pre-restart live IDs.
+// pre-restart live IDs. After a view rebinds to a different store session
+// (sessionmgmt.go, ADR-0051) the IDs are session-qualified (`hist-<sess8>-*`)
+// so a new binding's replay can never patch a message left by a previous
+// binding's; the view's first binding keeps the plain form (see replayMsgID).
 //
 // Bounds ("all *retained* history" gives the license): per-message text is
 // capped via internal/textbudget (head+tail inside the message), and the whole
@@ -62,7 +65,7 @@ func (as *acpSession) replayTurns(hist []session.Turn) {
 	n := len(hist)
 	if n > replayHeadTurns+replayTailTurns {
 		as.replayRange(hist, 0, replayHeadTurns)
-		as.emitHistoryMessage(histAgent, "hist-gap", fmt.Sprintf(
+		as.emitHistoryMessage(histAgent, as.replayGapID(), fmt.Sprintf(
 			"[… %d earlier turns omitted from replay — /export prints the full transcript …]",
 			n-replayHeadTurns-replayTailTurns))
 		as.replayRange(hist, n-replayTailTurns, n)
@@ -86,26 +89,58 @@ func (as *acpSession) replayTurn(hist []session.Turn, i int) {
 	t := hist[i]
 	switch t.Role {
 	case session.RoleUser:
-		as.emitHistoryMessage(histUser, histMsgID("u", i), boundReplayText(t.Content))
+		as.emitHistoryMessage(histUser, as.replayMsgID("u", i), boundReplayText(t.Content))
 	case session.RoleAssistant:
 		if t.Thinking != "" && as.showThinking.Load() {
-			as.emitHistoryMessage(histThought, histMsgID("think", i), boundReplayText(t.Thinking))
+			as.emitHistoryMessage(histThought, as.replayMsgID("think", i), boundReplayText(t.Thinking))
 		}
 		if t.Content != "" {
-			as.emitHistoryMessage(histAgent, histMsgID("a", i), boundReplayText(t.Content))
+			as.emitHistoryMessage(histAgent, as.replayMsgID("a", i), boundReplayText(t.Content))
 		}
 		as.replayToolCalls(hist, i)
 	}
 }
 
-// histMsgID is the deterministic replay ID for history index i — stable
-// across replays so a second replay patches rather than duplicates.
+// histMsgID is the plain deterministic replay ID for history index i — stable
+// across replays so a second replay patches rather than duplicates. This is
+// the first-binding form; use replayMsgID to replay through a view.
 func histMsgID(kind string, i int) acp.MessageID {
 	return acp.MessageID(fmt.Sprintf("hist-%s%d", kind, i))
 }
 
+// replayMsgID is the deterministic replay ID for history index i under the
+// view's current binding. The first binding keeps the plain hist-* form (so
+// already-replayed panes keep patching instead of duplicating on upgrade);
+// after a rebind (sessionmgmt.go, ADR-0051) IDs are session-qualified —
+// hist-<sess8>-u3 — so upserts can never patch a message left by a previous
+// binding's replay.
+func (as *acpSession) replayMsgID(kind string, i int) acp.MessageID {
+	if as.replayKey == "" {
+		return histMsgID(kind, i)
+	}
+	return acp.MessageID(fmt.Sprintf("hist-%s-%s%d", as.replayKey, kind, i))
+}
+
+// replayGapID is the gap-marker message ID under the current binding
+// (hist-gap on the first binding, hist-<sess8>-gap after a rebind).
+func (as *acpSession) replayGapID() acp.MessageID {
+	if as.replayKey == "" {
+		return "hist-gap"
+	}
+	return acp.MessageID("hist-" + as.replayKey + "-gap")
+}
+
+// replayToolID is the tool-call row ID for call j of history turn i under the
+// current binding (hist-t<i>-<j>, session-qualified after a rebind).
+func (as *acpSession) replayToolID(i, j int) acp.ToolCallID {
+	if as.replayKey == "" {
+		return acp.ToolCallID(fmt.Sprintf("hist-t%d-%d", i, j))
+	}
+	return acp.ToolCallID(fmt.Sprintf("hist-%s-t%d-%d", as.replayKey, i, j))
+}
+
 // replayToolCalls re-emits history turn i's tool calls as completed
-// tool_call_update rows (`hist-t<i>-<j>`), each rawOutput paired with the
+// tool_call_update rows (hist-t<i>-<j>), each rawOutput paired with the
 // result from the nearest following RoleToolResult turn (matched by
 // ToolCall.ID when the result carries one, positional otherwise).
 func (as *acpSession) replayToolCalls(hist []session.Turn, i int) {
@@ -130,7 +165,7 @@ func (as *acpSession) replayToolCalls(hist []session.Turn, i int) {
 		}
 		as.notify(acp.ToolCallUpdate{
 			SessionUpdate: "tool_call_update",
-			ToolCallID:    acp.ToolCallID(fmt.Sprintf("hist-t%d-%d", i, j)),
+			ToolCallID:    as.replayToolID(i, j),
 			Name:          tc.Name,
 			Title:         tc.Name,
 			Kind:          acp.ToolKindFor(tc.Name),

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -368,4 +369,293 @@ func TestACPServer_SessionDeleteCapabilityAdvertised(t *testing.T) {
 	if resp.Capabilities.Session == nil || resp.Capabilities.Session.Delete == nil {
 		t.Fatalf("session.delete capability not advertised: %+v", resp.Capabilities.Session)
 	}
+}
+
+// --- slash surface + view rebinding (plan D1/D4, ADR-0051) -------------
+
+// runACPSlash runs a slash command through the ACP command table, the way a
+// client prompt would.
+func runACPSlash(t *testing.T, as *acpSession, prompt string) string {
+	t.Helper()
+	handled, out, _ := as.runSlashCommand(&acpTurn{ctx: context.Background(), as: as}, prompt)
+	if !handled {
+		t.Fatalf("%q not handled as a slash command", prompt)
+	}
+	return out
+}
+
+func advertisedNames() map[string]bool {
+	out := map[string]bool{}
+	for _, c := range acpAdvertisedCommands() {
+		out[c.Name] = true
+	}
+	return out
+}
+
+func TestACPSessionSlash_AdvertisedSurface(t *testing.T) {
+	adv := advertisedNames()
+	for _, name := range []string{"sessions", "new", "clear", "resume", "drop"} {
+		if !adv[name] {
+			t.Errorf("/%s not advertised over ACP", name)
+		}
+	}
+	if adv["list"] {
+		t.Error("/list must stay hidden during its deprecation window")
+	}
+	if adv["help"] != true {
+		t.Error("/help disappeared from the advertised surface")
+	}
+}
+
+func TestACPSessionSlash_NewKeepsHandleOldBindingResumable(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	sess := seedSession(t, cwd, "alpha", time.Now(), userTurn("hello"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(sess.ID), CWD: cwd})
+	as := server.session(acp.SessionID(sess.ID))
+	if as == nil {
+		t.Fatal("session/resume did not register an acpSession")
+	}
+
+	out := runACPSlash(t, as, "/new gamma")
+	if !strings.Contains(out, "new session") {
+		t.Errorf("/new output = %q", out)
+	}
+	if string(as.id) != sess.ID {
+		t.Fatalf("wire handle changed: %q", as.id)
+	}
+	if as.sess.Name != "gamma" || as.sess.ID == sess.ID {
+		t.Fatalf("binding not swapped: %+v", as.sess)
+	}
+
+	// The old binding stays resumable inside the same view — /new deletes
+	// nothing.
+	out = runACPSlash(t, as, "/resume "+shortID(sess.ID))
+	if as.sess.ID != sess.ID || !strings.Contains(out, "resumed session") {
+		t.Fatalf("/resume back = %q, binding = %s", out, as.sess.ID)
+	}
+
+	// /clear is /new's alias; /list is the deprecated /sessions alias.
+	out = runACPSlash(t, as, "/clear")
+	if as.sess.ID == sess.ID || !strings.Contains(out, "new session") {
+		t.Fatalf("/clear = %q", out)
+	}
+	out = runACPSlash(t, as, "/list")
+	if !strings.Contains(out, "deprecated") || !strings.Contains(out, "use /sessions") {
+		t.Fatalf("/list alias = %q", out)
+	}
+	if strings.Contains(runACPSlash(t, as, "/sessions"), "deprecated") {
+		t.Error("/sessions must not carry the /list deprecation hint")
+	}
+}
+
+func TestACPSessionSlash_DropLandsFreshAndClosesSet(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	sess := seedSession(t, cwd, "", time.Now(), userTurn("hello"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(sess.ID), CWD: cwd})
+	as := server.session(acp.SessionID(sess.ID))
+
+	out := runACPSlash(t, as, "/drop")
+	if !strings.Contains(out, sess.ID) || !strings.Contains(out, "new session") {
+		t.Fatalf("/drop = %q, want the dropped id and the fresh session", out)
+	}
+	if as.sess.ID == sess.ID {
+		t.Fatal("/drop kept the deleted binding")
+	}
+	server.mu.Lock()
+	closed := server.closedIDs[acp.SessionID(sess.ID)]
+	server.mu.Unlock()
+	if !closed {
+		t.Error("dropped ID did not join the closed-set")
+	}
+	if _, err := session.Load(sess.ID); !os.IsNotExist(err) {
+		t.Errorf("dropped session file still exists (err=%v)", err)
+	}
+}
+
+func TestACPSessionResume_RetiredHandleRebinds(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	sess := seedSession(t, cwd, "", time.Now(), userTurn("hello"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(sess.ID), CWD: cwd})
+	as := server.session(acp.SessionID(sess.ID))
+
+	// The conversation /new's away — the handle survives, the binding moves.
+	runACPSlash(t, as, "/new")
+	if as.sess.ID == sess.ID {
+		t.Fatal("setup: /new did not move the binding")
+	}
+
+	// session/resume(X) with X a retired handle: the handle's view rebinds
+	// back to X ("the conversation that started at X") — never a second view.
+	result := acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(sess.ID), CWD: cwd})
+	resp := result.(resumeResult)
+	if resp.sessionID != acp.SessionID(sess.ID) {
+		t.Fatalf("resume returned %q, want %q", resp.sessionID, sess.ID)
+	}
+	if got := server.session(acp.SessionID(sess.ID)); got != as {
+		t.Fatalf("resume rebuilt the view (%p != %p)", got, as)
+	}
+	if as.sess.ID != sess.ID {
+		t.Fatalf("retired handle not rebound to its session: %s", as.sess.ID)
+	}
+}
+
+func TestACPSessionSlash_DropOtherLeavesBindingAlone(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	alpha := seedSession(t, cwd, "", time.Now(), userTurn("alpha-turn"))
+	beta := seedSession(t, cwd, "beta", time.Now().Add(-time.Hour), userTurn("beta-turn"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(alpha.ID), CWD: cwd})
+	asA := server.session(acp.SessionID(alpha.ID))
+
+	out := runACPSlash(t, asA, "/drop beta")
+	if !strings.Contains(out, beta.ID) {
+		t.Fatalf("/drop beta output hides what it deleted: %q", out)
+	}
+	if asA.sess.ID != alpha.ID {
+		t.Fatalf("/drop <other> moved the binding: %s", asA.sess.ID)
+	}
+	if _, err := session.Load(beta.ID); !os.IsNotExist(err) {
+		t.Errorf("dropped session file still exists (err=%v)", err)
+	}
+}
+
+func TestACPSessionResume_AliasDispatchAndClose(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	alpha := seedSession(t, cwd, "", time.Now(), userTurn("alpha-turn"))
+	beta := seedSession(t, cwd, "beta", time.Now().Add(-time.Hour), userTurn("beta-turn"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(alpha.ID), CWD: cwd})
+	asA := server.session(acp.SessionID(alpha.ID))
+	runACPSlash(t, asA, "/resume beta")
+
+	// session/resume(beta) finds the view already bound to beta and
+	// registers beta as an alias handle for it (rule: binding > handle).
+	result := acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(beta.ID), CWD: cwd})
+	if resp := result.(resumeResult); resp.sessionID != acp.SessionID(alpha.ID) {
+		t.Fatalf("alias resume returned %q, want the bound view %q", resp.sessionID, alpha.ID)
+	}
+	if got := server.session(acp.SessionID(beta.ID)); got != asA {
+		t.Fatalf("alias handle does not map to the bound view (%p != %p)", got, asA)
+	}
+
+	// session/close via the alias closes the whole view and its binding.
+	if _, err := acpRequestErr(t, server, "session/close", acp.CloseSessionRequest{SessionID: acp.SessionID(beta.ID)}); err != nil {
+		t.Fatalf("session/close via alias: %v", err)
+	}
+	if !asA.closed.Load() {
+		t.Error("close via alias did not close the view")
+	}
+	if server.session(acp.SessionID(alpha.ID)) != nil || server.session(acp.SessionID(beta.ID)) != nil {
+		t.Error("handles survived close")
+	}
+}
+
+func TestACPSessionSlash_ResumeRefusedForForeignBinding(t *testing.T) {
+	server, _ := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	alpha := seedSession(t, cwd, "", time.Now(), userTurn("alpha-turn"))
+	beta := seedSession(t, cwd, "beta", time.Now().Add(-time.Hour), userTurn("beta-turn"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(alpha.ID), CWD: cwd})
+	asA := server.session(acp.SessionID(alpha.ID))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(beta.ID), CWD: cwd})
+
+	out := runACPSlash(t, asA, "/resume beta")
+	if !strings.Contains(out, "open in another conversation") {
+		t.Fatalf("/resume onto a foreign binding = %q", out)
+	}
+	if asA.sess.ID != alpha.ID {
+		t.Fatalf("refused /resume still moved the binding: %s", asA.sess.ID)
+	}
+}
+
+func TestACPSessionDelete_RebindsSurvivingBoundView(t *testing.T) {
+	server, conn := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	w0 := seedSession(t, cwd, "", time.Now(), userTurn("w-turn"))
+	x := seedSession(t, cwd, "", time.Now().Add(-time.Hour), userTurn("x-turn"))
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{SessionID: acp.SessionID(w0.ID), CWD: cwd})
+	asW := server.session(acp.SessionID(w0.ID))
+	runACPSlash(t, asW, "/resume "+shortID(x.ID))
+	if asW.sess.ID != x.ID {
+		t.Fatalf("setup: binding = %s, want x %s", asW.sess.ID, x.ID)
+	}
+
+	// x is "merely the current binding" of asW (its handle is w0): delete
+	// drops x but keeps the view, rebound to a fresh session and told.
+	before := len(conn.sent())
+	if _, err := acpRequestErr(t, server, "session/delete", acp.DeleteSessionRequest{SessionID: acp.SessionID(x.ID)}); err != nil {
+		t.Fatalf("session/delete: %v", err)
+	}
+	if got := server.session(acp.SessionID(w0.ID)); got != asW {
+		t.Fatal("surviving view lost on delete of its binding")
+	}
+	if asW.sess.ID == x.ID || asW.sess.ID == "" {
+		t.Fatalf("view not rebound to a fresh session: %q", asW.sess.ID)
+	}
+	var said string
+	for _, u := range sentUpdatesSince(conn, before) {
+		if c, ok := u.(acp.ContentChunk); ok {
+			said += c.Content.Text
+		}
+	}
+	if !strings.Contains(said, "was deleted") {
+		t.Errorf("no delete notice on the surviving view: %q", said)
+	}
+}
+
+func TestACPReplayIDs_QualifiedAfterRebind(t *testing.T) {
+	server, conn := acpTestServer(t, "ok")
+	cwd := t.TempDir()
+	first := seedSession(t, cwd, "", time.Now(), userTurn("one"), assistantTurn("two"))
+	beta := seedSession(t, cwd, "beta", time.Now().Add(-time.Hour), userTurn("beta-turn"))
+
+	acpRequest(t, server, "session/resume", acp.ResumeSessionRequest{
+		SessionID: acp.SessionID(first.ID), CWD: cwd, ReplayFrom: json.RawMessage(`{"type":"start"}`),
+	})
+	as := server.session(acp.SessionID(first.ID))
+	if _, _, ok := upsertByID(sentUpdates(t, conn), "hist-u0"); !ok {
+		t.Fatal("first binding must replay with plain hist-* IDs")
+	}
+
+	// After a rebind the replay IDs are session-qualified — they can never
+	// patch a message left by the first binding's replay.
+	mark := len(conn.sent())
+	runACPSlash(t, as, "/resume beta")
+	qualified := acp.MessageID("hist-" + shortID(beta.ID) + "-u0")
+	updates := sentUpdates(t, conn)
+	if _, _, ok := upsertByID(updates[len(updates)-countSince(conn, mark):], qualified); !ok {
+		t.Fatalf("post-rebind replay lacks %q", qualified)
+	}
+
+	// Back on the first binding the plain IDs return — a re-replay patches
+	// what the client already holds instead of duplicating it.
+	mark = len(conn.sent())
+	runACPSlash(t, as, "/resume "+shortID(first.ID))
+	updates = sentUpdates(t, conn)
+	if _, _, ok := upsertByID(updates[len(updates)-countSince(conn, mark):], "hist-u0"); !ok {
+		t.Fatal("re-replaying the first binding must reuse plain hist-* IDs")
+	}
+}
+
+// countSince counts session/update notifications since a conn.sent() mark.
+func countSince(conn *fakeACPConn, mark int) int {
+	n := 0
+	for _, u := range sentUpdatesSince(conn, mark) {
+		_ = u
+		n++
+	}
+	return n
+}
+
+func sentUpdatesSince(conn *fakeACPConn, mark int) []acp.SessionUpdate {
+	var out []acp.SessionUpdate
+	for _, n := range conn.sent()[mark:] {
+		if wrapped, ok := n.Params.(acp.UpdateSessionNotification); ok {
+			out = append(out, wrapped.Update)
+		}
+	}
+	return out
 }
