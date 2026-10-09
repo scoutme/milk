@@ -43,12 +43,6 @@ type loopStreakTracker struct {
 
 const (
 	streakTriggerCount = 3
-	// streakMaxSpan bounds how much of the message tail cropLoopingMessages
-	// will delete when a streak is detected. Sized similarly to MiMo-Code's
-	// LOOP_STREAK_MAX_SPAN (64) — large enough to cover a real looping run,
-	// small enough that non-looping progress from earlier in a long turn
-	// survives the crop.
-	streakMaxSpan = 64
 )
 
 // recoveryNudgeMild is injected as a user message when a streak is first
@@ -197,7 +191,7 @@ type streakState struct {
 // crop+nudge+terminate independently) removes the risk of detectors drifting
 // out of sync — see the ngramRecoveryCount history in the caller for a case
 // where that already happened.
-func (a *Agent) loopRecoveryAction(ctx context.Context, msgs []Message, userMsgIdx int, recoveryCount, maxRecovery int, mildNudge, strongNudge, terminateReason, detectorName, reasoningText, sessionID string, totalRecoveryCount int) (newMsgs []Message, terminated, escalate bool) {
+func (a *Agent) loopRecoveryAction(ctx context.Context, msgs []Message, userMsgIdx int, recoveryCount, maxRecovery int, mildNudge, strongNudge, terminateReason, detectorName, reasoningText, sessionID string, totalRecoveryCount, cropGroups int) (newMsgs []Message, terminated, escalate bool) {
 	role := agentRoleForMetrics(a.escalationName)
 	// Escalating is strictly better than either continuing to nudge an
 	// already-struggling model or giving up on the turn entirely, so this
@@ -233,7 +227,7 @@ func (a *Agent) loopRecoveryAction(ctx context.Context, msgs []Message, userMsgI
 		msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
 		return msgs, true, false
 	}
-	cropped := cropLoopingMessages(msgs, userMsgIdx)
+	cropped := cropLoopingMessages(msgs, userMsgIdx, cropGroups)
 	if len(cropped) < len(msgs) {
 		a.logWarn(detectorName+": cropped looping messages",
 			append([]any{"model", a.model, "agent", role, "before", len(msgs), "after", len(cropped)}, sessionLogAttrs(sessionID)...)...)
@@ -255,41 +249,27 @@ func (a *Agent) loopRecoveryAction(ctx context.Context, msgs []Message, userMsgI
 	return msgs, false, false
 }
 
-// cropLoopingMessages removes consecutive assistant+tool-result message
-// groups from the tail of msgs that match the given step key, preserving the
-// user message that started the turn (at startIdx). Returns the cropped
-// slice.
+// cropLoopingMessages removes the last `groups` tool-calling iterations
+// (an assistant message with tool calls plus its tool results) from the tail
+// of msgs, never reaching the user message that started the turn (startIdx).
 //
-// The walk-back is bounded by streakMaxSpan: on a long-running turn, the
-// contiguous assistant/tool tail can span far more than the actual looping
-// streak (everything since the last recovery nudge), and deleting all of it
-// wipes real, non-looping progress — forcing the model to rediscover work it
-// already did instead of just breaking the loop. Sized similarly to
-// MiMo-Code's LOOP_STREAK_MAX_SPAN bound on the equivalent crop.
-func cropLoopingMessages(msgs []Message, startIdx int) []Message {
-	// Walk backwards from the end, removing assistant messages and their
-	// trailing tool results as long as they belong to the looping streak.
-	// We keep at least the system prompt (index 0), the original user
-	// message (startIdx), any pre-loop history, and no more than
-	// streakMaxSpan messages of the looping tail itself.
-	floor := max(startIdx+1, len(msgs)-streakMaxSpan)
+// Callers pass exactly the number of iterations the detector saw repeating
+// (a streak's trigger count), or 0 when the repetition is not in msgs at all
+// (a duplicate call is detected before it is appended; an n-gram loop is in a
+// stream that was cut). Cropping more than the loop itself deletes real
+// progress and forces the model to rediscover it: a single repeated `go build`
+// once wiped ~80K tokens of a turn's reads this way.
+func cropLoopingMessages(msgs []Message, startIdx, groups int) []Message {
 	cropTo := len(msgs)
-	for cropTo > floor {
-		// Check if the message at cropTo-1 is a tool result or assistant msg
-		// that's part of the loop.
-		prev := msgs[cropTo-1]
-		if prev.Role == "tool" {
-			cropTo--
-			continue
+	for ; groups > 0; groups-- {
+		i := cropTo
+		for i > startIdx+1 && msgs[i-1].Role == "tool" {
+			i--
 		}
-		if prev.Role == "assistant" && len(prev.ToolCalls) > 0 {
-			cropTo--
-			continue
+		if i <= startIdx+1 || msgs[i-1].Role != "assistant" || len(msgs[i-1].ToolCalls) == 0 {
+			break
 		}
-		break
-	}
-	if cropTo == len(msgs) {
-		return msgs // nothing was cropped
+		cropTo = i - 1
 	}
 	return msgs[:cropTo]
 }

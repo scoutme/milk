@@ -297,7 +297,7 @@ func runPrimaryWithSession(
 	// incorrect — it evaluated to true when both were empty (false || true), causing
 	// a blank assistant turn to be written to session history.
 	if res.Text != "" {
-		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, AgentName: agentName, Content: res.Text})
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, AgentName: agentName, Content: res.Text, Trail: res.Trail})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
 	if res.Text != "" && cbs.OnResponse != nil {
@@ -540,7 +540,7 @@ func runEscalationWithSession(
 	// copy is only used for context handoff back to the primary, where a blank entry
 	// is more harmful than a missing one.
 	if res.Text != "" {
-		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, AgentName: agentName, Content: res.Text})
+		sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentEscalation, AgentName: agentName, Content: res.Text, Trail: res.Trail})
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
 		if cbs.OnResponse != nil {
 			cbs.OnResponse(res.Text)

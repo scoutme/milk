@@ -1451,3 +1451,81 @@ func TestLoopDetectionCfg_ConvertsEveryField(t *testing.T) {
 		t.Errorf("LoopDetectionCfg() = %+v, want %+v", got, want)
 	}
 }
+
+func TestAgentToolResultMaxByteCount_DerivedFromWindow(t *testing.T) {
+	cfg := Config{DisableModelsDevLookup: true}
+	for _, tc := range []struct {
+		window int
+		want   int
+	}{
+		{0, 20000},          // unknown window: the conservative built-in
+		{8000, 4096},        // floor
+		{32000, 12800},      // ~10% of the window
+		{128000, 50 * 1024}, // capped at the standard 50 KB
+		{1000000, 50 * 1024},
+	} {
+		ac := AgentConfig{ContextWindowTokens: tc.window}
+		if got := cfg.AgentToolResultMaxByteCount(ac); got != tc.want {
+			t.Errorf("window %d: got %d, want %d", tc.window, got, tc.want)
+		}
+	}
+	// Explicit settings still win over the derived value.
+	ac := AgentConfig{ContextWindowTokens: 1000000, Limits: &AgentLimits{ToolResultMaxBytes: intPtr(8000)}}
+	if got := cfg.AgentToolResultMaxByteCount(ac); got != 8000 {
+		t.Errorf("explicit limit: got %d, want 8000", got)
+	}
+	cfg.LocalToolResultMaxBytes = 30000
+	if got := cfg.AgentToolResultMaxByteCount(AgentConfig{ContextWindowTokens: 1000000}); got != 30000 {
+		t.Errorf("global setting: got %d, want 30000", got)
+	}
+}
+
+func TestAgentCompactionTriggerTokens(t *testing.T) {
+	cfg := Config{DisableModelsDevLookup: true}
+	if got := cfg.AgentCompactionTriggerTokens(AgentConfig{}); got != 0 {
+		t.Errorf("unknown window must leave the token trigger off, got %d", got)
+	}
+	// 1M window, default 20K reserve: 0.85 * 980K.
+	if got, want := cfg.AgentCompactionTriggerTokens(AgentConfig{ContextWindowTokens: 1000000}), 833000; got != want {
+		t.Errorf("1M window: got %d, want %d", got, want)
+	}
+	// Small window: the reserve is clamped to a quarter of it.
+	if got, want := cfg.AgentCompactionTriggerTokens(AgentConfig{ContextWindowTokens: 8000}), 5100; got != want {
+		t.Errorf("8K window: got %d, want %d", got, want)
+	}
+	explicit := AgentConfig{ContextWindowTokens: 1000000, Limits: &AgentLimits{CompactionTriggerTokens: intPtr(300000)}}
+	if got := cfg.AgentCompactionTriggerTokens(explicit); got != 300000 {
+		t.Errorf("explicit: got %d", got)
+	}
+	explicit.Limits.CompactionTriggerTokens = intPtr(-1)
+	if got := cfg.AgentCompactionTriggerTokens(explicit); got != 0 {
+		t.Errorf("negative disables the token trigger, got %d", got)
+	}
+}
+
+func TestAgentCompactionTriggerTokens_UsesCatalogOutputLimit(t *testing.T) {
+	// mimo-v2.5-pro: 1048576 context, 131072 output in the embedded catalog —
+	// the reserve is capped at 32K, not the full 128K output limit.
+	cfg := Config{}
+	got := cfg.AgentCompactionTriggerTokens(AgentConfig{Model: "mimo-v2.5-pro"})
+	if want := (1048576 - 32000) * 85 / 100; got != want {
+		t.Errorf("got %d, want %d", got, want)
+	}
+}
+
+func TestAgentMaxPayloadBytes_FollowsWindow(t *testing.T) {
+	cfg := Config{DisableModelsDevLookup: true}
+	if got := cfg.AgentMaxPayloadBytes(AgentConfig{}); got != DefaultMaxPayloadBytes {
+		t.Errorf("no window: got %d", got)
+	}
+	if got := cfg.AgentMaxPayloadBytes(AgentConfig{ContextWindowTokens: 128000}); got != DefaultMaxPayloadBytes {
+		t.Errorf("128K window must keep the proxy-safe default, got %d", got)
+	}
+	if got := cfg.AgentMaxPayloadBytes(AgentConfig{ContextWindowTokens: 1000000}); got != 4000000 {
+		t.Errorf("1M window: got %d, want 4000000", got)
+	}
+	ac := AgentConfig{ContextWindowTokens: 1000000, Limits: &AgentLimits{MaxPayloadBytes: intPtr(500000)}}
+	if got := cfg.AgentMaxPayloadBytes(ac); got != 500000 {
+		t.Errorf("explicit must win, got %d", got)
+	}
+}

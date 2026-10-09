@@ -138,7 +138,7 @@ func TestCropLoopingMessages(t *testing.T) {
 		{Role: "assistant", Content: "again", ToolCalls: []toolCall{{Function: toolCallFunction{Name: "bash"}}}},
 		{Role: "tool", Content: "result2"},
 	}
-	cropped := cropLoopingMessages(msgs, 1)
+	cropped := cropLoopingMessages(msgs, 1, 2)
 	if len(cropped) != 2 {
 		t.Fatalf("expected 2 messages (system+user), got %d", len(cropped))
 	}
@@ -155,37 +155,37 @@ func TestCropLoopingMessages_PreservesNonLoopMessages(t *testing.T) {
 		{Role: "assistant", Content: "ok", ToolCalls: []toolCall{{Function: toolCallFunction{Name: "bash"}}}},
 		{Role: "tool", Content: "result"},
 	}
-	cropped := cropLoopingMessages(msgs, 1)
+	cropped := cropLoopingMessages(msgs, 1, 3)
 	if len(cropped) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(cropped))
 	}
 }
 
-func TestCropLoopingMessages_BoundedSpan(t *testing.T) {
-	// A long-running turn where every message since the original user prompt
-	// is a looping assistant/tool pair must NOT be cropped all the way back
-	// to the user message — only the last streakMaxSpan of them, so
-	// non-looping progress from earlier in the turn survives.
+func TestCropLoopingMessages_OnlyRemovesRequestedGroups(t *testing.T) {
+	// A long turn where every message since the user prompt is a tool-calling
+	// iteration: only the iterations the detector saw repeating are removed,
+	// earlier progress survives.
 	msgs := []Message{
 		{Role: "system", Content: "sys"},
 		{Role: "user", Content: "do something"},
 	}
-	const pairs = 60 // 120 messages, well beyond streakMaxSpan
-	for i := 0; i < pairs; i++ {
+	for i := 0; i < 30; i++ {
 		msgs = append(msgs,
-			Message{Role: "assistant", Content: "again", ToolCalls: []toolCall{{Function: toolCallFunction{Name: "bash"}}}},
+			Message{Role: "assistant", Content: "step", ToolCalls: []toolCall{{Function: toolCallFunction{Name: "bash"}}}},
 			Message{Role: "tool", Content: "result"},
+			Message{Role: "tool", Content: "result b"},
 		)
 	}
 	before := len(msgs)
-	cropped := cropLoopingMessages(msgs, 1)
-	removed := before - len(cropped)
-	if removed != streakMaxSpan {
-		t.Fatalf("expected exactly streakMaxSpan (%d) messages removed, removed %d (before=%d after=%d)",
-			streakMaxSpan, removed, before, len(cropped))
+	cropped := cropLoopingMessages(msgs, 1, streakTriggerCount)
+	if removed := before - len(cropped); removed != streakTriggerCount*3 {
+		t.Fatalf("want %d messages removed (%d iterations of 3), removed %d", streakTriggerCount*3, streakTriggerCount, removed)
 	}
-	if cropped[0].Role != "system" || cropped[1].Role != "user" {
-		t.Fatalf("expected system+user preserved at the head, got %s+%s", cropped[0].Role, cropped[1].Role)
+	if last := cropped[len(cropped)-1]; last.Role != "tool" {
+		t.Fatalf("crop must end on a complete iteration, ends on %s", last.Role)
+	}
+	if got := cropLoopingMessages(msgs, 1, 0); len(got) != before {
+		t.Fatalf("0 groups must not crop, removed %d", before-len(got))
 	}
 }
 

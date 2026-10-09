@@ -704,7 +704,7 @@ All keys go in `~/.milk/config.json`; sensible defaults apply when omitted. See 
 | `memory_reinjection_turns` | 20 | Re-inject memory/need instructions into escalation context after this many escalation turns. `0` disables. |
 | `memory_reinjection_bytes` | 40000 | Re-inject after this many bytes of escalation output. `0` disables. |
 | `local_memory_result_max_bytes` | 2048 | Max byte size of `get_memory`/`list_memory` results to the primary agent. `-1` = no limit. |
-| `local_tool_result_max_bytes` | 20000 | Max byte size of any other tool result (`bash`, `read_file`, …) to the primary agent, keeping both head and tail (the error/exit status at the end of shell/build/test output survives, not just the head). Unlike memory tool results, these had no cap at all before this setting — a single verbose shell/build/test output could otherwise balloon a turn's payload well before the payload-size trim loop ever ran. `0` = no limit. |
+| `local_tool_result_max_bytes` | derived (see below) | Max byte size of any other tool result (`bash`, `read_file`, …) to the primary agent, keeping both head and tail (the error/exit status at the end of shell/build/test output survives, not just the head). Unlike memory tool results, these had no cap at all before this setting — a single verbose shell/build/test output could otherwise balloon a turn's payload well before the payload-size trim loop ever ran. `0` = no limit. **Default when unset:** ~10% of the agent's context window (`context_window_tokens`, or the models.dev lookup) clamped to 4–50 KB — so a 1M-token model gets the standard 50 KB (the cap OpenCode, MiMo-Code and Claude Code use) while a 32K window gets ~12.8 KB; 20000 when the window is unknown. A capped result keeps its head and tail and the omission marker says how to read the rest: `read_file` offset/limit, or — for `bash`, `grep` and other tools — the path of a file under `~/.milk/tool-output/` holding the full output (private, removed after 7 days), which the model can `grep` or page with `read_file`. |
 | `local_memory_reinjection_turns` | 20 | Re-inject into the primary agent's context after this many local turns. `-1` disables. |
 | `local_memory_reinjection_bytes` | 40000 | Re-inject after this many bytes of primary agent output. `-1` disables. |
 | `local_max_tool_iterations` | 20 | Max tool-call/response cycles per turn before the turn is aborted. `-1` = unlimited. |
@@ -749,11 +749,13 @@ All fields optional; omitted → global value applies.
 | `percept_inject_max` | `percept_inject_max` | 25 | Max percepts injected per turn |
 | `percept_inject_max_bytes` | `percept_inject_max_bytes` | 2048 | Max total bytes of injected percept content |
 | `memory_result_max_bytes` | `local_memory_result_max_bytes` | 2048 | Max bytes of a memory tool result |
-| `tool_result_max_bytes` | `local_tool_result_max_bytes` | 20000 | Max bytes of any other tool result (`bash`, `read_file`, …) |
+| `tool_result_max_bytes` | `local_tool_result_max_bytes` | derived from window (4–50 KB; 20000 if unknown) | Max bytes of any other tool result (`bash`, `read_file`, …) |
 | `memory_reinjection_turns` | `memory_reinjection_turns`/`local_memory_reinjection_turns` | 20 | Re-inject after N turns |
 | `memory_reinjection_bytes` | `memory_reinjection_bytes`/`local_memory_reinjection_bytes` | 40000 | Re-inject after N bytes of output |
 | `percept_relevance_gate` | `percept_relevance_gate` | `true` | Keyword-intersection filter before injection |
 | `max_tool_iterations` | `local_max_tool_iterations` | 20 | Max tool-call cycles per turn (`-1` = unlimited) |
+| `compaction_trigger_tokens` | — | 85% of (window − output reserve) | Prompt size (tokens, as the provider reports it for the previous request) at which a running turn summarizes its own older history instead of letting a byte trim hard-drop it. The reserve is the models.dev output limit capped at 32K (20K if unlisted) and at a quarter of the window. Needs a known `context_window_tokens`; `-1` disables. |
+| `max_payload_bytes` | — | 900 KB, or ~4 bytes × window above that | Max HTTP request body; past it, history is trimmed per request (a safety net for reverse proxies — the token trigger above is the primary mechanism). |
 | `included_tools` | — | (all) | Whitelist of built-in tools for this agent |
 | `excluded_tools` | — | (none) | Built-in tools to remove for this agent (applied after `included_tools`) |
 | `tool_timeout_secs` | — | 120 | See [docs/tooling.md — Concurrent tool dispatch](tooling.md#concurrent-tool-dispatch) |

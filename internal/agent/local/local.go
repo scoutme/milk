@@ -256,6 +256,9 @@ type MemConfig struct {
 	ReinjectionBytes     int  // re-inject instruction after N bytes of local output; 0 = disabled
 	RelevanceGateEnabled bool // apply keyword relevance filter to get_memory results
 	MaxToolIterations    int  // max consecutive tool-call cycles per turn; 0 = use default (20)
+	// ToolOutputDir is where the full output of a result cut by
+	// ToolResultMaxBytes is saved so the model can read the rest; "" disables.
+	ToolOutputDir string
 }
 
 // agentRoleForMetrics returns "escalation" when the agent is configured as the
@@ -497,6 +500,17 @@ type Agent struct {
 	// construction (New/NewFromConfig), and <= 0 disables the compaction
 	// fallback (the per-request hard-drop trim keeps running unmodified).
 	payloadCompactionThreshold int
+	// compactTriggerTokens is the prompt size (tokens) at which a running turn
+	// compacts its own history, compared against the provider-reported prompt
+	// size of the previous request (lastPromptTokens). 0 disables the
+	// token-based trigger (the payload-size one still applies).
+	compactTriggerTokens int
+	// lastPromptTokens is the previous request's total prompt size as the
+	// provider reported it (cached tokens included).
+	lastPromptTokens int64
+	// turnTrail is the tool activity of the latest Run, captured when the
+	// tool loop exits (see TurnTrail).
+	turnTrail []session.TrailStep
 	// escalateAfterRecoveries is how many loop-recovery events, summed
 	// across all detector types within a single turn, force an escalation
 	// instead of continuing to nudge the same model. Mirrors
@@ -738,6 +752,14 @@ func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
 func (a *Agent) WithMaxPayloadBytes(n int) *Agent {
 	copy := *a
 	copy.maxPayloadBytes = n
+	return &copy
+}
+
+// WithCompactionTrigger sets the prompt size (tokens) at which a running
+// turn summarizes its own older history. See compactTriggerTokens.
+func (a *Agent) WithCompactionTrigger(tokens int) *Agent {
+	copy := *a
+	copy.compactTriggerTokens = tokens
 	return &copy
 }
 
@@ -1121,6 +1143,7 @@ const systemPromptShared = `Rules:
 - To find files by name or pattern (e.g. "*_test.go", "*.md", "Makefile") use find_files — never use grep for this. Use grep only to search inside file contents.
 - list_dir shows only the top level of a directory; never conclude that files or subdirectories are absent based solely on a list_dir result. To check whether files of a given type exist anywhere in the project, use find_files with the working directory as root.
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output. Do not narrate or summarize between individual tool calls in a multi-step sequence — keep issuing tool calls silently until the task is done.
+- Do not announce that you have "the full picture" or are "ready to start" and then keep investigating: either make the edit now, or make the next read. When a change is decided, put its content directly in the edit_file/write_file call — never draft the full code or file text in your reasoning first and write it a second time in the tool call. Never write a tool call as literal markup text or inside your reasoning; only a proper tool call runs.
 - Once you have no more tool calls left to make for the current task, you MUST end the turn with a short text response for the user. Never let a turn end with only tool calls and no reply — always close out with at least a brief summary of what you did or found.
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 **MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session. Only summarize a goal the user actually stated in words — never invent or infer one from an image/attachment alone. If the user's turn has no accompanying text stating a goal (e.g. an image-only paste), leave current_need unchanged.
@@ -1556,6 +1579,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 // (non-vision agent) for a possible agent_<name> tool-agent call to forward;
 // nil for RunBackgroundTask, which has no image-attachment path of its own.
 func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int, pendingImages []ContentPart) ([]Message, error) {
+	// msgs and userMsgIdx change during the loop (compaction, appends); the
+	// deferred capture reads their final values.
+	defer func() { a.turnTrail = TrailFromMessages(msgs, userMsgIdx) }()
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection
@@ -1573,6 +1599,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 	a.malformedToolCallTriggered = false
 	a.malformedToolCallRetries = 0
 
+	tokenCompactRetryAt := 0 // iteration index before which a failed token compaction is not retried
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
 		maxIter = defaultMaxToolIterations
@@ -1598,11 +1625,31 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		if a.maxPayloadBytes > 0 && messagesContentBytes(msgs) > a.maxPayloadBytes {
 			payloadTrimCountThisTurn++
 			if a.payloadCompactionThreshold > 0 && payloadTrimCountThisTurn >= a.payloadCompactionThreshold {
-				if compacted, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
-					msgs = compacted
+				if compacted, idx, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
+					msgs, userMsgIdx = compacted, idx
 					payloadTrimCountThisTurn = 0
+					a.lastPromptTokens = 0
 				}
 			}
+		}
+
+		// Token-based compaction: the provider told us how big the previous
+		// request really was, which is what the window is measured in —
+		// bytes only approximate it, and the byte trim hard-drops instead of
+		// summarizing. Compacting here, with headroom left for the next tool
+		// result, is what keeps a long turn from losing its early work to a
+		// blunt trim or an overflow error.
+		if a.compactTriggerTokens > 0 && a.lastPromptTokens >= int64(a.compactTriggerTokens) && i >= tokenCompactRetryAt {
+			if compacted, idx, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
+				a.logWarn("context at compaction threshold, summarized older history",
+					"model", a.model, "agent", a.logRole(),
+					"prompt_tokens", a.lastPromptTokens, "trigger_tokens", a.compactTriggerTokens)
+				msgs, userMsgIdx = compacted, idx
+				payloadTrimCountThisTurn = 0
+			} else {
+				tokenCompactRetryAt = i + tokenCompactBackoff
+			}
+			a.lastPromptTokens = 0
 		}
 
 		resp, fallbackRaw, toolCalls, emptyFallback, reasoningText, err := a.streamCompletion(ctx, msgs, tools, out, userMsgIdx)
@@ -1629,7 +1676,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, ngramRecoveryCount, ngramMaxRecovery,
 				recoveryNgramRemind, recoveryNgramReplan,
 				"the model was stuck in a reasoning repetition loop and could not self-recover after multiple attempts",
-				"reasoning n-gram", reasoningText, sess.ID, totalRecoveryCount)
+				"reasoning n-gram", reasoningText, sess.ID, totalRecoveryCount, 0)
 			if escalate {
 				return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: reasoning n-gram)", totalRecoveryCount)}
 			}
@@ -1797,7 +1844,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 			msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, duplicateRecoveryCount, duplicateToolMaxRecovery,
 				recoveryDuplicateToolMild, recoveryDuplicateToolStrong,
 				"the model kept repeating the same tool call and could not self-recover after multiple attempts",
-				"duplicate tool call", reasoningText, sess.ID, totalRecoveryCount)
+				"duplicate tool call", reasoningText, sess.ID, totalRecoveryCount, 0)
 			if escalate {
 				return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: duplicate tool call)", totalRecoveryCount)}
 			}
@@ -1832,6 +1879,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// This prevents re-reads after edits from being flagged as duplicates
 		// (the read-edit-verify pattern is legitimate and expected).
 		invalidateReadsForEditedFiles(executedKeys, toolCalls)
+		resetExecutedKeysAfterMutation(executedKeys, toolCalls)
 
 		// Loop streak detection: reasoning models (mimo-v2.5, DeepSeek) can
 		// get stuck producing near-identical reasoning that drives
@@ -1847,7 +1895,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, streak.recoveryCount, 2,
 					recoveryNudgeMild, recoveryNudgeStrong,
 					"the model was stuck repeating the same reasoning/tool-call pattern and could not self-recover after multiple attempts",
-					"loop streak", reasoningText, sess.ID, totalRecoveryCount)
+					"loop streak", reasoningText, sess.ID, totalRecoveryCount, streakTriggerCount)
 				if escalate {
 					return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: loop streak)", totalRecoveryCount)}
 				}
@@ -1885,7 +1933,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				msgs, terminated, escalate = a.loopRecoveryAction(ctx, msgs, userMsgIdx, textLoopRecoveryCount, textLoopMaxRecovery,
 					recoveryNudgeMild, recoveryNudgeStrong,
 					"the model kept repeating identical output text and could not self-recover after multiple attempts",
-					"text loop", reasoningText, sess.ID, totalRecoveryCount)
+					"text loop", reasoningText, sess.ID, totalRecoveryCount, textLoopTriggerCount)
 				if escalate {
 					return msgs, &EscalationSignal{Reason: fmt.Sprintf("primary model required %d loop recoveries in a single turn (last: text loop)", totalRecoveryCount)}
 				}
@@ -2306,6 +2354,25 @@ const sessionContextResultMaxBytes = 8000 // ~2000 tokens, enough for recent con
 // that the total content size stays within maxBytes.
 // When maxBytes is 0 the result is returned unchanged.
 func capToolResult(result string, maxBytes int) string {
+	return capToolResultHint(result, maxBytes, "")
+}
+
+// toolResultCutHint says how to get at what a capped result omitted — a cut
+// the model cannot recover from reads as "that is all there is" and sends it
+// re-running the same command.
+func toolResultCutHint(tool string) string {
+	switch tool {
+	case "read_file":
+		return "use read_file with offset/limit to read the omitted lines"
+	case "bash":
+		return "re-run with head/tail/grep/sed -n to see the omitted part"
+	}
+	return ""
+}
+
+// capToolResultHint is capToolResult with a recovery hint appended to the
+// omission marker.
+func capToolResultHint(result string, maxBytes int, hint string) string {
 	if maxBytes <= 0 {
 		return result
 	}
@@ -2316,7 +2383,7 @@ func capToolResult(result string, maxBytes int) string {
 	if len(r.Output) <= maxBytes {
 		return result
 	}
-	r.Output = truncateHeadAndTail(r.Output, maxBytes)
+	r.Output = truncateHeadAndTailHint(r.Output, maxBytes, hint)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return result
@@ -2330,10 +2397,22 @@ func capToolResult(result string, maxBytes int) string {
 // error, a failing assertion, an exit status) at the end — a head-only
 // truncation silently drops exactly that.
 func truncateHeadAndTail(s string, maxBytes int) string {
+	return truncateHeadAndTailHint(s, maxBytes, "")
+}
+
+// truncateHeadAndTailHint is truncateHeadAndTail with an optional recovery
+// hint inside the omission marker. The hint is dropped when it would eat a
+// meaningful share of a small budget.
+func truncateHeadAndTailHint(s string, maxBytes int, hint string) string {
 	if len(s) <= maxBytes {
 		return s
 	}
 	marker := fmt.Sprintf("\n... (%d bytes omitted) ...\n", len(s)-maxBytes)
+	if hint != "" {
+		if withHint := fmt.Sprintf("\n... (%d bytes omitted — %s) ...\n", len(s)-maxBytes, hint); len(withHint) <= maxBytes/8 {
+			marker = withHint
+		}
+	}
 	budget := maxBytes - len(marker)
 	if budget <= 0 {
 		return runeSafeHead(s, max(maxBytes, 0))
@@ -2714,7 +2793,11 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		// Every other tool (bash, read_file, …) has no cap of its own — a
 		// single verbose shell/build/test output can otherwise dominate a
 		// turn's payload well before the payload-size trim loop ever runs.
-		result = capToolResult(result, a.memCfg.ToolResultMaxBytes)
+		hint := toolResultCutHint(tc.Function.Name)
+		if path := spillToolOutput(a.memCfg.ToolOutputDir, tc.Function.Name, tc.ID, result, a.memCfg.ToolResultMaxBytes); path != "" {
+			hint = spillCutHint(path)
+		}
+		result = capToolResultHint(result, a.memCfg.ToolResultMaxBytes, hint)
 	}
 	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 }
@@ -2836,6 +2919,34 @@ func summarizeToolTrailWithHeader(msgs []Message, resp, header string) string {
 		b.WriteString(resp)
 	}
 	return b.String()
+}
+
+// resetExecutedKeysAfterMutation forgets every earlier call once a batch has
+// changed files, keeping only that batch's own keys. A repeat is evidence of a
+// stuck loop only while nothing changed in between: a verification command
+// (go build, go test, git diff, cat) re-run after an edit is the normal
+// edit-verify cycle, and flagging it used to trigger loop recovery mid-turn.
+// The batch's own keys stay so that re-issuing the same edit immediately is
+// still caught.
+func resetExecutedKeysAfterMutation(executedKeys map[string]bool, toolCalls []toolCall) {
+	mutated := false
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "edit_file", "write_file", "delete_file", "move_file", "apply_patch":
+			mutated = true
+		}
+	}
+	if !mutated {
+		return
+	}
+	clear(executedKeys)
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "read_file", "list_dir", "grep", "glob", "current_need":
+			continue
+		}
+		executedKeys[tc.Function.Name+"\x00"+tc.Function.Arguments] = true
+	}
 }
 
 // invalidateReadsForEditedFiles clears executedKeys entries for read_file
@@ -3022,9 +3133,9 @@ func messagesContentBytes(msgs []Message) int {
 // Summarize itself fails — a failed compaction attempt must never block the
 // turn; the per-request hard-drop trim remains the fallback safety net
 // either way.
-func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session, msgs []Message, userMsgIdx int) ([]Message, bool) {
+func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session, msgs []Message, userMsgIdx int) ([]Message, int, bool) {
 	if userMsgIdx < 0 || userMsgIdx >= len(msgs) || msgs[userMsgIdx].Role != "user" {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 	var start, end int
 	if priorUserIdxs := priorUserIndices(msgs, userMsgIdx); len(priorUserIdxs) > 0 {
@@ -3040,7 +3151,7 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		// moment-to-moment.
 		start = userMsgIdx + 1
 		if start >= len(msgs) {
-			return msgs, false
+			return msgs, userMsgIdx, false
 		}
 		end = start + (len(msgs)-start)/2
 		for end < len(msgs) && msgs[end].Role == "tool" {
@@ -3048,23 +3159,17 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		}
 	}
 	if end-start < payloadCompactionMinSpan {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 
-	var b strings.Builder
-	for _, m := range msgs[start:end] {
-		if m.Content == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "[%s]: %s\n", m.Role, m.Content)
-	}
-	if b.Len() == 0 {
-		return msgs, false
+	input := RenderForSummary(msgs[start:end])
+	if input == "" {
+		return msgs, userMsgIdx, false
 	}
 
-	summary, usage, err := a.Summarize(ctx, b.String())
+	summary, usage, err := a.Summarize(ctx, input)
 	if err != nil || summary == "" {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 	sess.AddTokens(a.model, a.logRole()+":compaction", usage.Prompt, usage.Completion)
 	role := agentRoleForMetrics(a.escalationName)
@@ -3075,12 +3180,18 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		attribute.String("agent", role),
 	)
 
-	summaryMsg := Message{
-		Role:    "system",
-		Content: "[Summary of earlier conversation this turn, compacted to save context]\n" + summary,
+	content := "[Summary of earlier conversation this turn, compacted to save context]\n" + summary
+	if touched := FilesTouched(msgs[start:end], 8); touched != "" {
+		content += "\n\n" + touched
 	}
-	compacted := append(append([]Message{}, msgs[:start]...), summaryMsg)
-	return append(compacted, msgs[end:]...), true
+	compacted := append(append([]Message{}, msgs[:start]...), Message{Role: "system", Content: content})
+	compacted = append(compacted, msgs[end:]...)
+	// A span that sat before the turn's user message shrinks the indices
+	// after it; callers hold userMsgIdx across later iterations.
+	if end <= userMsgIdx {
+		userMsgIdx -= (end - start) - 1
+	}
+	return compacted, userMsgIdx, true
 }
 
 // imageRetryAttempts caps how many times streamCompletion retries a request
@@ -3270,6 +3381,9 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	if err != nil {
 		return "", "", nil, false, "", 0, err
 	}
+	if promptTokens > 0 {
+		a.lastPromptTokens = promptTokens
+	}
 	// det.RawBlock() == "" already implies there is no usable block content
 	// regardless of whether the detector is still formally InBlock() — a
 	// block that opened (e.g. saw "<tool_call>") and never received any body
@@ -3384,6 +3498,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	return text, fallbackRaw, tcs, emptyFallback, reasoningText, imageTokens, err
 }
 
+// tokenCompactBackoff is how many iterations to wait after a token-triggered
+// compaction found nothing worth summarizing (or its Summarize call failed)
+// before trying again.
+const tokenCompactBackoff = 2
+
 // maxMalformedToolCallRetries bounds how often one turn re-asks after a tool
 // call the server failed to deliver; past it the turn ends as before (the
 // leaked markup is swapped for the tool trail — see stripUnparsedToolMarkup).
@@ -3391,12 +3510,19 @@ const maxMalformedToolCallRetries = 2
 
 // reasoningEndsMidMarkup reports whether reasoning stops inside an unclosed
 // inline code span (an odd number of backticks on its last line, which is not
-// a ``` fence) or on a dangling '<' — the signature of the server cutting the
-// stream as the model started writing tool-call markup.
+// a ``` fence), on a dangling '<', or on a closing tool-call tag — the
+// signature of the server cutting the stream as the model wrote (or finished
+// writing) a tool call as text inside its reasoning. The closing-tag case is a
+// whole call that was never executed; observed with a long edit_file call.
 func reasoningEndsMidMarkup(reasoning string) bool {
 	r := strings.TrimRight(reasoning, " \t\r\n")
 	if r == "" {
 		return false
+	}
+	for _, closer := range []string{"</tool_call>", "</function>", "</parameter>"} {
+		if strings.HasSuffix(r, closer) {
+			return true
+		}
 	}
 	if strings.HasSuffix(r, "<") {
 		return true

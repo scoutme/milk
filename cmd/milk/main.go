@@ -931,8 +931,10 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 // omitted)"). Only the current agent's own turns and user turns targeted at it
 // are included verbatim.
 func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent, selfName string, skipOtherAgents bool) []local.Message {
+	turns := sess.History[start:]
+	replays := ownTrailReplays(turns, selfAgent, selfName)
 	if !skipOtherAgents {
-		return buildAgentHistoryFull(sess.History[start:], selfAgent)
+		return buildAgentHistoryFull(turns, selfAgent, replays)
 	}
 
 	// Lazy mode: walk through turns, emitting own turns immediately and
@@ -940,7 +942,7 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 	var msgs []local.Message
 	var skipped int                   // count of contiguous omitted turns
 	var skippedAgents map[string]bool // agent names seen in the current skip block
-	for _, t := range sess.History[start:] {
+	for i, t := range turns {
 		own := turnIsForAgent(t, selfAgent)
 		if own {
 			// Flush any pending skip block before emitting an own turn.
@@ -953,7 +955,7 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 			if t.Role == session.RoleAssistant && t.Content == "" {
 				continue
 			}
-			msgs = append(msgs, formatOwnTurn(t, selfAgent))
+			msgs = append(msgs, formatOwnTurn(t, selfAgent, replays[i])...)
 		} else {
 			skipped++
 			if skippedAgents == nil {
@@ -969,10 +971,24 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 	return msgs
 }
 
+// ownTrailReplays decides how each of the agent's earlier tool-using turns is
+// replayed (see local.ReplayTrails). Only turns this very agent made carry a
+// replayable trail: another agent's tool calls would be nonsense to a model
+// that never issued them.
+func ownTrailReplays(turns []session.Turn, selfAgent session.Agent, selfName string) []local.TrailReplay {
+	trails := make([][]session.TrailStep, len(turns))
+	for i, t := range turns {
+		if t.Role == session.RoleAssistant && t.Agent == selfAgent && (t.AgentName == "" || t.AgentName == selfName) {
+			trails[i] = t.Trail
+		}
+	}
+	return local.ReplayTrails(trails)
+}
+
 // buildAgentHistoryFull includes all turns with labels (non-lazy mode).
-func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent) []local.Message {
+func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, replays []local.TrailReplay) []local.Message {
 	var msgs []local.Message
-	for _, t := range turns {
+	for i, t := range turns {
 		switch t.Role {
 		case session.RoleUser:
 			agentName := t.AgentName
@@ -986,7 +1002,7 @@ func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent) []loca
 			}
 			speaker := string(t.Agent)
 			if t.Agent == selfAgent {
-				msgs = append(msgs, local.Message{Role: "assistant", Speaker: speaker, Content: t.Content})
+				msgs = append(msgs, formatOwnTurn(t, selfAgent, replays[i])...)
 			} else {
 				name := t.AgentName
 				if name == "" {
@@ -1011,21 +1027,24 @@ func turnIsForAgent(t session.Turn, agent session.Agent) bool {
 	return t.Agent == agent
 }
 
-// formatOwnTurn formats a turn that belongs to the current agent.
-func formatOwnTurn(t session.Turn, selfAgent session.Agent) local.Message {
+// formatOwnTurn formats a turn that belongs to the current agent. An assistant
+// turn with a replayed tool trail yields the trail's tool-call and
+// tool-result messages followed by the turn's final text.
+func formatOwnTurn(t session.Turn, selfAgent session.Agent, replay local.TrailReplay) []local.Message {
 	switch t.Role {
 	case session.RoleUser:
 		agentName := t.AgentName
 		if agentName == "" {
 			agentName = string(t.Agent)
 		}
-		return local.Message{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content}
+		return []local.Message{{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content}}
 	case session.RoleAssistant:
-		return local.Message{Role: "assistant", Speaker: string(t.Agent), Content: t.Content}
+		msgs := append([]local.Message(nil), replay.Messages...)
+		return append(msgs, local.Message{Role: "assistant", Speaker: string(t.Agent), Content: t.Content + replay.Note})
 	case session.RoleToolResult:
-		return local.Message{Role: "tool", Speaker: string(t.Agent), Content: t.Content}
+		return []local.Message{{Role: "tool", Speaker: string(t.Agent), Content: t.Content}}
 	default:
-		return local.Message{Role: "system", Content: t.Content}
+		return []local.Message{{Role: "system", Content: t.Content}}
 	}
 }
 
@@ -1614,6 +1633,9 @@ func messagesCharCount(msgs []local.Message) int {
 	n := 0
 	for _, m := range msgs {
 		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.Function.Arguments)
+		}
 	}
 	return n
 }
@@ -1668,28 +1690,23 @@ func trimLocalMessagesWithCompaction(ctx context.Context, agent *local.Agent, se
 		return kept, true
 	}
 
-	var b strings.Builder
-	for _, m := range dropped {
-		if m.Content == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "[%s]: %s\n", m.Role, m.Content)
-	}
-	if b.Len() == 0 {
+	input := local.RenderForSummary(dropped)
+	if input == "" {
 		return kept, true
 	}
 
-	summary, usage, err := agent.Summarize(ctx, b.String())
+	summary, usage, err := agent.Summarize(ctx, input)
 	if err != nil || summary == "" {
 		return kept, true
 	}
 	if sess != nil {
 		sess.AddTokens(agent.ModelName(), agent.LogRole()+":compaction", usage.Prompt, usage.Completion)
 	}
-	summaryMsg := local.Message{
-		Role:    "system",
-		Content: "[Summary of earlier conversation, compacted to save context]\n" + summary,
+	content := "[Summary of earlier conversation, compacted to save context]\n" + summary
+	if touched := local.FilesTouched(dropped, 8); touched != "" {
+		content += "\n\n" + touched
 	}
+	summaryMsg := local.Message{Role: "system", Content: content}
 	return append([]local.Message{summaryMsg}, kept...), true
 }
 

@@ -75,27 +75,60 @@ var (
 // provider prefix), so matching is case-insensitive against every
 // provider's model IDs rather than a single namespaced key.
 func Lookup(modelID string) (int, bool) {
-	if modelID == "" {
+	l, ok := LookupLimit(modelID)
+	if !ok || l.Context <= 0 {
 		return 0, false
 	}
+	return l.Context, true
+}
+
+// LookupLimit is Lookup returning both limits. When several providers list
+// the same model ID with different numbers, the value most providers agree
+// on wins (the smaller on a tie) — deterministic, where map iteration order
+// was not. Output is 0 when no entry reports one.
+func LookupLimit(modelID string) (Limit, bool) {
+	if modelID == "" {
+		return Limit{}, false
+	}
 	want := strings.ToLower(modelID)
-	if window, ok := lookupIn(embedded, want); ok {
-		return window, true
+	if l, ok := lookupIn(embedded, want); ok {
+		return l, true
 	}
 	mu.RLock()
 	defer mu.RUnlock()
 	return lookupIn(cache, want)
 }
 
-func lookupIn(c Catalog, want string) (int, bool) {
+func lookupIn(c Catalog, want string) (Limit, bool) {
+	ctx, out := map[int]int{}, map[int]int{}
 	for _, p := range c {
 		for id, m := range p.Models {
-			if strings.ToLower(id) == want && m.Limit.Context > 0 {
-				return m.Limit.Context, true
+			if strings.ToLower(id) != want || m.Limit.Context <= 0 {
+				continue
+			}
+			ctx[m.Limit.Context]++
+			if m.Limit.Output > 0 {
+				out[m.Limit.Output]++
 			}
 		}
 	}
-	return 0, false
+	if len(ctx) == 0 {
+		return Limit{}, false
+	}
+	return Limit{Context: mostCommon(ctx), Output: mostCommon(out)}, true
+}
+
+// mostCommon returns the value listed by the most providers, the smaller one
+// on a tie, 0 for an empty set. A single provider capping a model below what
+// the rest serve (a host's own limit) must not set the number for everyone.
+func mostCommon(counts map[int]int) int {
+	best, bestN := 0, 0
+	for v, n := range counts {
+		if n > bestN || (n == bestN && v < best) {
+			best, bestN = v, n
+		}
+	}
+	return best
 }
 
 // EnsureLoaded loads the on-disk cache at cachePath synchronously (cheap —

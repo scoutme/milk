@@ -14,11 +14,15 @@ import (
 // acpCommand is one slash command available over ACP. The table is the single
 // source of truth: what session/prompt executes and what
 // available_commands_update advertises are both derived from it, so a command
-// can never be advertised without a handler.
+// can never be advertised without a handler. hidden rows are executable but
+// never advertised (the /list deprecation window: the alias must keep working
+// while the rename settles).
 type acpCommand struct {
 	name string // with leading "/", matching the TUI's slashCommands
 	desc string
 	hint string
+	// hidden: run, but keep out of /help and available_commands_update.
+	hidden bool
 	// run returns output text for the client and, optionally, a prompt to
 	// dispatch as an ordinary turn afterwards (/escalate <msg>, /primary <msg>).
 	run func(as *acpSession, rest string) (output, dispatch string)
@@ -50,32 +54,42 @@ func acpCommandTable() []acpCommand {
 	}
 	return []acpCommand{
 		{name: cmdWorkflow, desc: "run a workflow, or resume, inspect or clear the saved one", hint: "<name> <task> [--<role> <agent>] | resume | status | clear", runTurn: acpWorkflowCmd},
-		{cmdEscalate, "pin all turns to the escalation agent, or force one turn with a message", "[fresh] [<message>]", viaTUI(cmdEscalate), nil},
-		{cmdPrimary, "pin all turns to the primary agent, or force one turn with a message", "[<message>]", viaTUI(cmdPrimary), nil},
-		{cmdLearn, "store a persistent memory", "<fact>", viaTUI(cmdLearn), nil},
-		{cmdMemory, "list stored percepts (session and global)", "[global|session|<pattern>]", viaTUI(cmdMemory), nil},
-		{cmdUsage, "show token usage by model and role", "", viaTUI(cmdUsage), nil},
-		{cmdMetrics, "show recent metric values", "", viaTUI(cmdMetrics), nil},
-		{cmdExport, "print the session transcript (or another session's), or write it to a file", "[json|<path>|session <id>]", viaTUI(cmdExport), nil},
-		{"/list", "list sessions for the current directory", "", viaTUI("/list"), nil},
-		{cmdTasks, "list the session's and global tasks", "", acpTasks, nil},
-		{cmdTask, "mark a task done", "done <id>", acpTask, nil},
-		{cmdBg, "list, start or stop background agents", "[list|start <task>|stop <id>]", acpBg, nil},
-		{cmdSkipPerms, "approve every tool call without asking, or go back to asking", "[on|off]", acpSkipPerms, nil},
-		{cmdThink, "show or hide model reasoning in this session", "[on|off]", acpThink, nil},
-		{cmdConfig, "print the config, run the setup wizard, or open the config file", "[show|init|open]", acpConfig, nil},
-		{cmdInit, "run the setup wizard (alias for /config init)", "", acpInit, nil},
+		{name: cmdSessions, desc: "list stored sessions for this directory (* = current)", hint: "[all]", run: acpSessionsCmd},
+		{name: cmdNew, desc: "start a fresh session (the current one stays resumable)", hint: "[name]", run: acpNewCmd},
+		{name: cmdClear, desc: "alias for /new — start a fresh session", hint: "[name]", run: acpNewCmd},
+		{name: cmdResume, desc: "switch this conversation to a stored session", hint: sessionRefHint, run: acpResumeCmd},
+		{name: cmdDrop, desc: "delete the current session, or the referenced one", hint: "[" + sessionRefHint + "]", run: acpDropCmd},
+		{name: cmdListLegacy, desc: "deprecated alias for /sessions", hidden: true, run: func(as *acpSession, rest string) (string, string) {
+			out, dispatch := acpSessionsCmd(as, rest)
+			return milkTag() + " /list is deprecated — use /sessions\n\n" + out, dispatch
+		}},
+		{name: cmdEscalate, desc: "pin all turns to the escalation agent, or force one turn with a message", hint: "[fresh] [<message>]", run: viaTUI(cmdEscalate)},
+		{name: cmdPrimary, desc: "pin all turns to the primary agent, or force one turn with a message", hint: "[<message>]", run: viaTUI(cmdPrimary)},
+		{name: cmdLearn, desc: "store a persistent memory", hint: "<fact>", run: viaTUI(cmdLearn)},
+		{name: cmdMemory, desc: "list stored percepts (session and global)", hint: "[global|session|<pattern>]", run: viaTUI(cmdMemory)},
+		{name: cmdUsage, desc: "show token usage by model and role", hint: "", run: viaTUI(cmdUsage)},
+		{name: cmdMetrics, desc: "show recent metric values", hint: "", run: viaTUI(cmdMetrics)},
+		{name: cmdExport, desc: "print the session transcript (or another session's), or write it to a file", hint: "[json|<path>|session <id>]", run: viaTUI(cmdExport)},
+		{name: cmdTasks, desc: "list the session's and global tasks", hint: "", run: acpTasks},
+		{name: cmdTask, desc: "mark a task done", hint: "done <id>", run: acpTask},
+		{name: cmdBg, desc: "list, start or stop background agents", hint: "[list|start <task>|stop <id>]", run: acpBg},
+		{name: cmdSkipPerms, desc: "approve every tool call without asking, or go back to asking", hint: "[on|off]", run: acpSkipPerms},
+		{name: cmdThink, desc: "show or hide model reasoning in this session", hint: "[on|off]", run: acpThink},
+		{name: cmdConfig, desc: "print the config, run the setup wizard, or open the config file", hint: "[show|init|open]", run: acpConfig},
+		{name: cmdInit, desc: "run the setup wizard (alias for /config init)", hint: "", run: acpInit},
 		{name: cmdSetup, desc: "configure Telegram remote oversight (status, enable, disable, or the setup wizard)", hint: "telegram [on|off|status]", run: acpSetup},
-		{cmdAgent, "list configured agents", "[list]", acpAgent, nil},
+		{name: cmdAgent, desc: "list configured agents", hint: "[list]", run: acpAgent},
 		{name: cmdUpdate, desc: "check for milk updates, install one, or skip a release", hint: "check|status|install|skip", runTurn: acpUpdate},
-		{"/help", "list the commands available in this session", "", acpHelp, nil},
+		{name: "/help", desc: "list the commands available in this session", hint: "", run: acpHelp},
 	}
 }
 
 func acpAdvertisedCommands() []acp.AvailableCommand {
-	table := acpCommandTable()
-	out := make([]acp.AvailableCommand, 0, len(table))
-	for _, c := range table {
+	out := make([]acp.AvailableCommand, 0, len(acpCommandTable()))
+	for _, c := range acpCommandTable() {
+		if c.hidden {
+			continue
+		}
 		out = append(out, acp.Command(c.name, c.desc, c.hint))
 	}
 	return out
@@ -109,6 +123,9 @@ func acpHelp(*acpSession, string) (string, string) {
 	var b strings.Builder
 	b.WriteString("Commands available over ACP:\n")
 	for _, c := range acpCommandTable() {
+		if c.hidden {
+			continue
+		}
 		sig := c.name
 		if c.hint != "" {
 			sig += " " + c.hint

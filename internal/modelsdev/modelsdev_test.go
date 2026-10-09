@@ -171,3 +171,27 @@ func setAPIURLForTest(url string) {
 	defer apiURLMu.Unlock()
 	apiURL = url
 }
+
+func TestLookupLimit_DeterministicMajorityAcrossProviders(t *testing.T) {
+	resetState(t)
+	embedded = Catalog{
+		"a": Provider{Models: map[string]Model{"shared": {Limit: Limit{Context: 1048576, Output: 131072}}}},
+		"b": Provider{Models: map[string]Model{"Shared": {Limit: Limit{Context: 262144, Output: 16384}}}},
+		"c": Provider{Models: map[string]Model{"shared": {Limit: Limit{Context: 1048576}}}},
+		"d": Provider{Models: map[string]Model{"shared": {Limit: Limit{Context: 1048576, Output: 131072}}}},
+	}
+	for i := 0; i < 20; i++ {
+		l, ok := LookupLimit("SHARED")
+		if !ok || l.Context != 1048576 || l.Output != 131072 {
+			t.Fatalf("LookupLimit() = %+v, %v; want the majority 1048576/131072", l, ok)
+		}
+	}
+	// A tie resolves to the smaller value.
+	embedded = Catalog{
+		"a": Provider{Models: map[string]Model{"m": {Limit: Limit{Context: 1048576}}}},
+		"b": Provider{Models: map[string]Model{"m": {Limit: Limit{Context: 262144}}}},
+	}
+	if l, _ := LookupLimit("m"); l.Context != 262144 {
+		t.Fatalf("tie must pick the smaller window, got %+v", l)
+	}
+}

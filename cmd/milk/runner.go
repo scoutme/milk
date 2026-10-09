@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +95,9 @@ type TurnResult struct {
 	// inside internal/agent/local. The dispatcher (dispatch.go) is
 	// responsible for actually launching it.
 	WorkflowStart *local.WorkflowStartSignal
+	// Trail is the turn's tool activity (local-provider agents), persisted
+	// with the assistant turn so the agent's next turns can replay it.
+	Trail []session.TrailStep
 }
 
 // TurnCallbacks carries the tag-intercept callbacks wired per-turn by the dispatcher.
@@ -200,8 +204,10 @@ func (r *localRunner) Execute(
 		ReinjectionBytes:     cfg.AgentMemoryReinjectionByteThreshold(ac, role == RolePrimary),
 		RelevanceGateEnabled: cfg.AgentPerceptRelevanceGateEnabled(ac),
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
+		ToolOutputDir:        toolOutputDir(),
 	}).WithToolTimeout(cfg.AgentToolTimeout(ac)).
 		WithMaxPayloadBytes(cfg.AgentMaxPayloadBytes(ac)).
+		WithCompactionTrigger(cfg.AgentCompactionTriggerTokens(ac)).
 		WithPayloadCompactionThreshold(cfg.AgentPayloadTrimCompactionThreshold(ac)).
 		WithEscalateAfterRecoveries(cfg.AgentEscalateAfterRecoveries(ac))
 
@@ -342,7 +348,7 @@ func (r *localRunner) Execute(
 			text = last.Content
 		}
 	}
-	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text)}, nil
+	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text), Trail: agent.TurnTrail()}, nil
 }
 
 // endsWithQuestion reports whether the last non-empty line of text ends with
@@ -985,4 +991,14 @@ func buildPromptVars(sess *session.Session, percepts []string, _ config.Config) 
 		Escalation: escSummary,
 		Tools:      localBuiltinTools,
 	}
+}
+
+// toolOutputDir is where over-cap tool output is saved for the model to read
+// back ("" when the milk directory can't be resolved: no spill, plain cap).
+func toolOutputDir() string {
+	d, err := config.Dir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "tool-output")
 }

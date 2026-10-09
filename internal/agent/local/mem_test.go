@@ -235,3 +235,21 @@ func TestShouldInjectMemoryInstruction_ByteThresholdMet(t *testing.T) {
 		t.Error("expected injection when byte threshold met (110 ≥ 100)")
 	}
 }
+
+func TestCapToolResultHint_TellsHowToGetTheRest(t *testing.T) {
+	big := strings.Repeat("line of file text\n", 2000)
+	result := toolResult{Output: big}.String()
+	got := capToolResultHint(result, 4000, toolResultCutHint("read_file"))
+	if !strings.Contains(got, "offset/limit") || !strings.Contains(got, "bytes omitted") {
+		t.Errorf("capped read_file result lacks the read-back hint: %.300s", got)
+	}
+	if plain := capToolResultHint(result, 4000, ""); strings.Contains(plain, "offset/limit") {
+		t.Error("no hint expected when none is given")
+	}
+	// A tiny budget must not be eaten by the hint.
+	small := capToolResultHint(result, 200, toolResultCutHint("read_file"))
+	var r toolResult
+	if err := json.Unmarshal([]byte(small), &r); err != nil || len(r.Output) > 200 {
+		t.Errorf("small budget exceeded or invalid: len=%d err=%v", len(r.Output), err)
+	}
+}

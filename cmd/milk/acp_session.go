@@ -39,6 +39,14 @@ type acpSession struct {
 	conn acp.Conn
 	id   acp.SessionID
 
+	// firstBindingID is the store session ID the view was created with;
+	// replayKey is "" while the view is bound to it (plain hist-* replay
+	// IDs, what already-replayed panes hold) and the binding's short ID
+	// after any rebind (session-qualified replay IDs — see
+	// acp_history.go's replayMsgID and ADR-0051).
+	firstBindingID string
+	replayKey      string
+
 	primaryRunner    TurnRunner
 	escalationRunner TurnRunner
 
@@ -169,6 +177,7 @@ func newACPSession(cfg config.Config, sess *session.Session, conn acp.Conn, id a
 	}
 
 	as := &acpSession{cfg: cfg, sess: sess, mem: mem, conn: conn, id: id, runID: newRunID()}
+	as.firstBindingID = sess.ID
 	as.lastActive.Store(time.Now().UnixNano())
 	as.st = &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, toolFutures: map[string]chan string{}}
 	// Thoughts have always been forwarded over ACP; keep that unless the
