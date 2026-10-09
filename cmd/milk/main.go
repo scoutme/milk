@@ -1668,28 +1668,23 @@ func trimLocalMessagesWithCompaction(ctx context.Context, agent *local.Agent, se
 		return kept, true
 	}
 
-	var b strings.Builder
-	for _, m := range dropped {
-		if m.Content == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "[%s]: %s\n", m.Role, m.Content)
-	}
-	if b.Len() == 0 {
+	input := local.RenderForSummary(dropped)
+	if input == "" {
 		return kept, true
 	}
 
-	summary, usage, err := agent.Summarize(ctx, b.String())
+	summary, usage, err := agent.Summarize(ctx, input)
 	if err != nil || summary == "" {
 		return kept, true
 	}
 	if sess != nil {
 		sess.AddTokens(agent.ModelName(), agent.LogRole()+":compaction", usage.Prompt, usage.Completion)
 	}
-	summaryMsg := local.Message{
-		Role:    "system",
-		Content: "[Summary of earlier conversation, compacted to save context]\n" + summary,
+	content := "[Summary of earlier conversation, compacted to save context]\n" + summary
+	if touched := local.FilesTouched(dropped, 8); touched != "" {
+		content += "\n\n" + touched
 	}
+	summaryMsg := local.Message{Role: "system", Content: content}
 	return append([]local.Message{summaryMsg}, kept...), true
 }
 

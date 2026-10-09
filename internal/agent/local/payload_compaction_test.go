@@ -43,7 +43,7 @@ func TestCompactForPayloadSize_CollapsesWholePriorTurnsInOneShot(t *testing.T) {
 	}
 	userMsgIdx := 7
 
-	got, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, userMsgIdx)
+	got, _, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, userMsgIdx)
 	if !ok {
 		t.Fatal("expected compaction to succeed")
 	}
@@ -89,7 +89,7 @@ func TestCompactForPayloadSize_NoPriorTurns_CollapsesOlderHalfOfCurrentTurnTail(
 	}
 	userMsgIdx := 1
 
-	got, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, userMsgIdx)
+	got, _, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, userMsgIdx)
 	if !ok {
 		t.Fatal("expected compaction to succeed")
 	}
@@ -130,7 +130,7 @@ func TestCompactForPayloadSize_SpanTooSmall_ReturnsUnchanged(t *testing.T) {
 		{Role: "assistant", Content: "step 0", ToolCalls: []toolCall{{ID: "tc0", Function: toolCallFunction{Name: "read_file"}}}},
 		{Role: "tool", Content: "result 0", ToolCallID: "tc0"},
 	}
-	got, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, 1)
+	got, _, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, 1)
 	if ok {
 		t.Fatalf("expected no compaction for a span below payloadCompactionMinSpan, got %+v", got)
 	}
@@ -154,7 +154,7 @@ func TestCompactForPayloadSize_SummarizeFails_ReturnsUnchanged(t *testing.T) {
 		{Role: "user", Content: "current task"},
 		{Role: "assistant", Content: "working"},
 	}
-	got, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, 3)
+	got, _, ok := agent.compactForPayloadSize(context.Background(), sess, msgs, 3)
 	if ok {
 		t.Fatalf("expected compaction to fail gracefully on a Summarize error, got %+v", got)
 	}
@@ -234,5 +234,89 @@ func TestRunToolLoop_PayloadCompaction_Fires(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&nonStreamReqs); got == 0 {
 		t.Error("expected at least one non-streaming Summarize call — compactForPayloadSize was never invoked by runToolLoop's proactive check")
+	}
+}
+
+// The provider's own prompt-size report — not a byte estimate — triggers
+// compaction, and the turn keeps a valid user-message index afterwards.
+func TestRunToolLoop_TokenTriggeredCompaction_Fires(t *testing.T) {
+	var streamReqs, nonStreamReqs int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		json.Unmarshal(body, &req) //nolint:errcheck
+		if !req.Stream {
+			atomic.AddInt32(&nonStreamReqs, 1)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"[compacted summary]"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+			return
+		}
+		n := atomic.AddInt32(&streamReqs, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n <= 8 {
+			fmt.Fprintf(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc%d","function":{"name":"unknown-tool-%d","arguments":"{}"}}]}}]}`+"\n\n", n, n)
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		} else {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`+"\n\n")
+		}
+		fmt.Fprintf(w, `data: {"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":5}}`+"\n\n", 1000*n)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model").
+		WithMemConfig(MemConfig{MaxToolIterations: 15}).
+		WithMaxPayloadBytes(0). // byte trigger off: only the token one can fire
+		WithCompactionTrigger(4000)
+	var out strings.Builder
+	history, err := agent.Run(context.Background(), nil, "do the thing", &out, &session.Session{ID: "token-compaction"}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := atomic.LoadInt32(&nonStreamReqs); got == 0 {
+		t.Fatal("prompt_tokens crossed the trigger but no Summarize call was made")
+	}
+	var summaries int
+	for _, m := range history {
+		if m.Role == "system" && strings.Contains(m.Content, "[compacted summary]") {
+			summaries++
+		}
+	}
+	if summaries == 0 {
+		t.Error("compacted summary was not spliced into the turn's history")
+	}
+	if last := history[len(history)-1]; !strings.Contains(last.Content, "done") {
+		t.Errorf("turn should finish normally, got %q", last.Content)
+	}
+}
+
+func TestFilesTouchedAndRenderForSummary(t *testing.T) {
+	call := func(name, args string) toolCall {
+		return toolCall{Function: toolCallFunction{Name: name, Arguments: args}}
+	}
+	msgs := []Message{
+		{Role: "assistant", ToolCalls: []toolCall{call("read_file", `{"path":"a.go"}`), call("read_file", `{"path":"b.go"}`)}},
+		{Role: "tool", Content: strings.Repeat("x", 5000)},
+		{Role: "assistant", ToolCalls: []toolCall{call("edit_file", `{"path":"a.go","old_string":"o","new_string":"n"}`), call("bash", `{"command":"go build ./..."}`)}},
+		{Role: "assistant", ToolCalls: []toolCall{call("read_file", `{"path":"a.go"}`)}},
+	}
+	got := FilesTouched(msgs, 8)
+	if !strings.Contains(got, "- b.go (read)") || !strings.Contains(got, "- a.go (edited)") {
+		t.Errorf("manifest wrong (a.go stays 'edited' after a later read):\n%s", got)
+	}
+	if FilesTouched(msgs[:0], 8) != "" {
+		t.Error("no tool calls, no manifest")
+	}
+	if limited := FilesTouched(msgs, 1); strings.Contains(limited, "b.go") {
+		t.Errorf("limit keeps only the most recent file:\n%s", limited)
+	}
+	r := RenderForSummary(msgs)
+	if !strings.Contains(r, "read_file(a.go)") || !strings.Contains(r, "bash(go build ./...)") {
+		t.Errorf("tool calls missing from the summarizer input:\n%s", r)
+	}
+	if len(r) > 3000 {
+		t.Errorf("a 5000-byte tool result must be cut for the summarizer, input is %d bytes", len(r))
 	}
 }

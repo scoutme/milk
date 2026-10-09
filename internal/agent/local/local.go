@@ -497,6 +497,14 @@ type Agent struct {
 	// construction (New/NewFromConfig), and <= 0 disables the compaction
 	// fallback (the per-request hard-drop trim keeps running unmodified).
 	payloadCompactionThreshold int
+	// compactTriggerTokens is the prompt size (tokens) at which a running turn
+	// compacts its own history, compared against the provider-reported prompt
+	// size of the previous request (lastPromptTokens). 0 disables the
+	// token-based trigger (the payload-size one still applies).
+	compactTriggerTokens int
+	// lastPromptTokens is the previous request's total prompt size as the
+	// provider reported it (cached tokens included).
+	lastPromptTokens int64
 	// escalateAfterRecoveries is how many loop-recovery events, summed
 	// across all detector types within a single turn, force an escalation
 	// instead of continuing to nudge the same model. Mirrors
@@ -738,6 +746,14 @@ func (a *Agent) WithToolTimeout(d time.Duration) *Agent {
 func (a *Agent) WithMaxPayloadBytes(n int) *Agent {
 	copy := *a
 	copy.maxPayloadBytes = n
+	return &copy
+}
+
+// WithCompactionTrigger sets the prompt size (tokens) at which a running
+// turn summarizes its own older history. See compactTriggerTokens.
+func (a *Agent) WithCompactionTrigger(tokens int) *Agent {
+	copy := *a
+	copy.compactTriggerTokens = tokens
 	return &copy
 }
 
@@ -1574,6 +1590,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 	a.malformedToolCallTriggered = false
 	a.malformedToolCallRetries = 0
 
+	tokenCompactRetryAt := 0 // iteration index before which a failed token compaction is not retried
 	maxIter := a.memCfg.MaxToolIterations
 	if maxIter <= 0 {
 		maxIter = defaultMaxToolIterations
@@ -1599,11 +1616,31 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		if a.maxPayloadBytes > 0 && messagesContentBytes(msgs) > a.maxPayloadBytes {
 			payloadTrimCountThisTurn++
 			if a.payloadCompactionThreshold > 0 && payloadTrimCountThisTurn >= a.payloadCompactionThreshold {
-				if compacted, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
-					msgs = compacted
+				if compacted, idx, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
+					msgs, userMsgIdx = compacted, idx
 					payloadTrimCountThisTurn = 0
+					a.lastPromptTokens = 0
 				}
 			}
+		}
+
+		// Token-based compaction: the provider told us how big the previous
+		// request really was, which is what the window is measured in —
+		// bytes only approximate it, and the byte trim hard-drops instead of
+		// summarizing. Compacting here, with headroom left for the next tool
+		// result, is what keeps a long turn from losing its early work to a
+		// blunt trim or an overflow error.
+		if a.compactTriggerTokens > 0 && a.lastPromptTokens >= int64(a.compactTriggerTokens) && i >= tokenCompactRetryAt {
+			if compacted, idx, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
+				a.logWarn("context at compaction threshold, summarized older history",
+					"model", a.model, "agent", a.logRole(),
+					"prompt_tokens", a.lastPromptTokens, "trigger_tokens", a.compactTriggerTokens)
+				msgs, userMsgIdx = compacted, idx
+				payloadTrimCountThisTurn = 0
+			} else {
+				tokenCompactRetryAt = i + tokenCompactBackoff
+			}
+			a.lastPromptTokens = 0
 		}
 
 		resp, fallbackRaw, toolCalls, emptyFallback, reasoningText, err := a.streamCompletion(ctx, msgs, tools, out, userMsgIdx)
@@ -3083,9 +3120,9 @@ func messagesContentBytes(msgs []Message) int {
 // Summarize itself fails — a failed compaction attempt must never block the
 // turn; the per-request hard-drop trim remains the fallback safety net
 // either way.
-func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session, msgs []Message, userMsgIdx int) ([]Message, bool) {
+func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session, msgs []Message, userMsgIdx int) ([]Message, int, bool) {
 	if userMsgIdx < 0 || userMsgIdx >= len(msgs) || msgs[userMsgIdx].Role != "user" {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 	var start, end int
 	if priorUserIdxs := priorUserIndices(msgs, userMsgIdx); len(priorUserIdxs) > 0 {
@@ -3101,7 +3138,7 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		// moment-to-moment.
 		start = userMsgIdx + 1
 		if start >= len(msgs) {
-			return msgs, false
+			return msgs, userMsgIdx, false
 		}
 		end = start + (len(msgs)-start)/2
 		for end < len(msgs) && msgs[end].Role == "tool" {
@@ -3109,23 +3146,17 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		}
 	}
 	if end-start < payloadCompactionMinSpan {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 
-	var b strings.Builder
-	for _, m := range msgs[start:end] {
-		if m.Content == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "[%s]: %s\n", m.Role, m.Content)
-	}
-	if b.Len() == 0 {
-		return msgs, false
+	input := RenderForSummary(msgs[start:end])
+	if input == "" {
+		return msgs, userMsgIdx, false
 	}
 
-	summary, usage, err := a.Summarize(ctx, b.String())
+	summary, usage, err := a.Summarize(ctx, input)
 	if err != nil || summary == "" {
-		return msgs, false
+		return msgs, userMsgIdx, false
 	}
 	sess.AddTokens(a.model, a.logRole()+":compaction", usage.Prompt, usage.Completion)
 	role := agentRoleForMetrics(a.escalationName)
@@ -3136,12 +3167,18 @@ func (a *Agent) compactForPayloadSize(ctx context.Context, sess *session.Session
 		attribute.String("agent", role),
 	)
 
-	summaryMsg := Message{
-		Role:    "system",
-		Content: "[Summary of earlier conversation this turn, compacted to save context]\n" + summary,
+	content := "[Summary of earlier conversation this turn, compacted to save context]\n" + summary
+	if touched := FilesTouched(msgs[start:end], 8); touched != "" {
+		content += "\n\n" + touched
 	}
-	compacted := append(append([]Message{}, msgs[:start]...), summaryMsg)
-	return append(compacted, msgs[end:]...), true
+	compacted := append(append([]Message{}, msgs[:start]...), Message{Role: "system", Content: content})
+	compacted = append(compacted, msgs[end:]...)
+	// A span that sat before the turn's user message shrinks the indices
+	// after it; callers hold userMsgIdx across later iterations.
+	if end <= userMsgIdx {
+		userMsgIdx -= (end - start) - 1
+	}
+	return compacted, userMsgIdx, true
 }
 
 // imageRetryAttempts caps how many times streamCompletion retries a request
@@ -3331,6 +3368,9 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	if err != nil {
 		return "", "", nil, false, "", 0, err
 	}
+	if promptTokens > 0 {
+		a.lastPromptTokens = promptTokens
+	}
 	// det.RawBlock() == "" already implies there is no usable block content
 	// regardless of whether the detector is still formally InBlock() — a
 	// block that opened (e.g. saw "<tool_call>") and never received any body
@@ -3444,6 +3484,11 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	text, fallbackRaw, tcs, err := a.classifyStreamResult(det, toolCalls, textBuf.String(), classifyOut)
 	return text, fallbackRaw, tcs, emptyFallback, reasoningText, imageTokens, err
 }
+
+// tokenCompactBackoff is how many iterations to wait after a token-triggered
+// compaction found nothing worth summarizing (or its Summarize call failed)
+// before trying again.
+const tokenCompactBackoff = 2
 
 // maxMalformedToolCallRetries bounds how often one turn re-asks after a tool
 // call the server failed to deliver; past it the turn ends as before (the

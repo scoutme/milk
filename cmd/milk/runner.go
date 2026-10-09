@@ -202,6 +202,7 @@ func (r *localRunner) Execute(
 		MaxToolIterations:    cfg.AgentMaxToolIterations(ac),
 	}).WithToolTimeout(cfg.AgentToolTimeout(ac)).
 		WithMaxPayloadBytes(cfg.AgentMaxPayloadBytes(ac)).
+		WithCompactionTrigger(cfg.AgentCompactionTriggerTokens(ac)).
 		WithPayloadCompactionThreshold(cfg.AgentPayloadTrimCompactionThreshold(ac)).
 		WithEscalateAfterRecoveries(cfg.AgentEscalateAfterRecoveries(ac))
 
