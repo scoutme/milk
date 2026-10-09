@@ -108,6 +108,13 @@ type streamEvent struct {
 	// addition to the main process Usage.
 	WorkflowUsage *claudeUsage `json:"workflow_usage,omitempty"`
 	TotalCostUSD  float64      `json:"total_cost_usd,omitempty"`
+	// Throughput timing reported natively by Claude Code's result event
+	// (validated live against CLI 2.1.295): total wall time, total API time
+	// across the run's internal requests, and time-to-first-token. Zero when
+	// absent (older CLIs) — see ParseResult's matching fields.
+	DurationMS    int64 `json:"duration_ms,omitempty"`
+	DurationAPIMS int64 `json:"duration_api_ms,omitempty"`
+	TTFTMS        int64 `json:"ttft_ms,omitempty"`
 }
 
 // PermissionDenialRecord records a tool that was blocked in the final result event.
@@ -131,6 +138,15 @@ type ParseResult struct {
 	CacheCreationInputTokens int64
 	CacheReadInputTokens     int64
 	TotalCostUSD             float64
+	// Throughput timing from the result event's duration_api_ms / ttft_ms
+	// (Claude Code >= 2.x reports them natively; all zero when absent).
+	// Decode is the provider-reported API generation time — for a multi-request
+	// internal tool loop it's the closest available analogue to milk-side
+	// decode windows; Requests counts runs that reported any timing.
+	Duration time.Duration // duration_ms (total wall time)
+	Decode   time.Duration // duration_api_ms
+	TTFT     time.Duration // ttft_ms
+	Requests int64
 	// Subagent token usage — populated when Claude Code's result event
 	// includes a subagent_usage field (subagents spawned via the Agent tool).
 	SubagentInputTokens              int64
@@ -403,6 +419,12 @@ func applyResult(res *ParseResult, ev streamEvent) {
 		res.HasWorkflowTokens = true
 	}
 	res.TotalCostUSD = ev.TotalCostUSD
+	if ev.DurationMS > 0 || ev.DurationAPIMS > 0 || ev.TTFTMS > 0 {
+		res.Duration = time.Duration(ev.DurationMS) * time.Millisecond
+		res.Decode = time.Duration(ev.DurationAPIMS) * time.Millisecond
+		res.TTFT = time.Duration(ev.TTFTMS) * time.Millisecond
+		res.Requests = 1
+	}
 }
 
 // userMessageContent is the minimal structure we need to detect stream-closed tool results.

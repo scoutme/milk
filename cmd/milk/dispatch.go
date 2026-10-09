@@ -48,6 +48,13 @@ func drainBackgroundJobs(ctx context.Context, mgr *local.Manager, sess *session.
 		obs.RecordTokens(ctx, j.Model, role, j.Tokens.Prompt, j.Tokens.Completion)
 		obs.AccumulateCacheTokens(j.Model, role, j.Tokens.CacheRead, j.Tokens.CacheCreation)
 		sess.AddTokensFull(j.Model, role, j.Tokens.Prompt, j.Tokens.Completion, j.Tokens.CacheRead, j.Tokens.CacheCreation)
+		// Throughput timing aggregated by RunBackgroundTask's onTokens — the
+		// job's requests never recorded timing live (see the jobID guard in
+		// streamCompletionOnce), so this drain-time recording is the only one.
+		bgTTFT := time.Duration(j.Tokens.TTFTSeconds * float64(time.Second))
+		bgDecode := time.Duration(j.Tokens.DecodeSeconds * float64(time.Second))
+		obs.RecordTiming(ctx, j.Model, role, bgTTFT, bgDecode)
+		sess.AddTiming(j.Model, role, bgTTFT, bgDecode)
 		if j.Err != nil {
 			// Failed jobs may still carry partial work (RunBackgroundTask
 			// preserves the best-effort answer from the tool trajectory up
@@ -288,6 +295,8 @@ func runPrimaryWithSession(
 	// prompt-caching feature — fixed here since this sprint already touches this
 	// exact call site to verify cache-token flow end-to-end.
 	sess.AddTokensFull(model, "primary", res.InputTokens, res.OutputTokens, res.CacheRead, res.CacheCreate)
+	obs.RecordTiming(ctx, model, "primary", res.TTFT, res.Decode)
+	sess.AddTiming(model, "primary", res.TTFT, res.Decode)
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens, "cost_usd", res.CostUSD)
 
 	// For local HTTP runners, text is only set when a real response came back.
@@ -511,6 +520,8 @@ func runEscalationWithSession(
 	obs.RecordTokens(ctx, model, "escalation", res.InputTokens, res.OutputTokens)
 	obs.AccumulateCacheTokens(model, "escalation", res.CacheRead, res.CacheCreate)
 	sess.AddTokensFull(model, "escalation", res.InputTokens, res.OutputTokens, res.CacheRead, res.CacheCreate)
+	obs.RecordTiming(ctx, model, "escalation", res.TTFT, res.Decode)
+	sess.AddTiming(model, "escalation", res.TTFT, res.Decode)
 	obs.Debug("tokens ("+agentName+")", "input", res.InputTokens, "output", res.OutputTokens,
 		"cache_read", res.CacheRead, "cache_write", res.CacheCreate, "cost_usd", res.CostUSD)
 

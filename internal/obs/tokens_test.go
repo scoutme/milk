@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAccumulateCacheTokens_Accumulates(t *testing.T) {
@@ -122,5 +123,48 @@ func TestSessionTokensByRole_SubagentPrefix(t *testing.T) {
 	p, c = SessionTokensByRole("escalation:workflow")
 	if p != 25 || c != 5 {
 		t.Errorf("escalation:workflow: p=%d c=%d, want 25/5", p, c)
+	}
+}
+
+// TestRecordTiming_Accumulates: per-request timing lands in the session
+// accumulator under the (model, role) key, summed across requests.
+func TestRecordTiming_Accumulates(t *testing.T) {
+	ResetSessionTokens()
+	RecordTiming(context.TODO(), "model-x", "primary", 800*time.Millisecond, 2*time.Second)
+	RecordTiming(context.TODO(), "model-x", "primary", 200*time.Millisecond, 3*time.Second)
+	ttftSec, decodeSec, reqs := SessionTimingByRole("primary")
+	if decodeSec != 5 || ttftSec != 1 || reqs != 2 {
+		t.Errorf("timing = (%v, %v, %d), want (1, 5, 2)", ttftSec, decodeSec, reqs)
+	}
+}
+
+// TestRecordTiming_NoopWithoutTiming: unmeasured requests (both zero) are
+// dropped entirely — no counter, no accumulator entry, no request count.
+func TestRecordTiming_NoopWithoutTiming(t *testing.T) {
+	ResetSessionTokens()
+	RecordTiming(context.TODO(), "model-x", "primary", 0, 0)
+	ttftSec, decodeSec, reqs := SessionTimingByRole("primary")
+	if ttftSec != 0 || decodeSec != 0 || reqs != 0 {
+		t.Errorf("timing = (%v, %v, %d), want all zero", ttftSec, decodeSec, reqs)
+	}
+}
+
+// TestFormatTokenUsage_TokPerSec: the /usage table shows a tok/s column
+// (completion ÷ decode seconds) and "—" where no timing was recorded.
+func TestFormatTokenUsage_TokPerSec(t *testing.T) {
+	ResetSessionTokens()
+	entries := []SessionTokenEntry{
+		{Model: "qwen", Agent: "primary", Prompt: 500, Completion: 200, DecodeSeconds: 4},
+		{Model: "claude", Agent: "escalation", Prompt: 100, Completion: 30},
+	}
+	out := FormatTokenUsage(context.TODO(), "/nonexistent", entries, 5)
+	if !strings.Contains(out, "tok/s") {
+		t.Errorf("expected tok/s header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "50") { // 200/4
+		t.Errorf("expected 50 tok/s for qwen/primary, got:\n%s", out)
+	}
+	if !strings.Contains(out, "—") {
+		t.Errorf("expected '—' for the unmeasured claude row, got:\n%s", out)
 	}
 }

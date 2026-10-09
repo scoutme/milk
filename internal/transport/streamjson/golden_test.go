@@ -386,6 +386,7 @@ var knownKeys = map[string]bool{
 	// result
 	"num_turns": true, "duration_ms": true, "result": true, "route_history": true,
 	"usage": true, "model_usage": true, "total_cost_usd": true,
+	"output_tokens_per_second": true, "ttft_ms": true,
 	// nested modeled
 	"name": true, "provider": true, "model": true, "context_window_tokens": true,
 	"target": true, "conclusive": true, "turn": true, "hint": true,

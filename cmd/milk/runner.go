@@ -75,6 +75,14 @@ type TurnResult struct {
 	CacheRead        int64
 	CacheCreate      int64
 	CostUSD          float64
+	// Throughput timing for this turn's measured completion requests (local
+	// and claude-cli runners). Zero for runners with no timing source (generic
+	// subprocess) and for local runners, whose timing flows live through the
+	// agent's onTokens callback instead of through the result — mirroring how
+	// the token fields above are zero for local runners for the same reason.
+	TTFT     time.Duration
+	Decode   time.Duration
+	Requests int64
 	// Subagent token usage — populated when the escalation agent's result
 	// includes subagent_usage (subagents spawned via the Agent tool).
 	SubagentInputTokens  int64
@@ -689,6 +697,13 @@ func (r *cliRunner) Execute(
 		res.CacheReadInputTokens += resumeRes.CacheReadInputTokens
 		res.CacheCreationInputTokens += resumeRes.CacheCreationInputTokens
 		res.TotalCostUSD += resumeRes.TotalCostUSD
+		// Throughput timing: API time accumulates across resumes; the turn's
+		// TTFT is the first request's (the earliest reported wins).
+		res.Decode += resumeRes.Decode
+		res.Requests += resumeRes.Requests
+		if resumeRes.TTFT > 0 && (res.TTFT == 0 || resumeRes.TTFT < res.TTFT) {
+			res.TTFT = resumeRes.TTFT
+		}
 		if resumeRes.Text != "" {
 			res.Text = resumeRes.Text
 			res.EndsWithQ = resumeRes.EndsWithQ
@@ -706,6 +721,10 @@ func (r *cliRunner) Execute(
 		CacheRead:    res.CacheReadInputTokens,
 		CacheCreate:  res.CacheCreationInputTokens,
 		CostUSD:      res.TotalCostUSD,
+		// Throughput timing
+		TTFT:     res.TTFT,
+		Decode:   res.Decode,
+		Requests: res.Requests,
 		// Subagent tokens
 		SubagentInputTokens:  res.SubagentInputTokens,
 		SubagentOutputTokens: res.SubagentOutputTokens,

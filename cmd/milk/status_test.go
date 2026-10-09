@@ -11,6 +11,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
@@ -361,5 +362,117 @@ func TestFormatTokenCount_Tiers(t *testing.T) {
 		if got := formatTokenCount(n); got != want {
 			t.Errorf("formatTokenCount(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// TestStatusTokens_ThroughputIdle: when idle after a turn with measured
+// timing, the last-turn fragment carries the real decode rate and mean TTFT
+// (340 output tokens over 4 decode-seconds = 85 tok/s; 1.6s TTFT sum over 2
+// requests = 0.8s).
+func TestStatusTokens_ThroughputIdle(t *testing.T) {
+	m := &model{
+		width: 200,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                false,
+		lastTurnPrompt:      map[string]int64{"primary": 100, "escalation": 0},
+		lastTurnCompletion:  map[string]int64{"primary": 340, "escalation": 0},
+		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnTiming: map[string]turnTiming{
+			"primary":    {ttftSec: 1.6, decodeSec: 4, reqs: 2},
+			"escalation": {},
+		},
+		seenTiming: map[string]turnTiming{"primary": {}, "escalation": {}},
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "85 tok/s") {
+		t.Errorf("want 85 tok/s in status bar, got %q", bar)
+	}
+	if !strings.Contains(bar, "ttft 0.8s") {
+		t.Errorf("want ttft 0.8s in status bar, got %q", bar)
+	}
+}
+
+// TestStatusTokens_ThroughputMissingTiming: without measured timing the
+// fragment stays exactly as before — no tok/s, no ttft, no zeros.
+func TestStatusTokens_ThroughputMissingTiming(t *testing.T) {
+	m := &model{
+		width: 200,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                false,
+		lastTurnPrompt:      map[string]int64{"primary": 100, "escalation": 0},
+		lastTurnCompletion:  map[string]int64{"primary": 340, "escalation": 0},
+		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnTiming:      map[string]turnTiming{"primary": {}, "escalation": {}},
+		seenTiming:          map[string]turnTiming{"primary": {}, "escalation": {}},
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if strings.Contains(bar, "tok/s") || strings.Contains(bar, "ttft") {
+		t.Errorf("want no throughput fragment without timing, got %q", bar)
+	}
+	if !strings.Contains(bar, "(last:↑100↓340)") {
+		t.Errorf("want unchanged last-turn fragment, got %q", bar)
+	}
+}
+
+// TestStatusTokens_ThroughputBusyLiveEstimate: while streaming, the live
+// estimate divides the output-token estimate by the time since the first
+// streamed output token (1000 chars ≈ 250 tokens over 5s = 50 tok/s).
+func TestStatusTokens_ThroughputBusyLiveEstimate(t *testing.T) {
+	m := &model{
+		width: 200,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                true,
+		currentTurnChars:    1000,
+		turnFirstOutputAt:   time.Now().Add(-5 * time.Second),
+		lastTurnPrompt:      map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnTiming:      map[string]turnTiming{"primary": {}, "escalation": {}},
+		seenTiming:          map[string]turnTiming{"primary": {}, "escalation": {}},
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if !strings.Contains(bar, "50 tok/s") {
+		t.Errorf("want live 50 tok/s estimate in status bar, got %q", bar)
+	}
+}
+
+// TestStatusTokens_ThroughputBusyNoEstimateDuringPrefill: before the first
+// output token arrives there is no rate to show — nothing is appended.
+func TestStatusTokens_ThroughputBusyNoEstimateDuringPrefill(t *testing.T) {
+	m := &model{
+		width: 200,
+		st: &interactiveState{
+			sess: &session.Session{ID: "test1234"},
+			cfg:  config.Config{},
+		},
+		busy:                true,
+		currentTurnChars:    1000,
+		turnFirstOutputAt:   time.Time{},
+		lastTurnPrompt:      map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnTiming:      map[string]turnTiming{"primary": {}, "escalation": {}},
+		seenTiming:          map[string]turnTiming{"primary": {}, "escalation": {}},
+	}
+
+	bar := stripANSI(m.statusTokens())
+	if strings.Contains(bar, "tok/s") {
+		t.Errorf("want no tok/s during prefill, got %q", bar)
 	}
 }

@@ -221,6 +221,7 @@
         "option": {
           "type": "string"
         },
+        "output_tokens_per_second": {},
         "parent_tool_use_id": {
           "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
           "type": "string"
@@ -307,6 +308,9 @@
         "ts": {
           "description": "RFC 3339 timestamp",
           "type": "string"
+        },
+        "ttft_ms": {
+          "type": "integer"
         },
         "type": {
           "description": "line discriminator — system | stream_event | assistant | user | result (open set: ignore unknown values)",
@@ -643,6 +647,7 @@
     "option": {
       "type": "string"
     },
+    "output_tokens_per_second": {},
     "parent_tool_use_id": {
       "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
       "type": "string"
@@ -729,6 +734,9 @@
     "ts": {
       "description": "RFC 3339 timestamp",
       "type": "string"
+    },
+    "ttft_ms": {
+      "type": "integer"
     },
     "type": {
       "description": "line discriminator — system | stream_event | assistant | user | result (open set: ignore unknown values)",

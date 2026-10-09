@@ -206,3 +206,46 @@ var errTest = &testError{"boom"}
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// TestBuildResultEvent_Throughput: the result event carries the turn's real
+// throughput — output tokens over the summed decode window (200/4 = 50 tok/s)
+// and the mean TTFT across measured requests (1.2s/2 = 600ms).
+func TestBuildResultEvent_Throughput(t *testing.T) {
+	before := map[string]session.TokenUsage{}
+	after := map[string]session.TokenUsage{
+		"m\x00primary": {Model: "m", Agent: "primary", Prompt: 10, Completion: 200,
+			DecodeSeconds: 4, TTFTSeconds: 1.2, Requests: 2},
+	}
+
+	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, before, after)
+
+	if ev.OutputTokensPerSecond != 50 {
+		t.Errorf("OutputTokensPerSecond = %v, want 50", ev.OutputTokensPerSecond)
+	}
+	if ev.TTFTMS != 600 {
+		t.Errorf("TTFTMS = %d, want 600", ev.TTFTMS)
+	}
+
+	line, err := streamjson.EncodeLine(ev)
+	if err != nil {
+		t.Fatalf("EncodeLine: %v", err)
+	}
+	if _, err := streamjson.Decode(line[:len(line)-1]); err != nil {
+		t.Fatalf("Decode(EncodeLine(ev)): %v", err)
+	}
+}
+
+// TestBuildResultEvent_ThroughputOmitted: with no timing recorded the fields
+// stay zero (and thus absent on the wire) — never a fabricated 0 tok/s.
+func TestBuildResultEvent_ThroughputOmitted(t *testing.T) {
+	before := map[string]session.TokenUsage{}
+	after := map[string]session.TokenUsage{
+		"m\x00primary": {Model: "m", Agent: "primary", Prompt: 10, Completion: 200},
+	}
+
+	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, before, after)
+
+	if ev.OutputTokensPerSecond != 0 || ev.TTFTMS != 0 {
+		t.Errorf("throughput = %v/%d, want both zero", ev.OutputTokensPerSecond, ev.TTFTMS)
+	}
+}

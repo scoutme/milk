@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
@@ -149,6 +150,27 @@ func tokenUsageDelta(before, after map[string]session.TokenUsage) (*streamjson.U
 	return total, perModel
 }
 
+// timingDelta sums throughput timing (see session.TokenUsage) across the
+// changed entries of a TokensSnapshot diff, mirroring tokenUsageDelta's
+// diff semantics: entries whose timing didn't change contribute nothing,
+// and negative deltas (a session swap between the snapshots) are clamped
+// away rather than dragged into the aggregate.
+func timingDelta(before, after map[string]session.TokenUsage) (ttftSec, decodeSec float64, reqs int64) {
+	for key, a := range after {
+		b := before[key]
+		dTTFT := a.TTFTSeconds - b.TTFTSeconds
+		dDecode := a.DecodeSeconds - b.DecodeSeconds
+		dReqs := a.Requests - b.Requests
+		if dTTFT <= 0 && dDecode <= 0 && dReqs <= 0 {
+			continue
+		}
+		ttftSec += max(dTTFT, 0)
+		decodeSec += max(dDecode, 0)
+		reqs += max(dReqs, 0)
+	}
+	return ttftSec, decodeSec, reqs
+}
+
 // buildResultEvent builds the terminal, always-exactly-one result line
 // (design §6.4). Scope note: NumTurns is always 1 and RouteHistory is a
 // single hop — this run has no role-aware signal to detect a mid-run
@@ -163,8 +185,9 @@ func buildResultEvent(sessionID string, target router.Target, turnErr error, las
 	}
 
 	usage, modelUsage := tokenUsageDelta(before, after)
+	ttftSec, decodeSec, reqs := timingDelta(before, after)
 
-	return &streamjson.Event{
+	ev := &streamjson.Event{
 		Type:         streamjson.TypeResult,
 		Subtype:      subtype,
 		SessionID:    sessionID,
@@ -177,4 +200,14 @@ func buildResultEvent(sessionID string, target router.Target, turnErr error, las
 		Usage:        usage,
 		ModelUsage:   modelUsage,
 	}
+	// Throughput of the turn's generation window (see session.TokenUsage):
+	// omitted rather than zeroed when the providers involved reported no
+	// timing — a fabricated 0.0 tok/s would be indistinguishable from a stall.
+	if decodeSec > 0 && usage.OutputTokens > 0 {
+		ev.OutputTokensPerSecond = float64(usage.OutputTokens) / decodeSec
+	}
+	if reqs > 0 {
+		ev.TTFTMS = int64(math.Round(1000 * ttftSec / float64(reqs)))
+	}
+	return ev
 }

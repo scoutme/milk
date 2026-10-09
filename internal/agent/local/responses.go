@@ -175,11 +175,12 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	det := NewStreamDetector(a.detectedFormat)
 	partialTools := map[int]*toolCall{}
 	var textBuf strings.Builder
+	var timing StreamTiming
 
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanResponsesSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, err := a.scanResponsesSSE(scanner, det, partialTools, &textBuf, out, inferenceStart, &timing)
 	if err != nil {
 		return "", "", nil, false, "", err
 	}
@@ -204,13 +205,14 @@ func (a *Agent) responsesStreamCompletion(ctx context.Context, msgs []Message, t
 	// never per-request (double-counting + parent-role mis-tagging).
 	if a.jobID == "" {
 		obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+		obs.RecordTiming(ctx, a.model, role, timing.TTFT, timing.Decode)
 	}
 	if a.onTokens != nil {
 		// cacheCreation is always 0: the Responses API, like Chat Completions,
 		// reports cache reads only. See input_tokens_details.cached_tokens
 		// (inferred from OpenAI's public Responses API docs — not live-verified
 		// against a Responses-API provider; safe because it's ignored when absent).
-		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0, timing)
 	}
 
 	if det.Format != ToolFormatUnknown {
@@ -228,9 +230,21 @@ func (a *Agent) scanResponsesSSE(
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
+	reqStart time.Time,
+	timing *StreamTiming,
 ) ([]toolCall, int64, int64, int64, error) {
 	dbg := a.debugLog
 	var promptTokens, completionTokens, cacheRead int64
+	// firstOut/lastOut bracket the generation window — see scanSSE's identical
+	// tracking for the throughput (StreamTiming) measurement.
+	var firstOut, lastOut time.Time
+	markOutput := func() {
+		now := time.Now()
+		if firstOut.IsZero() {
+			firstOut = now
+		}
+		lastOut = now
+	}
 
 	// See the matching comment in scanSSE (local.go) — same observability gap,
 	// same fix: a mid-stream read failure used to return bare from
@@ -285,6 +299,9 @@ func (a *Agent) scanResponsesSSE(
 		}
 		switch ev.Type {
 		case "response.output_text.delta":
+			if ev.Delta != "" {
+				markOutput()
+			}
 			processContentToken(ev.Delta, det, textBuf, out)
 		case "response.output_item.added":
 			if ev.Item != nil && ev.Item.Type == "function_call" {
@@ -297,6 +314,9 @@ func (a *Agent) scanResponsesSSE(
 				}
 			}
 		case "response.function_call_arguments.delta":
+			if ev.Delta != "" {
+				markOutput()
+			}
 			if pt, ok := partialTools[ev.OutputIndex]; ok {
 				pt.Function.Arguments += ev.Delta
 			}
@@ -327,6 +347,12 @@ func (a *Agent) scanResponsesSSE(
 		"lines_scanned", lines.Load(),
 		"elapsed", time.Since(streamStartedAt).String(),
 		"content_bytes", textBuf.Len())
+	if timing != nil && !firstOut.IsZero() {
+		if !reqStart.IsZero() {
+			timing.TTFT = firstOut.Sub(reqStart)
+		}
+		timing.Decode = lastOut.Sub(firstOut)
+	}
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, nil
 }
 
