@@ -676,8 +676,16 @@ type AgentLimits struct {
 	// for this agent. When the marshaled chatRequest exceeds this limit,
 	// message history is trimmed further before sending to avoid 413 errors
 	// from reverse proxies (e.g. openresty/nginx).
-	// Default: 900KB (conservative margin below typical 1MB proxy limits).
+	// Default: 900KB (conservative margin below typical 1MB proxy limits), or
+	// ~4 bytes per context-window token when the window is larger than that.
 	MaxPayloadBytes *int `json:"max_payload_bytes,omitempty"`
+
+	// CompactionTriggerTokens overrides the prompt size (tokens, as reported by
+	// the provider's usage on the previous request) at which a running turn
+	// compacts its own history. Default: derived from the context window and
+	// output limit (see AgentCompactionTriggerTokens). <= 0 disables the
+	// token-based trigger, leaving only the payload-size one.
+	CompactionTriggerTokens *int `json:"compaction_trigger_tokens,omitempty"`
 
 	// PayloadTrimCompactionThreshold overrides how many consecutive
 	// payload-size trims within a single turn trigger a one-shot
@@ -1476,7 +1484,47 @@ func (c Config) AgentMaxPayloadBytes(a AgentConfig) int {
 		}
 		return v
 	}
+	// A fixed 900 KB sized for typical 1 MB reverse-proxy limits trims a
+	// 1M-token model at ~20% of its window, so the cap follows the window:
+	// an endpoint that serves N tokens must accept ~4 bytes per token.
+	if ctw := c.AgentContextWindowTokens(a); ctw*4 > DefaultMaxPayloadBytes {
+		return ctw * 4
+	}
 	return DefaultMaxPayloadBytes
+}
+
+// Compaction trigger shape, after OpenCode (window minus a reserve for the
+// model's output) and MiMo-Code (a fraction of the usable window): compact
+// at 85% of what is left once the output reserve is set aside, which leaves
+// room for the next tool result (~12K tokens at the 50 KB cap) and the
+// summary call.
+const (
+	compactionReserveDefaultTokens = 20000
+	compactionReserveMaxTokens     = 32000
+	compactionTriggerRatio         = 0.85
+)
+
+// AgentCompactionTriggerTokens returns the prompt size (tokens) at which a
+// running turn should compact its own history, or 0 when unknown/disabled
+// (no context window known — the payload-size trigger still applies).
+// The output reserve is the models.dev output limit capped at 32K, or 20K
+// when the catalog has none, and never more than a quarter of the window.
+func (c Config) AgentCompactionTriggerTokens(a AgentConfig) int {
+	if a.Limits != nil && a.Limits.CompactionTriggerTokens != nil {
+		return max(*a.Limits.CompactionTriggerTokens, 0)
+	}
+	ctw := c.AgentContextWindowTokens(a)
+	if ctw <= 0 {
+		return 0
+	}
+	reserve := compactionReserveDefaultTokens
+	if !c.DisableModelsDevLookup {
+		if l, ok := modelsdev.LookupLimit(a.Model); ok && l.Output > 0 {
+			reserve = min(l.Output, compactionReserveMaxTokens)
+		}
+	}
+	reserve = min(reserve, ctw/4)
+	return int(float64(ctw-reserve) * compactionTriggerRatio)
 }
 
 // AgentPayloadTrimCompactionThreshold returns how many consecutive
