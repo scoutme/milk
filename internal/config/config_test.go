@@ -1451,3 +1451,31 @@ func TestLoopDetectionCfg_ConvertsEveryField(t *testing.T) {
 		t.Errorf("LoopDetectionCfg() = %+v, want %+v", got, want)
 	}
 }
+
+func TestAgentToolResultMaxByteCount_DerivedFromWindow(t *testing.T) {
+	cfg := Config{DisableModelsDevLookup: true}
+	for _, tc := range []struct {
+		window int
+		want   int
+	}{
+		{0, 20000},          // unknown window: the conservative built-in
+		{8000, 4096},        // floor
+		{32000, 12800},      // ~10% of the window
+		{128000, 50 * 1024}, // capped at the standard 50 KB
+		{1000000, 50 * 1024},
+	} {
+		ac := AgentConfig{ContextWindowTokens: tc.window}
+		if got := cfg.AgentToolResultMaxByteCount(ac); got != tc.want {
+			t.Errorf("window %d: got %d, want %d", tc.window, got, tc.want)
+		}
+	}
+	// Explicit settings still win over the derived value.
+	ac := AgentConfig{ContextWindowTokens: 1000000, Limits: &AgentLimits{ToolResultMaxBytes: intPtr(8000)}}
+	if got := cfg.AgentToolResultMaxByteCount(ac); got != 8000 {
+		t.Errorf("explicit limit: got %d, want 8000", got)
+	}
+	cfg.LocalToolResultMaxBytes = 30000
+	if got := cfg.AgentToolResultMaxByteCount(AgentConfig{ContextWindowTokens: 1000000}); got != 30000 {
+		t.Errorf("global setting: got %d, want 30000", got)
+	}
+}

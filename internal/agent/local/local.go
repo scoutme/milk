@@ -2308,6 +2308,25 @@ const sessionContextResultMaxBytes = 8000 // ~2000 tokens, enough for recent con
 // that the total content size stays within maxBytes.
 // When maxBytes is 0 the result is returned unchanged.
 func capToolResult(result string, maxBytes int) string {
+	return capToolResultHint(result, maxBytes, "")
+}
+
+// toolResultCutHint says how to get at what a capped result omitted — a cut
+// the model cannot recover from reads as "that is all there is" and sends it
+// re-running the same command.
+func toolResultCutHint(tool string) string {
+	switch tool {
+	case "read_file":
+		return "use read_file with offset/limit to read the omitted lines"
+	case "bash":
+		return "re-run with head/tail/grep/sed -n to see the omitted part"
+	}
+	return ""
+}
+
+// capToolResultHint is capToolResult with a recovery hint appended to the
+// omission marker.
+func capToolResultHint(result string, maxBytes int, hint string) string {
 	if maxBytes <= 0 {
 		return result
 	}
@@ -2318,7 +2337,7 @@ func capToolResult(result string, maxBytes int) string {
 	if len(r.Output) <= maxBytes {
 		return result
 	}
-	r.Output = truncateHeadAndTail(r.Output, maxBytes)
+	r.Output = truncateHeadAndTailHint(r.Output, maxBytes, hint)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return result
@@ -2332,10 +2351,22 @@ func capToolResult(result string, maxBytes int) string {
 // error, a failing assertion, an exit status) at the end — a head-only
 // truncation silently drops exactly that.
 func truncateHeadAndTail(s string, maxBytes int) string {
+	return truncateHeadAndTailHint(s, maxBytes, "")
+}
+
+// truncateHeadAndTailHint is truncateHeadAndTail with an optional recovery
+// hint inside the omission marker. The hint is dropped when it would eat a
+// meaningful share of a small budget.
+func truncateHeadAndTailHint(s string, maxBytes int, hint string) string {
 	if len(s) <= maxBytes {
 		return s
 	}
 	marker := fmt.Sprintf("\n... (%d bytes omitted) ...\n", len(s)-maxBytes)
+	if hint != "" {
+		if withHint := fmt.Sprintf("\n... (%d bytes omitted — %s) ...\n", len(s)-maxBytes, hint); len(withHint) <= maxBytes/8 {
+			marker = withHint
+		}
+	}
 	budget := maxBytes - len(marker)
 	if budget <= 0 {
 		return runeSafeHead(s, max(maxBytes, 0))
@@ -2716,7 +2747,7 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 		// Every other tool (bash, read_file, …) has no cap of its own — a
 		// single verbose shell/build/test output can otherwise dominate a
 		// turn's payload well before the payload-size trim loop ever runs.
-		result = capToolResult(result, a.memCfg.ToolResultMaxBytes)
+		result = capToolResultHint(result, a.memCfg.ToolResultMaxBytes, toolResultCutHint(tc.Function.Name))
 	}
 	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 }

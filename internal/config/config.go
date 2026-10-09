@@ -1573,7 +1573,9 @@ func (c Config) AgentMemoryResultMaxByteCount(a AgentConfig) int {
 }
 
 // AgentToolResultMaxByteCount returns the non-memory tool result size cap for
-// the given agent, falling back to the global LocalToolResultMaxByteCount().
+// the given agent: the explicit limits.tool_result_max_bytes, else the global
+// local_tool_result_max_bytes, else ~10% of the context window (4–50 KB), else
+// the 20000-byte built-in when the window is unknown.
 func (c Config) AgentToolResultMaxByteCount(a AgentConfig) int {
 	if a.Limits != nil && a.Limits.ToolResultMaxBytes != nil {
 		v := *a.Limits.ToolResultMaxBytes
@@ -1582,8 +1584,23 @@ func (c Config) AgentToolResultMaxByteCount(a AgentConfig) int {
 		}
 		return intOr(v, 20000)
 	}
+	if c.LocalToolResultMaxBytes != 0 {
+		return c.LocalToolResultMaxByteCount()
+	}
+	// Unset: derive from the window. OpenCode, MiMo-Code and Claude Code all
+	// cap one tool result at roughly 50 KB / 30K chars regardless of model;
+	// a small window can't afford that, so scale down to ~10% of it.
+	if ctw := c.AgentContextWindowTokens(a); ctw > 0 {
+		return min(max(ctw*4/10, minDerivedToolResultBytes), DefaultToolResultMaxBytes)
+	}
 	return c.LocalToolResultMaxByteCount()
 }
+
+// DefaultToolResultMaxBytes is the cap on one tool result when the agent's
+// context window is large enough to afford it (see AgentToolResultMaxByteCount).
+const DefaultToolResultMaxBytes = 50 * 1024
+
+const minDerivedToolResultBytes = 4096
 
 // AgentPerceptInjectMaxCount returns the percept injection count cap for the
 // given agent, falling back to the global PerceptInjectMaxCount().
