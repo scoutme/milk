@@ -505,6 +505,9 @@ type Agent struct {
 	// lastPromptTokens is the previous request's total prompt size as the
 	// provider reported it (cached tokens included).
 	lastPromptTokens int64
+	// turnTrail is the tool activity of the latest Run, captured when the
+	// tool loop exits (see TurnTrail).
+	turnTrail []session.TrailStep
 	// escalateAfterRecoveries is how many loop-recovery events, summed
 	// across all detector types within a single turn, force an escalation
 	// instead of continuing to nudge the same model. Mirrors
@@ -1573,6 +1576,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 // (non-vision agent) for a possible agent_<name> tool-agent call to forward;
 // nil for RunBackgroundTask, which has no image-attachment path of its own.
 func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, sess *session.Session, mem *memory.Store, userPrompt string, userMsgIdx int, pendingImages []ContentPart) ([]Message, error) {
+	// msgs and userMsgIdx change during the loop (compaction, appends); the
+	// deferred capture reads their final values.
+	defer func() { a.turnTrail = TrailFromMessages(msgs, userMsgIdx) }()
 	executedKeys := map[string]bool{}
 	var lastReasoningText string // track across iterations for the max-iter fallback
 	var streak streakState       // reasoning/tool-call loop detection

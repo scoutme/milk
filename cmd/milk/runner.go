@@ -94,6 +94,9 @@ type TurnResult struct {
 	// inside internal/agent/local. The dispatcher (dispatch.go) is
 	// responsible for actually launching it.
 	WorkflowStart *local.WorkflowStartSignal
+	// Trail is the turn's tool activity (local-provider agents), persisted
+	// with the assistant turn so the agent's next turns can replay it.
+	Trail []session.TrailStep
 }
 
 // TurnCallbacks carries the tag-intercept callbacks wired per-turn by the dispatcher.
@@ -343,7 +346,7 @@ func (r *localRunner) Execute(
 			text = last.Content
 		}
 	}
-	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text)}, nil
+	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text), Trail: agent.TurnTrail()}, nil
 }
 
 // endsWithQuestion reports whether the last non-empty line of text ends with

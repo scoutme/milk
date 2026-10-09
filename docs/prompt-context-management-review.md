@@ -377,3 +377,25 @@ whole thing, including the expensive-to-reprocess system prompt, on every percep
 Fixed (`fix(bedrock): anchor the system cachePoint after the stable prefix, not the end`):
 the cachePoint now sits right after `system[0]`, so the actually-stable part caches independently
 of whatever dynamic content follows it. No change in breakpoint budget.
+
+---
+
+## 10. Follow-up (2026-10-09): thresholds and between-turn context vs. OpenCode / MiMo-Code / Claude Code
+
+Triggered by a long escalation turn in which milk's own loop recovery erased ~80K tokens of reads
+(fixed separately: crop only the looping iterations), after which the model re-read everything.
+Comparison of the other harnesses, and what milk did about each difference:
+
+| | OpenCode | MiMo-Code | Claude Code | milk before → now |
+|---|---|---|---|---|
+| One tool result | 50 KB / 2000 lines, not window-scaled (`tool/truncate.ts`) | same (`tool/preview.ts`); bash 30K tokens | bash 30K chars (ceiling 150K), MCP 25K tokens | 20 KB flat → ~10% of window, 4–50 KB; marker says how to read the rest |
+| Overflow trigger | window − min(20K, output) (`session/overflow.ts`) | 0.9 × window (`flag.ts`) | near the limit, undocumented | 900 KB request size → 85% of (window − output reserve), from provider `prompt_tokens` |
+| Request-size cap | none | none | none | 900 KB fixed → follows the window above that (safety net only) |
+| Old tool output | kept; pruned past the newest 40K tokens (skips the last 2 user turns) to a placeholder | same, plus file manifest after compaction | kept; older outputs cleared first | **all dropped at turn end** → trail stored and replayed the same way |
+| Loop recovery | doom-loop asks, deletes nothing | crop bounded to the identical run | n/a | 64-message tail crop → only the repeating iterations |
+
+Model limits come from models.dev in OpenCode and MiMo-Code; milk now also reads the catalog's
+output limit, and resolves providers that disagree about a model by majority instead of map order.
+Not done: spilling over-cap output to a file (OpenCode / MiMo-Code do), and cache-cold gating of
+pruning (MiMo-Code's soft trim) — milk's replay boundary moves once per turn, which costs one
+partial prefix-cache miss at that point.

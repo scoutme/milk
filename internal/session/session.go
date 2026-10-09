@@ -45,6 +45,24 @@ type ToolCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// TrailCall is one tool call a local-provider agent made during a turn and
+// what came back. Result is already size-capped; Cleared marks one dropped to
+// keep a long turn's stored trail bounded.
+type TrailCall struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Args    string `json:"args,omitempty"`
+	Result  string `json:"result,omitempty"`
+	Cleared bool   `json:"cleared,omitempty"`
+}
+
+// TrailStep is one tool-calling iteration: the text the model wrote beside
+// the calls, then the calls (issued together, results in the same order).
+type TrailStep struct {
+	Text  string      `json:"text,omitempty"`
+	Calls []TrailCall `json:"calls"`
+}
+
 type Turn struct {
 	Role      Role       `json:"role"`
 	Agent     Agent      `json:"agent,omitempty"`
@@ -52,7 +70,12 @@ type Turn struct {
 	Content   string     `json:"content"`
 	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Timestamp time.Time  `json:"timestamp"`
+	// Trail is the tool activity behind an assistant turn (local-provider
+	// agents only). The agent's own later turns replay it, pruned by age — it
+	// is never shown in transcripts or handed to other agents, which see only
+	// Content.
+	Trail     []TrailStep `json:"trail,omitempty"`
+	Timestamp time.Time   `json:"timestamp"`
 }
 
 type Session struct {

@@ -59,57 +59,68 @@ func callArgSummary(args string) string {
 	return ""
 }
 
-// FilesTouched lists the files the given messages' tool calls read, edited or
-// wrote (most recent last, at most limit) for the compaction summary, so the
-// model knows which file contents it no longer has. Empty when none.
-func FilesTouched(msgs []Message, limit int) string {
-	type entry struct {
-		path, action string
-	}
-	var order []entry
+type namedArgs struct{ name, args string }
+
+type touchedFile struct{ path, action string }
+
+// touchedFiles returns the files calls read, edited or wrote, most recently
+// touched last, at most limit; a file keeps its strongest action
+// (edited > written > read).
+func touchedFiles(calls []namedArgs, limit int) []touchedFile {
+	var order []touchedFile
 	rank := map[string]int{"read": 1, "written": 2, "edited": 3}
-	for _, m := range msgs {
-		for _, tc := range m.ToolCalls {
-			action := ""
-			switch tc.Function.Name {
-			case "read_file":
-				action = "read"
-			case "write_file":
-				action = "written"
-			case "edit_file", "apply_patch":
-				action = "edited"
-			default:
-				continue
-			}
-			var a struct {
-				Path string `json:"path"`
-			}
-			if json.Unmarshal([]byte(tc.Function.Arguments), &a) != nil || a.Path == "" {
-				continue
-			}
-			prior := ""
-			for i, e := range order {
-				if e.path == a.Path {
-					prior = e.action
-					order = append(order[:i], order[i+1:]...)
-					break
-				}
-			}
-			if rank[prior] > rank[action] {
-				action = prior
-			}
-			order = append(order, entry{a.Path, action})
+	for _, c := range calls {
+		action := ""
+		switch c.name {
+		case "read_file":
+			action = "read"
+		case "write_file":
+			action = "written"
+		case "edit_file", "apply_patch":
+			action = "edited"
+		default:
+			continue
 		}
-	}
-	if len(order) == 0 {
-		return ""
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(c.args), &a) != nil || a.Path == "" {
+			continue
+		}
+		for i, e := range order {
+			if e.path == a.Path {
+				if rank[e.action] > rank[action] {
+					action = e.action
+				}
+				order = append(order[:i], order[i+1:]...)
+				break
+			}
+		}
+		order = append(order, touchedFile{a.Path, action})
 	}
 	if limit > 0 && len(order) > limit {
 		order = order[len(order)-limit:]
 	}
+	return order
+}
+
+// FilesTouched lists the files the given messages' tool calls read, edited or
+// wrote (most recent last, at most limit) for the compaction summary, so the
+// model knows which file contents it no longer has. Empty when none.
+func FilesTouched(msgs []Message, limit int) string {
+	var calls []namedArgs
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			calls = append(calls, namedArgs{tc.Function.Name, tc.Function.Arguments})
+		}
+	}
+	files := touchedFiles(calls, limit)
+	if len(files) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("<files-touched>\n")
-	for _, e := range order {
+	for _, e := range files {
 		fmt.Fprintf(&b, "- %s (%s)\n", e.path, e.action)
 	}
 	b.WriteString("Their contents are no longer in context — re-read a file before editing it.\n</files-touched>")
