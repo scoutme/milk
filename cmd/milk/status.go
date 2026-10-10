@@ -137,7 +137,24 @@ func (m *model) statusBar() string {
 	} else if m.taSelAnchor >= 0 && m.taSelEnd >= 0 && m.taSelAnchor != m.taSelEnd {
 		n := len([]rune(m.taSelText()))
 		left += yellow(fmt.Sprintf(" [%d chars selected — ctrl+c copy · ctrl+x cut · del delete · type to replace]", n))
-	} else if m.selAnchorLine >= 0 && m.selDragging {
+	} else if m.attachActive() && m.attachSelAnchorLine >= 0 && m.attachSelDragging {
+		// Attach view on screen: report ITS selection, not the hidden
+		// transcript's (issue #207 — the status bar used to announce
+		// transcript line numbers for text the user couldn't see).
+		var selStatus string
+		if m.attachSelText != "" {
+			selStatus = yellow(fmt.Sprintf(" [%d chars — ctrl+c / right-click to copy]", len([]rune(m.attachSelText))))
+		} else {
+			selStatus = yellow(fmt.Sprintf(" [selecting attached view: line %d col %d — release to end]", m.attachSelAnchorLine+1, m.attachSelAnchorCol+1))
+		}
+		left += selStatus
+	} else if m.attachActive() && m.attachSelAnchorLine >= 0 {
+		hint := " [attached selection — ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]"
+		if m.attachSelText != "" {
+			hint = fmt.Sprintf(" [%d chars selected (attached) — ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]", len([]rune(m.attachSelText)))
+		}
+		left += yellow(hint)
+	} else if !m.attachActive() && m.selAnchorLine >= 0 && m.selDragging {
 		var selStatus string
 		if m.selText != "" {
 			selStatus = yellow(fmt.Sprintf(" [%d chars — ctrl+c / right-click to copy]", len([]rune(m.selText))))
@@ -145,7 +162,7 @@ func (m *model) statusBar() string {
 			selStatus = yellow(fmt.Sprintf(" [selecting: line %d col %d — release to end]", m.selAnchorLine+1, m.selAnchorCol+1))
 		}
 		left += selStatus
-	} else if m.selAnchorLine >= 0 {
+	} else if !m.attachActive() && m.selAnchorLine >= 0 {
 		hint := " [transcript selection — shift/ctrl+arrows or ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]"
 		if m.selText != "" {
 			hint = fmt.Sprintf(" [%d chars selected — shift/ctrl+arrows or ctrl+click to extend · ctrl+c / right-click to copy · esc to clear]", len([]rune(m.selText)))
