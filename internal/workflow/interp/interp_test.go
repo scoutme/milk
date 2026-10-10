@@ -830,3 +830,38 @@ func (b *blockingRunner) Run(_ context.Context, _ string, _ io.Writer) (string, 
 	b.after()
 	return "ok", nil
 }
+
+// A plan longer than sectionCharBudget must reach parallel_group intact. It was
+// saved head+tail truncated, which dropped "## Item 1/2" from the middle and
+// left only "## Item 3 (depends_on: 1, 2)" -- an unresolvable dependency.
+func TestExecParallelGroup_LongPlanKeepsMiddleItems(t *testing.T) {
+	filler := func(n int) string { return strings.Repeat("spec detail. ", n/13+1)[:n] + "\n\n" }
+	plan := "## Spec\n" + filler(8500) +
+		"## Item 1\na\n\n## Item 2\nb\n\n" + filler(2000) +
+		"## Item 3 (depends_on: 1, 2)\nc\n\n" + filler(2500)
+	if len(plan) <= sectionCharBudget {
+		t.Fatalf("test plan must exceed the budget, got %d", len(plan))
+	}
+	worker := &fakeRunner{name: "w", responses: []string{"item output"}}
+	def := workflow.Definition{
+		Name: "t",
+		Stages: []workflow.Stage{
+			{ID: "plan_stage", Kind: workflow.StageKindAgentTurn, Role: "planner", Prompt: "plan", SaveAs: "plan"},
+			{
+				ID: "fanout", Kind: workflow.StageKindParallelGroup, Over: "Item", From: "plan",
+				MaxConcurrency: 2, SaveAs: "results",
+				Body: []workflow.Stage{
+					{ID: "work", Kind: workflow.StageKindAgentTurn, Role: "w", Prompt: "do item {{.item}}", SaveAs: "work_out"},
+				},
+			},
+		},
+	}
+	planner := &fakeRunner{name: "planner", responses: []string{plan}}
+	r := New(def, "task")
+	if err := r.Run(context.Background(), runCfg(map[string]workflow.TurnRunner{"planner": planner, "w": worker})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if worker.callCount() != 3 {
+		t.Errorf("want all 3 items run, got %d", worker.callCount())
+	}
+}

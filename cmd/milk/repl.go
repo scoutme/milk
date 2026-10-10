@@ -202,6 +202,10 @@ type prefixChunkMsg struct{ text string }
 // separate from regular content so it can be shown or hidden independently.
 type thinkChunkMsg struct{ text string }
 
+// workflowThinkChunkMsg is a workflow agent's reasoning chunk. It goes to the
+// workflow's own live buffer, never the main transcript (see workflowDisplaySend).
+type workflowThinkChunkMsg struct{ text string }
+
 // retractMsg tells the TUI that the agent replaced already-streamed response
 // text (from) with a clean one (to) — see Agent.WithOnRetract.
 type retractMsg struct{ from, to string }
@@ -2024,6 +2028,19 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 
+	case workflowThinkChunkMsg:
+		m.currentTurnChars += int64(len(msg.text))
+		if m.workflowState != nil && m.showThinking {
+			m.workflowState.LiveBuffer().Append([]byte(dim(msg.text)))
+			if m.attached != nil && m.attached.kind == attachWorkflow {
+				m.syncAttachedContent()
+			}
+		}
+		// Reasoning is activity too: without this a long think trips the idle watchdog.
+		m.lastWorkflowActivity = time.Now()
+		m.workflowTimeoutWarned = false
+		return m, nil
+
 	case workflow.WorkflowChunkMsg:
 		m.currentTurnChars += int64(len(msg.Text))
 		// Stage output goes to the workflow's own live buffer, not the main
@@ -2115,6 +2132,11 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.workflowState != nil {
 			m.workflowState.Role = "done"
 			m.workflowState.ActiveStageTree = nil
+			runErr := msg.Err
+			if runErr == nil && m.interrupted {
+				runErr = context.Canceled
+			}
+			noteWorkflowFinished(m.st.sess, m.workflowState.WorkflowName, m.workflowState.Task, m.workflowState.WorkflowID, runErr)
 		}
 		if m.interrupted {
 			m.interrupted = false

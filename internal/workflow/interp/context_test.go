@@ -106,27 +106,6 @@ func TestTruncateLargeVarsWithBudget(t *testing.T) {
 	}
 }
 
-func TestSummarizeLongOutput(t *testing.T) {
-	t.Run("short output unchanged", func(t *testing.T) {
-		out := "short output"
-		got := summarizeLongOutput(out, 1000)
-		if got != out {
-			t.Errorf("expected unchanged, got different")
-		}
-	})
-
-	t.Run("long output truncated", func(t *testing.T) {
-		long := strings.Repeat("z", 5000)
-		got := summarizeLongOutput(long, 1000)
-		if len(got) >= len(long) {
-			t.Errorf("expected truncation, got len %d >= %d", len(got), len(long))
-		}
-		if !strings.Contains(got, "chars omitted") {
-			t.Error("expected omission marker")
-		}
-	})
-}
-
 func TestTruncatePromptSections(t *testing.T) {
 	t.Run("short prompt unchanged", func(t *testing.T) {
 		prompt := "short prompt"

@@ -708,6 +708,7 @@ func TestHandleWorkflowReconfigure_InterpKind_WalksRolesAndApplies(t *testing.T)
 func TestWorkflowDoneMsg_GenericExhaustion_OffersContinue(t *testing.T) {
 	sandboxMilkHome(t)
 	m := testModel()
+	m.st = &interactiveState{sess: &session.Session{ID: "s"}}
 	m.workflowState = &workflow.State{
 		WorkflowName: "pair",
 		Task:         "build a thing",
@@ -716,6 +717,10 @@ func TestWorkflowDoneMsg_GenericExhaustion_OffersContinue(t *testing.T) {
 	}
 	newM, _ := m.Update(workflow.WorkflowDoneMsg{Err: &interp.ExhaustedError{StageID: "pass_loop", MaxIterations: 3}})
 	nm := newM.(model)
+
+	if n := nm.st.sess.PendingNotices; len(n) != 1 || !strings.Contains(n[0], `Workflow "pair"`) || !strings.Contains(n[0], "pass_loop") {
+		t.Errorf("a finished workflow should queue a completion notice for the next turn, got %v", n)
+	}
 
 	if nm.pendingGenericWorkflowExtend == nil {
 		t.Fatal("expected pendingGenericWorkflowExtend to be set")

@@ -13,6 +13,7 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 func (m *model) headerBar() string {
@@ -111,6 +112,9 @@ func (m *model) statusBar() string {
 		if n := m.agents.backgroundMgr.ActiveCount(); n > 0 {
 			left += dim(" [⚙ " + pluralize(n, "background agent") + " running]")
 		}
+	}
+	if m.workflowRunning {
+		left += dim(" [⚙ " + workflowStatusLabel(m.workflowState) + "]")
 	}
 	if m.quitPending {
 		left += yellow(" [press ctrl+c again to exit]")
@@ -212,6 +216,19 @@ func (m *model) statusBar() string {
 		return styleStatusBar.Width(m.width).MaxWidth(m.width).Render(bar)
 	}
 	return bar
+}
+
+// workflowStatusLabel is the status-bar text for a running workflow: its name
+// and, once known, the role currently working.
+func workflowStatusLabel(st *workflow.State) string {
+	if st == nil || st.WorkflowName == "" {
+		return "workflow running"
+	}
+	label := "workflow " + st.WorkflowName + " running"
+	if st.Role != "" && st.Role != "starting" && st.Role != "done" {
+		label += " · " + st.Role
+	}
+	return label
 }
 
 func (m *model) statusAgent() string {

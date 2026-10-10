@@ -214,7 +214,10 @@ func runPrimaryWithSession(
 	// dispatchPrompt, not prompt, carries any completed background-job
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// RecordNeed/percept-matching/session bookkeeping below.
-	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + drainPendingBangOutput(sess) + prompt
+	events := drainBackgroundJobs(ctx, mgr, sess)
+	noticesBlock, nNotices := pendingEventsBlock(sess)
+	events += noticesBlock
+	dispatchPrompt := events + drainPendingBangOutput(sess) + prompt
 
 	ac := cfg.ActiveAgent()
 	agentName := runner.Name()
@@ -276,10 +279,11 @@ func runPrimaryWithSession(
 		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
+		recordInterruptedTurn(sess, session.AgentLocal, agentName, historyUserContent(events, sessionContent), nNotices, res, err)
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, AgentName: agentName, Content: sessionContent})
+	recordUserTurn(sess, session.AgentLocal, agentName, historyUserContent(events, sessionContent), nNotices)
 
 	if res.NewSessionID != "" {
 		sess.PrimarySessionID = res.NewSessionID
@@ -311,6 +315,9 @@ func runPrimaryWithSession(
 	}
 	if res.Text != "" && cbs.OnResponse != nil {
 		cbs.OnResponse(res.Text)
+	}
+	if recordSilentTurn(sess, session.AgentLocal, agentName, res, onWorkflowStart != nil) {
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
 
 	if res.EscalationReason != "" {
@@ -398,7 +405,10 @@ func runEscalationWithSession(
 	// dispatchPrompt, not prompt, carries any completed background-job
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// percept-matching/session bookkeeping below.
-	dispatchPrompt := drainBackgroundJobs(ctx, mgr, sess) + drainPendingBangOutput(sess) + prompt
+	events := drainBackgroundJobs(ctx, mgr, sess)
+	noticesBlock, nNotices := pendingEventsBlock(sess)
+	events += noticesBlock
+	dispatchPrompt := events + drainPendingBangOutput(sess) + prompt
 	escAC := cfg.EscalationAgentConfig()
 	agentName := runner.Name()
 
@@ -504,10 +514,11 @@ func runEscalationWithSession(
 		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
+		recordInterruptedTurn(sess, session.AgentEscalation, agentName, historyUserContent(events, sessionContent), nNotices, res, err)
 		return err
 	}
 
-	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentEscalation, AgentName: agentName, Content: sessionContent})
+	recordUserTurn(sess, session.AgentEscalation, agentName, historyUserContent(events, sessionContent), nNotices)
 
 	if res.NewSessionID != "" {
 		sess.EscalationSessionID = res.NewSessionID
@@ -556,6 +567,9 @@ func runEscalationWithSession(
 		if cbs.OnResponse != nil {
 			cbs.OnResponse(res.Text)
 		}
+	}
+	if recordSilentTurn(sess, session.AgentEscalation, agentName, res, onWorkflowStart != nil) {
+		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
 	}
 
 	if res.WorkflowStart != nil {

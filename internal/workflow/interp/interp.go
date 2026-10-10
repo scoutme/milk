@@ -554,7 +554,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 				"\n[stage %q ran out of tool-call iteration budget (not flagged as a loop) — advancing workflow with partial output]\n", s.ID)})
 		}
 		if s.SaveAs != "" {
-			ec.vars[s.SaveAs] = summarizeLongOutput(out, sectionCharBudget)
+			ec.vars[s.SaveAs] = out
 		}
 		ec.completeActivePath()
 		ec.reportProgress("")
@@ -577,7 +577,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 		}
 		// Save the partial output so downstream stages can work with it.
 		if s.SaveAs != "" {
-			ec.vars[s.SaveAs] = summarizeLongOutput(out, sectionCharBudget)
+			ec.vars[s.SaveAs] = out
 		}
 		ec.completeActivePath()
 		ec.reportProgress("")
@@ -597,11 +597,11 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	}
 
 	if s.SaveAs != "" {
-		// Truncate large outputs before saving as template variables.
-		// A generator's output (e.g. sprint_output) can be very large when
-		// the model is confused or looping. Capping it prevents the next
-		// stage's prompt from blowing up when it injects {{.sprint_output}}.
-		ec.vars[s.SaveAs] = summarizeLongOutput(out, sectionCharBudget)
+		// Saved whole: a later stage may parse it structurally (parallel_group
+		// splits a plan into "## Item N" sections), and head+tail truncation
+		// would drop whole sections from the middle. Prompt injection stays
+		// bounded because execAgentTurn truncates each variable at render time.
+		ec.vars[s.SaveAs] = out
 	}
 
 	if len(s.Verdict) == 0 {

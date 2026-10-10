@@ -328,7 +328,7 @@ func (r *localRunner) Execute(
 			return TurnResult{EscalationReason: esc.Reason}, nil
 		}
 		if ws, ok := err.(*local.WorkflowStartSignal); ok {
-			return TurnResult{WorkflowStart: ws}, nil
+			return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
 		}
 		// On connection failure, auto-start the server if run_cmd is configured
 		// and retry once. This handles the case where the server was stopped
@@ -343,9 +343,9 @@ func (r *localRunner) Execute(
 				return TurnResult{EscalationReason: esc.Reason}, nil
 			}
 			if ws, ok := err.(*local.WorkflowStartSignal); ok {
-				return TurnResult{WorkflowStart: ws}, nil
+				return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
 			}
-			return TurnResult{}, err
+			return TurnResult{Trail: agent.TurnTrail()}, err
 		}
 	}
 
