@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/scoutme/milk/internal/agent/local"
 )
 
@@ -255,8 +256,12 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 
 	var rows []string
 	for _, line := range lines {
-		lineW := utf8.RuneCountInString(stripANSI(line))
-		if lineW < inner {
+		// Never let a line outgrow the panel (issue #212): an over-wide row
+		// would push the scrollbar column out of the visible area. Builders
+		// wrap/truncate their own content — this clamp is the guarantee that
+		// the frame holds even if one of them ever doesn't.
+		line = ansi.Truncate(line, inner, "…")
+		if lineW := ansi.StringWidth(stripANSI(line)); lineW < inner {
 			line += strings.Repeat(" ", inner-lineW)
 		}
 		rows = append(rows, withPanelBackground(line, bg))

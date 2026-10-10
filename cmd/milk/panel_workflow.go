@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	rw "github.com/mattn/go-runewidth"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -331,7 +332,9 @@ func (m *model) renderWorkflowPanelScrollbar(h int) string {
 	return m.renderSidePanelScrollbar(regionWorkflow, h)
 }
 
-// wordWrapPanel wraps s into lines of at most maxWidth visible characters.
+// wordWrapPanel wraps s into lines of at most maxWidth display cells. Words
+// that cannot fit on a line of their own are hard-broken into width-sized
+// chunks instead of overflowing the panel (issue #212).
 func wordWrapPanel(s string, maxWidth int) []string {
 	if maxWidth <= 0 {
 		return []string{s}
@@ -341,16 +344,33 @@ func wordWrapPanel(s string, maxWidth int) []string {
 		return nil
 	}
 	var out []string
-	line := words[0]
-	for _, w := range words[1:] {
-		if len(line)+1+len(w) <= maxWidth {
-			line += " " + w
-		} else {
-			out = append(out, line)
-			line = w
+	line, lineW := "", 0
+	for _, w := range words {
+		for w != "" {
+			ww := rw.StringWidth(w)
+			switch {
+			case lineW == 0 && ww <= maxWidth:
+				line, lineW = w, ww
+				w = ""
+			case lineW == 0:
+				// Hard-break the over-long word (issue #212).
+				chunk, rest := splitAtWidth(w, maxWidth)
+				out = append(out, chunk)
+				w = rest
+			case lineW+1+ww <= maxWidth:
+				line += " " + w
+				lineW += 1 + ww
+				w = ""
+			default:
+				out = append(out, line)
+				line, lineW = "", 0
+			}
 		}
 	}
-	return append(out, line)
+	if lineW > 0 {
+		out = append(out, line)
+	}
+	return out
 }
 
 // workflowPanelLineCount returns the number of content lines the panel would occupy.
