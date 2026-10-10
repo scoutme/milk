@@ -238,6 +238,7 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 			WithPermissions(permStore, as.askPermissionWithOversight).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
+			WithRemoteSafetyAsk(as.remoteSafetyAsk).
 			WithOnOpenFile(func(path string) error { return acpOpenFile(cwd, path) }).
 			WithOnToolUse(as.onLocalToolUse).
 			WithOnToolResult(as.onLocalToolResult).
@@ -726,7 +727,7 @@ func (as *acpSession) permissionFailed(tool string, err error) {
 func (as *acpSession) backgroundPermissionAsk(jobID, tool, summary string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), as.cfg.EffectiveBackgroundAgentTimeout())
 	defer cancel()
-	sum := strings.TrimSpace(summary + " — requested by background agent " + jobID)
+	sum := jobPermSummary(summary, jobID)
 	askClient := func(c context.Context) bool {
 		out, err := as.host.RequestPermission(c, events.PermissionRequest{
 			Tool:       tool,

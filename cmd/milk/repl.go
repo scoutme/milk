@@ -33,6 +33,7 @@ import (
 	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/shelldetect"
@@ -406,6 +407,13 @@ type permRequestMsg struct {
 	respCh chan string
 }
 
+// permDismissMsg withdraws a permission prompt whose answer came from
+// somewhere else (remote oversight won the race — see readLineCtx). respCh is
+// used only for identity: the racing ask already stopped reading it.
+type permDismissMsg struct {
+	respCh chan string
+}
+
 // notifyMsg is tuiHost's Notify bridge (events.Host) — sent from a turn's own
 // goroutine, consumed by one Update() case that calls the existing m.notify,
 // same async-bridge shape as permRequestMsg above.
@@ -501,22 +509,47 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 }
 
 func (r *tuiInputReader) readLineLabeled(prompt, label string) (string, error) {
+	return r.readLineCtx(context.Background(), prompt, label)
+}
+
+// readLineCtx is readLineLabeled with cancellation: when ctx ends before the
+// user answers — a racing remote-oversight surface won the permission race,
+// or a bounded background-job ask timed out — the prompt is withdrawn via
+// permDismissMsg and the error returned. respCh is buffered so a just-in-time
+// answer that nobody reads any more can never block the UI goroutine.
+func (r *tuiInputReader) readLineCtx(ctx context.Context, prompt, label string) (string, error) {
 	respCh := make(chan string, 1)
 	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh})
-	return <-respCh, nil
+	select {
+	case s := <-respCh:
+		return s, nil
+	case <-ctx.Done():
+		r.send(permDismissMsg{respCh: respCh})
+		return "", ctx.Err()
+	}
 }
 
 // makeLocalPermAsk returns the permAsk callback for the local agent, routed
 // through events.Host.RequestPermission (Phase 1's one real Host migration —
-// see docs/machine-readable-output-design.md). host is backed by tuiHost,
-// which reuses the existing TUI permRequestMsg flow unchanged: the goroutine
-// blocks while the TUI displays a yellow permission prompt to the user.
-// Grants are persisted to ps (may be nil). Session-level skipPermissions is
-// handled by the caller via WithSkipPermissions before this is ever called.
-func makeLocalPermAsk(host events.Host, ps *local.PermStore) func(tool, summary string) bool {
+// see docs/machine-readable-output-design.md) and raced against the remote
+// oversight notifier — first answer wins, the same rule as the claude-cli
+// path (makeTUIPermissionHandler) and ACP's askPermissionWithOversight, so
+// every local-agent ask (tool permissions and safety confirmations like the
+// doom-loop gate) reaches the remote surface too, not just the TUI. host is
+// backed by tuiHost, which reuses the existing TUI permRequestMsg flow: the
+// goroutine blocks while the TUI displays a yellow permission prompt, and a
+// remote answer withdraws it via permDismissMsg (readLineCtx). Grants are
+// persisted to ps (may be nil). Session-level skipPermissions is handled by
+// the caller via WithSkipPermissions before this is ever called. n may be
+// nil — treated as oversight.Noop (client only).
+func makeLocalPermAsk(host events.Host, ps *local.PermStore, n oversight.Notifier) func(tool, summary string) bool {
 	return func(tool, summary string) bool {
-		outcome, _ := host.RequestPermission(context.Background(), events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
-		return outcome.Allow
+		return racePermAsk(context.Background(), n,
+			func(ctx context.Context) bool {
+				outcome, err := host.RequestPermission(ctx, events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
+				return err == nil && outcome.Allow
+			},
+			oversight.PermRequest{ToolName: tool, Input: summary})
 	}
 }
 
@@ -1213,6 +1246,26 @@ func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handlePermDismiss removes a pending/queued permission prompt that a racing
+// surface (remote oversight) already answered, so the TUI doesn't sit on a
+// question whose answer has already been applied. The displayed prompt gets a
+// one-line note so the transcript stays honest about what happened.
+func (m model) handlePermDismiss(msg permDismissMsg) (tea.Model, tea.Cmd) {
+	if m.pendingPerm != nil && m.pendingPerm.respCh == msg.respCh {
+		m.appendTranscript(dim("(answered via remote oversight)") + "\n")
+		m.pendingPerm = nil
+		m.dequeueNextPerm()
+		return m, nil
+	}
+	for i := range m.permQueue {
+		if m.permQueue[i].respCh == msg.respCh {
+			m.permQueue = append(m.permQueue[:i], m.permQueue[i+1:]...)
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
 func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.busy = false
 	m.activeToolUse = ""
@@ -1883,6 +1936,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case permRequestMsg:
 		return m.handlePermRequest(msg)
+
+	case permDismissMsg:
+		return m.handlePermDismiss(msg)
 
 	case notifyMsg:
 		m.notify(msg.text, msg.hint)
@@ -3414,11 +3470,33 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		}
 	}
 
-	// Wire local-agent permissions: persistent store + TUI ask callback.
-	// Both the primary and escalation-local agents share the same store and ask
-	// callback — they operate in the same cwd and grants should be shared.
+	// Wire local-agent permissions: persistent store + TUI ask callback
+	// raced against remote oversight (first answer wins — see makeLocalPermAsk).
+	// Both the primary and escalation-local agents share the same store and
+	// ask callbacks — they operate in the same cwd and grants should be shared.
 	localPermStore := st.localPerms
-	localPermAsk := makeLocalPermAsk(newTUIHost(ir0), localPermStore)
+	localHost := newTUIHost(ir0)
+	localPermAsk := makeLocalPermAsk(localHost, localPermStore, st.notifier)
+	// Background-job tool asks use the same race, attributed to the job and
+	// bounded by the job timeout — the ACP session's backgroundPermissionAsk
+	// with the TUI prompt in the client's seat.
+	localBgPermAsk := func(jobID, tool, summary string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), st.cfg.EffectiveBackgroundAgentTimeout())
+		defer cancel()
+		sum := jobPermSummary(summary, jobID)
+		return racePermAsk(ctx, st.notifier,
+			func(c context.Context) bool {
+				outcome, err := localHost.RequestPermission(c, events.PermissionRequest{Prompt: permAskPrompt(tool, sum), Tool: tool, Summary: sum})
+				return err == nil && outcome.Allow
+			},
+			oversight.PermRequest{ToolName: tool, Input: sum})
+	}
+	// Unattended safety confirmations (the doom-loop gate) ask remote
+	// oversight only — never a local prompt nobody may be watching — and
+	// fail closed when no remote surface is active.
+	localRemoteAsk := func(tool, summary string) (bool, bool) {
+		return remoteSafetyPermAsk(st.notifier, oversight.PermRequest{ToolName: tool, Input: summary})
+	}
 	localOpenFile := func(path string) error {
 		respCh := make(chan error, 1)
 		send(openFileMsg{path: path, respCh: respCh})
@@ -3441,6 +3519,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
+			WithBackgroundPermissionAsk(localBgPermAsk).
+			WithRemoteSafetyAsk(localRemoteAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
@@ -3455,6 +3535,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		tuiEscLocal := agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
+			WithBackgroundPermissionAsk(localBgPermAsk).
+			WithRemoteSafetyAsk(localRemoteAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).

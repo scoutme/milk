@@ -273,7 +273,9 @@ Forward agent activity and permission prompts to a mobile device.
 | `timeout_action` | `"deny"` | `"allow"` or `"deny"` on timeout |
 | `notify_tools` | `true` | Forward tool-call notifications |
 
-**Forwarded**: turn start (agent, target, prompt snippet — workflow turns labeled `workflow:<role>`), tool calls and results (truncated to 500 chars), response text (capped at 3000 chars, streamed as it's produced), permission prompts with y/n reply (first response from either surface wins).
+**Forwarded**: turn start (agent, target, prompt snippet — workflow turns labeled `workflow:<role>`), tool calls and results (truncated to 500 chars), response text (capped at 3000 chars, streamed as it's produced), permission prompts with y/n reply (first response from either surface wins). Every permission ask reaches the remote surface in both hosts — the claude-cli escalation agent's tool prompts, the local agent's tool prompts and safety confirmations (e.g. the doom-loop gate's "allow it to continue?"), and background-job tool prompts — not just the ones a given provider path happens to render locally.
+
+**Unattended safety confirmations (doom-loop gate)**: when the model repeats the exact same tool call 3 times in a row inside a background job or workflow step — where a local prompt would block work nobody is watching — milk asks the remote surface only. An unanswered prompt resolves through `timeout_action` (default `deny`) and stops the turn; with remote oversight disabled such contexts stop immediately without asking, exactly as before.
 
 **Remote input**: any message sent to the bot is injected as a new turn (`[telegram] …` in the transcript); queued while a turn is in progress, delivered as the next turn once it completes.
 

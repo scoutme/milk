@@ -30,8 +30,10 @@ func (h *tuiHost) Notify(n events.Notification) {
 
 // RequestPermission asks a yes/no question via the existing permRequestMsg
 // flow. req.Prompt is rendered verbatim; a blank or "y"/"Y" answer allows.
+// ctx cancellation (a racing remote-oversight answer) withdraws the prompt
+// via permDismissMsg and returns the error — the answer is then irrelevant.
 func (h *tuiHost) RequestPermission(ctx context.Context, req events.PermissionRequest) (events.PermissionOutcome, error) {
-	answer, err := h.ir.readLine(req.Prompt)
+	answer, err := h.ir.readLineCtx(ctx, req.Prompt, "")
 	if err != nil {
 		return events.PermissionOutcome{}, err
 	}
@@ -40,9 +42,10 @@ func (h *tuiHost) RequestPermission(ctx context.Context, req events.PermissionRe
 }
 
 // Elicit collects one line of structured input via the existing
-// permRequestMsg flow, labeled per req.Label.
+// permRequestMsg flow, labeled per req.Label. Cancellation semantics match
+// RequestPermission.
 func (h *tuiHost) Elicit(ctx context.Context, req events.ElicitationRequest) (events.ElicitationResult, error) {
-	line, err := h.ir.readLineLabeled(req.Prompt, req.Label)
+	line, err := h.ir.readLineCtx(ctx, req.Prompt, req.Label)
 	if err != nil {
 		return events.ElicitationResult{}, err
 	}

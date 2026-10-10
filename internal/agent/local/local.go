@@ -390,6 +390,10 @@ type Agent struct {
 	// bgPermAsk lets background jobs forked from this agent ask for tool
 	// permission; see WithBackgroundPermissionAsk. nil = jobs never ask.
 	bgPermAsk func(jobID, tool, summary string) bool
+	// remoteAsk is the doom-loop gate's confirmation channel for unattended
+	// contexts (background jobs, workflow steps); see WithRemoteSafetyAsk.
+	// nil = those contexts fail closed without asking anyone.
+	remoteAsk func(tool, summary string) (asked, allow bool)
 	permStore *PermStore
 	permAsk   func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
 	// bashAllowedPatterns is AgentConfig.BashAllowedPatterns: bash command
@@ -1035,6 +1039,22 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 func (a *Agent) WithBackgroundPermissionAsk(fn func(jobID, tool, summary string) bool) *Agent {
 	copy := *a
 	copy.bgPermAsk = fn
+	return &copy
+}
+
+// WithRemoteSafetyAsk returns a copy whose doom-loop gate can confirm with a
+// remote oversight surface (Telegram et al.) in unattended contexts —
+// background jobs and workflow steps — where prompting the local UI would
+// block work nobody is watching. fn must be safe for concurrent use and must
+// return rather than block forever (the remote backend's own prompt timeout
+// bounds it; a timeout counts as a decline). It reports whether anyone was
+// asked at all: with no remote surface active it must return (false, false)
+// and the gate fails closed exactly as before. Unattended contexts never
+// escalate on a decline (see canEscalate) — a decline simply terminates the
+// turn.
+func (a *Agent) WithRemoteSafetyAsk(fn func(tool, summary string) (asked, allow bool)) *Agent {
+	copy := *a
+	copy.remoteAsk = fn
 	return &copy
 }
 
@@ -1760,10 +1780,10 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// needing confirmation, not another self-recovery nudge. Applies to
 		// every tool, not just write/mutate ones — 3 identical calls in a
 		// row has no legitimate read-only explanation either. Similarly to
-		// MiMo-Code's doom_loop mechanism: ask for interactive confirmation,
-		// or fail closed immediately when there is no one to ask (a
-		// background job or workflow-role turn) rather than risking an
-		// unattended runaway loop.
+		// MiMo-Code's doom_loop mechanism: ask for confirmation — the
+		// interactive surface in a live turn, remote oversight (the user's
+		// phone) in an unattended one — and fail closed when there is nobody
+		// to ask at all, rather than risking an unattended runaway loop.
 		sig := toolCallBatchSignature(toolCalls) // never "" here: toolCalls is non-empty past the check above
 		if sig == lastToolCallSignature {
 			consecutiveIdenticalToolCalls++
@@ -1772,18 +1792,39 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		}
 		lastToolCallSignature = sig
 		if consecutiveIdenticalToolCalls >= doomLoopThreshold {
-			failClosed := a.workflowRole || a.jobID != "" || a.permAsk == nil
+			unattended := a.workflowRole || a.jobID != ""
 			var finalResp, outcome string
 			escalateDenied := false
 			switch {
-			case failClosed:
-				// No real escalation path exists for any fail-closed
-				// context (background job, workflow step, or no permAsk at
-				// all) — see canEscalate's doc comment — so this stays a
-				// plain termination regardless of canEscalate().
+			case unattended:
+				// Unattended context (background job, workflow step): a
+				// local-UI prompt would block work nobody is watching, but a
+				// remote oversight surface is exactly who should decide —
+				// ask it (bounded by its own prompt timeout) and fail closed
+				// when nobody can be asked, or when remote oversight declines
+				// or times out. No real escalation path exists here either —
+				// see canEscalate's doc comment — so a decline stays a plain
+				// termination regardless of canEscalate().
+				asked, allow := false, false
+				if a.remoteAsk != nil {
+					asked, allow = a.remoteAsk("doom_loop", doomLoopAskSummary)
+				}
+				switch {
+				case asked && allow:
+					outcome = "approved"
+				case asked:
+					finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and remote oversight declined or timed out, so the turn was stopped instead of risking an unattended runaway loop]"
+					outcome = "terminated_denied"
+				default:
+					finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and this context has no way to ask for confirmation, so the turn was stopped instead of risking an unattended runaway loop]"
+					outcome = "terminated_fail_closed"
+				}
+			case a.permAsk == nil:
+				// No ask callback at all (non-interactive embedding): same
+				// fail-closed termination (see canEscalate's doc comment).
 				finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and this context has no way to ask for confirmation, so the turn was stopped instead of risking an unattended runaway loop]"
 				outcome = "terminated_fail_closed"
-			case !a.permAsk("doom_loop", "the model has repeated the exact same tool call 3 times in a row — allow it to continue?"):
+			case !a.permAsk("doom_loop", doomLoopAskSummary):
 				// A denial is itself a strong signal that the primary model
 				// isn't handling this task well — escalate to a more
 				// capable agent instead of just giving up, when a real
@@ -2226,6 +2267,7 @@ func (a *Agent) cloneForBackground() *Agent {
 		skipPerms:        a.skipPerms,
 		skipPermsFn:      a.skipPermsFn, // concurrency-safe by contract
 		bgPermAsk:        a.bgPermAsk,
+		remoteAsk:        a.remoteAsk, // concurrency-safe by contract (WithRemoteSafetyAsk)
 		permStore:        a.permStore, // shared, but already designed for concurrent access (concurrent tool-call batches use it today)
 		// permAsk deliberately NOT copied. It blocks synchronously on a
 		// plain channel receive (readLineLabeled's <-respCh in cmd/milk)
