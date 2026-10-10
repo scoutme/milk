@@ -157,6 +157,7 @@ func (as *acpSession) runWorkflow(t *acpTurn, def workflow.Definition, task stri
 
 	r, runCfg := plan.newRunner(as.sess, task, runners, send, make(chan string, 1))
 	runErr := r.Run(t.ctx, runCfg)
+	noteWorkflowFinished(as.sess, def.Name, task, id, runErr)
 
 	stopStream() // flush stage output before the terminal status row
 	finish := func(status acp.ToolCallStatus, out string) {

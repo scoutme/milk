@@ -160,6 +160,13 @@ type Session struct {
 	// ephemeral within a single process run.
 	PendingBangOutput []string `json:"-"`
 
+	// PendingNotices are milk-authored events that happened outside any turn
+	// (e.g. a background workflow finishing). The next user turn carries them
+	// as a prefix, both in what the agent is sent and in what history stores,
+	// so the trace of work an agent started stays visible to it. Persisted: a
+	// notice must survive a restart before the next prompt.
+	PendingNotices []string `json:"pending_notices,omitempty"`
+
 	// RepetitionBaselineLocalTurns is the total user-turn count (all agents) at the
 	// moment the user last returned to the primary agent via /primary. The
 	// repeated-prompt check skips any user turns before this index so that prompts
@@ -659,6 +666,11 @@ func EscalationMostRecent(s *Session) bool {
 		}
 	}
 	return lastEsc > lastLocal
+}
+
+// AddNotice queues a milk-authored event for the next user turn (see PendingNotices).
+func (s *Session) AddNotice(n string) {
+	s.PendingNotices = append(s.PendingNotices, n)
 }
 
 func (s *Session) AddTurn(t Turn) {

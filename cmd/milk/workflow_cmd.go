@@ -384,6 +384,26 @@ func (m model) applyGenericWorkflowReconfigure(w *workflowWizardState) (tea.Mode
 	return m, nil
 }
 
+// workflowDisplaySend wraps send for the agents a workflow runs. buildTUIAgents
+// wires each agent's display hooks (reasoning, CLI tool-use hints, retraction)
+// to messages that write into the main transcript; for a workflow they belong
+// in its live buffer instead. Retraction and reasoning-promotion refer to the
+// main transcript's current turn and are dropped; everything else (permission
+// asks, OAuth, open-file) passes through.
+func workflowDisplaySend(send func(tea.Msg)) func(tea.Msg) {
+	return func(msg tea.Msg) {
+		switch v := msg.(type) {
+		case thinkChunkMsg:
+			send(workflowThinkChunkMsg{text: v.text})
+		case chunkMsg:
+			send(workflow.WorkflowChunkMsg{Text: v.text})
+		case retractMsg, reasoningPromotedMsg:
+		default:
+			send(msg)
+		}
+	}
+}
+
 // launchGenericWorkflow resolves agents, builds runners, and starts the
 // interpreter-driven workflow goroutine for any registered definition.
 func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
@@ -440,7 +460,7 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 
 	m.st.toolFutures = map[string]chan string{}
 	ir0 := &tuiInputReader{send: send}
-	tuiAgents, cliPC := m.buildTUIAgents(send, ir0)
+	tuiAgents, cliPC := m.buildTUIAgents(workflowDisplaySend(send), ir0)
 
 	runners, err := buildWorkflowRunners(plan.AgentNames, cfg, sess, m.st.mem, &tuiAgents, cliPC, func() inputReader { return ir0 }, m.st.notifier, attachments)
 	if err != nil {
