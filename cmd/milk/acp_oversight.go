@@ -141,13 +141,38 @@ func (as *acpSession) notifyTools() bool {
 }
 
 // oversightRemote reports whether n is an active remote backend (not the
-// Noop used when oversight is off, or before startOversight ran).
+// Noop used when oversight is off, before startOversight ran, or a nil
+// notifier in bare unit-test setups).
 func oversightRemote(n oversight.Notifier) bool {
+	if n == nil {
+		return false
+	}
 	_, noop := n.(oversight.Noop)
 	return !noop
 }
 
 // --- remote input: messages the user sends the bot ---
+
+// jobPermSummary attributes a background-job question to its job — the same
+// wording on every surface (the TUI's permission prompt text, ACP's
+// session/request_permission summary, and the remote oversight request).
+func jobPermSummary(summary, jobID string) string {
+	return strings.TrimSpace(summary + " — requested by background agent " + jobID)
+}
+
+// remoteSafetyPermAsk is the doom-loop gate's unattended-context channel: it
+// asks only the remote oversight backend — an unattended background job or
+// workflow step must not block on a local UI prompt nobody may be watching —
+// and reports whether anyone was asked at all. With no active backend it
+// answers (false, false), keeping the gate's fail-closed default. The remote
+// backend bounds its own wait (its prompt timeout resolves via the configured
+// timeout action), so this never blocks forever.
+func remoteSafetyPermAsk(n oversight.Notifier, req oversight.PermRequest) (asked, allow bool) {
+	if !oversightRemote(n) {
+		return false, false
+	}
+	return true, n.AskPermission(context.Background(), req) == oversight.PermAllow
+}
 
 // handleRemoteInput receives a message from the remote backend's polling
 // loop and runs it as a turn — the ACP counterpart of the TUI's
@@ -302,4 +327,11 @@ func (as *acpSession) askPermissionWithOversight(tool, summary string) bool {
 			return outcome.Allow
 		},
 		oversight.PermRequest{ToolName: tool, Input: summary})
+}
+
+// remoteSafetyAsk is the doom-loop gate's unattended-context channel over ACP
+// (background jobs, workflow steps): the remote backend only — see
+// remoteSafetyPermAsk for the semantics.
+func (as *acpSession) remoteSafetyAsk(tool, summary string) (bool, bool) {
+	return remoteSafetyPermAsk(as.notifier(), oversight.PermRequest{ToolName: tool, Input: summary})
 }

@@ -232,8 +232,9 @@ already granted, matches `bash_allowed_patterns`, or skip-permissions is on.
 - **Background agents** ask too. Their prompts point at the job's own
   `job:<id>` tool-call row and say which job is asking; the wait is bounded by
   the background-agent timeout, after which the tool is denied. `/skip-permissions`
-  and `dangerously_skip_permissions` apply to jobs as well. (In the TUI a
-  background job never asks and can only use tools already granted.)
+  and `dangerously_skip_permissions` apply to jobs as well. (In the TUI the
+  same job ask exists: the TUI prompt raced with remote oversight, bounded by
+  the job timeout.)
 - **Not covered yet:** the claude-cli escalation agent (its tool permissions
   are denied by default over ACP, and no request is ever sent), and agents
   that a workflow role or a tool-agent entry builds separately from the
@@ -257,7 +258,10 @@ and rebuilt when `/setup telegram` changes it:
   backend for both providers, plus workflow turns (`workflow:<role>`).
 - **Permission prompts race the client** — `session/request_permission`
   goes to the editor as always; the remote answer wins the race if it
-  arrives first (see the Tool permissions section above).
+  arrives first (see the Tool permissions section above). Safety
+  confirmations from unattended contexts (the doom-loop gate in a background
+  job or workflow step) skip the client and ask the remote surface only —
+  see docs/operations.md's "Remote oversight (Telegram)" section.
 - **Bot messages run as turns** — a message you send the bot runs in the
   live session with the most recent activity, echoed to the client as an
   ordinary user message; it queues while a turn is running and runs at turn

@@ -352,6 +352,10 @@ const ngramMaxRecovery = 2
 // confirmation rather than another nudge attempt.
 const doomLoopThreshold = 3
 
+// doomLoopAskSummary is the confirmation question the doom-loop gate asks —
+// the same words on every surface (local prompt, remote oversight request).
+const doomLoopAskSummary = "the model has repeated the exact same tool call 3 times in a row — allow it to continue?"
+
 // toolCallBatchSignature returns a signature for a whole iteration's tool
 // calls (order-sensitive, exact-match) so two iterations can be compared for
 // an identical repeat. Empty for an iteration with no tool calls.
