@@ -126,6 +126,12 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 			break
 		}
 		m.clearSelection()
+		if m.attached != nil && m.attachSelAnchorLine >= 0 {
+			// A panel click ends an attach-view selection too — both are on
+			// screen while attached, and only one selection may be live.
+			m.clearAttachSelection()
+			m.syncAttachedContent()
+		}
 		if m.panelSelRegion != region {
 			m.clearPanelSelection()
 		}

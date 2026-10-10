@@ -32,10 +32,19 @@ const viewportRebuildThrottle = 33 * time.Millisecond
 // left untouched — once the prompt resolves, the attach view reappears
 // exactly where it was, since nothing here ever calls detachAttach.
 func (m *model) activeViewport() *viewport.Model {
-	if m.attached != nil && !m.hasPendingPrompt() {
+	if m.attachActive() {
 		return &m.attached.vp
 	}
 	return &m.vp
+}
+
+// attachActive reports whether the attach view currently owns the main area —
+// attached and no pending prompt needs the screen (the exact condition
+// activeViewport() uses to pick the attach viewport). Kept as its own helper
+// so mouse selection can ask "which view is under the cursor?" with the same
+// answer rendering gives, without dereferencing a nil attachState.
+func (m *model) attachActive() bool {
+	return m.attached != nil && !m.hasPendingPrompt()
 }
 
 // hasPendingPrompt reports whether some pending prompt/wizard needs the

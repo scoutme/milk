@@ -73,6 +73,7 @@ func (m *model) startAttach(kind attachKind, jobID, label string, buf *livebuf.B
 	if buf == nil {
 		return nil
 	}
+	m.clearAttachSelection() // a new target is a fresh view — no stale highlight
 	m.attached = &attachState{
 		kind:  kind,
 		jobID: jobID,
@@ -93,14 +94,58 @@ func (m *model) detachAttach() {
 		return
 	}
 	obs.Debug("attach.stop", "kind", m.attached.kind.String(), "job", m.attached.jobID, "label", m.attached.label)
+	m.clearAttachSelection()
 	m.attached = nil
 }
 
+// clearAttachSelection resets the attach view's selection state (issue #207).
+func (m *model) clearAttachSelection() {
+	m.attachSelAnchorLine = -1
+	m.attachSelAnchorCol = 0
+	m.attachSelEndLine = -1
+	m.attachSelEndCol = 0
+	m.attachSelDragging = false
+	m.attachSelText = ""
+}
+
+// attachContentLines builds the attach view's content lines from the live
+// buffer's current snapshot: the header line (plus the parallel-workflow
+// note when applicable), a blank separator, then the wrapped body. This is
+// the single coordinate space shared by rendering (syncAttachedContent) and
+// selection (attachSelectionText / handleAttachMouse) so line indices can't
+// drift between what's shown and what a click maps to: line 0 is the
+// "── attached: … ──" header, the body starts after the blank line.
+func (m *model) attachContentLines() []string {
+	vw := m.vpWidth()
+	header := dim(fmt.Sprintf("── attached: %s — Esc to detach ──", m.attached.label))
+	if m.attached.kind == attachWorkflow && m.workflowState != nil && m.workflowState.ParallelExec {
+		header += "\n" + dim("parallel workflow — worker output is not streamed live; per-item start/finish lines appear instead")
+	}
+	body := m.attached.buf.Snapshot()
+	if vw > 0 {
+		body = ansi.Wrap(expandTabsForWrap(body), vw, "")
+	}
+	return strings.Split(header+"\n\n"+body, "\n")
+}
+
+// attachSelectionText extracts the selected text from the attach view's
+// content lines (panelSelectionText strips the ANSI per line), mirroring
+// selectionText() for the transcript.
+func (m *model) attachSelectionText() string {
+	if m.attached == nil || m.attachSelAnchorLine < 0 {
+		return ""
+	}
+	return panelSelectionText(m.attachContentLines(), m.attachSelAnchorLine, m.attachSelAnchorCol, m.attachSelEndLine, m.attachSelEndCol)
+}
+
 // syncAttachedContent rebuilds the attach viewport's content from the live
-// buffer's current snapshot. Sticky-bottom, matching the main transcript's
-// own convention: only auto-scrolls when already at the bottom, so a user
-// who has scrolled up to read earlier output isn't yanked back down by new
-// content arriving.
+// buffer's current snapshot, applying the attach selection highlight (issue
+// #207) before the background tint — tintBlock re-applies the row background
+// after every SGR reset, so the reverse-video spans keep their tint, and its
+// padding measures the stripped line either way. Sticky-bottom, matching the
+// main transcript's own convention: only auto-scrolls when already at the
+// bottom, so a user who has scrolled up to read earlier output isn't yanked
+// back down by new content arriving.
 func (m *model) syncAttachedContent() {
 	if m.attached == nil {
 		return
@@ -114,15 +159,11 @@ func (m *model) syncAttachedContent() {
 		m.attached.vp.Height = vpH
 	}
 	atBottom := m.attached.vp.AtBottom()
-	header := dim(fmt.Sprintf("── attached: %s — Esc to detach ──", m.attached.label))
-	body := m.attached.buf.Snapshot()
-	if vw > 0 {
-		body = ansi.Wrap(expandTabsForWrap(body), vw, "")
+	lines := m.attachContentLines()
+	if m.attachSelAnchorLine >= 0 && m.attachSelEndLine >= 0 {
+		lines = applyPanelSelectionHighlight(lines, m.attachSelAnchorLine, m.attachSelAnchorCol, m.attachSelEndLine, m.attachSelEndCol)
 	}
-	if m.attached.kind == attachWorkflow && m.workflowState != nil && m.workflowState.ParallelExec {
-		header += "\n" + dim("parallel workflow — worker output is not streamed live; per-item start/finish lines appear instead")
-	}
-	content := header + "\n\n" + body
+	content := strings.Join(lines, "\n")
 	// Tint every row of the attach view with the same subtle background used
 	// to set an alternating side panel apart from the main transcript —
 	// applied unconditionally here (not alternating with anything) so the
@@ -151,16 +192,117 @@ func tintBlock(content string, width int, bg string) string {
 	return strings.Join(lines, "\n")
 }
 
-// handleAttachKey handles every key while attached: Esc detaches; everything
+// handleAttachKey handles every key while attached: Esc clears an active
+// selection first (mirroring the transcript's esc-clears-selection
+// convention), then detaches; ctrl+c copies the attach selection; everything
 // else is swallowed — this is a read-only view, not an input surface, and
 // arrow keys in particular stay reserved for input-history navigation
 // elsewhere in the TUI, never repurposed here for scrolling.
 func (m model) handleAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "esc" {
+	switch msg.String() {
+	case "esc":
+		if m.attachSelAnchorLine >= 0 {
+			m.clearAttachSelection()
+			m.syncAttachedContent()
+			return m, nil
+		}
 		m.detachAttach()
 		m.syncLayout()
+	case "ctrl+c":
+		// handleCtrlC is unreachable while attached (keys route here first),
+		// so copy needs its own branch — only when a selection exists;
+		// otherwise ctrl+c stays swallowed exactly as before (issue #207).
+		if m.attachSelText == "" && m.attachSelAnchorLine >= 0 && m.attachSelDragging {
+			m.attachSelText = m.attachSelectionText()
+		}
+		if m.attachSelText != "" {
+			copyToClipboard(m.attachSelText)
+			m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.attachSelText)))
+			m.clearAttachSelection()
+			m.syncAttachedContent()
+			return m, copyFeedbackClearCmd()
+		}
 	}
 	return m, nil
+}
+
+// handleAttachMouse handles left-button press/motion/release over the attach
+// view while it owns the main area (issue #207): content lines are computed
+// against the attach viewport's own YOffset — the "── attached: … ──" header
+// included — and the selection lives in the attachSel* fields, so selecting
+// attached text never highlights, rebuilds, or copies the hidden transcript
+// underneath. Mirrors the transcript path in handleMouse; every step re-runs
+// syncAttachedContent so the highlight follows the drag.
+func (m *model) handleAttachMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
+	if m.attached == nil {
+		return m, nil
+	}
+	const vpRowStart = 2
+	contentLine := m.attached.vp.YOffset + (ev.Y - vpRowStart)
+	col := ev.X
+	if col < 0 {
+		col = 0
+	}
+	var dragCmd tea.Cmd // set by press/motion; returned at the end
+	switch ev.Action {
+	case tea.MouseActionPress:
+		if ev.Ctrl && m.attachSelAnchorLine >= 0 {
+			// Extend (or shrink) the existing selection to the clicked
+			// position, mirroring the transcript's ctrl+click behavior.
+			m.attachSelEndLine = contentLine
+			m.attachSelEndCol = col
+			m.attachSelDragging = true
+			m.attachSelText = m.attachSelectionText()
+			m.syncAttachedContent()
+			setMouseDragMode(true)
+			m.dragResetPending = true
+			m.dragResetGen++
+			dragCmd = dragResetCmd(m.dragResetGen)
+			break
+		}
+		// A panel click clears the panel selection (the panels stay visible
+		// while attached); the transcript's own selection is deliberately
+		// left untouched — it belongs to the hidden view and reappears on
+		// detach (issue #207's regression requirement).
+		m.clearPanelSelection()
+		m.attachSelAnchorLine = contentLine
+		m.attachSelAnchorCol = col
+		m.attachSelEndLine = -1
+		m.attachSelEndCol = 0
+		m.attachSelDragging = false
+		m.attachSelText = ""
+		m.syncAttachedContent()
+		setMouseDragMode(true)
+		m.dragResetPending = true
+		m.dragResetGen++
+		dragCmd = dragResetCmd(m.dragResetGen)
+	case tea.MouseActionMotion:
+		if m.attachSelAnchorLine >= 0 {
+			m.attachSelDragging = true
+			m.attachSelEndLine = contentLine
+			m.attachSelEndCol = col
+			m.syncAttachedContent()
+			m.dragResetGen++
+			dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
+		}
+	case tea.MouseActionRelease:
+		m.dragResetPending = false
+		setMouseDragMode(false)
+		if m.attachSelAnchorLine < 0 {
+			break
+		}
+		if contentLine == m.attachSelAnchorLine && col == m.attachSelAnchorCol {
+			// A click, not a drag: clear the zero-length selection.
+			m.clearAttachSelection()
+			m.syncAttachedContent()
+			return m, nil
+		}
+		m.attachSelEndLine = contentLine
+		m.attachSelEndCol = col
+		m.attachSelText = m.attachSelectionText()
+		m.syncAttachedContent()
+	}
+	return m, dragCmd
 }
 
 // handleBackgroundPanelClick runs the background panel's click-for-attach

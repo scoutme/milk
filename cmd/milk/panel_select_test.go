@@ -15,18 +15,20 @@ func dragTestModel() *model {
 	ta := buildTextarea()
 	vp := viewport.New(200, 36)
 	return &model{
-		width:              200,
-		height:             40,
-		ready:              true,
-		ta:                 ta,
-		vp:                 vp,
-		selAnchorLine:      -1,
-		selEndLine:         -1,
-		panelSelAnchorLine: -1,
-		panelSelEndLine:    -1,
-		st:                 &interactiveState{},
-		transcript:         &strings.Builder{},
-		transcriptNoThink:  &strings.Builder{},
+		width:               200,
+		height:              40,
+		ready:               true,
+		ta:                  ta,
+		vp:                  vp,
+		selAnchorLine:       -1,
+		selEndLine:          -1,
+		panelSelAnchorLine:  -1,
+		panelSelEndLine:     -1,
+		attachSelAnchorLine: -1,
+		attachSelEndLine:    -1,
+		st:                  &interactiveState{},
+		transcript:          &strings.Builder{},
+		transcriptNoThink:   &strings.Builder{},
 	}
 }
 

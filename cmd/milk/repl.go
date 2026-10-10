@@ -719,6 +719,18 @@ type model struct {
 	panelSelDragging   bool
 	panelSelText       string
 
+	// click-to-select state for the attach view (ADR-0047 / issue #207):
+	// content-space coordinates into the attach viewport's own lines (the
+	// "── attached: … ──" header included; -1 = none). Kept separate from the
+	// transcript selection above so selecting attached text never highlights
+	// or copies the hidden transcript underneath, and vice versa.
+	attachSelAnchorLine int
+	attachSelAnchorCol  int
+	attachSelEndLine    int
+	attachSelEndCol     int
+	attachSelDragging   bool
+	attachSelText       string
+
 	copyFeedback   string // transient "[copied N chars]" shown in status bar
 	busyHint       string // transient "agent is responding" shown in status bar
 	credRefreshing bool   // true while any background credential refresh is running
@@ -984,6 +996,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		panelSelRegion:      regionNone,
 		panelSelAnchorLine:  -1,
 		panelSelEndLine:     -1,
+		attachSelAnchorLine: -1,
+		attachSelEndLine:    -1,
 		taSelAnchor:         -1,
 		taSelEnd:            -1,
 		lastUndoValue:       "\x00", // sentinel: never equals real textarea value, so first push always succeeds
@@ -1403,6 +1417,10 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.dragSawOutside = false // a press starts a fresh interaction
 	case tea.MouseActionMotion, tea.MouseActionRelease:
 		switch {
+		case m.attachActive() && m.attachSelAnchorLine >= 0 && m.attachSelDragging:
+			// Same rule as the transcript: the attach view fills the main
+			// area, so "outside" means a panel column or the chrome rows.
+			m.dragSawOutside = region != regionNone || ev.Y < 2 || ev.Y >= m.height-2
 		case m.selAnchorLine >= 0 && m.selDragging:
 			m.dragSawOutside = region != regionNone || ev.Y < 2 || ev.Y >= m.height-2
 		case m.panelSelAnchorLine >= 0 && m.panelSelDragging:
@@ -1443,6 +1461,14 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		vpRowEnd := m.height - 2
 		if ev.Y < vpRowStart || ev.Y >= vpRowEnd || region != regionNone {
 			break
+		}
+		// The attach view owns the main area (and therefore selection) with
+		// exactly the same condition activeViewport() renders with — selecting
+		// must hit the buffer on screen, not the hidden transcript (issue #207).
+		// While a pending prompt temporarily re-reveals the transcript, this
+		// falls through to the transcript path below.
+		if m.attachActive() {
+			return m.handleAttachMouse(ev)
 		}
 		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
 		switch ev.Action {
@@ -1512,8 +1538,21 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if m.panelSelText == "" && m.panelSelAnchorLine >= 0 && m.panelSelDragging {
 				m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
 			}
-			// Transcript selection takes priority; then panel selection; then keyboard input selection.
-			if m.selText != "" {
+			if m.attachSelText == "" && m.attachActive() && m.attachSelAnchorLine >= 0 && m.attachSelDragging {
+				m.attachSelText = m.attachSelectionText()
+				m.syncAttachedContent()
+			}
+			// The view on screen takes priority: attach selection first while
+			// attached, then transcript, then panel, then keyboard input —
+			// right-clicking must copy what the user can actually see (issue #207).
+			if m.attachActive() && m.attachSelText != "" {
+				copyToClipboard(m.attachSelText)
+				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.attachSelText)))
+				m.clearAttachSelection()
+				m.syncAttachedContent()
+				return m, copyFeedbackClearCmd()
+			}
+			if !m.attachActive() && m.selText != "" {
 				copyToClipboard(m.selText)
 				m.copyFeedback = fmt.Sprintf("copied %d chars", len([]rune(m.selText)))
 				m.clearSelection()
@@ -2253,7 +2292,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is still held. Keep mode 1002 so motion keeps updating the highlight
 		// when the pointer resumes, and reschedule the timeout — finalizing
 		// here would freeze the selection until release (#168).
-		if (m.selAnchorLine >= 0 || m.panelSelAnchorLine >= 0) && !m.dragSawOutside {
+		if (m.selAnchorLine >= 0 || m.panelSelAnchorLine >= 0 || m.attachSelAnchorLine >= 0) && !m.dragSawOutside {
 			m.dragResetGen++
 			return m, dragResetCmd(m.dragResetGen)
 		}
@@ -2267,6 +2306,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.panelSelAnchorLine >= 0 && m.panelSelDragging && m.panelSelText == "" {
 			m.panelSelText = panelSelectionText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
+		}
+		if m.attachSelAnchorLine >= 0 && m.attachSelDragging && m.attachSelText == "" && m.attached != nil {
+			m.attachSelText = m.attachSelectionText()
 		}
 		setMouseDragMode(false)
 		m.setViewportContent()
