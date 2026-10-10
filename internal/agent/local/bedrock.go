@@ -387,6 +387,16 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 	var events atomic.Int64
 	var lastEventAtNano atomic.Int64
 	lastEventAtNano.Store(streamStartedAt.UnixNano())
+	// firstOut/lastOut bracket the generation window for throughput timing
+	// (StreamTiming) — see scanSSE (local.go) for the measurement semantics.
+	var firstOut, lastOut time.Time
+	markOutput := func() {
+		now := time.Now()
+		if firstOut.IsZero() {
+			firstOut = now
+		}
+		lastOut = now
+	}
 	heartbeatDone := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(streamIdleLogInterval)
@@ -449,12 +459,14 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 				continue
 			}
 			if ev.Delta.Text != "" {
+				markOutput()
 				textBuf.WriteString(ev.Delta.Text)
 				if out != nil {
 					fmt.Fprint(out, ev.Delta.Text)
 				}
 			}
 			if ev.Delta.ToolUse != nil {
+				markOutput()
 				if tc := toolBlocks[ev.ContentBlockIndex]; tc != nil {
 					tc.inputBuf.WriteString(ev.Delta.ToolUse.Input)
 				}
@@ -467,13 +479,19 @@ func (a *Agent) bedrockStreamCompletion(ctx context.Context, msgs []Message, too
 			var ev bedrockMetadataEvent
 			if json.Unmarshal(payload, &ev) == nil {
 				role := agentRoleForMetrics(a.escalationName)
+				var timing StreamTiming
+				if !firstOut.IsZero() {
+					timing.TTFT = firstOut.Sub(inferenceStart)
+					timing.Decode = lastOut.Sub(firstOut)
+				}
 				obs.RecordTokens(ctx, a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens)
+				obs.RecordTiming(ctx, a.model, role, timing.TTFT, timing.Decode)
 				if a.onTokens != nil {
 					// cacheRead/cacheCreation are 0 today since milk never sends
 					// an explicit cachePoint block yet (that's a separate,
 					// request-side sprint) — parsing them here is forward
 					// compatible and a no-op until that lands.
-					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.CacheReadInputTokens, ev.Usage.CacheWriteInputTokens)
+					a.onTokens(a.model, role, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.CacheReadInputTokens, ev.Usage.CacheWriteInputTokens, timing)
 				}
 			}
 

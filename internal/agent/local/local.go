@@ -247,6 +247,18 @@ type streamChunk struct {
 	} `json:"usage,omitempty"`
 }
 
+// StreamTiming captures one completion request's streaming timing for
+// throughput (tok/s) measurement: TTFT is request-send → first output delta
+// (content, reasoning, or tool-call args), Decode is the generation window
+// (first output delta → last output delta — tool execution and other
+// between-request time is deliberately excluded, so a slow tool call cannot
+// dilute the rate). Either is zero when the request produced no output
+// deltas or the path reports no timing.
+type StreamTiming struct {
+	TTFT   time.Duration
+	Decode time.Duration
+}
+
 // MemConfig holds the memory-related config values that the local agent uses at
 // runtime to gate memory tool results and instruction re-injection.
 type MemConfig struct {
@@ -413,10 +425,11 @@ type Agent struct {
 	logContext   bool // when true, log full request payload at DEBUG level
 	// onTokens is an optional callback fired after each inference call with real
 	// token counts, including cache-read/cache-creation counts when the provider
-	// reports them. Used to persist usage into the session without coupling the
-	// agent to the session package. Parameter order mirrors
-	// session.AddTokensFull so callers can pass through 1:1.
-	onTokens func(model, role string, prompt, completion, cacheRead, cacheCreation int64)
+	// reports them, plus that request's streaming timing (see StreamTiming) for
+	// throughput measurement. Used to persist usage into the session without
+	// coupling the agent to the session package. The first six parameters
+	// mirror session.AddTokensFull so callers can pass through 1:1.
+	onTokens func(model, role string, prompt, completion, cacheRead, cacheCreation int64, timing StreamTiming)
 	// onRequestSize is an optional callback fired with the exact marshaled
 	// size (bytes) of the outgoing request payload, once per inference call,
 	// right before it is sent — the live counterpart to onTokens's
@@ -1050,8 +1063,9 @@ func (a *Agent) WithOnRetract(fn func(from, to string)) *Agent {
 }
 
 // WithOnTokens registers a callback invoked after each inference call with the
-// model name, agent role, and real prompt/completion/cache token counts.
-func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion, cacheRead, cacheCreation int64)) *Agent {
+// model name, agent role, real prompt/completion/cache token counts, and the
+// request's streaming timing (see StreamTiming).
+func (a *Agent) WithOnTokens(fn func(model, role string, prompt, completion, cacheRead, cacheCreation int64, timing StreamTiming)) *Agent {
 	a.onTokens = fn
 	return a
 }
@@ -2106,11 +2120,16 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, jobID, cwd, task, context
 	}
 
 	usage := session.TokenUsage{Model: bg.model, Agent: bg.logRole()}
-	bg.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64) {
+	bg.onTokens = func(_, _ string, prompt, completion, cacheRead, cacheCreation int64, timing StreamTiming) {
 		usage.Prompt += prompt
 		usage.Completion += completion
 		usage.CacheRead += cacheRead
 		usage.CacheCreation += cacheCreation
+		usage.TTFTSeconds += timing.TTFT.Seconds()
+		usage.DecodeSeconds += timing.Decode.Seconds()
+		if timing.TTFT > 0 || timing.Decode > 0 {
+			usage.Requests++
+		}
 	}
 
 	// Excludes start_workflow alongside escalate: ADR-0043 caps background
@@ -3373,11 +3392,12 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	det := NewStreamDetector(a.detectedFormat)
 	partialTools := map[int]*toolCall{}
 	var textBuf strings.Builder
+	var timing StreamTiming
 
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out)
+	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out, inferenceStart, &timing)
 	if err != nil {
 		return "", "", nil, false, "", 0, err
 	}
@@ -3483,12 +3503,13 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// parent role's turns.
 	if a.jobID == "" {
 		obs.RecordTokens(ctx, a.model, role, freshPrompt, completionTokens)
+		obs.RecordTiming(ctx, a.model, role, timing.TTFT, timing.Decode)
 	}
 	if a.onTokens != nil {
 		// cacheCreation is always 0 here: OpenAI-compatible automatic caching
 		// (mirrored by other providers such as MiMo) reports cache-read hits via
 		// prompt_tokens_details.cached_tokens but never a write/creation size.
-		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0)
+		a.onTokens(a.model, role, freshPrompt, completionTokens, cacheRead, 0, timing)
 	}
 
 	if det.Format != ToolFormatUnknown {
@@ -3621,11 +3642,24 @@ func (a *Agent) scanSSE(
 	partialTools map[int]*toolCall,
 	textBuf *strings.Builder,
 	out io.Writer,
+	reqStart time.Time,
+	timing *StreamTiming,
 ) ([]toolCall, int64, int64, int64, int64, string, string, error) {
 	dbg := a.debugLog
 	var promptTokens, completionTokens, cacheRead, imageTokens int64
 	var reasoningBuf strings.Builder
 	var finishReason string
+	// firstOut/lastOut bracket the generation window (StreamTiming.Decode);
+	// firstOut - reqStart is the time to first output token. Output means any
+	// streamed output delta — content, reasoning, or native tool-call args.
+	var firstOut, lastOut time.Time
+	markOutput := func() {
+		now := time.Now()
+		if firstOut.IsZero() {
+			firstOut = now
+		}
+		lastOut = now
+	}
 	// Tracked purely for observability: a mid-stream read failure (RST_STREAM,
 	// GOAWAY, connection drop) previously returned bare from scanner.Err()
 	// with zero trace in milk.log — the only place it ever became visible was
@@ -3699,6 +3733,7 @@ func (a *Agent) scanSSE(
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.ReasoningContent != "" {
+				markOutput()
 				reasoningBuf.WriteString(choice.Delta.ReasoningContent)
 				if a.onThinking != nil {
 					a.onThinking(choice.Delta.ReasoningContent)
@@ -3720,7 +3755,13 @@ func (a *Agent) scanSSE(
 					break
 				}
 			}
+			if choice.Delta.Content != "" {
+				markOutput()
+			}
 			processContentToken(choice.Delta.Content, det, textBuf, out)
+			if len(choice.Delta.ToolCalls) > 0 {
+				markOutput()
+			}
 			accumulateNativeToolCalls(choice.Delta.ToolCalls, partialTools)
 			if choice.FinishReason != "" {
 				finishReason = choice.FinishReason
@@ -3750,6 +3791,12 @@ func (a *Agent) scanSSE(
 		"content_bytes", textBuf.Len(),
 		"reasoning_bytes", reasoningBuf.Len(),
 		"finish_reason", finishReason)
+	if timing != nil && !firstOut.IsZero() {
+		if !reqStart.IsZero() {
+			timing.TTFT = firstOut.Sub(reqStart)
+		}
+		timing.Decode = lastOut.Sub(firstOut)
+	}
 	return collectNativeToolCalls(partialTools), promptTokens, completionTokens, cacheRead, imageTokens, reasoningBuf.String(), finishReason, nil
 }
 

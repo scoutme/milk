@@ -52,7 +52,18 @@ milk exports OpenTelemetry-shaped signals to JSONL files under `~/.milk/otel/` �
 | `/otel` | File sizes, record counts, timestamp bounds |
 | `/otel trim` | Archive current files, recreate empty ones |
 | `search_signals` (tool) | Case-insensitive search over the raw JSONL |
-| `/usage` | Token usage report — cumulative, this session, since start — broken down by agent role and model |
+| `/usage` | Token usage report — cumulative, this session, since start — broken down by agent role and model, with a `tok/s` throughput column |
+
+### Throughput (tok/s)
+
+milk measures generation throughput per completion request and aggregates it per turn and per (model, role):
+
+- **Decode tok/s** — output tokens ÷ the generation window (first streamed output token → last). Tool execution and other between-request time is excluded, so a slow tool call never dilutes the rate.
+- **TTFT** — request send → first output token (queue + prefill).
+
+Sources: local/Bedrock/Responses providers are timed directly from the SSE stream; claude-cli turns use Claude Code's own `duration_api_ms` / `ttft_ms` from the result event; generic subprocess agents (aider, smolagents) report no timing and show `—` rather than a fabricated number.
+
+Where it shows: the TUI status bar (live `tok/s` estimate while streaming; `(last:↑…↓… · 42 tok/s · ttft 0.8s)` when idle), the `/usage` table's `tok/s` column, and the stream-json result event's `output_tokens_per_second` / `ttft_ms` fields. OTel counters/histograms: `milk.tokens.decode_seconds` (summed, the /usage denominator), `milk.tokens.ttft_ms`, `milk.tokens.decode_ms`.
 
 ### Config
 

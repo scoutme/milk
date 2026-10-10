@@ -46,7 +46,7 @@ func TestOnTokens_CachedTokensReported(t *testing.T) {
 
 	var gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation int64
 	var calls int
-	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		calls++
 		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
 	})
@@ -83,7 +83,7 @@ func TestOnTokens_NoPromptTokensDetails_RegressionGuard(t *testing.T) {
 	agent := New(srv.URL, "test-model")
 
 	var gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation int64
-	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
 	})
 

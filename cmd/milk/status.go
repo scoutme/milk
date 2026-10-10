@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	rw "github.com/mattn/go-runewidth"
@@ -289,8 +290,26 @@ func (m *model) statusTokens() string {
 		estimatedOut := int64(math.Round(float64(m.currentTurnChars) * 0.25))
 		estimatedIn := int64(math.Round(float64(m.currentTurnInputChars) * 0.25))
 		parts = append(parts, fmt.Sprintf("↑~%s↓~%s", formatTokenCount(estimatedIn), formatTokenCount(estimatedOut)))
+		// Live decode-rate estimate: the output estimate above divided by the
+		// time since the first streamed output token. Nothing sensible to show
+		// during prefill — turnFirstOutputAt is still zero then.
+		if !m.turnFirstOutputAt.IsZero() {
+			if elapsed := time.Since(m.turnFirstOutputAt).Seconds(); elapsed > 0.5 {
+				parts = append(parts, fmt.Sprintf("%.0f tok/s", float64(estimatedOut)/elapsed))
+			}
+		}
 	} else if lastPrompt+lastCompletion > 0 {
-		parts = append(parts, fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion)))
+		frag := fmt.Sprintf("(last:↑%s↓%s)", formatTokenCount(lastPrompt), formatTokenCount(lastCompletion))
+		// Real measured throughput of the last turn (provider-reported or
+		// stream-timed — see local.StreamTiming / claude's duration_api_ms),
+		// shown only when at least one request actually reported timing.
+		if lt := m.lastTurnTiming[role]; lt.decodeSec > 0 && lastCompletion > 0 {
+			frag += fmt.Sprintf(" · %.0f tok/s", float64(lastCompletion)/lt.decodeSec)
+			if lt.reqs > 0 {
+				frag += fmt.Sprintf(" · ttft %.1fs", lt.ttftSec/float64(lt.reqs))
+			}
+		}
+		parts = append(parts, frag)
 	}
 	if role == "escalation" {
 		// Same fresh-prompt-inclusive denominator as headerBar's cache:NN% — see

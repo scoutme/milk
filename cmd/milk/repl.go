@@ -832,6 +832,18 @@ type model struct {
 	// lastTokenRole tracks which role's counters were last displayed; used to detect
 	// role changes and clear stale last-turn counters between turns.
 	lastTokenRole string
+	// lastTurnTiming holds per-role throughput timing deltas (TTFT sum,
+	// decode-seconds sum, measured requests) of the last completed turn;
+	// seenTiming is the last observed cumulative timing per role — the delta
+	// base, mirroring primaryPrompt/escalationPrompt above.
+	lastTurnTiming map[string]turnTiming
+	seenTiming     map[string]turnTiming
+	// turnFirstOutputAt stamps the first streamed output token of the current
+	// turn (content or thinking). statusTokens divides the estimated output so
+	// far by the elapsed time since this stamp for its live tok/s estimate;
+	// zero until the first output arrives (a prefill-phase rate would be
+	// fiction). Cleared wherever currentTurnChars is reset.
+	turnFirstOutputAt time.Time
 
 	colorizeMode ColorizeMode
 
@@ -965,6 +977,8 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
 		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
 		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		lastTurnTiming:      map[string]turnTiming{"primary": {}, "escalation": {}},
+		seenTiming:          map[string]turnTiming{"primary": {}, "escalation": {}},
 		loopDetector:        loop.New(st.cfg.LoopDetectionCfg()),
 	}
 	m.seedTranscriptFromHistory()
@@ -1228,12 +1242,20 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	m.lastTurnCacheCreate["escalation"] = newEscCacheCreation - m.escalationCacheCreation
 	m.lastTurnCacheRead["primary"] = newPrimaryCacheRead - m.primaryCacheRead
 	m.lastTurnCacheCreate["primary"] = newPrimaryCacheCreation - m.primaryCacheCreation
+	// Throughput timing deltas — exact mirror of the token deltas above.
+	escTTFT, escDecode, escReqs := obs.SessionTimingByRolePrefix("escalation")
+	priTTFT, priDecode, priReqs := obs.SessionTimingByRole("primary")
+	m.lastTurnTiming["escalation"] = subtractTiming(escTTFT, escDecode, escReqs, m.seenTiming["escalation"])
+	m.lastTurnTiming["primary"] = subtractTiming(priTTFT, priDecode, priReqs, m.seenTiming["primary"])
+	m.seenTiming["escalation"] = turnTiming{ttftSec: escTTFT, decodeSec: escDecode, reqs: escReqs}
+	m.seenTiming["primary"] = turnTiming{ttftSec: priTTFT, decodeSec: priDecode, reqs: priReqs}
 	m.primaryPrompt, m.primaryCompletion = newPrimaryPrompt, newPrimaryCompletion
 	m.escalationPrompt, m.escalationComp = newEscPrompt, newEscComp
 	m.primaryCacheRead, m.primaryCacheCreation = newPrimaryCacheRead, newPrimaryCacheCreation
 	m.escalationCacheRead, m.escalationCacheCreation = newEscCacheRead, newEscCacheCreation
 	m.lastTokenRole = m.activeTokenRole()
 	m.currentTurnChars = 0
+	m.turnFirstOutputAt = time.Time{}
 	m.currentTurnInputChars = 0
 
 	// Loop detection: feed turn summary and check for signals.
@@ -1877,11 +1899,13 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case prefixChunkMsg:
+		m.markOutput()
 		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscriptStreamed(msg.text)
 		return m, nil
 
 	case chunkMsg:
+		m.markOutput()
 		m.currentTurnChars += int64(len(msg.text))
 		m.appendTranscriptStreamed(msg.text)
 		// Intra-turn loop detection: feed chunk and check for repetition.
@@ -1904,6 +1928,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case thinkChunkMsg:
+		m.markOutput()
 		m.currentTurnChars += int64(len(msg.text))
 		m.currentTurnThinking.WriteString(msg.text)
 		m.appendThinkingStreamed(msg.text)
@@ -2084,6 +2109,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyHint = ""
 		obs.IncrementTurnCount()
 		m.currentTurnChars = 0
+		m.turnFirstOutputAt = time.Time{}
 		m.currentTurnInputChars = 0
 		m.autoOpenPanel(regionWorkflow)
 		if m.workflowState != nil {
@@ -2260,8 +2286,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				newAgent.WithLogContext(m.st.cfg.Otel.LogContext)
 				ist := m.st
-				newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+				newAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, timing local.StreamTiming) {
 					ist.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
+					ist.sess.AddTiming(model, role, timing.TTFT, timing.Decode)
 				})
 				newAgent, mcpErr := attachMCPToolSet(m.ctx, m.st.cfg, activeLocalAgentConfig(m.st.cfg).Name, newAgent)
 				if mcpErr != nil {
@@ -3134,6 +3161,7 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.spinnerFrame = 0
 	m.currentTurnChars = 0
+	m.turnFirstOutputAt = time.Time{}
 	m.currentTurnInputChars = 0
 	m.currentTurnThinking.Reset()
 	m.thinkingActiveInTurn = false
@@ -3753,8 +3781,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Wire token persistence callbacks now that st is available; closures reference
 	// st.sess so they always write to the current session even after /new.
 	if localAgent != nil {
-		localAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		localAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, timing local.StreamTiming) {
 			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
+			st.sess.AddTiming(model, role, timing.TTFT, timing.Decode)
 		})
 		localAgent.WithOnRequestSize(func(bytes int64) {
 			if st.program != nil {
@@ -3763,8 +3792,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		})
 	}
 	if escalationLocalAgent != nil {
-		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+		escalationLocalAgent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, timing local.StreamTiming) {
 			st.sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
+			st.sess.AddTiming(model, role, timing.TTFT, timing.Decode)
 		})
 		escalationLocalAgent.WithOnRequestSize(func(bytes int64) {
 			if st.program != nil {
@@ -4087,4 +4117,35 @@ func loopSignalLine(v loop.Verdict, msg string) string {
 		cat = "consumption"
 	}
 	return fmt.Sprintf("[⚠ %s: %s]\n", cat, msg)
+}
+
+// turnTiming is the throughput timing accumulated across the measured
+// completion requests of one turn (or observed cumulatively for a role):
+// summed time-to-first-token, summed generation windows (decode seconds),
+// and the count of requests that reported timing.
+type turnTiming struct {
+	ttftSec   float64
+	decodeSec float64
+	reqs      int64
+}
+
+// subtractTiming diffs a newly observed cumulative timing total against the
+// previously seen one, clamping at zero — obs.ResetSessionTokens zeroes the
+// accumulators on a session swap, and a stale delta base must not produce
+// negative per-turn values.
+func subtractTiming(ttftSec, decodeSec float64, reqs int64, seen turnTiming) turnTiming {
+	return turnTiming{
+		ttftSec:   max(ttftSec-seen.ttftSec, 0),
+		decodeSec: max(decodeSec-seen.decodeSec, 0),
+		reqs:      max(reqs-seen.reqs, 0),
+	}
+}
+
+// markOutput stamps the first streamed output token of the current turn
+// (content or thinking) so statusTokens can show a live decode-rate estimate.
+// Subsequent calls within the same turn are no-ops.
+func (m *model) markOutput() {
+	if m.turnFirstOutputAt.IsZero() {
+		m.turnFirstOutputAt = time.Now()
+	}
 }

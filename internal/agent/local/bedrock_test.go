@@ -513,7 +513,7 @@ func TestBedrockStreamCompletion_CacheTokensReported(t *testing.T) {
 		model:   "test-model",
 		client:  srv.Client(),
 	}
-	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		calls++
 		gotPrompt, gotCompletion, gotCacheRead, gotCacheCreation = prompt, completion, cacheRead, cacheCreation
 	}
@@ -554,7 +554,7 @@ func TestBedrockStreamCompletion_NoCacheFields_RegressionGuard(t *testing.T) {
 		model:   "test-model",
 		client:  srv.Client(),
 	}
-	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	a.onTokens = func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		calls++
 		gotCacheRead, gotCacheCreation = cacheRead, cacheCreation
 	}

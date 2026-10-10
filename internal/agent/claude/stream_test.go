@@ -3,6 +3,7 @@ package claude
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func ndjson(lines ...string) string {
@@ -979,5 +980,49 @@ func TestStream_NoUsageAtAll(t *testing.T) {
 	}
 	if res.HasSubagentTokens || res.HasWorkflowTokens {
 		t.Errorf("HasSubagentTokens/HasWorkflowTokens should be false when no usage, got %v/%v", res.HasSubagentTokens, res.HasWorkflowTokens)
+	}
+}
+
+// TestStream_ResultTiming: the result event's native timing fields
+// (duration_ms / duration_api_ms / ttft_ms — validated live against Claude
+// Code 2.1.295) map onto ParseResult's throughput fields.
+func TestStream_ResultTiming(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1","duration_ms":1855,"duration_api_ms":1483,"ttft_ms":420}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Duration != 1855*time.Millisecond {
+		t.Errorf("Duration = %v, want 1855ms", res.Duration)
+	}
+	if res.Decode != 1483*time.Millisecond {
+		t.Errorf("Decode = %v, want 1483ms", res.Decode)
+	}
+	if res.TTFT != 420*time.Millisecond {
+		t.Errorf("TTFT = %v, want 420ms", res.TTFT)
+	}
+	if res.Requests != 1 {
+		t.Errorf("Requests = %d, want 1", res.Requests)
+	}
+}
+
+// TestStream_ResultTimingAbsent: older CLIs report no timing — all fields
+// stay zero and Requests stays 0 (tok/s renders as "—", never a fake 0).
+func TestStream_ResultTimingAbsent(t *testing.T) {
+	input := ndjson(
+		`{"type":"system","session_id":"s1"}`,
+		`{"type":"result","is_error":false,"session_id":"s1"}`,
+	)
+	var out strings.Builder
+	res, err := Stream(strings.NewReader(input), &out, nil, StreamOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Duration != 0 || res.Decode != 0 || res.TTFT != 0 || res.Requests != 0 {
+		t.Errorf("timing = %+v, want all zero when absent", res)
 	}
 }

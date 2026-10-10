@@ -696,6 +696,7 @@ func execUsage(st *interactiveState) string {
 				Model: u.Model, Agent: u.Agent,
 				Prompt: u.Prompt, Completion: u.Completion,
 				CacheRead: u.CacheRead, CacheCreation: u.CacheCreation,
+				DecodeSeconds: u.DecodeSeconds, TTFTSeconds: u.TTFTSeconds, Requests: u.Requests,
 			})
 		}
 		turns = int64(st.sess.EscalationTurnCount() + st.sess.LocalTurnCount())

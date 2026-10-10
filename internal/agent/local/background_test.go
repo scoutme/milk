@@ -111,7 +111,7 @@ func TestRunBackgroundTask_TokenUsageNotAttributedToParent(t *testing.T) {
 
 	agent := New(srv.URL, "test-model")
 	var parentCalls atomic.Int32
-	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		parentCalls.Add(1)
 	})
 
@@ -189,7 +189,7 @@ func TestRunBackgroundTask_ConcurrentWithParentRun_NoRace(t *testing.T) {
 
 	agent := New(srv.URL, "test-model")
 	var parentTokenCalls atomic.Int32
-	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64) {
+	agent.WithOnTokens(func(model, role string, prompt, completion, cacheRead, cacheCreation int64, _ StreamTiming) {
 		parentTokenCalls.Add(1)
 	})
 

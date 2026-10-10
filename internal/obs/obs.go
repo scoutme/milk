@@ -105,6 +105,20 @@ func Add(ctx context.Context, meterName, instrument string, n int64, attrs ...at
 	c.Add(ctx, n, withAttrs(attrs...))
 }
 
+// AddFloat increments a named float64 counter by v. No-op when v <= 0.
+func AddFloat(ctx context.Context, meterName, instrument string, v float64, attrs ...attribute.KeyValue) {
+	if v <= 0 {
+		return
+	}
+	m := Meter(meterName)
+	c, err := m.Float64Counter(instrument)
+	if err != nil {
+		Warn("obs: counter init failed", "instrument", instrument, "err", err)
+		return
+	}
+	c.Add(ctx, v, withAttrs(attrs...))
+}
+
 // RecordTokens emits prompt, completion, and total token counters with model
 // and agent-role labels, and updates the in-memory session accumulator.
 // model and agentRole must be non-empty.

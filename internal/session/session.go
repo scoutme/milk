@@ -209,6 +209,14 @@ type TokenUsage struct {
 	Completion    int64  `json:"completion"`
 	CacheRead     int64  `json:"cache_read,omitempty"`
 	CacheCreation int64  `json:"cache_creation,omitempty"`
+	// Throughput accounting (see AddTiming): DecodeSeconds is the summed
+	// generation window (first→last output token) across measured completion
+	// requests, TTFTSeconds the summed time-to-first-token, Requests the count
+	// of requests that reported timing. tok/s = Completion / DecodeSeconds.
+	// omitempty so pre-feature session files round-trip unchanged.
+	DecodeSeconds float64 `json:"decode_seconds,omitempty"`
+	TTFTSeconds   float64 `json:"ttft_seconds,omitempty"`
+	Requests      int64   `json:"requests,omitempty"`
 }
 
 // AddTokens accumulates token counts for a (model, role) pair into the session.
@@ -236,6 +244,30 @@ func (s *Session) AddTokensFull(model, role string, prompt, completion, cacheRea
 	e.Completion += completion
 	e.CacheRead += cacheRead
 	e.CacheCreation += cacheCreation
+}
+
+// AddTiming accumulates throughput timing for one measured completion request
+// into the same (model, role) entry AddTokensFull writes. Requests that
+// reported no timing (both durations zero — e.g. generic subprocess agents)
+// are not counted in Requests, so a partial denominator never dilutes tok/s.
+func (s *Session) AddTiming(model, role string, ttft, decode time.Duration) {
+	if model == "" || role == "" || (ttft <= 0 && decode <= 0) {
+		return
+	}
+	tokensMu.Lock()
+	defer tokensMu.Unlock()
+	if s.Tokens == nil {
+		s.Tokens = map[string]*TokenUsage{}
+	}
+	key := model + "\x00" + role
+	e, ok := s.Tokens[key]
+	if !ok {
+		e = &TokenUsage{Model: model, Agent: role}
+		s.Tokens[key] = e
+	}
+	e.TTFTSeconds += ttft.Seconds()
+	e.DecodeSeconds += decode.Seconds()
+	e.Requests++
 }
 
 // TokensSnapshot returns a copy of the session's token-usage entries, safe to

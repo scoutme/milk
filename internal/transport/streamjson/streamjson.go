@@ -152,6 +152,11 @@ type Event struct {
 	Usage        *Usage            `json:"usage,omitempty"`
 	ModelUsage   map[string]*Usage `json:"model_usage,omitempty"`
 	TotalCostUSD *float64          `json:"total_cost_usd,omitempty"` // reserved; emitted only with a pricing table
+	// Throughput of the turn's generation: output tokens per decode-second and
+	// mean time-to-first-token across the turn's measured completion requests.
+	// Omitted (not zeroed) when no timing was reported.
+	OutputTokensPerSecond float64 `json:"output_tokens_per_second,omitempty"`
+	TTFTMS                int64   `json:"ttft_ms,omitempty"`
 
 	// Reserved extension points: the ONLY home for provider-specific detail.
 	Extension json.RawMessage `json:"extension,omitempty"`

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- messagesToResponses ---
@@ -155,7 +156,7 @@ func TestScanResponsesSSE_TextDelta(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 	var out strings.Builder
-	tcs, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out)
+	tcs, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, &out, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +180,7 @@ func TestScanResponsesSSE_FunctionCallAssembled(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	tcs, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	tcs, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestScanResponsesSSE_UsageFromResponseCompleted(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	_, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	_, prompt, completion, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestScanResponsesSSE_CachedTokensFromInputTokensDetails(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestScanResponsesSSE_NoInputTokensDetails_RegressionGuard(t *testing.T) {
 	)
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
-	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard)
+	_, prompt, completion, cacheRead, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &strings.Builder{}, io.Discard, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestScanResponsesSSE_SkipsBadJSON(t *testing.T) {
 	a := &Agent{}
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
-	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("bad JSON line must be skipped, got error: %v", err)
 	}
@@ -302,7 +303,7 @@ func TestScanResponsesSSE_PropagatesMidStreamReadError(t *testing.T) {
 	det := NewStreamDetector(ToolFormatUnknown)
 	var textBuf strings.Builder
 
-	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard)
+	_, _, _, _, err := a.scanResponsesSSE(scanner, det, map[int]*toolCall{}, &textBuf, io.Discard, time.Time{}, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected scanResponsesSSE to propagate the underlying read error, got %v", err)
 	}

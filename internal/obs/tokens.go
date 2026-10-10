@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // TokenEntry accumulates token counts for one (model, agent-role) pair.
@@ -21,6 +24,11 @@ type TokenEntry struct {
 	Completion    int64
 	CacheRead     int64
 	CacheCreation int64
+	// Throughput timing (see RecordTiming): summed per-request generation
+	// window and time-to-first-token, plus the count of measured requests.
+	DecodeSeconds float64
+	TTFTSeconds   float64
+	Requests      int64
 }
 
 var sessionAccumulator struct {
@@ -57,6 +65,39 @@ func AccumulateCacheTokens(model, agent string, cacheRead, cacheCreation int64) 
 	}
 	e.CacheRead += cacheRead
 	e.CacheCreation += cacheCreation
+	sessionAccumulator.mu.Unlock()
+}
+
+// RecordTiming records one completion request's streaming timing: a summed
+// decode-seconds counter (milk.tokens.decode_seconds — the denominator for
+// /usage's tok/s column), ttft/decode duration histograms, and the in-memory
+// session accumulator used for per-turn deltas. No-op when both durations are
+// zero (paths with no timing, e.g. generic subprocess agents).
+func RecordTiming(ctx context.Context, model, agentRole string, ttft, decode time.Duration) {
+	if model == "" || agentRole == "" || (ttft <= 0 && decode <= 0) {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("agent", agentRole),
+	}
+	AddFloat(ctx, instrumentationScope, "milk.tokens.decode_seconds", decode.Seconds(), attrs...)
+	if ttft > 0 {
+		RecordDuration(ctx, instrumentationScope, "milk.tokens.ttft_ms", ttft, attrs...)
+	}
+	if decode > 0 {
+		RecordDuration(ctx, instrumentationScope, "milk.tokens.decode_ms", decode, attrs...)
+	}
+	key := model + "\x00" + agentRole
+	sessionAccumulator.mu.Lock()
+	e, ok := sessionAccumulator.entries[key]
+	if !ok {
+		e = &TokenEntry{Model: model, Agent: agentRole}
+		sessionAccumulator.entries[key] = e
+	}
+	e.TTFTSeconds += ttft.Seconds()
+	e.DecodeSeconds += decode.Seconds()
+	e.Requests++
 	sessionAccumulator.mu.Unlock()
 }
 
@@ -157,12 +198,45 @@ func SessionCacheByRolePrefix(prefix string) (cacheRead, cacheCreation int64) {
 	return
 }
 
+// SessionTimingByRole sums throughput timing for exactly one role.
+func SessionTimingByRole(role string) (ttftSec, decodeSec float64, reqs int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == role {
+			ttftSec += e.TTFTSeconds
+			decodeSec += e.DecodeSeconds
+			reqs += e.Requests
+		}
+	}
+	return
+}
+
+// SessionTimingByRolePrefix sums throughput timing for all roles matching the
+// prefix (exact or colon-separated sub-roles). Mirrors SessionTokensByRolePrefix.
+func SessionTimingByRolePrefix(prefix string) (ttftSec, decodeSec float64, reqs int64) {
+	sessionAccumulator.mu.Lock()
+	defer sessionAccumulator.mu.Unlock()
+	for _, e := range sessionAccumulator.entries {
+		if e.Agent == prefix || strings.HasPrefix(e.Agent, prefix+":") {
+			ttftSec += e.TTFTSeconds
+			decodeSec += e.DecodeSeconds
+			reqs += e.Requests
+		}
+	}
+	return
+}
+
 type tkey struct{ metric, model, agent string }
 
 type SessionTokenEntry struct {
 	Model, Agent             string
 	Prompt, Completion       int64
 	CacheRead, CacheCreation int64
+	// Throughput timing (see RecordTiming); tok/s = Completion / DecodeSeconds.
+	DecodeSeconds float64
+	TTFTSeconds   float64
+	Requests      int64
 }
 
 func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []SessionTokenEntry, turns int64) string {
@@ -172,6 +246,7 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		agent, model             string
 		prompt, completion       float64
 		cacheRead, cacheCreation int64
+		decodeSec                float64
 	}
 	rowMap := map[rowKey]*row{}
 	path := filepath.Join(otelDir, "metrics.jsonl")
@@ -228,10 +303,10 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		return rows[i].model < rows[j].model
 	})
 	var b strings.Builder
-	rule := "  " + strings.Repeat("─", 110)
+	rule := "  " + strings.Repeat("─", 119)
 	header := func(title string) {
 		fmt.Fprintf(&b, "\n%s\n", title)
-		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s  %10s  %10s  %6s\n", "role", "model", "prompt", "completion", "total", "cache_read", "cache_wrt", "hit%")
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10s  %10s  %10s  %10s  %10s  %6s  %7s\n", "role", "model", "prompt", "completion", "total", "cache_read", "cache_wrt", "hit%", "tok/s")
 		fmt.Fprintln(&b, rule)
 	}
 	// hitRate is the fraction of TOTAL input tokens (fresh prompt + cacheRead +
@@ -252,51 +327,67 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		}
 		return fmt.Sprintf("%d", read), fmt.Sprintf("%d", creation)
 	}
-	footer := func(p, c float64, cacheRead, cacheCreation int64) {
+	// tokPerSec is output tokens divided by the summed generation window
+	// (decode seconds) of the measured requests behind them. "—" whenever no
+	// timing was recorded (e.g. generic subprocess agents) rather than a
+	// misleading effective rate.
+	tokPerSec := func(completion, decodeSec float64) string {
+		if decodeSec <= 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%.0f", completion/decodeSec)
+	}
+	footer := func(p, c float64, cacheRead, cacheCreation int64, decodeSec float64) {
 		cr, cw := cacheRow(cacheRead, cacheCreation)
 		fmt.Fprintln(&b, rule)
-		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", "total", p, c, p+c, cr, cw, hitRate(p, cacheRead, cacheCreation))
+		fmt.Fprintf(&b, "  %-48s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s  %7s\n", "total", p, c, p+c, cr, cw, hitRate(p, cacheRead, cacheCreation), tokPerSec(c, decodeSec))
 	}
 	header("token usage (cumulative):")
 	var grandPrompt, grandCompletion float64
 	var grandCacheRead, grandCacheCreation int64
+	var grandDecode float64
 	for _, r := range rows {
 		grandPrompt += r.prompt
 		grandCompletion += r.completion
 		grandCacheRead += r.cacheRead
 		grandCacheCreation += r.cacheCreation
+		grandDecode += r.decodeSec
 		cr, cw := cacheRow(r.cacheRead, r.cacheCreation)
-		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s\n", r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion, cr, cw, hitRate(r.prompt, r.cacheRead, r.cacheCreation))
+		fmt.Fprintf(&b, "  %-16s  %-30s  %10.0f  %10.0f  %10.0f  %10s  %10s  %6s  %7s\n", r.agent, r.model, r.prompt, r.completion, r.prompt+r.completion, cr, cw, hitRate(r.prompt, r.cacheRead, r.cacheCreation), tokPerSec(r.completion, r.decodeSec))
 	}
-	footer(grandPrompt, grandCompletion, grandCacheRead, grandCacheCreation)
+	footer(grandPrompt, grandCompletion, grandCacheRead, grandCacheCreation, grandDecode)
 	if len(sessEntries) > 0 {
 		header(fmt.Sprintf("this session (%d turns):", turns))
 		var sp, sc float64
 		var sCacheRead, sCacheCreation int64
+		var sDecode float64
 		for _, e := range sessEntries {
 			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation))
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s  %7s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation), tokPerSec(float64(e.Completion), e.DecodeSeconds))
 			sp += float64(e.Prompt)
 			sc += float64(e.Completion)
 			sCacheRead += e.CacheRead
 			sCacheCreation += e.CacheCreation
+			sDecode += e.DecodeSeconds
 		}
-		footer(sp, sc, sCacheRead, sCacheCreation)
+		footer(sp, sc, sCacheRead, sCacheCreation, sDecode)
 	}
 	procEntries, procTurns := SessionTotals()
 	if len(procEntries) > 0 {
 		header(fmt.Sprintf("since start (%d turns):", procTurns))
 		var pp, pc float64
 		var pCacheRead, pCacheCreation int64
+		var pDecode float64
 		for _, e := range procEntries {
 			cr, cw := cacheRow(e.CacheRead, e.CacheCreation)
-			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation))
+			fmt.Fprintf(&b, "  %-16s  %-30s  %10d  %10d  %10d  %10s  %10s  %6s  %7s\n", e.Agent, e.Model, e.Prompt, e.Completion, e.Prompt+e.Completion, cr, cw, hitRate(float64(e.Prompt), e.CacheRead, e.CacheCreation), tokPerSec(float64(e.Completion), e.DecodeSeconds))
 			pp += float64(e.Prompt)
 			pc += float64(e.Completion)
 			pCacheRead += e.CacheRead
 			pCacheCreation += e.CacheCreation
+			pDecode += e.DecodeSeconds
 		}
-		footer(pp, pc, pCacheRead, pCacheCreation)
+		footer(pp, pc, pCacheRead, pCacheCreation, pDecode)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
