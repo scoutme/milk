@@ -76,6 +76,7 @@ func (p workflowPlan) initialState() *workflow.State {
 		WorkflowID:   p.ID,
 		StageTree:    definitionStageTree(p.Def.Stages),
 		Generic:      true,
+		ParallelExec: p.Def.HasParallelGroup(),
 	}
 }
 

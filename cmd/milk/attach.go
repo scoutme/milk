@@ -119,6 +119,9 @@ func (m *model) syncAttachedContent() {
 	if vw > 0 {
 		body = ansi.Wrap(expandTabsForWrap(body), vw, "")
 	}
+	if m.attached.kind == attachWorkflow && m.workflowState != nil && m.workflowState.ParallelExec {
+		header += "\n" + dim("parallel workflow — worker output is not streamed live; per-item start/finish lines appear instead")
+	}
 	content := header + "\n\n" + body
 	// Tint every row of the attach view with the same subtle background used
 	// to set an alternating side panel apart from the main transcript —

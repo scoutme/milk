@@ -214,6 +214,8 @@ const interactiveHelp = `
   /workflow <name> [<task>] [--<role> <agent> ...]   start a registered workflow, e.g. dev (designer→generator→evaluator),
                                                       pair (adds a user checkpoint before each verdict), swarm (concurrent
                                                       items + a final pass) — or a custom one from ~/.milk/workflows/
+  /workflow status                                   show the running (or saved) workflow
+  /workflow cancel                                   stop the running workflow; /workflow resume continues it
   /workflow resume                                   resume workflow from last checkpoint
   /workflow reconfigure                              reassign agent roles for current workflow (preserves state)
   /workflow clear                                    delete saved workflow state for this session

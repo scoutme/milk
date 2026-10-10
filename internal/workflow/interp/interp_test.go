@@ -865,3 +865,46 @@ func TestExecParallelGroup_LongPlanKeepsMiddleItems(t *testing.T) {
 		t.Errorf("want all 3 items run, got %d", worker.callCount())
 	}
 }
+
+func TestExecParallelGroup_ReportsItemStartAndFinishWithoutWorkerOutput(t *testing.T) {
+	var mu sync.Mutex
+	var streamed strings.Builder
+	cfg := runCfg(nil)
+	cfg.Send = func(msg tea.Msg) {
+		if c, ok := msg.(workflow.WorkflowChunkMsg); ok {
+			mu.Lock()
+			streamed.WriteString(c.Text)
+			mu.Unlock()
+		}
+	}
+	worker := &fakeRunner{name: "w", responses: []string{"SECRET worker output"}, errs: []error{nil, errors.New("boom")}}
+	def := workflow.Definition{
+		Name: "t",
+		Stages: []workflow.Stage{
+			{ID: "plan_stage", Kind: workflow.StageKindAgentTurn, Role: "planner", Prompt: "plan", SaveAs: "plan"},
+			{
+				ID: "fanout", Kind: workflow.StageKindParallelGroup, Over: "Item", From: "plan",
+				MaxConcurrency: 1, SaveAs: "results",
+				Body: []workflow.Stage{
+					{ID: "work", Kind: workflow.StageKindAgentTurn, Role: "w", Prompt: "do item {{.item}}", SaveAs: "work_out"},
+				},
+			},
+		},
+	}
+	planner := &fakeRunner{name: "planner", responses: []string{"## Item 1\na\n\n## Item 2\nb\n"}}
+	cfg.Runners = map[string]workflow.TurnRunner{"planner": planner, "w": worker}
+	if err := New(def, "task").Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	got := streamed.String()
+	mu.Unlock()
+	for _, want := range []string{"fanout: 2 items", "without live output", "[item 1] started", "[item 2] started", "[item 1] done", "[item 2] failed: "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("live stream missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "SECRET") {
+		t.Errorf("worker output must stay out of the live stream:\n%s", got)
+	}
+}

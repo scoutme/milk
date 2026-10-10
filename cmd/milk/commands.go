@@ -25,6 +25,14 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if m.st != nil && m.st.sess != nil {
 		oldSessionID = m.st.sess.ID
 	}
+	if m.workflowRunning {
+		switch cmd {
+		case cmdNew, cmdClear, cmdDrop, cmdResume:
+			// The workflow's checkpoint and completion notice belong to this session.
+			m.appendTranscript(milkTag() + " a workflow is running in this session — /workflow cancel it before " + cmd + "\n")
+			return m, nil
+		}
+	}
 	if cmd == cmdHistory {
 		return m.handleHistoryCmd(strings.TrimSpace(rest)), nil
 	}

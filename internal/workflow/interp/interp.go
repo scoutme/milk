@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/scoutme/milk/internal/textbudget"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -835,6 +836,15 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 		posByIndex[sec.Index] = i
 	}
 
+	// Workers run without live output (below), so say so, and report each
+	// item's start and finish as whole lines (never interleaved mid-line).
+	note := func(format string, args ...any) {
+		if ec.cfg.Send != nil {
+			ec.cfg.Send(workflow.WorkflowChunkMsg{Text: fmt.Sprintf(format, args...)})
+		}
+	}
+	note("\n[%s: %d %ss, up to %d at a time — workers run without live output]\n", s.ID, len(sections), label, maxConcurrency)
+
 	for _, wave := range waves {
 		sem := make(chan struct{}, maxConcurrency)
 		var wg sync.WaitGroup
@@ -863,6 +873,7 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 				}
 				defer itemEC.removeActivePath()
 				itemEC.pushPath(fmt.Sprintf("%s %s[%d]", s.ID, label, sec.Index))
+				note("[%s %d] started\n", label, sec.Index)
 				outcome, err := executeStages(itemEC, s.Body)
 				r := ItemResult{Index: sec.Index, Label: sec.Label, Status: outcome}
 				if lastSaveAs := lastSaveAsOf(s.Body); lastSaveAs != "" {
@@ -873,6 +884,9 @@ func execParallelGroup(ec *execContext, s workflow.Stage) error {
 				if err != nil {
 					r.Status = "error"
 					r.Err = err.Error()
+					note("[%s %d] failed: %s\n", label, sec.Index, textbudget.SummarizeLong(r.Err, 200))
+				} else {
+					note("[%s %d] done\n", label, sec.Index)
 				}
 				itemEC.completeActivePath()
 				itemEC.reportProgress("")

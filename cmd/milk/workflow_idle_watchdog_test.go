@@ -21,7 +21,8 @@ func TestWorkflowIdleCheck_WarnsAfterTimeoutAndReschedules(t *testing.T) {
 			{Name: "local-designer", Limits: &config.AgentLimits{TurnTimeoutSecs: &sec}},
 		}},
 	}
-	m.busy = true
+	m.workflowRunning = true
+	m.workflowGen = 1
 	m.ready = false
 	m.workflowState = &workflow.State{
 		WorkflowName: "dev",
@@ -30,7 +31,7 @@ func TestWorkflowIdleCheck_WarnsAfterTimeoutAndReschedules(t *testing.T) {
 	}
 	m.lastWorkflowActivity = time.Now().Add(-time.Hour) // long past the 1s timeout
 
-	updated, cmd := m.Update(workflowIdleCheckMsg{})
+	updated, cmd := m.Update(workflowIdleCheckMsg{gen: 1})
 	mm := updated.(model)
 
 	if !mm.workflowTimeoutWarned {
@@ -45,16 +46,31 @@ func TestWorkflowIdleCheck_WarnsAfterTimeoutAndReschedules(t *testing.T) {
 
 	// A second tick before any new activity must not warn again.
 	before := mm.transcript.String()
-	updated2, _ := mm.Update(workflowIdleCheckMsg{})
+	updated2, _ := mm.Update(workflowIdleCheckMsg{gen: 1})
 	mm2 := updated2.(model)
 	if mm2.transcript.String() != before {
 		t.Fatalf("expected no duplicate warning, transcript grew: %s", mm2.transcript.String())
 	}
 
-	// Once the workflow finishes (busy=false), the watchdog must stop rescheduling.
-	mm2.busy = false
-	_, cmd3 := mm2.Update(workflowIdleCheckMsg{})
+	// While the designer's questions wait on the user, no warning is due but
+	// the watchdog keeps running.
+	mm2.pendingWorkflowQuestions = "q?"
+	mm2.workflowTimeoutWarned = false
+	updated3, cmdQ := mm2.Update(workflowIdleCheckMsg{gen: 1})
+	if updated3.(model).workflowTimeoutWarned || cmdQ == nil {
+		t.Fatalf("pending questions: want no warning and a rescheduled check")
+	}
+	mm2.pendingWorkflowQuestions = ""
+
+	// A tick left over from an earlier run (older gen) must die quietly.
+	if _, cmdOld := mm2.Update(workflowIdleCheckMsg{gen: 0}); cmdOld != nil {
+		t.Fatalf("expected a stale-generation tick not to reschedule")
+	}
+
+	// Once the workflow finishes, the watchdog must stop rescheduling.
+	mm2.workflowRunning = false
+	_, cmd3 := mm2.Update(workflowIdleCheckMsg{gen: 1})
 	if cmd3 != nil {
-		t.Fatalf("expected idle check to stop rescheduling once busy=false")
+		t.Fatalf("expected idle check to stop rescheduling once the workflow is no longer running")
 	}
 }
