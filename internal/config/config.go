@@ -206,6 +206,11 @@ func DeepMerge(dst, src Config) Config {
 		dst.RemoteOversight = src.RemoteOversight
 	}
 
+	// Permissions — pointer sub-struct override
+	if src.Permissions != nil {
+		dst.Permissions = src.Permissions
+	}
+
 	// MCPServers — merge by name
 	if src.MCPServers != nil {
 		dst.MCPServers = mergeMCPServers(dst.MCPServers, src.MCPServers)
@@ -990,6 +995,11 @@ type Config struct {
 	// prompts are forwarded to the configured backend (e.g. Telegram).
 	RemoteOversight *RemoteOversightConfig `json:"remote_oversight,omitempty"`
 
+	// Permissions tunes how permission asks are answered — in particular the
+	// timed answer that bounds background asks (ADR-0052). Nil = defaults
+	// (360s deadline, deny).
+	Permissions *PermissionsConfig `json:"permissions,omitempty"`
+
 	// LoopDetection configures agent loop detection. When enabled, milk
 	// monitors turns for signs of the agent looping (repeated responses,
 	// high token velocity, echoing tool calls) and warns or interrupts.
@@ -1401,6 +1411,58 @@ func (r *RemoteOversightConfig) NotifyToolsEnabled() bool {
 		return true
 	}
 	return *r.NotifyTools
+}
+
+// PermissionsConfig tunes how permission asks are answered (ADR-0052): the
+// timed answer that bounds background asks. "Background" covers tool prompts
+// from background jobs and workflow steps; "safety" covers the doom-loop
+// gate's confirmations in unattended contexts. Both defaults are "deny" —
+// safety_default: "allow" re-enables unattended runaway loops and is warned
+// about at startup.
+type PermissionsConfig struct {
+	// BackgroundTimeoutSecs bounds how long a background tool ask waits for
+	// a real answer before the timed default applies. Default: 360.
+	BackgroundTimeoutSecs int `json:"background_timeout_secs,omitempty"`
+	// BackgroundDefault is the timed answer for background tool asks:
+	// "deny" (default) or "allow".
+	BackgroundDefault string `json:"background_default,omitempty"`
+	// SafetyTimeoutSecs bounds the doom-loop gate's unattended confirm.
+	// Default: 360.
+	SafetyTimeoutSecs int `json:"safety_timeout_secs,omitempty"`
+	// SafetyDefault is the timed answer for unattended safety
+	// confirmations: "deny" (default) or "allow".
+	SafetyDefault string `json:"safety_default,omitempty"`
+}
+
+// PermBackgroundTimeout returns the deadline for background tool asks,
+// defaulting to 360 seconds (enough to notice a prompt and answer it, short
+// enough to not stall a long unattended task).
+func (c Config) PermBackgroundTimeout() time.Duration {
+	if c.Permissions == nil || c.Permissions.BackgroundTimeoutSecs <= 0 {
+		return 360 * time.Second
+	}
+	return time.Duration(c.Permissions.BackgroundTimeoutSecs) * time.Second
+}
+
+// PermBackgroundAllow returns whether the timed answer for background tool
+// asks is "allow". Defaults to false (deny).
+func (c Config) PermBackgroundAllow() bool {
+	return c.Permissions != nil && c.Permissions.BackgroundDefault == "allow"
+}
+
+// PermSafetyTimeout returns the deadline for unattended safety confirmations
+// (the doom-loop gate), defaulting to 360 seconds.
+func (c Config) PermSafetyTimeout() time.Duration {
+	if c.Permissions == nil || c.Permissions.SafetyTimeoutSecs <= 0 {
+		return 360 * time.Second
+	}
+	return time.Duration(c.Permissions.SafetyTimeoutSecs) * time.Second
+}
+
+// PermSafetyAllow returns whether the timed answer for unattended safety
+// confirmations is "allow". Defaults to false (deny).
+func (c Config) PermSafetyAllow() bool {
+	return c.Permissions != nil && c.Permissions.SafetyDefault == "allow"
 }
 
 // LocalContextBudget returns the maximum total character count of the local
@@ -2324,6 +2386,26 @@ func Validate(cfg Config) []ValidationWarning {
 		}
 		if !found {
 			warn("", fmt.Sprintf("escalation_agent %q not found in agents list — run /config init or edit config", cfg.EscalationAgent))
+		}
+	}
+
+	// Validate the timed-answer permission policy (ADR-0052).
+	if cfg.Permissions != nil {
+		p := cfg.Permissions
+		if d := strings.TrimSpace(p.BackgroundDefault); d != "" && d != "allow" && d != "deny" {
+			warn("", fmt.Sprintf("permissions.background_default %q invalid — use \"allow\" or \"deny\" (defaulting to deny)", d))
+		}
+		if d := strings.TrimSpace(p.SafetyDefault); d != "" && d != "allow" && d != "deny" {
+			warn("", fmt.Sprintf("permissions.safety_default %q invalid — use \"allow\" or \"deny\" (defaulting to deny)", d))
+		}
+		if p.BackgroundTimeoutSecs < 0 {
+			warn("", "permissions.background_timeout_secs is negative — using the default (360)")
+		}
+		if p.SafetyTimeoutSecs < 0 {
+			warn("", "permissions.safety_timeout_secs is negative — using the default (360)")
+		}
+		if p.SafetyDefault == "allow" {
+			warn("", "permissions.safety_default is \"allow\" — the doom-loop gate will let unattended loops continue without confirmation")
 		}
 	}
 

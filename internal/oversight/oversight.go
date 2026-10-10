@@ -44,9 +44,13 @@ type Notifier interface {
 	NotifyResponse(ctx context.Context, agent, text string)
 
 	// AskPermission sends a permission request to the remote interface and
-	// waits for an allow/deny reply up to the configured timeout.
-	// Returns PermTimeout when the deadline expires before a reply arrives.
-	AskPermission(ctx context.Context, req PermRequest) PermDecision
+	// waits for a reply. answered reports whether a human actually replied;
+	// a timeout — the backend's own prompt timeout or ctx cancellation — is
+	// not an answer (see ADR-0052). On silence, decision carries the
+	// backend's configured timeout action, and the caller decides what
+	// silence means: the timeout action for foreground asks, the timed
+	// default for background ones.
+	AskPermission(ctx context.Context, req PermRequest) (decision PermDecision, answered bool)
 }
 
 // Noop is a no-op Notifier used when remote oversight is disabled.
@@ -57,6 +61,9 @@ func (Noop) NotifyToolUse(_ context.Context, _, _ string)            {}
 func (Noop) NotifyToolResult(_ context.Context, _, _ string, _ bool) {}
 func (Noop) NotifyTurnDone(_ context.Context, _ string, _ error)     {}
 func (Noop) NotifyResponse(_ context.Context, _, _ string)           {}
-func (Noop) AskPermission(_ context.Context, _ PermRequest) PermDecision {
-	return PermAllow
+func (Noop) AskPermission(_ context.Context, _ PermRequest) (PermDecision, bool) {
+	// Nobody to answer: silence, with the timeout-action-shaped decision the
+	// callers fall back to for foreground asks (deny, like the default
+	// timeout action).
+	return PermDeny, false
 }

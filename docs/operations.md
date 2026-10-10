@@ -273,7 +273,22 @@ Forward agent activity and permission prompts to a mobile device.
 | `timeout_action` | `"deny"` | `"allow"` or `"deny"` on timeout |
 | `notify_tools` | `true` | Forward tool-call notifications |
 
-**Forwarded**: turn start (agent, target, prompt snippet — workflow turns labeled `workflow:<role>`), tool calls and results (truncated to 500 chars), response text (capped at 3000 chars, streamed as it's produced), permission prompts with y/n reply (first response from either surface wins).
+**Forwarded**: turn start (agent, target, prompt snippet — workflow turns labeled `workflow:<role>`), tool calls and results (truncated to 500 chars), response text (capped at 3000 chars, streamed as it's produced), permission prompts with y/n reply (first response from either surface wins). Every permission ask reaches the remote surface in both hosts — the claude-cli escalation agent's tool prompts, the local agent's tool prompts and safety confirmations (e.g. the doom-loop gate's "allow it to continue?"), and background-job tool prompts — not just the ones a given provider path happens to render locally.
+
+**Background asks (timed answer)**: permission asks from background jobs, workflow steps, and safety confirmations like the doom-loop gate surface everywhere — the main TUI prompt queue (with a countdown and `a`/`d` bulk answers) and the remote surface — instead of failing closed. Each ask carries a **timed answer**: if neither surface replies before the deadline, the configured default applies (default `deny` after 360s). Configure it in `~/.milk/config.json`:
+
+```json
+{
+  "permissions": {
+    "background_timeout_secs": 360,
+    "background_default": "deny",
+    "safety_timeout_secs": 360,
+    "safety_default": "deny"
+  }
+}
+```
+
+`safety_*` governs the doom-loop gate's unattended confirmations only (separate from tool asks on purpose — `safety_default: "allow"` re-enables unattended runaway loops and warns at startup). Override both for the session with `/permissions default allow|deny [safety]` and `/permissions timeout <secs> [safety]`; `/permissions` lists the policy and any pending asks. Foreground asks are unchanged: direct input and remote oversight, no deadline; `timeout_action` (above) resolves remote-side silence for those. `dangerously_skip_permissions` keeps auto-approving tool asks (including background ones) but never bypasses the doom-loop gate.
 
 **Remote input**: any message sent to the bot is injected as a new turn (`[telegram] …` in the transcript); queued while a turn is in progress, delivered as the next turn once it completes.
 

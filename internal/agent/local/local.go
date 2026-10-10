@@ -390,6 +390,10 @@ type Agent struct {
 	// bgPermAsk lets background jobs forked from this agent ask for tool
 	// permission; see WithBackgroundPermissionAsk. nil = jobs never ask.
 	bgPermAsk func(jobID, tool, summary string) bool
+	// safetyAsk is the doom-loop gate's confirmation channel for unattended
+	// contexts (background jobs, workflow steps); see WithSafetyAsk and
+	// SafetyOutcome. nil = those contexts fail closed without asking anyone.
+	safetyAsk func(jobID, tool, summary string) SafetyOutcome
 	permStore *PermStore
 	permAsk   func(tool, summary string) bool // returns true if user allows; nil = deny all (non-TUI)
 	// bashAllowedPatterns is AgentConfig.BashAllowedPatterns: bash command
@@ -625,6 +629,16 @@ func (a *Agent) AsWorkflowExecutor() *Agent {
 	copy.workflowRole = true
 	copy.skipRepeatCheck = true
 	copy.escalationName = ""
+	// A workflow step runs unattended: its tool asks go through the bounded
+	// background ask (all surfaces + the timed answer — ADR-0052), never the
+	// open-ended foreground prompt that would trap the input line until
+	// somebody notices. With no background ask wired the step keeps the
+	// copied foreground ask (tests, non-interactive embeddings deny instead).
+	if a.bgPermAsk != nil {
+		copy.permAsk = func(tool, summary string) bool {
+			return a.bgPermAsk("", tool, summary)
+		}
+	}
 	return &copy
 }
 
@@ -1035,6 +1049,39 @@ func (a *Agent) WithSkipPermissions(skip bool) *Agent {
 func (a *Agent) WithBackgroundPermissionAsk(fn func(jobID, tool, summary string) bool) *Agent {
 	copy := *a
 	copy.bgPermAsk = fn
+	return &copy
+}
+
+// SafetyOutcome is how an unattended safety confirmation (the doom-loop
+// gate) resolved; the gate picks its termination wording from it so the
+// transcript never claims an answer that didn't happen (ADR-0052).
+type SafetyOutcome int
+
+const (
+	// SafetyUnreachable: no ask surface existed at all (no local UI, no
+	// remote oversight) — fail closed without waiting.
+	SafetyUnreachable SafetyOutcome = iota
+	// SafetyApproved: a human — or a default-allow timed answer — let it
+	// continue.
+	SafetyApproved
+	// SafetyDeclined: a real answer (local or remote) denied it.
+	SafetyDeclined
+	// SafetyTimedOut: no answer arrived before the deadline and the
+	// configured timed default denied it.
+	SafetyTimedOut
+)
+
+// WithSafetyAsk returns a copy whose doom-loop gate can confirm an unattended
+// safety event (background job, workflow step) through fn — the full ask
+// flow: every surface including the main TUI prompt queue, plus the timed
+// answer that bounds the wait (ADR-0052). fn must be safe for concurrent use
+// and must return rather than block forever. SafetyUnreachable (no surface
+// at all) fails the gate closed exactly as before; unattended contexts never
+// escalate on a decline (see canEscalate) — a decline simply terminates the
+// turn.
+func (a *Agent) WithSafetyAsk(fn func(jobID, tool, summary string) SafetyOutcome) *Agent {
+	copy := *a
+	copy.safetyAsk = fn
 	return &copy
 }
 
@@ -1760,10 +1807,10 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// needing confirmation, not another self-recovery nudge. Applies to
 		// every tool, not just write/mutate ones — 3 identical calls in a
 		// row has no legitimate read-only explanation either. Similarly to
-		// MiMo-Code's doom_loop mechanism: ask for interactive confirmation,
-		// or fail closed immediately when there is no one to ask (a
-		// background job or workflow-role turn) rather than risking an
-		// unattended runaway loop.
+		// MiMo-Code's doom_loop mechanism: ask for confirmation — the
+		// interactive surface in a live turn, remote oversight (the user's
+		// phone) in an unattended one — and fail closed when there is nobody
+		// to ask at all, rather than risking an unattended runaway loop.
 		sig := toolCallBatchSignature(toolCalls) // never "" here: toolCalls is non-empty past the check above
 		if sig == lastToolCallSignature {
 			consecutiveIdenticalToolCalls++
@@ -1772,18 +1819,43 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		}
 		lastToolCallSignature = sig
 		if consecutiveIdenticalToolCalls >= doomLoopThreshold {
-			failClosed := a.workflowRole || a.jobID != "" || a.permAsk == nil
+			unattended := a.workflowRole || a.jobID != ""
 			var finalResp, outcome string
 			escalateDenied := false
 			switch {
-			case failClosed:
-				// No real escalation path exists for any fail-closed
-				// context (background job, workflow step, or no permAsk at
-				// all) — see canEscalate's doc comment — so this stays a
-				// plain termination regardless of canEscalate().
+			case unattended:
+				// Unattended context (background job, workflow step): the
+				// ask surfaces everywhere — the main TUI prompt queue and
+				// remote oversight — bounded by the timed answer (ADR-0052),
+				// instead of blocking work nobody is watching or failing
+				// closed without asking. Only when no surface exists at all
+				// does it fail closed immediately. No real escalation path
+				// exists here either — see canEscalate's doc comment — so a
+				// decline stays a plain termination regardless of
+				// canEscalate().
+				safety := SafetyUnreachable
+				if a.safetyAsk != nil {
+					safety = a.safetyAsk(a.jobID, "doom_loop", doomLoopAskSummary)
+				}
+				switch safety {
+				case SafetyApproved:
+					outcome = "approved"
+				case SafetyDeclined:
+					finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and the user declined to let it continue]"
+					outcome = "terminated_denied"
+				case SafetyTimedOut:
+					finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and no answer arrived before the deadline, so the turn was stopped instead of risking an unattended runaway loop]"
+					outcome = "terminated_timeout"
+				default:
+					finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and this context has no way to ask for confirmation, so the turn was stopped instead of risking an unattended runaway loop]"
+					outcome = "terminated_fail_closed"
+				}
+			case a.permAsk == nil:
+				// No ask callback at all (non-interactive embedding): same
+				// fail-closed termination (see canEscalate's doc comment).
 				finalResp = "[turn terminated: the model repeated the exact same tool call 3 times in a row and this context has no way to ask for confirmation, so the turn was stopped instead of risking an unattended runaway loop]"
 				outcome = "terminated_fail_closed"
-			case !a.permAsk("doom_loop", "the model has repeated the exact same tool call 3 times in a row — allow it to continue?"):
+			case !a.permAsk("doom_loop", doomLoopAskSummary):
 				// A denial is itself a strong signal that the primary model
 				// isn't handling this task well — escalate to a more
 				// capable agent instead of just giving up, when a real
@@ -2226,6 +2298,7 @@ func (a *Agent) cloneForBackground() *Agent {
 		skipPerms:        a.skipPerms,
 		skipPermsFn:      a.skipPermsFn, // concurrency-safe by contract
 		bgPermAsk:        a.bgPermAsk,
+		safetyAsk:        a.safetyAsk, // concurrency-safe by contract (WithSafetyAsk)
 		permStore:        a.permStore, // shared, but already designed for concurrent access (concurrent tool-call batches use it today)
 		// permAsk deliberately NOT copied. It blocks synchronously on a
 		// plain channel receive (readLineLabeled's <-respCh in cmd/milk)

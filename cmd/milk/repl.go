@@ -33,6 +33,7 @@ import (
 	"github.com/scoutme/milk/internal/mcpauth"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/shelldetect"
@@ -404,6 +405,18 @@ type permRequestMsg struct {
 	prompt string
 	label  string // status-bar label; defaults to "[allow?]" when empty
 	respCh chan string
+	// autoDefault ("y"/"n") and autoAt mark a background ask with a timed
+	// answer (ADR-0052): the queue applies autoDefault when autoAt passes
+	// with no reply, shows a countdown for it, and answers overflow with it.
+	autoDefault string
+	autoAt      time.Time
+}
+
+// permDismissMsg withdraws a permission prompt whose answer came from
+// somewhere else (remote oversight won the race — see readLineCtx). respCh is
+// used only for identity: the racing ask already stopped reading it.
+type permDismissMsg struct {
+	respCh chan string
 }
 
 // notifyMsg is tuiHost's Notify bridge (events.Host) — sent from a turn's own
@@ -501,22 +514,48 @@ func (r *tuiInputReader) readLine(prompt string) (string, error) {
 }
 
 func (r *tuiInputReader) readLineLabeled(prompt, label string) (string, error) {
+	return r.readLineCtx(context.Background(), prompt, label, "", time.Time{})
+}
+
+// readLineCtx is readLineLabeled with cancellation and an optional timed
+// answer (autoDefault/autoAt — ADR-0052): when ctx ends before the user
+// answers — a racing remote-oversight surface won the permission race, or a
+// bounded background ask hit its deadline — the prompt is withdrawn via
+// permDismissMsg and the error returned. respCh is buffered so a just-in-time
+// answer that nobody reads any more can never block the UI goroutine.
+func (r *tuiInputReader) readLineCtx(ctx context.Context, prompt, label, autoDefault string, autoAt time.Time) (string, error) {
 	respCh := make(chan string, 1)
-	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh})
-	return <-respCh, nil
+	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh, autoDefault: autoDefault, autoAt: autoAt})
+	select {
+	case s := <-respCh:
+		return s, nil
+	case <-ctx.Done():
+		r.send(permDismissMsg{respCh: respCh})
+		return "", ctx.Err()
+	}
 }
 
 // makeLocalPermAsk returns the permAsk callback for the local agent, routed
 // through events.Host.RequestPermission (Phase 1's one real Host migration —
-// see docs/machine-readable-output-design.md). host is backed by tuiHost,
-// which reuses the existing TUI permRequestMsg flow unchanged: the goroutine
-// blocks while the TUI displays a yellow permission prompt to the user.
-// Grants are persisted to ps (may be nil). Session-level skipPermissions is
-// handled by the caller via WithSkipPermissions before this is ever called.
-func makeLocalPermAsk(host events.Host, ps *local.PermStore) func(tool, summary string) bool {
+// see docs/machine-readable-output-design.md) and raced over the three
+// answer sources (ADR-0052's permask.go) — direct input and remote oversight
+// here, no timed answer: a foreground ask waits for a human. host is backed
+// by tuiHost, which reuses the existing TUI permRequestMsg flow: the
+// goroutine blocks while the TUI displays a yellow permission prompt, and a
+// remote answer withdraws it via permDismissMsg (readLineCtx). Grants are
+// persisted to ps (may be nil). Session-level skipPermissions is handled by
+// the caller via WithSkipPermissions before this is ever called. n may be
+// nil — no remote surface.
+func makeLocalPermAsk(host events.Host, ps *local.PermStore, n oversight.Notifier) func(tool, summary string) bool {
 	return func(tool, summary string) bool {
-		outcome, _ := host.RequestPermission(context.Background(), events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
-		return outcome.Allow
+		allow, _ := askPermission(context.Background(), n,
+			oversight.PermRequest{ToolName: tool, Input: summary},
+			func(ctx context.Context) bool {
+				outcome, err := host.RequestPermission(ctx, events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
+				return err == nil && outcome.Allow
+			},
+			foregroundAskPolicy)
+		return allow
 	}
 }
 
@@ -619,6 +658,10 @@ type model struct {
 	// for tool-use permission prompts that arrive while a prior one is active.
 	pendingPerm *permRequestMsg
 	permQueue   []permRequestMsg
+	// permInputStash keeps the draft the user was typing when the first
+	// permission prompt arrived (background asks can land mid-draft), so it
+	// can be restored once no prompt is pending any more (ADR-0052).
+	permInputStash *string
 
 	// cancelTurn cancels the context of the running agent turn; nil when idle.
 	cancelTurn  context.CancelFunc
@@ -1159,7 +1202,9 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePermKey routes key events while a permission prompt is pending.
-// Only enter submits; anything else is passed to the textarea normally.
+// Enter submits; "a"/"d" answer every pending prompt (allow all / deny all —
+// the bulk keys a burst of background asks needs); anything else is passed to
+// the textarea normally.
 func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -1167,6 +1212,7 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.appendTranscript("n\n")
 		m.pendingPerm = nil
 		m.dequeueNextPerm()
+		m.afterPermResolved()
 		return m, nil
 	case "enter":
 		answer := strings.TrimSpace(m.ta.Value())
@@ -1174,9 +1220,17 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.leadingPasted = false
 		m.syncLayout()
 		m.appendTranscript(answer + "\n")
-		m.pendingPerm.respCh <- answer
-		m.pendingPerm = nil
-		m.dequeueNextPerm()
+		switch strings.ToLower(answer) {
+		case "a":
+			m.answerAllPerms("y")
+		case "d":
+			m.answerAllPerms("n")
+		default:
+			m.pendingPerm.respCh <- answer
+			m.pendingPerm = nil
+			m.dequeueNextPerm()
+			m.afterPermResolved()
+		}
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -1184,6 +1238,20 @@ func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	cmd = m.updateTA(msg)
 	m.syncLayout()
 	return m, cmd
+}
+
+// answerAllPerms answers the active prompt and the whole queue with answer —
+// the "a"/"d" bulk keys.
+func (m *model) answerAllPerms(answer string) {
+	if m.pendingPerm != nil {
+		m.pendingPerm.respCh <- answer
+		m.pendingPerm = nil
+	}
+	for i := range m.permQueue {
+		m.permQueue[i].respCh <- answer
+	}
+	m.permQueue = nil
+	m.afterPermResolved()
 }
 
 // dequeueNextPerm promotes the next queued permission prompt, if any.
@@ -1200,16 +1268,92 @@ func (m *model) dequeueNextPerm() {
 	m.syncLayout()
 }
 
+// permQueueMax bounds how many permission prompts may wait behind the active
+// one (ADR-0052): a burst of background-job asks beyond it resolves straight
+// to the ask's timed default instead of piling up.
+const permQueueMax = 5
+
 func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
 	if m.pendingPerm != nil {
+		if len(m.permQueue) >= permQueueMax && msg.autoDefault != "" {
+			// Background ask overflow: the timed default answers it now.
+			m.appendTranscript(fmt.Sprintf("%s too many pending permission prompts — auto-answering %q (timed default)\n", milkTag(), msg.autoDefault))
+			msg.respCh <- msg.autoDefault
+			return m, nil
+		}
 		m.permQueue = append(m.permQueue, msg)
-		return m, nil
+		return m, maybePermTick(msg)
+	}
+	// Keep whatever the user was typing — a background ask can land mid-draft
+	// and the prompt flow resets the input line.
+	if m.permInputStash == nil {
+		v := m.ta.Value()
+		m.permInputStash = &v
 	}
 	m.pendingPerm = &msg
 	m.appendTranscript(msg.prompt)
 	m.ta.Reset()
 	m.leadingPasted = false
 	m.syncLayout()
+	return m, maybePermTick(msg)
+}
+
+// maybePermTick schedules the countdown refresh only for timed asks.
+func maybePermTick(msg permRequestMsg) tea.Cmd {
+	if msg.autoAt.IsZero() {
+		return nil
+	}
+	return permTick()
+}
+
+// permTick refreshes the status-bar countdown once a second while a timed
+// ask is pending (ADR-0052).
+func permTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return permTickMsg{} })
+}
+
+type permTickMsg struct{}
+
+// restorePermInput puts back the draft stashed when the first permission
+// prompt arrived.
+func (m *model) restorePermInput() {
+	if m.permInputStash == nil {
+		return
+	}
+	m.ta.SetValue(*m.permInputStash)
+	m.permInputStash = nil
+	m.leadingPasted = false
+	m.syncLayout()
+}
+
+// afterPermResolved runs once a prompt is answered and nothing else is
+// waiting: restores the stashed draft.
+func (m *model) afterPermResolved() {
+	if m.pendingPerm == nil && len(m.permQueue) == 0 {
+		m.restorePermInput()
+	}
+}
+
+// handlePermDismiss removes a pending/queued permission prompt whose answer
+// came from somewhere else (remote oversight won the race, or the timed
+// answer fired — ADR-0052), so the TUI doesn't sit on a question whose
+// answer has already been applied. The displayed prompt gets a one-line note
+// so the transcript stays honest about what happened.
+func (m model) handlePermDismiss(msg permDismissMsg) (tea.Model, tea.Cmd) {
+	if m.pendingPerm != nil && m.pendingPerm.respCh == msg.respCh {
+		m.appendTranscript(dim("(answered elsewhere)") + "\n")
+		m.pendingPerm = nil
+		m.dequeueNextPerm()
+		m.afterPermResolved()
+		return m, nil
+	}
+	for i := range m.permQueue {
+		if m.permQueue[i].respCh == msg.respCh {
+			m.permQueue = append(m.permQueue[:i], m.permQueue[i+1:]...)
+			m.afterPermResolved()
+			return m, nil
+		}
+	}
 	return m, nil
 }
 
@@ -1883,6 +2027,17 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case permRequestMsg:
 		return m.handlePermRequest(msg)
+
+	case permDismissMsg:
+		return m.handlePermDismiss(msg)
+
+	case permTickMsg:
+		// Countdown refresh for a timed ask (ADR-0052) — keep ticking only
+		// while one is actually pending.
+		if m.pendingPerm != nil && !m.pendingPerm.autoAt.IsZero() {
+			return m, permTick()
+		}
+		return m, nil
 
 	case notifyMsg:
 		m.notify(msg.text, msg.hint)
@@ -3415,10 +3570,52 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 	}
 
 	// Wire local-agent permissions: persistent store + TUI ask callback.
-	// Both the primary and escalation-local agents share the same store and ask
-	// callback — they operate in the same cwd and grants should be shared.
+	// Both the primary and escalation-local agents share the same store and
+	// ask callbacks — they operate in the same cwd and grants should be shared.
 	localPermStore := st.localPerms
-	localPermAsk := makeLocalPermAsk(newTUIHost(ir0), localPermStore)
+	localHost := newTUIHost(ir0)
+	localPermAsk := makeLocalPermAsk(localHost, localPermStore, st.notifier)
+	// Background asks (job and workflow-step tool asks) use the full
+	// three-source race with the timed answer (ADR-0052): the TUI prompt
+	// (countdown + bulk keys), remote oversight, and the configured default
+	// at the deadline — never a silent denial.
+	localBgPermAsk := func(jobID, tool, summary string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), st.cfg.EffectiveBackgroundAgentTimeout())
+		defer cancel()
+		p := bgAskPolicy(st.cfg, st.permOverrides)
+		sum := jobPermSummary(summary, jobID)
+		allow, _ := askPermission(ctx, st.notifier,
+			oversight.PermRequest{ToolName: tool, Input: sum},
+			func(c context.Context) bool {
+				outcome, err := localHost.RequestPermission(c, events.PermissionRequest{
+					Prompt:      permAskPromptAuto(tool, sum, autoNote(p.def, p.deadline)),
+					Tool:        tool,
+					Summary:     sum,
+					AutoDefault: autoDefaultAnswer(p.def),
+					AutoAt:      time.Now().Add(p.deadline),
+				})
+				return err == nil && outcome.Allow
+			}, p)
+		return allow
+	}
+	// Unattended safety confirmations (the doom-loop gate) use the same flow
+	// with the safety policy — its own default knob, so one "allow" can't
+	// silently re-enable unattended runaway loops.
+	localSafetyAsk := func(jobID, tool, summary string) local.SafetyOutcome {
+		p := safetyAskPolicy(st.cfg, st.permOverrides)
+		return safetyAskRun(context.Background(), st.notifier, jobID, tool, summary,
+			func(c context.Context) bool {
+				sum := jobPermSummary(summary, jobID)
+				outcome, err := localHost.RequestPermission(c, events.PermissionRequest{
+					Prompt:      permAskPromptAuto(tool, sum, autoNote(p.def, p.deadline)),
+					Tool:        tool,
+					Summary:     sum,
+					AutoDefault: autoDefaultAnswer(p.def),
+					AutoAt:      time.Now().Add(p.deadline),
+				})
+				return err == nil && outcome.Allow
+			}, p)
+	}
 	localOpenFile := func(path string) error {
 		respCh := make(chan error, 1)
 		send(openFileMsg{path: path, respCh: respCh})
@@ -3441,6 +3638,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		tuiLocalAgent := agents.local.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
+			WithBackgroundPermissionAsk(localBgPermAsk).
+			WithSafetyAsk(localSafetyAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).
@@ -3455,6 +3654,8 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		tuiEscLocal := agents.escalationLocal.
 			WithSkipPermissions(st.skipPermissions).
 			WithPermissions(localPermStore, localPermAsk).
+			WithBackgroundPermissionAsk(localBgPermAsk).
+			WithSafetyAsk(localSafetyAsk).
 			WithOnOpenFile(localOpenFile).
 			WithOnRetract(localOnRetract).
 			WithOnToolUse(localOnToolUse).

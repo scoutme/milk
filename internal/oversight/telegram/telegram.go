@@ -218,8 +218,12 @@ func (n *Notifier) NotifyResponse(_ context.Context, agent, text string) {
 }
 
 // AskPermission sends a formatted permission prompt and waits for a y/n reply
-// via the background poll loop. Returns PermTimeout when cfg.PermTimeout elapses.
-func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest) oversight.PermDecision {
+// via the background poll loop. answered is true only for a real reply; a
+// timeout (cfg.PermTimeout or ctx) is silence — the returned decision then
+// reflects cfg.TimeoutAction, and it is the caller (cmd/milk's ask layer) that
+// decides whether that resolves the ask (foreground) or keeps it open until
+// its own deadline (background asks — see ADR-0052).
+func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest) (oversight.PermDecision, bool) {
 	lines := []string{fmt.Sprintf("🔐 Permission request — *%s*", escMD(req.ToolName))}
 	if req.Input != "" {
 		lines = append(lines, fmt.Sprintf("`%s`", escMD(req.Input)))
@@ -249,10 +253,10 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 		r := strings.TrimSpace(strings.ToLower(reply))
 		if r == "y" || r == "yes" {
 			n.sendAsync("✅ Allowed")
-			return oversight.PermAllow
+			return oversight.PermAllow, true
 		}
 		n.sendAsync("🚫 Denied")
-		return oversight.PermDeny
+		return oversight.PermDeny, true
 	case <-time.After(n.cfg.PermTimeout):
 	case <-ctx.Done():
 	}
@@ -263,9 +267,9 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 	}
 	n.sendAsync(fmt.Sprintf("⏱ %s", action))
 	if n.cfg.TimeoutAction == "allow" {
-		return oversight.PermAllow
+		return oversight.PermAllow, false
 	}
-	return oversight.PermTimeout
+	return oversight.PermTimeout, false
 }
 
 // send sends a MarkdownV2-formatted message synchronously, ignoring errors.

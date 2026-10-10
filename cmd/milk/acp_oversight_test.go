@@ -63,18 +63,18 @@ func (f *fakeNotifier) NotifyTurnDone(_ context.Context, agent string, err error
 func (f *fakeNotifier) NotifyResponse(_ context.Context, agent, text string) {
 	f.record("response:" + agent + ":" + text)
 }
-func (f *fakeNotifier) AskPermission(ctx context.Context, req oversight.PermRequest) oversight.PermDecision {
+func (f *fakeNotifier) AskPermission(ctx context.Context, req oversight.PermRequest) (oversight.PermDecision, bool) {
 	f.record("perm:" + req.ToolName)
 	if f.permCh != nil {
 		select {
 		case d := <-f.permCh:
-			return d
+			return d, true
 		case <-ctx.Done():
-			return oversight.PermTimeout
+			return oversight.PermTimeout, false
 		}
 	}
 	<-ctx.Done()
-	return oversight.PermTimeout
+	return oversight.PermTimeout, false
 }
 
 // setTestNotifier installs a fake under the server's lock — the field is
@@ -285,20 +285,26 @@ func TestACPOversight_RemoteInputQueuedWithoutSession_DrainsOnNew(t *testing.T) 
 	waitForOversightCall(t, fake, "start:test-local:local:no session yet")
 }
 
-// The permission race: Noop means client-only; first answer wins on both
-// sides; a remote deny arriving first denies.
+// The permission race (permask.go's askPermission, ADR-0052): Noop/nil
+// means client-only; first real answer wins on both sides; a remote deny
+// arriving first denies. Foreground policy resolves remote-side silence with
+// the remote's timeout action; the background policy treats it as no answer.
 func TestACPOversight_PermissionRace(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("noop backend asks client only", func(t *testing.T) {
 		fake := &fakeNotifier{} // would record if ever called
 		asked := false
-		got := racePermAsk(ctx, oversight.Noop{}, func(context.Context) bool {
-			asked = true
-			return true
-		}, oversight.PermRequest{ToolName: "Bash"})
+		got, src := askPermission(ctx, oversight.Noop{}, oversight.PermRequest{ToolName: "Bash"},
+			func(context.Context) bool {
+				asked = true
+				return true
+			}, foregroundAskPolicy)
 		if !got || !asked {
 			t.Errorf("got=%v asked=%v, want true/true", got, asked)
+		}
+		if src != permSrcDirect {
+			t.Errorf("src = %q, want %q", src, permSrcDirect)
 		}
 		if calls := fake.recorded(); len(calls) != 0 {
 			t.Errorf("unexpected remote calls: %v", calls)
@@ -307,34 +313,92 @@ func TestACPOversight_PermissionRace(t *testing.T) {
 
 	t.Run("client answer wins over a silent remote", func(t *testing.T) {
 		fake := &fakeNotifier{} // blocks until cancelled
-		got := racePermAsk(ctx, fake, func(context.Context) bool { return true },
-			oversight.PermRequest{ToolName: "Bash"})
+		got, src := askPermission(ctx, fake, oversight.PermRequest{ToolName: "Bash"},
+			func(context.Context) bool { return true }, foregroundAskPolicy)
 		if !got {
-			t.Error("racePermAsk = false, want true (client answered allow)")
+			t.Error("askPermission = false, want true (client answered allow)")
+		}
+		if src != permSrcDirect {
+			t.Errorf("src = %q, want %q", src, permSrcDirect)
 		}
 	})
 
 	t.Run("remote answer wins over a silent client", func(t *testing.T) {
 		fake := &fakeNotifier{permCh: make(chan oversight.PermDecision, 1)}
 		fake.permCh <- oversight.PermAllow
-		got := racePermAsk(ctx, fake, func(c context.Context) bool {
-			<-c.Done() // client never answers on its own
-			return false
-		}, oversight.PermRequest{ToolName: "Bash"})
+		got, src := askPermission(ctx, fake, oversight.PermRequest{ToolName: "Bash"},
+			func(c context.Context) bool {
+				<-c.Done() // client never answers on its own
+				return false
+			}, foregroundAskPolicy)
 		if !got {
-			t.Error("racePermAsk = false, want true (remote answered allow)")
+			t.Error("askPermission = false, want true (remote answered allow)")
+		}
+		if src != permSrcRemote {
+			t.Errorf("src = %q, want %q", src, permSrcRemote)
 		}
 	})
 
 	t.Run("remote deny denies", func(t *testing.T) {
 		fake := &fakeNotifier{permCh: make(chan oversight.PermDecision, 1)}
 		fake.permCh <- oversight.PermDeny
-		got := racePermAsk(ctx, fake, func(c context.Context) bool {
-			<-c.Done()
-			return true
-		}, oversight.PermRequest{ToolName: "Bash"})
+		got, _ := askPermission(ctx, fake, oversight.PermRequest{ToolName: "Bash"},
+			func(c context.Context) bool {
+				<-c.Done()
+				return true
+			}, foregroundAskPolicy)
 		if got {
-			t.Error("racePermAsk = true, want false (remote denied)")
+			t.Error("askPermission = true, want false (remote denied)")
+		}
+	})
+
+	t.Run("background ask resolves with the timed default at the deadline", func(t *testing.T) {
+		fake := &fakeNotifier{} // remote never replies
+		start := time.Now()
+		got, src := askPermission(ctx, fake, oversight.PermRequest{ToolName: "bash"},
+			func(c context.Context) bool {
+				<-c.Done() // nobody answers locally either
+				return false
+			}, askPolicy{deadline: 30 * time.Millisecond, def: false})
+		if got {
+			t.Error("askPermission = true, want false (timed default is deny)")
+		}
+		if src != permSrcDefault {
+			t.Errorf("src = %q, want %q", src, permSrcDefault)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("timed answer took %s, want ~30ms", elapsed)
+		}
+	})
+
+	t.Run("background ask: remote silence does not resolve before the deadline", func(t *testing.T) {
+		// The remote's own timeout would answer deny-as-timeout; for
+		// background asks that must NOT resolve the ask — the direct surface
+		// still gets its window (here: it answers after the remote is gone).
+		fake := &fakeNotifier{} // returns (PermTimeout, false) on ctx end only
+		answered := make(chan struct{})
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			close(answered)
+		}()
+		got, src := askPermission(ctx, fake, oversight.PermRequest{ToolName: "bash"},
+			func(c context.Context) bool {
+				<-answered
+				return true
+			}, askPolicy{deadline: 2 * time.Second, def: false})
+		if !got {
+			t.Error("askPermission = false, want true (direct surface answered after remote silence)")
+		}
+		if src != permSrcDirect {
+			t.Errorf("src = %q, want %q", src, permSrcDirect)
+		}
+	})
+
+	t.Run("no surface at all resolves immediately with the default", func(t *testing.T) {
+		got, src := askPermission(ctx, nil, oversight.PermRequest{ToolName: "bash"},
+			nil, askPolicy{deadline: time.Hour, def: true})
+		if !got || src != permSrcNoSurface {
+			t.Errorf("got=%v src=%q, want true/%q", got, src, permSrcNoSurface)
 		}
 	})
 }

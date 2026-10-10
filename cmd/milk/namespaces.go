@@ -62,6 +62,7 @@ var freeTextParams = map[string]bool{
 	"path":             true,
 	"file":             true,
 	"count":            true,
+	"secs":             true,
 	"task":             true,
 	"desc":             true,
 	"description":      true,

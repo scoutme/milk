@@ -224,3 +224,155 @@ func TestDoomLoopGate_SessionIDIsLoggingOnly(t *testing.T) {
 		t.Errorf("expected exactly 3 requests before stopping, got %d", got)
 	}
 }
+
+// TestDoomLoopGate_Unattended_SafetyAsk_Approved: in an unattended context
+// (background job, workflow step) the doom-loop gate asks through the safety
+// ask seam — the full background flow (TUI queue + remote oversight + timed
+// answer, ADR-0052) — never the plain permAsk, and an approval lets the turn
+// continue past the 3 identical calls.
+func TestDoomLoopGate_Unattended_SafetyAsk_Approved(t *testing.T) {
+	srv, requests := doomLoopServer(3)
+	defer srv.Close()
+
+	var asked, perm int32
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 15})
+	agent = agent.WithPermissions(nil, func(tool, summary string) bool {
+		atomic.AddInt32(&perm, 1)
+		return true
+	})
+	agent.jobID = "test-job"
+	agent = agent.WithSafetyAsk(func(jobID, tool, summary string) SafetyOutcome {
+		atomic.AddInt32(&asked, 1)
+		if jobID != "test-job" {
+			t.Errorf("ask jobID = %q, want %q", jobID, "test-job")
+		}
+		if tool != "doom_loop" {
+			t.Errorf("expected the ask to be for tool %q, got %q", "doom_loop", tool)
+		}
+		if summary != doomLoopAskSummary {
+			t.Errorf("ask summary = %q, want %q", summary, doomLoopAskSummary)
+		}
+		return SafetyApproved
+	})
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "do the thing", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if !strings.Contains(last.Content, "done") {
+		t.Errorf("expected the turn to complete normally after approval, got %q", last.Content)
+	}
+	if got := atomic.LoadInt32(&asked); got != 1 {
+		t.Errorf("expected exactly one doom_loop ask, got %d", got)
+	}
+	if got := atomic.LoadInt32(&perm); got != 0 {
+		t.Errorf("permAsk must not be called for a background job, got %d calls", got)
+	}
+	if got := atomic.LoadInt32(requests); got != 4 {
+		t.Errorf("expected 4 requests (3 identical + 1 final), got %d", got)
+	}
+}
+
+// TestDoomLoopGate_Unattended_SafetyAsk_Declined: a real decline (local or
+// remote) stops the turn with the user-declined wording.
+func TestDoomLoopGate_Unattended_SafetyAsk_Declined(t *testing.T) {
+	srv, requests := doomLoopServer(10)
+	defer srv.Close()
+
+	var asked int32
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 15})
+	agent = agent.WithPermissions(nil, func(tool, summary string) bool {
+		t.Fatal("permAsk must not be called for a background job")
+		return false
+	})
+	agent.jobID = "test-job"
+	agent = agent.WithSafetyAsk(func(jobID, tool, summary string) SafetyOutcome {
+		atomic.AddInt32(&asked, 1)
+		return SafetyDeclined
+	})
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "do the thing", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if !strings.Contains(last.Content, "the user declined to let it continue") {
+		t.Errorf("expected a user-declined termination message, got %q", last.Content)
+	}
+	if got := atomic.LoadInt32(&asked); got != 1 {
+		t.Errorf("expected exactly one doom_loop ask, got %d", got)
+	}
+	if got := atomic.LoadInt32(requests); got != 3 {
+		t.Errorf("expected exactly 3 requests before stopping, got %d", got)
+	}
+}
+
+// TestDoomLoopGate_Unattended_SafetyAsk_TimedOut: the timed answer fired and
+// denied (ADR-0052) — the wording must say no answer arrived before the
+// deadline, not claim anyone declined.
+func TestDoomLoopGate_Unattended_SafetyAsk_TimedOut(t *testing.T) {
+	srv, requests := doomLoopServer(10)
+	defer srv.Close()
+
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 15})
+	agent.jobID = "test-job"
+	agent = agent.WithSafetyAsk(func(jobID, tool, summary string) SafetyOutcome {
+		return SafetyTimedOut
+	})
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "do the thing", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if !strings.Contains(last.Content, "no answer arrived before the deadline") {
+		t.Errorf("expected a timed-out termination message, got %q", last.Content)
+	}
+	if got := atomic.LoadInt32(requests); got != 3 {
+		t.Errorf("expected exactly 3 requests before stopping, got %d", got)
+	}
+}
+
+// TestDoomLoopGate_Unattended_SafetyUnreachable_FailsClosedWithoutAsking: a
+// workflow step whose safety seam reports "nobody was asked" (no surface at
+// all) keeps the original fail-closed wording.
+func TestDoomLoopGate_Unattended_SafetyUnreachable_FailsClosedWithoutAsking(t *testing.T) {
+	srv, requests := doomLoopServer(10)
+	defer srv.Close()
+
+	var asked int32
+	agent := New(srv.URL, "test-model").WithMemConfig(MemConfig{MaxToolIterations: 15})
+	agent = agent.WithPermissions(nil, func(tool, summary string) bool {
+		t.Fatal("permAsk must not be called for a workflow step")
+		return false
+	})
+	agent = agent.AsWorkflowExecutor()
+	agent = agent.WithSafetyAsk(func(jobID, tool, summary string) SafetyOutcome {
+		atomic.AddInt32(&asked, 1)
+		return SafetyUnreachable
+	})
+	sess := &session.Session{}
+	var out strings.Builder
+
+	history, err := agent.Run(context.Background(), nil, "do the thing", &out, sess, nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	last := history[len(history)-1]
+	if !strings.Contains(last.Content, "this context has no way to ask for confirmation") {
+		t.Errorf("expected the fail-closed termination message, got %q", last.Content)
+	}
+	if got := atomic.LoadInt32(&asked); got != 1 {
+		t.Errorf("expected exactly one doom_loop ask, got %d", got)
+	}
+	if got := atomic.LoadInt32(requests); got != 3 {
+		t.Errorf("expected exactly 3 requests before stopping, got %d", got)
+	}
+}

@@ -116,6 +116,18 @@ func (m *model) statusBar() string {
 	if m.workflowRunning {
 		left += dim(" [⚙ " + workflowStatusLabel(m.workflowState) + "]")
 	}
+	// Timed answer countdown for a pending background ask (ADR-0052).
+	if m.pendingPerm != nil && !m.pendingPerm.autoAt.IsZero() {
+		rem := time.Until(m.pendingPerm.autoAt).Round(time.Second)
+		if rem < 0 {
+			rem = 0
+		}
+		act := "deny"
+		if m.pendingPerm.autoDefault == "y" {
+			act = "allow"
+		}
+		left += yellow(fmt.Sprintf(" [permission pending — auto-%s in %s]", act, rem))
+	}
 	if m.quitPending {
 		if m.workflowRunning {
 			left += yellow(" [workflow running — ctrl+c again to exit and cancel it · /workflow cancel stops only it]")

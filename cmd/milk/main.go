@@ -1550,52 +1550,29 @@ func makeTUIPermissionHandler(input inputReader, cs *claudesettings.Store, notif
 		}
 		prompt += fmt.Sprintf("%s Allow? [Y/n] ", milkTag())
 
-		// Race TUI input against remote notifier. Cancel the losing goroutine as
-		// soon as the first result arrives so neither leaks.
-		type result struct{ allow bool }
-		ch := make(chan result, 2)
-		raceCtx, cancelRace := context.WithCancel(context.Background())
-		defer cancelRace()
-
-		go func() {
-			// readLine blocks on a channel internally; we must also watch raceCtx
-			// so this goroutine exits when the Telegram side wins.
-			type lineResult struct {
-				yn  string
-				err error
-			}
-			lineCh := make(chan lineResult, 1)
-			go func() {
-				yn, err := input.readLine(prompt)
-				lineCh <- lineResult{yn: yn, err: err}
-			}()
-			select {
-			case lr := <-lineCh:
-				yn := lr.yn
-				if yn == "" {
-					yn = "y"
-				}
-				ch <- result{allow: strings.EqualFold(yn, "y")}
-			case <-raceCtx.Done():
-			}
-		}()
-
-		go func() {
-			dec := notifier.AskPermission(raceCtx, oversight.PermRequest{
+		// Race TUI input against the remote notifier over the ask layer
+		// (permask.go): first answer wins, and remote-side silence resolves
+		// with the remote's timeout action — the pre-ADR-0052 behavior,
+		// unchanged. (With no remote surface it is just the TUI ask.)
+		allow, _ := askPermission(context.Background(), notifier,
+			oversight.PermRequest{
 				ToolName:    b.ToolName,
 				Input:       cliToolArgSummary(b.Input),
 				Description: b.Description,
 				BlockedPath: b.BlockedPath,
-			})
-			select {
-			case ch <- result{allow: dec == oversight.PermAllow}:
-			case <-raceCtx.Done():
-			}
-		}()
-
-		res := <-ch
-		cancelRace()
-		if res.allow {
+			},
+			func(context.Context) bool {
+				yn, err := input.readLine(prompt)
+				if err != nil {
+					return false
+				}
+				if yn == "" {
+					yn = "y"
+				}
+				return strings.EqualFold(yn, "y")
+			},
+			foregroundAskPolicy)
+		if allow {
 			claude.Allow(req.RequestID, stdinW)
 			if cs != nil {
 				if b.ToolName != "" {

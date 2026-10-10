@@ -74,6 +74,7 @@ func acpCommandTable() []acpCommand {
 		{name: cmdTask, desc: "mark a task done", hint: "done <id>", run: acpTask},
 		{name: cmdBg, desc: "list, start or stop background agents", hint: "[list|start <task>|stop <id>]", run: acpBg},
 		{name: cmdSkipPerms, desc: "approve every tool call without asking, or go back to asking", hint: "[on|off]", run: acpSkipPerms},
+		{name: cmdPermissions, desc: "show the permission timed-answer policy, or override it for this session", hint: "[default allow|deny [safety] | timeout <seconds> [safety]]", run: acpPermissions},
 		{name: cmdThink, desc: "show or hide model reasoning in this session", hint: "[on|off]", run: acpThink},
 		{name: cmdConfig, desc: "print the config, run the setup wizard, or open the config file", hint: "[show|init|open]", run: acpConfig},
 		{name: cmdInit, desc: "run the setup wizard (alias for /config init)", hint: "", run: acpInit},
@@ -302,4 +303,18 @@ func acpSkipPerms(as *acpSession, rest string) (string, string) {
 		return "dangerously_skip_permissions is " + state + "  (use /skip-permissions on|off)", ""
 	}
 	return "usage: /skip-permissions [on|off]", ""
+}
+
+// acpPermissions is /permissions over ACP — the same grammar as the TUI's
+// handlePermissionsCmd (permask.go's execPermissionsCore). ACP has no local
+// prompt queue: pending asks live in the client's own permission dialogs.
+func acpPermissions(as *acpSession, rest string) (string, string) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	out, listing := execPermissionsCore(rest, as.cfg, &as.permOverrides)
+	if listing {
+		return milkTag() + " permission asks — every ask races the client dialog, remote oversight, and (for background asks) the timed answer:\n" +
+			formatPermPolicy(as.cfg, as.permOverrides), ""
+	}
+	return out, ""
 }
