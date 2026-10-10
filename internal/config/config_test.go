@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1527,5 +1528,58 @@ func TestAgentMaxPayloadBytes_FollowsWindow(t *testing.T) {
 	ac := AgentConfig{ContextWindowTokens: 1000000, Limits: &AgentLimits{MaxPayloadBytes: intPtr(500000)}}
 	if got := cfg.AgentMaxPayloadBytes(ac); got != 500000 {
 		t.Errorf("explicit must win, got %d", got)
+	}
+}
+
+// TestPermissionsTimedAnswerDefaults (ADR-0052): the timed answer defaults to
+// 360s / deny for both ask kinds, and the safety default is warnable.
+func TestPermissionsTimedAnswerDefaults(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.PermBackgroundTimeout(); got != 360*time.Second {
+		t.Errorf("PermBackgroundTimeout = %s, want 360s", got)
+	}
+	if got := cfg.PermSafetyTimeout(); got != 360*time.Second {
+		t.Errorf("PermSafetyTimeout = %s, want 360s", got)
+	}
+	if cfg.PermBackgroundAllow() || cfg.PermSafetyAllow() {
+		t.Error("both timed defaults must be deny out of the box")
+	}
+
+	cfg.Permissions = &PermissionsConfig{
+		BackgroundTimeoutSecs: 90,
+		BackgroundDefault:     "allow",
+		SafetyTimeoutSecs:     120,
+		SafetyDefault:         "deny",
+	}
+	if got := cfg.PermBackgroundTimeout(); got != 90*time.Second {
+		t.Errorf("PermBackgroundTimeout = %s, want 90s", got)
+	}
+	if !cfg.PermBackgroundAllow() {
+		t.Error("BackgroundDefault allow must surface")
+	}
+	if got := cfg.PermSafetyTimeout(); got != 120*time.Second {
+		t.Errorf("PermSafetyTimeout = %s, want 120s", got)
+	}
+
+	ws := Validate(cfg)
+	var sawSafetyWarn bool
+	for _, w := range ws {
+		if strings.Contains(w.Message, "safety_default is \"allow\"") {
+			sawSafetyWarn = true
+		}
+	}
+	if sawSafetyWarn {
+		t.Error("safety_default deny must not warn")
+	}
+	cfg.Permissions.SafetyDefault = "allow"
+	ws = Validate(cfg)
+	sawSafetyWarn = false
+	for _, w := range ws {
+		if strings.Contains(w.Message, "safety_default is \"allow\"") {
+			sawSafetyWarn = true
+		}
+	}
+	if !sawSafetyWarn {
+		t.Error("safety_default allow must warn at startup")
 	}
 }

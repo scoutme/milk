@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/scoutme/milk/internal/events"
 )
@@ -33,7 +34,7 @@ func (h *tuiHost) Notify(n events.Notification) {
 // ctx cancellation (a racing remote-oversight answer) withdraws the prompt
 // via permDismissMsg and returns the error — the answer is then irrelevant.
 func (h *tuiHost) RequestPermission(ctx context.Context, req events.PermissionRequest) (events.PermissionOutcome, error) {
-	answer, err := h.ir.readLineCtx(ctx, req.Prompt, "")
+	answer, err := h.ir.readLineCtx(ctx, req.Prompt, "", req.AutoDefault, req.AutoAt)
 	if err != nil {
 		return events.PermissionOutcome{}, err
 	}
@@ -45,7 +46,7 @@ func (h *tuiHost) RequestPermission(ctx context.Context, req events.PermissionRe
 // permRequestMsg flow, labeled per req.Label. Cancellation semantics match
 // RequestPermission.
 func (h *tuiHost) Elicit(ctx context.Context, req events.ElicitationRequest) (events.ElicitationResult, error) {
-	line, err := h.ir.readLineCtx(ctx, req.Prompt, req.Label)
+	line, err := h.ir.readLineCtx(ctx, req.Prompt, req.Label, "", time.Time{})
 	if err != nil {
 		return events.ElicitationResult{}, err
 	}

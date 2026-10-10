@@ -54,6 +54,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdNotifications {
 		return m.handleNotificationsCmd(strings.TrimSpace(rest)), nil
 	}
+	if cmd == cmdPermissions {
+		return m.handlePermissionsCmd(strings.TrimSpace(rest)), nil
+	}
 	if cmd == cmdSetup {
 		return m.handleSetupCmd(strings.TrimSpace(rest))
 	}

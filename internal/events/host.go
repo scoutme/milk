@@ -21,7 +21,10 @@
 // session/update kinds out), not something this package reuses or extends.
 package events
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Notification is a turn-unrelated informational event (ADR-0048 toasts
 // today). CommandHint, when non-empty, is the slash command a user would
@@ -86,7 +89,13 @@ type PermissionRequest struct {
 	// ToolCallID names the tool call being approved when the caller knows it
 	// (a background job's row); hosts otherwise look it up from Tool.
 	ToolCallID string
-	Options    []PermissionOption
+	// AutoDefault ("y"/"n") and AutoAt mark this a background ask with a
+	// timed answer (ADR-0052): when AutoAt passes with no reply, AutoDefault
+	// is applied. The TUI shows a countdown for it and answers queued
+	// overflow with it; other hosts can ignore both.
+	AutoDefault string
+	AutoAt      time.Time
+	Options     []PermissionOption
 }
 
 // PermissionOutcome is the host's answer to a PermissionRequest.

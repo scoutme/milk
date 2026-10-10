@@ -118,6 +118,11 @@ type acpSession struct {
 	// acp_initwizard.go. Set once at session creation; read-only after.
 	formElicit bool
 
+	// permOverrides: session-level overrides for the timed answer behind
+	// background asks (ADR-0052, /permissions default|timeout). Guarded by
+	// mu like the other live session knobs.
+	permOverrides permOverrides
+
 	// noChoice: this client's session/request_permission responses carry no
 	// recognizable outcome (or fail), so the setup wizard skips its clickable
 	// choice prompts and asks steps as typed input directly. Set on the
@@ -238,7 +243,7 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 			WithPermissions(permStore, as.askPermissionWithOversight).
 			WithSkipPermissionsFunc(as.skipPerms.Load).
 			WithBackgroundPermissionAsk(as.backgroundPermissionAsk).
-			WithRemoteSafetyAsk(as.remoteSafetyAsk).
+			WithSafetyAsk(as.safetyAsk).
 			WithOnOpenFile(func(path string) error { return acpOpenFile(cwd, path) }).
 			WithOnToolUse(as.onLocalToolUse).
 			WithOnToolResult(as.onLocalToolResult).
@@ -724,22 +729,30 @@ func (as *acpSession) permissionFailed(tool string, err error) {
 // when one is configured (first answer wins — the interactive race's shape,
 // bounded here by the job timeout so an unanswered question denies the tool
 // instead of holding the job's concurrency slot forever).
+// backgroundPermissionAsk asks whether a background job may use a tool —
+// the full background flow (ADR-0052): client dialog, remote oversight, and
+// the timed answer at the deadline — attributed to the job's own tool-call
+// row, and bounded by the job timeout so an unanswered question resolves to
+// the timed default instead of holding the job's concurrency slot forever.
 func (as *acpSession) backgroundPermissionAsk(jobID, tool, summary string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), as.cfg.EffectiveBackgroundAgentTimeout())
 	defer cancel()
+	as.mu.Lock()
+	cfg, ov := as.cfg, as.permOverrides
+	as.mu.Unlock()
+	p := bgAskPolicy(cfg, ov)
 	sum := jobPermSummary(summary, jobID)
-	askClient := func(c context.Context) bool {
-		out, err := as.host.RequestPermission(c, events.PermissionRequest{
-			Tool:       tool,
-			Summary:    sum,
-			ToolCallID: string(acp.JobToolCallID(jobID)),
-		})
-		return err == nil && out.Allow
-	}
-	n := as.notifier()
-	if !oversightRemote(n) {
-		return askClient(ctx)
-	}
-	return racePermAsk(ctx, n, askClient,
-		oversight.PermRequest{ToolName: tool, Input: sum})
+	allow, _ := askPermission(ctx, as.notifier(),
+		oversight.PermRequest{ToolName: tool, Input: sum},
+		func(c context.Context) bool {
+			out, err := as.host.RequestPermission(c, events.PermissionRequest{
+				Tool:        tool,
+				Summary:     sum,
+				ToolCallID:  string(acp.JobToolCallID(jobID)),
+				AutoDefault: autoDefaultAnswer(p.def),
+				AutoAt:      time.Now().Add(p.deadline),
+			})
+			return err == nil && out.Allow
+		}, p)
+	return allow
 }

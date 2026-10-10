@@ -26,8 +26,9 @@ package main
 import (
 	"context"
 	"strings"
-	"sync"
+	"time"
 
+	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/oversight"
@@ -157,21 +158,10 @@ func oversightRemote(n oversight.Notifier) bool {
 // wording on every surface (the TUI's permission prompt text, ACP's
 // session/request_permission summary, and the remote oversight request).
 func jobPermSummary(summary, jobID string) string {
-	return strings.TrimSpace(summary + " — requested by background agent " + jobID)
-}
-
-// remoteSafetyPermAsk is the doom-loop gate's unattended-context channel: it
-// asks only the remote oversight backend — an unattended background job or
-// workflow step must not block on a local UI prompt nobody may be watching —
-// and reports whether anyone was asked at all. With no active backend it
-// answers (false, false), keeping the gate's fail-closed default. The remote
-// backend bounds its own wait (its prompt timeout resolves via the configured
-// timeout action), so this never blocks forever.
-func remoteSafetyPermAsk(n oversight.Notifier, req oversight.PermRequest) (asked, allow bool) {
-	if !oversightRemote(n) {
-		return false, false
+	if strings.TrimSpace(jobID) == "" {
+		return strings.TrimSpace(summary + " — requested by a workflow step")
 	}
-	return true, n.AskPermission(context.Background(), req) == oversight.PermAllow
+	return strings.TrimSpace(summary + " — requested by background agent " + jobID)
 }
 
 // handleRemoteInput receives a message from the remote backend's polling
@@ -273,51 +263,17 @@ func (as *acpSession) flushRemoteInputs() {
 	as.requestRemoteInput(next)
 }
 
-// --- permission race: client vs remote backend ---
-
-// oversightPermMu serializes the *remote* side of permission races
-// process-wide: the Telegram backend has a single prompt slot
-// (internal/oversight/telegram's permCh), so two concurrent AskPermission
-// calls would steal it from each other — the loser would time out, and its
-// reply could fall through to the input callback and be injected as a typed
-// message. The lock is taken by the racing goroutine and held until
-// AskPermission has fully returned (including its permCh cleanup), so a
-// waiter can never clear the slot of the next one.
-var oversightPermMu sync.Mutex
-
-// racePermAsk runs askClient and the remote backend's AskPermission
-// concurrently; the first answer wins — makeTUIPermissionHandler's rule,
-// with the ACP client in the TUI's seat. With no active backend it is just
-// the client ask. askClient receives a context cancelled the moment the
-// remote side answers, so a losing client wait stops promptly.
-func racePermAsk(ctx context.Context, n oversight.Notifier, askClient func(context.Context) bool, req oversight.PermRequest) bool {
-	if !oversightRemote(n) {
-		return askClient(ctx)
-	}
-	if ctx.Err() != nil {
-		return askClient(ctx)
-	}
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	ch := make(chan bool, 2)
-	go func() { ch <- askClient(raceCtx) }()
-	go func() {
-		oversightPermMu.Lock()
-		defer oversightPermMu.Unlock()
-		if raceCtx.Err() != nil {
-			return // already answered by the client — don't prompt the backend
-		}
-		ch <- n.AskPermission(raceCtx, req) == oversight.PermAllow
-	}()
-	return <-ch
-}
+// The client-vs-remote permission race lives in permask.go (askPermission,
+// ADR-0052's three-source ask layer) — shared by the TUI, ACP and the
+// claude-cli path.
 
 // askPermissionWithOversight is the local agent's permission callback over
 // ACP: the client is asked via session/request_permission (as before —
-// makeLocalPermAsk's prompt text, now shared in permAskPrompt), raced
-// against the remote backend when one is active.
+// makeLocalPermAsk's prompt text, now shared in permAskPrompt) under the
+// foreground policy — direct input and remote oversight, no timed answer.
 func (as *acpSession) askPermissionWithOversight(tool, summary string) bool {
-	return racePermAsk(context.Background(), as.notifier(),
+	allow, _ := askPermission(context.Background(), as.notifier(),
+		oversight.PermRequest{ToolName: tool, Input: summary},
 		func(ctx context.Context) bool {
 			outcome, _ := as.host.RequestPermission(ctx, events.PermissionRequest{
 				Prompt:  permAskPrompt(tool, summary),
@@ -326,12 +282,28 @@ func (as *acpSession) askPermissionWithOversight(tool, summary string) bool {
 			})
 			return outcome.Allow
 		},
-		oversight.PermRequest{ToolName: tool, Input: summary})
+		foregroundAskPolicy)
+	return allow
 }
 
-// remoteSafetyAsk is the doom-loop gate's unattended-context channel over ACP
-// (background jobs, workflow steps): the remote backend only — see
-// remoteSafetyPermAsk for the semantics.
-func (as *acpSession) remoteSafetyAsk(tool, summary string) (bool, bool) {
-	return remoteSafetyPermAsk(as.notifier(), oversight.PermRequest{ToolName: tool, Input: summary})
+// safetyAsk is the doom-loop gate's unattended-context channel over ACP
+// (background jobs, workflow steps): the full background flow — client
+// dialog, remote oversight, and the safety policy's timed answer — mapped to
+// the gate's outcome vocabulary (permask.go's safetyAskRun, ADR-0052).
+func (as *acpSession) safetyAsk(jobID, tool, summary string) local.SafetyOutcome {
+	as.mu.Lock()
+	cfg, ov := as.cfg, as.permOverrides
+	as.mu.Unlock()
+	p := safetyAskPolicy(cfg, ov)
+	return safetyAskRun(context.Background(), as.notifier(), jobID, tool, summary,
+		func(ctx context.Context) bool {
+			out, err := as.host.RequestPermission(ctx, events.PermissionRequest{
+				Tool:        tool,
+				Summary:     jobPermSummary(summary, jobID),
+				ToolCallID:  string(acp.JobToolCallID(jobID)),
+				AutoDefault: autoDefaultAnswer(p.def),
+				AutoAt:      time.Now().Add(p.deadline),
+			})
+			return err == nil && out.Allow
+		}, p)
 }

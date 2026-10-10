@@ -38,6 +38,7 @@ const cmdHistory = "/history"
 const cmdPanel = "/panel"
 const cmdForget = "/forget"
 const cmdSkipPerms = "/skip-permissions"
+const cmdPermissions = "/permissions"
 const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
@@ -53,7 +54,7 @@ const cmdBg = "/bg"
 const cmdNotifications = "/notifications"
 
 var slashCommands = []string{
-	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdInit, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash, cmdBg, cmdNotifications,
+	cmdEscalate, cmdPrimary, cmdPaste, cmdLearn, cmdOtel, cmdMetrics, cmdUsage, cmdMemory, cmdExport, cmdHistory, cmdPanel, cmdForget, cmdSkipPerms, cmdPermissions, cmdAgent, cmdColorize, cmdThink, cmdSetup, cmdConfig, cmdInit, cmdOpen, cmdMCP, cmdUpdate, cmdWorkflow, cmdServer, cmdReload, cmdTasks, cmdTask, cmdAttach, cmdBash, cmdBg, cmdNotifications,
 	cmdNew, cmdClear, cmdDrop, cmdSessions, cmdResume, cmdListLegacy, "/help", "/exit", "/quit",
 }
 
@@ -144,6 +145,11 @@ const interactiveHelp = `
   /skip-permissions      show current skip-permissions state
   /skip-permissions on   all agents auto-approve tool uses (no prompts)
   /skip-permissions off  agents prompt before running side-effecting tools
+
+── Permissions ──────────────────────────────────────────────────────────
+  /permissions                      show the timed-answer policy + pending asks
+  /permissions default allow|deny [safety]  session override of the timed default
+  /permissions timeout <secs> [safety]      session override of the ask deadline
 
 ── Memory ───────────────────────────────────────────────────────────────
   /learn <fact>          store a persistent memory
@@ -426,6 +432,7 @@ type interactiveState struct {
 	// the user hasn't responded yet). Keyed by tool name.
 	toolFutures     map[string]chan string
 	skipPermissions bool             // session-level override for DangerouslySkipPermissions
+	permOverrides   permOverrides    // session-level overrides for the timed answer (ADR-0052, /permissions default|timeout)
 	localPerms      *local.PermStore // persisted tool grants for the primary local agent
 	notifier        oversight.Notifier
 
@@ -586,6 +593,11 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		output = execBash(prompt, st)
 	case cmdSkipPerms:
 		output = execSkipPerms(prompt, st)
+	case cmdPermissions:
+		// The listing shows the model's pending prompt queue, so the TUI
+		// intercepts this in handleSlashInput (commands.go) before it
+		// reaches here. Guard to prevent "unknown command" output, mirroring
+		// cmdNotifications.
 	case cmdThink:
 		// execThink is handled in repl.go where it can toggle model.showThinking.
 		// This case is a no-op here; the TUI intercepts cmdThink before it reaches
