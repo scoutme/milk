@@ -291,7 +291,7 @@ type spinnerTickMsg struct{}
 // stretch — the workflow equivalent of turnTimeoutWarningMsg, needed because a
 // workflow's overall run spans many turns rather than the single turn a
 // one-shot timer could cover.
-type workflowIdleCheckMsg struct{}
+type workflowIdleCheckMsg struct{ gen int }
 
 // copyFeedbackClearMsg clears the transient copy confirmation in the status bar.
 type copyFeedbackClearMsg struct{}
@@ -922,7 +922,17 @@ type model struct {
 	// /workflow slash commands, which all consult workflow.CurrentWorkflowID)
 	// from starting a second interp.Runner goroutine that races the first one
 	// over the single m.workflowState/m.cancelTurn/m.busy fields.
-	workflowRunning              bool
+	workflowRunning bool
+	// cancelWorkflow cancels the running workflow's context; nil when none runs.
+	// Kept apart from cancelTurn/busy: a workflow runs in the background, so the
+	// user can chat (and cancel or finish a turn) without touching it.
+	cancelWorkflow context.CancelFunc
+	// workflowCancelled marks a user-requested cancel so the done handler
+	// reports an interruption rather than an error.
+	workflowCancelled bool
+	// workflowGen identifies the current run; idle-check ticks carry it so a tick
+	// left over from an earlier run cannot start a second watchdog chain.
+	workflowGen                  int
 	pendingWorkflowWizard        *workflowWizardState
 	pendingGenericWorkflowExtend *genericWorkflowExtendState
 
@@ -1090,7 +1100,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.launchPTYPane(shellCmd)
 		}
 		if cmd, rest, found := extractSlashCommand(input); found && !m.leadingPasted {
-			if busySafeCommands[cmd] {
+			if busySafeCommands[cmd] || busySafeWorkflowCmd(cmd, rest) {
 				// Safe command: execute immediately without clearing busy state.
 				m.ta.Reset()
 				m.tabMatches = nil
@@ -1790,7 +1800,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// still reach its own handler rather than being swallowed here.
 			return m.handleAttachKey(msg)
 		}
-		if m.inputLocked() {
+		// Pending designer questions take the next Enter even mid-turn: the
+		// busy handler would only answer with its "agent is working" hint.
+		if m.inputLocked() && m.pendingWorkflowQuestions == "" {
 			return m.handleBusyKey(msg)
 		}
 		return m.handleKey(msg)
@@ -2029,7 +2041,6 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case workflowThinkChunkMsg:
-		m.currentTurnChars += int64(len(msg.text))
 		if m.workflowState != nil && m.showThinking {
 			m.workflowState.LiveBuffer().Append([]byte(dim(msg.text)))
 			if m.attached != nil && m.attached.kind == attachWorkflow {
@@ -2042,7 +2053,6 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case workflow.WorkflowChunkMsg:
-		m.currentTurnChars += int64(len(msg.Text))
 		// Stage output goes to the workflow's own live buffer, not the main
 		// transcript (ADR-0047) — attach via the workflow panel to watch it.
 		if m.workflowState != nil {
@@ -2057,8 +2067,12 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case workflowIdleCheckMsg:
-		if !m.busy || m.workflowState == nil {
-			return m, nil // workflow finished or was cancelled — stop rescheduling
+		if msg.gen != m.workflowGen || !m.workflowRunning || m.workflowState == nil {
+			return m, nil // workflow finished, was cancelled, or this tick is from an older run — stop rescheduling
+		}
+		if m.pendingWorkflowQuestions != "" {
+			// Waiting on the user, not on an agent: nothing to warn about.
+			return m, workflowIdleCheck(m.workflowGen)
 		}
 		if !m.workflowTimeoutWarned {
 			agentName := m.workflowState.AgentMap[m.workflowState.Role]
@@ -2071,17 +2085,15 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, workflowIdleCheck()
+		return m, workflowIdleCheck(m.workflowGen)
 
 	case workflow.WorkflowQuestionsMsg:
 		// Designer identified ambiguities — present questions to user.
-		// Unblock input so the user can type answers. The workflow goroutine
-		// is blocked on cfg.AnswersCh; we forward that exact channel here so
-		// the user's reply reaches it.
+		// The next Enter answers them (see the key routing in Update). The
+		// workflow goroutine is blocked on cfg.AnswersCh; we forward that exact
+		// channel here so the user's reply reaches it.
 		m.pendingWorkflowQuestions = msg.Questions
 		m.workflowAnswersCh = msg.AnswersCh // use the workflow goroutine's channel
-		m.busy = false                      // allow user input
-		m.busyHint = ""
 		if m.workflowState != nil {
 			// Distinguish "waiting on you" from "still generating" in the panel —
 			// otherwise it keeps showing "role: designer" throughout the pause too.
@@ -2120,29 +2132,25 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.launchGenericWorkflow(w)
 
 	case workflow.WorkflowDoneMsg:
-		m.busy = false
+		// The workflow ran in the background: any agent turn in flight owns
+		// busy/cancelTurn and its per-turn counters, so none of those are
+		// touched here.
 		m.workflowRunning = false
-		m.cancelTurn = nil
-		m.busyHint = ""
-		obs.IncrementTurnCount()
-		m.currentTurnChars = 0
-		m.turnFirstOutputAt = time.Time{}
-		m.currentTurnInputChars = 0
+		m.cancelWorkflow = nil
+		cancelled := m.workflowCancelled
+		m.workflowCancelled = false
 		m.autoOpenPanel(regionWorkflow)
 		if m.workflowState != nil {
 			m.workflowState.Role = "done"
 			m.workflowState.ActiveStageTree = nil
 			runErr := msg.Err
-			if runErr == nil && m.interrupted {
+			if runErr == nil && cancelled {
 				runErr = context.Canceled
 			}
 			noteWorkflowFinished(m.st.sess, m.workflowState.WorkflowName, m.workflowState.Task, m.workflowState.WorkflowID, runErr)
 		}
-		if m.interrupted {
-			m.interrupted = false
-			m.appendTranscript(dim("[interrupted]") + "\n")
-		} else if isContextCanceled(msg.Err) {
-			m.appendTranscript(dim("[interrupted]") + "\n")
+		if cancelled || isContextCanceled(msg.Err) {
+			m.appendTranscript(dim("[workflow interrupted]") + "\n")
 		} else if msg.Err != nil {
 			if genericExhausted := (*interp.ExhaustedError)(nil); errors.As(msg.Err, &genericExhausted) && m.workflowState != nil && m.pendingWorkflowWizard == nil {
 				// Offer to continue with a doubled iteration limit.
@@ -2908,10 +2916,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if m.pendingWorkflowQuestions != "" {
 		m.pendingWorkflowQuestions = ""
 		m.workflowAnswersCh = nil
-		if m.cancelTurn != nil {
-			m.cancelTurn()
-			m.cancelTurn = nil
-		}
+		m.cancelRunningWorkflow()
 		m.appendTranscript("\n" + milkTag() + " workflow cancelled\n")
 		m.refreshPrompt()
 		m.syncLayout()
@@ -2969,9 +2974,6 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 			m.workflowAnswersCh = nil
 		}
 		m.pendingWorkflowQuestions = ""
-		// Re-lock input while the designer finalizes the plan.
-		m.busy = true
-		m.spinnerFrame = 0
 		m.lastWorkflowActivity = time.Now()
 		m.workflowTimeoutWarned = false
 		if m.workflowState != nil {
@@ -2981,7 +2983,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		m.appendTranscript(milkTag() + " Answers submitted. Designer finalizing plan...\n")
 		m.syncLayout()
-		return m, tea.Batch(spinnerTick(), workflowIdleCheck())
+		return m, nil
 	}
 
 	return m.submitInput(input, promptLabel(m.st))
@@ -3438,9 +3440,9 @@ func memoryPollTick() tea.Cmd {
 // elapsed time against the current role's agent turn timeout.
 const workflowIdleCheckInterval = 15 * time.Second
 
-func workflowIdleCheck() tea.Cmd {
+func workflowIdleCheck(gen int) tea.Cmd {
 	return tea.Tick(workflowIdleCheckInterval, func(time.Time) tea.Msg {
-		return workflowIdleCheckMsg{}
+		return workflowIdleCheckMsg{gen: gen}
 	})
 }
 

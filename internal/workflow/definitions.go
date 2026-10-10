@@ -5,6 +5,22 @@ import "fmt"
 // Definition is a workflow described as data (YAML/JSON) rather than a
 // hand-written Go type. The interpreter (internal/workflow/interp) walks a
 // Definition's Stages to execute a run.
+// HasParallelGroup reports whether any stage, at any nesting depth, is a
+// parallel_group. Its workers run without live output (see interp's
+// execParallelGroup), which the attach view tells the user about.
+func (d Definition) HasParallelGroup() bool {
+	return stagesHaveParallelGroup(d.Stages)
+}
+
+func stagesHaveParallelGroup(stages []Stage) bool {
+	for _, s := range stages {
+		if s.Kind == StageKindParallelGroup || stagesHaveParallelGroup(s.Body) {
+			return true
+		}
+	}
+	return false
+}
+
 type Definition struct {
 	// Name is the identifier used by /workflow <name> and as the registry key.
 	Name string `yaml:"name" json:"name"`

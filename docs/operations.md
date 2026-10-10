@@ -211,7 +211,7 @@ The `/bg` slash command manages background agents interactively:
 
 The spawning agent has a model-facing equivalent to `/bg stop`: a `cancel_background_agent(job_id)` tool call, using the same cancellation path, for when the agent itself decides mid-turn that a job it spawned is no longer needed (e.g. the user's request changed).
 
-**Watching a job (or workflow) live** (ADR-0047): double-click a job's row in the background panel (**F3**), or the workflow panel (**F4**) while a `/workflow` is running, to swap the main transcript for that job's/workflow's own live output — its tool calls and streamed text, kept off the main transcript the whole time, not just summarized after the fact. Esc detaches back to the main transcript, which keeps accumulating underneath the whole time. The buffer keeps growing after the job/workflow finishes, so re-attaching (or never detaching) still shows the full output; nothing auto-detaches on completion. `obs.Debug` logs `attach.start`/`attach.stop` with the job/workflow ID and label, so this is checkable from `milk.log` even without watching the terminal live.
+**Watching a job (or workflow) live** (ADR-0047): double-click a job's row in the background panel (**F3**), or the workflow panel (**F4**) while a `/workflow` is running, to swap the main transcript for that job's/workflow's own live output — its tool calls and streamed text, kept off the main transcript the whole time, not just summarized after the fact. Esc detaches back to the main transcript, which keeps accumulating underneath the whole time. A workflow with a `parallel_group` (e.g. `swarm`) shows a header note there: its workers run without live output, so the fan-out stage shows only `[item N] started`/`done`/`failed` lines. The buffer keeps growing after the job/workflow finishes, so re-attaching (or never detaching) still shows the full output; nothing auto-detaches on completion. `obs.Debug` logs `attach.start`/`attach.stop` with the job/workflow ID and label, so this is checkable from `milk.log` even without watching the terminal live.
 
 ---
 
@@ -293,7 +293,7 @@ When an agent calls `edit_file`/`write_file` (primary) or `Edit`/`Write` (Claude
 | **Ctrl+Enter** | Spawn a background agent from the current input (while an agent turn is in progress). **Ctrl+J** works as a universal fallback in terminals without extended key protocols. |
 | **Tab** | Cycle slash-command and @-path completions (also available while a turn is in progress) |
 | **Shift-Tab** | Reverse cycle completions |
-| **Ctrl-C** | Copy selection → clear input → cancel workflow/turn → quit (double press) |
+| **Ctrl-C** | Copy selection → clear input → cancel the running turn → quit (double press; also cancels a running workflow — to stop only the workflow use `/workflow cancel`) |
 | **Ctrl-D** | Quit (when input is empty) |
 | **Ctrl-R** | Search backward in transcript |
 | **Ctrl-S** | Search forward in transcript |

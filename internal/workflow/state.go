@@ -49,6 +49,10 @@ type State struct {
 	// than on StageTree's emptiness, since a top-level (not-yet-nested-in-
 	// a-loop) stage has an empty StageTree too.
 	Generic bool `json:"-"`
+	// ParallelExec is set at launch when the definition contains a
+	// parallel_group, whose workers don't stream live output; the attach view
+	// shows a note about it.
+	ParallelExec bool `json:"-"`
 	// Live accumulates this run's streamed stage output (see
 	// internal/livebuf) for the TUI's attach view (ADR-0047), kept off the
 	// main session transcript. In-memory only, like ActiveStageTree — never

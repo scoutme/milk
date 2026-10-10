@@ -60,11 +60,23 @@ func (m model) handleWorkflowCmd(args string) (tea.Model, tea.Cmd) {
 
 	if len(parts) == 0 {
 		// List available workflows.
-		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
+		m.appendTranscript(milkTag() + " available workflows:\n  " + strings.Join(reg.Names(), ", ") + "\n\nUsage:\n  /workflow <name> [task] [--<role> <agent> ...]\n  /workflow status       — show the running workflow\n  /workflow cancel       — stop the running workflow (resumable)\n  /workflow resume       — resume workflow from last checkpoint\n  /workflow reconfigure  — reassign agent roles without losing saved state\n  /workflow clear        — delete saved state for this session\n")
 		return m, nil
 	}
 
 	name := parts[0]
+	if name == "status" {
+		return m.handleWorkflowStatus()
+	}
+	if name == "cancel" {
+		return m.handleWorkflowCancel()
+	}
+	if m.workflowRunning {
+		// Everything below starts, resumes, reconfigures or clears a run; none
+		// of it is safe against the one that is live.
+		m.appendTranscript(milkTag() + " a workflow is running — /workflow status shows it, /workflow cancel stops it\n")
+		return m, nil
+	}
 	if name == "resume" {
 		return m.handleWorkflowResume()
 	}
@@ -384,6 +396,61 @@ func (m model) applyGenericWorkflowReconfigure(w *workflowWizardState) (tea.Mode
 	return m, nil
 }
 
+// cancelRunningWorkflow cancels the live workflow, if any, and reports whether
+// there was one. The done message that follows does the bookkeeping.
+func (m *model) cancelRunningWorkflow() bool {
+	if !m.workflowRunning || m.cancelWorkflow == nil {
+		return false
+	}
+	m.workflowCancelled = true
+	m.cancelWorkflow()
+	m.cancelWorkflow = nil
+	return true
+}
+
+func (m model) handleWorkflowCancel() (tea.Model, tea.Cmd) {
+	if !m.cancelRunningWorkflow() {
+		m.appendTranscript(milkTag() + " no workflow is running\n")
+		return m, nil
+	}
+	m.appendTranscript(milkTag() + " cancelling workflow — /workflow resume continues it from the last checkpoint\n")
+	return m, nil
+}
+
+func (m model) handleWorkflowStatus() (tea.Model, tea.Cmd) {
+	if m.workflowRunning {
+		m.appendTranscript(milkTag() + " " + workflowStatusLabel(m.workflowState) + "\n")
+		return m, nil
+	}
+	saved, err := loadSavedWorkflow(m.st.sess)
+	switch {
+	case errors.Is(err, errNoSavedWorkflow):
+		m.appendTranscript(milkTag() + " no workflow is running and none is saved for this session\n")
+	case errors.Is(err, errWorkflowDone):
+		m.appendTranscript(milkTag() + " no workflow is running — the last one is complete (/workflow clear removes its state)\n")
+	case err != nil:
+		m.appendTranscript(milkTag() + " workflow status error: " + err.Error() + "\n")
+	default:
+		m.appendTranscript(milkTag() + fmt.Sprintf(" no workflow is running — %s #%d is paused (/workflow resume continues it)\n  task: %s\n",
+			saved.Def.Name, saved.ID, saved.Checkpoint.Task))
+	}
+	return m, nil
+}
+
+// busySafeWorkflowCmd reports whether a /workflow invocation may run while an
+// agent turn is in progress: only the read-only status and the cancel, so a
+// workflow can always be stopped without waiting for the turn.
+func busySafeWorkflowCmd(cmd, rest string) bool {
+	if cmd != cmdWorkflow {
+		return false
+	}
+	switch strings.TrimSpace(rest) {
+	case "status", "cancel":
+		return true
+	}
+	return false
+}
+
 // workflowDisplaySend wraps send for the agents a workflow runs. buildTUIAgents
 // wires each agent's display hooks (reasoning, CLI tool-use hints, retraction)
 // to messages that write into the main transcript; for a workflow they belong
@@ -407,20 +474,19 @@ func workflowDisplaySend(send func(tea.Msg)) func(tea.Msg) {
 // launchGenericWorkflow resolves agents, builds runners, and starts the
 // interpreter-driven workflow goroutine for any registered definition.
 func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd) {
-	// Refuse a second concurrent fresh launch: without this, start_workflow's
-	// tool-driven path (cmd/milk/repl.go's startWorkflowFromToolMsg) has no
-	// equivalent of the /workflow slash commands' workflow.CurrentWorkflowID
-	// check, so a model that calls the tool again while a workflow is still
-	// running would start a second interp.Runner goroutine racing the first
-	// one over the single m.workflowState/m.cancelTurn/m.busy fields. A
-	// resume/reconfigure/extend of the *same* run (w.resuming) is unaffected.
-	if !w.resuming && m.workflowRunning {
+	// Refuse any launch while a workflow is running: start_workflow's
+	// tool-driven path (startWorkflowFromToolMsg) has no equivalent of the
+	// /workflow slash commands' early check, and a second interp.Runner would
+	// race the first over the single m.workflowState/m.cancelWorkflow fields.
+	// A resume/extend of a finished run is fine: workflowRunning is already
+	// false by then.
+	if m.workflowRunning {
 		running := "a workflow"
 		if m.workflowState != nil && m.workflowState.WorkflowName != "" {
 			running = fmt.Sprintf("workflow %q (role: %s)", m.workflowState.WorkflowName, m.workflowState.Role)
 		}
 		m.appendTranscript(milkTag() + fmt.Sprintf(
-			" %s is already running — ignoring request to start %q; check /workflow status or /workflow clear it first\n",
+			" %s is already running — ignoring request to start %q; /workflow status shows it, /workflow cancel stops it\n",
 			running, w.name,
 		))
 		m.refreshPrompt()
@@ -476,9 +542,10 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 	}
 
 	m.autoOpenPanel(regionWorkflow)
-	m.busy = true
 	m.workflowRunning = true
-	m.spinnerFrame = 0
+	m.workflowCancelled = false
+	m.workflowGen++
+	gen := m.workflowGen
 	m.lastWorkflowActivity = time.Now()
 	m.workflowTimeoutWarned = false
 	m.workflowState = plan.initialState()
@@ -490,10 +557,9 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 	m.syncLayout()
 
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancelTurn = cancel
+	m.cancelWorkflow = cancel
 	return m, tea.Batch(
-		spinnerTick(),
-		workflowIdleCheck(),
+		workflowIdleCheck(gen),
 		func() tea.Msg {
 			defer cancel()
 			err := r.Run(ctx, runCfg)

@@ -216,7 +216,7 @@ Persisted to config immediately, effective on next render.
 
 **/need** sets the current session goal (`/need <one-sentence goal>`); the primary agent calls this automatically when the user states a new objective. Shown in the memory panel and injected into escalation context.
 
-**/workflow** runs a named multi-agent pipeline — see [docs/workflows.md — The native `/workflow` engine](workflows.md#the-native-workflow-engine).
+**/workflow** runs a named multi-agent pipeline in the background (`/workflow status` and `/workflow cancel` manage it) — see [docs/workflows.md — The native `/workflow` engine](workflows.md#the-native-workflow-engine).
 
 **/config** manages configuration:
 

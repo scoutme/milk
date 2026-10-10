@@ -117,7 +117,11 @@ func (m *model) statusBar() string {
 		left += dim(" [⚙ " + workflowStatusLabel(m.workflowState) + "]")
 	}
 	if m.quitPending {
-		left += yellow(" [press ctrl+c again to exit]")
+		if m.workflowRunning {
+			left += yellow(" [workflow running — ctrl+c again to exit and cancel it · /workflow cancel stops only it]")
+		} else {
+			left += yellow(" [press ctrl+c again to exit]")
+		}
 	} else if m.loopInterrupt {
 		label := m.loopInterruptLabel
 		if label == "" {

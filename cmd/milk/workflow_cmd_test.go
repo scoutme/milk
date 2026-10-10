@@ -291,10 +291,10 @@ func TestWorkflowCmdVariants(t *testing.T) {
 	}
 }
 
-// ── TestLaunchWorkflow_SetsCancelTurn ─────────────────────────────────────────
+// ── TestLaunchWorkflow_SetsCancelWorkflow ─────────────────────────────────────────
 
-// TestLaunchWorkflow_SetsCancelTurn verifies that launchWorkflow assigns a non-nil
-// cancelTurn to the model so Ctrl+C can cancel a running workflow.
+// TestLaunchWorkflow_SetsCancelWorkflow verifies that launchWorkflow assigns a non-nil
+// cancelWorkflow to the model so Ctrl+C can cancel a running workflow.
 //
 // The test exploits the fact that with a zero config and nil primary/escalation
 // runners, both cfg.ActiveAgent().Name and da.primary.Name() resolve to "", so
@@ -331,8 +331,8 @@ func TestHandleWorkflowCmd_DevLaunchesThroughGenericPath(t *testing.T) {
 	if cur.pendingWorkflowWizard != nil {
 		t.Fatalf("expected the wizard to clear after all roles answered, still at %+v", cur.pendingWorkflowWizard)
 	}
-	if cur.cancelTurn == nil {
-		t.Error("expected cancelTurn to be non-nil — was the workflow goroutine launched?")
+	if cur.cancelWorkflow == nil {
+		t.Error("expected cancelWorkflow to be non-nil — was the workflow goroutine launched?")
 	}
 	if cur.workflowState == nil || cur.workflowState.WorkflowName != "dev" {
 		t.Errorf("workflowState = %+v, want WorkflowName %q", cur.workflowState, "dev")
@@ -425,7 +425,7 @@ func TestHandleGenericWorkflowCmd_TaskThenRoleWizardFlow(t *testing.T) {
 	}
 }
 
-func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
+func TestLaunchGenericWorkflow_SetsCancelWorkflow(t *testing.T) {
 	sandboxMilkHome(t)
 	reg, errs := workflow.LoadRegistry()
 	if len(errs) != 0 {
@@ -455,8 +455,8 @@ func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
 	newM, _ := m.launchGenericWorkflow(wizard)
 	nm := newM.(model)
 
-	if nm.cancelTurn == nil {
-		t.Error("expected cancelTurn to be non-nil after launchGenericWorkflow; was the workflow goroutine launched?")
+	if nm.cancelWorkflow == nil {
+		t.Error("expected cancelWorkflow to be non-nil after launchGenericWorkflow; was the workflow goroutine launched?")
 	}
 	if nm.workflowState == nil || nm.workflowState.WorkflowName != "swarm" {
 		t.Errorf("workflowState = %+v, want WorkflowName %q", nm.workflowState, "swarm")
@@ -470,7 +470,7 @@ func TestLaunchGenericWorkflow_SetsCancelTurn(t *testing.T) {
 // start_workflow tool path (unlike the /workflow slash commands) having no
 // check against an already-active run: calling launchGenericWorkflow again
 // with resuming=false while workflowRunning is still true from a prior
-// launch must not replace workflowState/cancelTurn or start a second
+// launch must not replace workflowState/cancelWorkflow or start a second
 // goroutine racing the first one over that shared state.
 func TestLaunchGenericWorkflow_RefusesSecondConcurrentLaunch(t *testing.T) {
 	sandboxMilkHome(t)
@@ -554,8 +554,8 @@ func TestHandleWorkflowResume_InterpKind_LoadsCheckpointAndLaunches(t *testing.T
 
 	newM, _ := m.handleWorkflowResume()
 	nm := newM.(model)
-	if nm.cancelTurn == nil {
-		t.Fatal("expected cancelTurn to be set — was the resumed workflow launched?")
+	if nm.cancelWorkflow == nil {
+		t.Fatal("expected cancelWorkflow to be set — was the resumed workflow launched?")
 	}
 	if !strings.Contains(nm.transcript.String(), "resuming workflow pair") {
 		t.Errorf("transcript = %q, expected a \"resuming workflow pair\" line", nm.transcript.String())
@@ -578,7 +578,7 @@ func TestHandleWorkflowResume_InterpKind_DoneCheckpointReportsCompleted(t *testi
 	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
 	newM, _ := m.handleWorkflowResume()
 	nm := newM.(model)
-	if nm.cancelTurn != nil {
+	if nm.cancelWorkflow != nil {
 		t.Error("expected no launch for an already-completed checkpoint")
 	}
 	if !strings.Contains(nm.transcript.String(), "already completed") {
@@ -599,7 +599,7 @@ func TestHandleWorkflowResume_InterpKind_UnregisteredDefinitionErrors(t *testing
 	m.st = &interactiveState{sess: &session.Session{ID: sessID}}
 	newM, _ := m.handleWorkflowResume()
 	nm := newM.(model)
-	if nm.cancelTurn != nil {
+	if nm.cancelWorkflow != nil {
 		t.Error("expected no launch when the checkpoint's definition is no longer registered")
 	}
 	if !strings.Contains(nm.transcript.String(), "no longer registered") {
@@ -764,8 +764,8 @@ func TestHandleGenericWorkflowExtendKey_Yes_RelaunchesWithOverride(t *testing.T)
 	if nm.pendingGenericWorkflowExtend != nil {
 		t.Error("expected pendingGenericWorkflowExtend to be cleared")
 	}
-	if nm.cancelTurn == nil {
-		t.Error("expected cancelTurn to be set — was the workflow relaunched?")
+	if nm.cancelWorkflow == nil {
+		t.Error("expected cancelWorkflow to be set — was the workflow relaunched?")
 	}
 }
 

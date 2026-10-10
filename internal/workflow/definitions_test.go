@@ -107,3 +107,11 @@ func TestDefinition_Validate_MissingID(t *testing.T) {
 		t.Error("expected error for stage missing id")
 	}
 }
+
+func TestDefinitionHasParallelGroup(t *testing.T) {
+	plain := Definition{Stages: []Stage{{ID: "a", Kind: StageKindAgentTurn}}}
+	nested := Definition{Stages: []Stage{{ID: "l", Kind: StageKindLoop, Body: []Stage{{ID: "pg", Kind: StageKindParallelGroup}}}}}
+	if plain.HasParallelGroup() || !nested.HasParallelGroup() {
+		t.Errorf("plain=%v nested=%v", plain.HasParallelGroup(), nested.HasParallelGroup())
+	}
+}
