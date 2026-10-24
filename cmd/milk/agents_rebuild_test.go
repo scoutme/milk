@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"net"
@@ -11,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
@@ -32,22 +33,21 @@ func TestHandleInitWizardKey_CommitRebuildsRunners(t *testing.T) {
 	cfg := config.Config{}
 	st := &interactiveState{cfg: cfg, cwd: t.TempDir()}
 	m := newModel(context.Background(), st, router.New(cfg, nil), dispatchAgents{}, nil)
+	stubWizardModels(t, nil, errors.New("no server"))
 	m.pendingInit, _ = initWizardStart("")
 
 	answer := func(s string) {
 		t.Helper()
 		m.ta.SetValue(s)
-		res, _ := m.handleInitWizardKey(tea.KeyMsg{Type: tea.KeyEnter})
+		res, _ := m.handleInitWizardKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = res.(model)
 	}
 
-	answer("mock")       // agent name
 	answer("1")          // provider: local
 	answer(srv.URL)      // server URL
-	answer("default")    // run_cmd: skip
 	answer("mock-model") // model
-	answer("default")    // context window: skip
-	answer("n")          // escalation: no — this answer commits the config
+	answer("n")          // escalation: no
+	answer("n")          // optional tuning: no — this answer commits the config
 
 	if !m.hasInferenceAgent {
 		t.Error("the wizard commit must mark an inference agent as configured")

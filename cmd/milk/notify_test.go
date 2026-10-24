@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/local"
@@ -237,7 +237,7 @@ func TestUpdate_CtrlGDismissesToasts(t *testing.T) {
 	if len(m.toastVisible) != 1 {
 		t.Fatalf("setup: visible = %d, want 1", len(m.toastVisible))
 	}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	got := updated.(model)
 	if len(got.toastVisible) != 0 {
 		t.Errorf("Ctrl+G must dismiss open toasts, got %d", len(got.toastVisible))
@@ -253,7 +253,7 @@ func TestUpdate_CtrlGDismissesToasts(t *testing.T) {
 // render-time overlay — adds zero layout rows (same line count either way).
 func TestView_ToastOverlayFloating(t *testing.T) {
 	m := layoutTestModel(t, 120, 40)
-	baseline := m.View()
+	baseline := m.viewString()
 	baselineLines := strings.Count(baseline, "\n")
 
 	// Message kept short: the box's halfway clamp (overlayToasts) truncates
@@ -261,7 +261,7 @@ func TestView_ToastOverlayFloating(t *testing.T) {
 	// is not guaranteed to survive intact — that trade-off has its own
 	// dedicated coverage below. This test only pins the overlay mechanics.
 	m.notify("panel on", "/panel background")
-	view := m.View()
+	view := m.viewString()
 
 	if !strings.Contains(view, "panel on") {
 		t.Errorf("view must contain the toast text, got:\n%s", view)
@@ -319,7 +319,7 @@ func TestOverlayToasts_DismissGetsOwnRow(t *testing.T) {
 	m := layoutTestModel(t, 120, 40)
 	m.notify("short", "")
 
-	view := m.View()
+	view := m.viewString()
 	lines := strings.Split(view, "\n")
 	// mainArea row i is at line index i+1 (see margin test above); with one
 	// visible toast, row 0 is its message and row 1 is the dismiss footer.
@@ -356,7 +356,7 @@ func TestOverlayToasts_PendingCountOnDismissRow(t *testing.T) {
 		t.Fatalf("setup: queue = %d, want 2", len(m.toastQueue))
 	}
 
-	view := m.View()
+	view := m.viewString()
 	lines := strings.Split(view, "\n")
 	dismissRow := lines[limit+1] // messages occupy rows 1..limit, footer is next
 
@@ -401,7 +401,7 @@ func TestOverlayToasts_RowsShareStartColumn(t *testing.T) {
 	// change) sits before the content, which starts right after it.
 	contentStart := toastSideMargin + sharedCol + toastContentPadding
 
-	view := m.View()
+	view := m.viewString()
 	lines := strings.Split(view, "\n")
 	// mainArea row i is at line index i+1 (see margin test above); the
 	// dismiss footer follows immediately after the last visible toast.
@@ -423,11 +423,11 @@ func TestOverlayToasts_PreservesSideMargins(t *testing.T) {
 
 	// View() = headerBar + "\n" + mainArea + "\n" + statusBar: mainArea's own
 	// row 0 (where the first toast paints) is line index 1 of the full view.
-	before := m.View()
+	before := m.viewString()
 	beforeRow := strings.Split(before, "\n")[1]
 
 	m.notify("margin check", "")
-	after := m.View()
+	after := m.viewString()
 	afterRow := strings.Split(after, "\n")[1]
 
 	beforeLeft := ansi.Strip(ansi.Truncate(beforeRow, toastSideMargin, ""))
@@ -457,7 +457,7 @@ func TestOverlayToasts_BandStartsAtSharedColumn(t *testing.T) {
 	width := m.mainWidth()
 	boxWidth := width - 2*toastSideMargin
 
-	before := m.View()
+	before := m.viewString()
 	rowIdx := strings.Count(m.headerBar(), "\n") + 1
 	beforeRow := strings.Split(before, "\n")[rowIdx]
 
@@ -471,7 +471,7 @@ func TestOverlayToasts_BandStartsAtSharedColumn(t *testing.T) {
 	sharedCol := max(boxWidth/2, boxWidth-(max(msgLen, dismissLen)+2*toastContentPadding))
 	bandStart := toastSideMargin + sharedCol
 
-	after := m.View()
+	after := m.viewString()
 	afterRow := strings.Split(after, "\n")[rowIdx]
 
 	beforePrefix := ansi.Truncate(beforeRow, bandStart, "")
@@ -503,7 +503,7 @@ func TestOverlayToasts_ContentHasPaddingColumns(t *testing.T) {
 	bandEnd := width - toastSideMargin
 
 	rowIdx := strings.Count(m.headerBar(), "\n") + 1
-	row := strings.Split(m.View(), "\n")[rowIdx]
+	row := strings.Split(m.viewString(), "\n")[rowIdx]
 
 	leading := ansi.Cut(row, bandStart, bandStart+toastContentPadding)
 	if ansi.Strip(leading) != strings.Repeat(" ", toastContentPadding) {
@@ -531,7 +531,7 @@ func TestView_ToastOverlayPreservesPanelHeader(t *testing.T) {
 	m.panelTasks = true
 	m.syncLayout()
 
-	before := m.View()
+	before := m.viewString()
 	if !strings.Contains(before, "tasks") {
 		t.Fatalf("setup: expected tasks panel title in view, got:\n%s", before)
 	}
@@ -540,7 +540,7 @@ func TestView_ToastOverlayPreservesPanelHeader(t *testing.T) {
 	// halfway clamp can truncate a long message before dropping hint/dismiss,
 	// which isn't what this test is about.
 	m.notify("panel open", "/panel tasks")
-	after := m.View()
+	after := m.viewString()
 
 	if !strings.Contains(after, "tasks") {
 		t.Errorf("toast overlay must not blank out the open panel's title row, got:\n%s", after)

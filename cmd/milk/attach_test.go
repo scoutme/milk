@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/local"
@@ -140,7 +140,7 @@ func TestHandleAttachKey_EscDetaches(t *testing.T) {
 	job := spawnJobWithLiveContent(t, mgr, "job", "content")
 	m.attached = &attachState{kind: attachBackground, jobID: job.ID, buf: job.Live}
 
-	updated, _ := m.handleAttachKey(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	mm := updated.(model)
 
 	if mm.attached != nil {
@@ -157,7 +157,7 @@ func TestHandleAttachKey_OtherKeysAreSwallowed(t *testing.T) {
 	job := spawnJobWithLiveContent(t, mgr, "job", "content")
 	m.attached = &attachState{kind: attachBackground, jobID: job.ID, buf: job.Live}
 
-	updated, cmd := m.handleAttachKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, cmd := m.handleAttachKey(tea.KeyPressMsg{Code: []rune("j")[0], Text: "j"})
 	mm := updated.(model)
 
 	if mm.attached == nil {
@@ -223,7 +223,7 @@ func TestUpdate_PendingPermReachesItsHandlerWhileAttached(t *testing.T) {
 	m.attached = &attachState{kind: attachBackground, jobID: job.ID, label: "job", buf: job.Live}
 	m.pendingPerm = &permRequestMsg{label: "[allow bash?]", respCh: make(chan string, 1)}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	mm := updated.(model)
 
 	if mm.pendingPerm != nil {
@@ -251,7 +251,7 @@ func TestView_PendingPermShowsMainTranscriptNotAttachBuffer(t *testing.T) {
 	m.startAttach(attachBackground, job.ID, "job", job.Live)
 	m.pendingPerm = &permRequestMsg{label: "[allow?]", respCh: make(chan string, 1)}
 
-	view := m.View()
+	view := m.viewString()
 	if !strings.Contains(view, "please allow this tool call?") {
 		t.Errorf("expected the pending permission prompt to be visible, got:\n%s", view)
 	}
@@ -262,7 +262,7 @@ func TestView_PendingPermShowsMainTranscriptNotAttachBuffer(t *testing.T) {
 	// Resolve the prompt; the attach view should reappear without needing
 	// another double-click.
 	m.pendingPerm = nil
-	view = m.View()
+	view = m.viewString()
 	if !strings.Contains(view, "attached buffer sentinel") {
 		t.Errorf("expected the attach view to reappear once the prompt resolved, got:\n%s", view)
 	}
@@ -346,7 +346,7 @@ func TestView_AttachedRendersLiveBufferNotMainTranscript(t *testing.T) {
 		t.Fatal("expected startAttach to return the refresh-tick command")
 	}
 
-	view := m.View()
+	view := m.viewString()
 	if !strings.Contains(view, "attached buffer sentinel") {
 		t.Errorf("expected attach view to render the live buffer content, got:\n%s", view)
 	}
@@ -367,11 +367,11 @@ func TestHandleResize_ResizesAttachedViewport(t *testing.T) {
 	if mm.attached == nil {
 		t.Fatal("expected attach state to survive a resize")
 	}
-	if mm.attached.vp.Width != mm.vpWidth() {
-		t.Errorf("attached.vp.Width = %d, want %d (mm.vpWidth())", mm.attached.vp.Width, mm.vpWidth())
+	if mm.attached.vp.Width() != mm.vpWidth() {
+		t.Errorf("attached.vp.Width = %d, want %d (mm.vpWidth())", mm.attached.vp.Width(), mm.vpWidth())
 	}
-	if mm.attached.vp.Height != mm.viewportHeight() {
-		t.Errorf("attached.vp.Height = %d, want %d (mm.viewportHeight())", mm.attached.vp.Height, mm.viewportHeight())
+	if mm.attached.vp.Height() != mm.viewportHeight() {
+		t.Errorf("attached.vp.Height = %d, want %d (mm.viewportHeight())", mm.attached.vp.Height(), mm.viewportHeight())
 	}
 }
 
@@ -385,7 +385,7 @@ func TestHandleMouse_WheelScrollsAttachedViewportNotMain(t *testing.T) {
 	}
 	m.vp.SetContent(longMain.String())
 	m.vp.GotoBottom()
-	mainOffsetBefore := m.vp.YOffset
+	mainOffsetBefore := m.vp.YOffset()
 
 	mgr := local.NewManager(context.Background(), 1)
 	var content strings.Builder
@@ -395,16 +395,16 @@ func TestHandleMouse_WheelScrollsAttachedViewportNotMain(t *testing.T) {
 	job := spawnJobWithLiveContent(t, mgr, "job", content.String())
 	m.startAttach(attachBackground, job.ID, "job", job.Live)
 	m.attached.vp.GotoBottom()
-	attachOffsetBefore := m.attached.vp.YOffset
+	attachOffsetBefore := m.attached.vp.YOffset()
 
-	updated, _ := m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonWheelUp}))
+	updated, _ := m.handleMouse(mouseEvent{X: 5, Y: 5, Button: tea.MouseWheelUp}.msg())
 	mm := updated.(*model)
 
-	if mm.vp.YOffset != mainOffsetBefore {
-		t.Errorf("main viewport YOffset changed from %d to %d — wheel should have scrolled the attached view instead", mainOffsetBefore, mm.vp.YOffset)
+	if mm.vp.YOffset() != mainOffsetBefore {
+		t.Errorf("main viewport YOffset changed from %d to %d — wheel should have scrolled the attached view instead", mainOffsetBefore, mm.vp.YOffset())
 	}
-	if mm.attached.vp.YOffset >= attachOffsetBefore {
-		t.Errorf("attached viewport YOffset = %d, want less than %d (scrolled up)", mm.attached.vp.YOffset, attachOffsetBefore)
+	if mm.attached.vp.YOffset() >= attachOffsetBefore {
+		t.Errorf("attached viewport YOffset = %d, want less than %d (scrolled up)", mm.attached.vp.YOffset(), attachOffsetBefore)
 	}
 }
 

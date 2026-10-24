@@ -1,6 +1,29 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+)
+
+func TestHeaderLogoIsStaticWordmark(t *testing.T) {
+	oldIsTTY := isTTY
+	t.Cleanup(func() { isTTY = oldIsTTY })
+
+	isTTY = false
+	if got := headerLogo(0); got != "milk" {
+		t.Fatalf("non-TTY headerLogo() = %q, want %q", got, "milk")
+	}
+
+	isTTY = true
+	first := headerLogo(0)
+	if next := headerLogo(len(pulseColors) - 1); next != first {
+		t.Fatalf("headerLogo changed with animation frame: %q != %q", first, next)
+	}
+	if plain := ansi.Strip(first); plain != "milk" {
+		t.Fatalf("TTY headerLogo() = %q after stripping ANSI, want %q", plain, "milk")
+	}
+}
 
 func TestDimLines_ResetsBeforeEachNewline(t *testing.T) {
 	oldIsTTY := isTTY

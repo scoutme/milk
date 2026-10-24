@@ -713,7 +713,7 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string, media *acpProm
 			// itself (the empty turn ACP chat can't send), on every input
 			// surface.
 			res := initWizardApply(as.pendingInit, prompt, as.initWizardOptions())
-			out := res.Output + as.commitInitWizard(res)
+			out := res.Output + as.initLoginNote(turnCtx, res) + as.commitInitWizard(res)
 			if res.Done {
 				as.pendingInit = nil
 			} else {

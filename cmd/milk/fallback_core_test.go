@@ -311,3 +311,15 @@ func TestRunPrimary_DeclinedSelfEscalationDoesNotRunEscalation(t *testing.T) {
 		t.Errorf("an approved escalation must run, ran %d times", esc.calls)
 	}
 }
+
+// TestClaudeConsentQuestion_PointsFirstRunAtSetup: with no agent configured the
+// consent question names the guided setup; with one it stays unchanged.
+func TestClaudeConsentQuestion_PointsFirstRunAtSetup(t *testing.T) {
+	if q := claudeConsentQuestion(config.Config{}, false, ""); !strings.Contains(q, "/config init") {
+		t.Errorf("empty config: %q, want the /config init pointer", q)
+	}
+	cfg := config.Config{Agent: "a", Agents: []config.AgentConfig{{Name: "a", URL: "http://localhost:1", Model: "m", Provider: "local"}}}
+	if q := claudeConsentQuestion(cfg, false, ""); strings.Contains(q, "/config init") {
+		t.Errorf("configured primary: %q, want no setup pointer", q)
+	}
+}

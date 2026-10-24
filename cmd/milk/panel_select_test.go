@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/workflow"
@@ -15,7 +15,7 @@ import (
 // initialised so that handleMouse → setViewportContent doesn't panic.
 func dragTestModel() *model {
 	ta := buildTextarea()
-	vp := viewport.New(200, 36)
+	vp := viewport.New(viewport.WithWidth(200), viewport.WithHeight(36))
 	return &model{
 		width:               200,
 		height:              40,
@@ -325,8 +325,8 @@ func workflowSelModel() *model {
 
 func TestHandlePanelMouse_ClickWithoutDragLeavesNoSelection(t *testing.T) {
 	m := workflowSelModel()
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mouseRelease})
 	if m.panelSelRegion != regionNone || m.panelSelText != "" {
 		t.Errorf("a click (no drag) should leave no active selection, got region=%v text=%q", m.panelSelRegion, m.panelSelText)
 	}
@@ -334,9 +334,9 @@ func TestHandlePanelMouse_ClickWithoutDragLeavesNoSelection(t *testing.T) {
 
 func TestHandlePanelMouse_DragSelectsText(t *testing.T) {
 	m := workflowSelModel()
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 6, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 6, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 6, Action: mouseMotion})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 6, Action: mouseRelease})
 	if m.panelSelRegion != regionWorkflow {
 		t.Errorf("expected panelSelRegion=regionWorkflow after drag, got %v", m.panelSelRegion)
 	}
@@ -349,7 +349,7 @@ func TestHandlePanelMouse_PressClearsTranscriptSelection(t *testing.T) {
 	m := workflowSelModel()
 	m.selAnchorLine = 0
 	m.selEndLine = 0
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
 	if m.selAnchorLine >= 0 {
 		t.Error("starting a panel selection should clear any active transcript selection")
 	}
@@ -360,14 +360,14 @@ func TestHandlePanelMouse_PressClearsTranscriptSelection(t *testing.T) {
 func TestHandlePanelMouse_CtrlClickExtendsSelection(t *testing.T) {
 	m := workflowSelModel()
 	// Establish an initial selection via a normal drag.
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 5, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 5, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 5, Action: mouseMotion})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 5, Action: mouseRelease})
 	firstEnd := m.panelSelEndLine
 	anchor := m.panelSelAnchorLine
 
 	// Ctrl+click further down should extend the selection, not restart it.
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 8, Ctrl: true, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 8, Ctrl: true, Action: mousePress})
 
 	if m.panelSelAnchorLine != anchor {
 		t.Errorf("ctrl+click must not move the anchor: got %d, want %d", m.panelSelAnchorLine, anchor)
@@ -382,13 +382,13 @@ func TestHandlePanelMouse_CtrlClickExtendsSelection(t *testing.T) {
 
 func TestHandlePanelMouse_CtrlClickCanShrinkSelection(t *testing.T) {
 	m := workflowSelModel()
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 8, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 8, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 8, Action: mouseMotion})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 8, Action: mouseRelease})
 
 	// Ctrl+click between anchor and the current end shrinks the selection.
 	// (handlePanelMouse maps screen row Y to content line Y-2; see panelRowStart.)
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 5, Ctrl: true, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 5, Ctrl: true, Action: mousePress})
 
 	if m.panelSelAnchorLine != 2 {
 		t.Errorf("anchor must stay put: got %d, want 2", m.panelSelAnchorLine)
@@ -400,7 +400,7 @@ func TestHandlePanelMouse_CtrlClickCanShrinkSelection(t *testing.T) {
 
 func TestHandlePanelMouse_CtrlClickWithoutExistingSelectionActsAsNormalClick(t *testing.T) {
 	m := workflowSelModel()
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Ctrl: true, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Ctrl: true, Action: mousePress})
 
 	if m.panelSelRegion != regionWorkflow || m.panelSelAnchorLine != 2 {
 		t.Errorf("ctrl+click with no prior selection should start a fresh anchor, got region=%v anchor=%d",
@@ -414,14 +414,14 @@ func TestHandlePanelMouse_CtrlClickWithoutExistingSelectionActsAsNormalClick(t *
 func TestHandlePanelMouse_SwitchingRegionClearsPriorSelection(t *testing.T) {
 	m := workflowSelModel()
 	// Start (and finish) a drag selection in the workflow panel.
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 6, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionWorkflow, 2, tea.MouseEvent{Y: 6, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 4, Action: mousePress})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 6, Action: mouseMotion})
+	m.handlePanelMouse(regionWorkflow, 2, mouseEvent{Y: 6, Action: mouseRelease})
 	if m.panelSelText == "" {
 		t.Fatal("setup: expected a populated selection before switching regions")
 	}
 	// A fresh press in a different region must discard the stale selection.
-	m.handlePanelMouse(regionMemory, 0, tea.MouseEvent{Y: 4, Action: tea.MouseActionPress})
+	m.handlePanelMouse(regionMemory, 0, mouseEvent{Y: 4, Action: mousePress})
 	if m.panelSelRegion != regionMemory {
 		t.Errorf("expected panelSelRegion=regionMemory, got %v", m.panelSelRegion)
 	}
@@ -436,9 +436,9 @@ func TestHandlePanelMouse_SwitchingRegionClearsPriorSelection(t *testing.T) {
 
 func TestHandlePanelMouse_DragSelectsText_Tasks(t *testing.T) {
 	m := &model{} // nil taskStore still yields a few placeholder content lines
-	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 2, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionTasks, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionTasks, 2, mouseEvent{Y: 2, Action: mousePress})
+	m.handlePanelMouse(regionTasks, 2, mouseEvent{Y: 4, Action: mouseMotion})
+	m.handlePanelMouse(regionTasks, 2, mouseEvent{Y: 4, Action: mouseRelease})
 	if m.panelSelRegion != regionTasks {
 		t.Errorf("expected panelSelRegion=regionTasks after drag, got %v", m.panelSelRegion)
 	}
@@ -449,9 +449,9 @@ func TestHandlePanelMouse_DragSelectsText_Tasks(t *testing.T) {
 
 func TestHandlePanelMouse_DragSelectsText_Background(t *testing.T) {
 	m := &model{} // nil backgroundMgr still yields a few placeholder content lines
-	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 2, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionMotion})
-	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionRelease})
+	m.handlePanelMouse(regionBackground, 2, mouseEvent{Y: 2, Action: mousePress})
+	m.handlePanelMouse(regionBackground, 2, mouseEvent{Y: 4, Action: mouseMotion})
+	m.handlePanelMouse(regionBackground, 2, mouseEvent{Y: 4, Action: mouseRelease})
 	if m.panelSelRegion != regionBackground {
 		t.Errorf("expected panelSelRegion=regionBackground after drag, got %v", m.panelSelRegion)
 	}
@@ -469,7 +469,7 @@ func TestHandleMouse_LeftClickRoutesAnySidePanelToHandlePanelMouse(t *testing.T)
 	m := &model{width: 200, height: 40, panelTasks: true}
 	mw := m.mainWidth()
 	// First column inside the tasks panel region.
-	_, cmd := m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: mw, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}))
+	_, cmd := m.handleMouse(mouseEvent{X: mw, Y: 2, Button: tea.MouseLeft, Action: mousePress}.msg())
 	_ = cmd
 	if m.panelSelRegion != regionTasks {
 		t.Errorf("expected a left click inside the tasks panel to start a tasks selection, got region=%v", m.panelSelRegion)
@@ -480,15 +480,15 @@ func TestDragResetMsg_ClearsDragModeOnTimeout(t *testing.T) {
 	m := dragTestModel()
 
 	// Simulate a click-drag in the transcript viewport.
-	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-	_, _ = m.handleMouse(tea.MouseMsg(press))
+	press := mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mousePress}
+	_, _ = m.handleMouse(press.msg())
 	if !m.dragResetPending {
 		t.Fatal("expected dragResetPending after press")
 	}
 
 	// First in-area motion reschedules the timer.
-	motion := tea.MouseEvent{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
-	_, _ = m.handleMouse(tea.MouseMsg(motion))
+	motion := mouseEvent{X: 10, Y: 5, Button: tea.MouseLeft, Action: mouseMotion}
+	_, _ = m.handleMouse(motion.msg())
 	if !m.selDragging {
 		t.Fatal("expected selDragging after motion")
 	}
@@ -497,8 +497,8 @@ func TestDragResetMsg_ClearsDragModeOnTimeout(t *testing.T) {
 	// the release is dropped: the dragResetMsg fires after 500ms with the
 	// current generation. The handler should finalize the selection and
 	// reset the drag state.
-	outside := tea.MouseEvent{X: 10, Y: 39, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
-	_, _ = m.handleMouse(tea.MouseMsg(outside))
+	outside := mouseEvent{X: 10, Y: 39, Button: tea.MouseLeft, Action: mouseMotion}
+	_, _ = m.handleMouse(outside.msg())
 	if !m.dragSawOutside {
 		t.Fatal("expected dragSawOutside after motion outside viewport bounds")
 	}
@@ -526,10 +526,10 @@ func TestDragResetMsg_ClearsDragModeOnTimeout(t *testing.T) {
 func TestDragResetMsg_StaleGenerationIgnored(t *testing.T) {
 	m := dragTestModel()
 
-	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-	_, _ = m.handleMouse(tea.MouseMsg(press)) // gen: 0 -> 1
-	motion := tea.MouseEvent{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
-	_, _ = m.handleMouse(tea.MouseMsg(motion)) // gen: 1 -> 2 (timer rescheduled)
+	press := mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mousePress}
+	_, _ = m.handleMouse(press.msg()) // gen: 0 -> 1
+	motion := mouseEvent{X: 10, Y: 5, Button: tea.MouseLeft, Action: mouseMotion}
+	_, _ = m.handleMouse(motion.msg()) // gen: 1 -> 2 (timer rescheduled)
 
 	// The press-time tick (gen 1) arrives after the motion already bumped the
 	// generation — it must be discarded, not processed.
@@ -551,10 +551,10 @@ func TestDragResetMsg_StaleGenerationIgnored(t *testing.T) {
 func TestDragResetMsg_PauseKeepsDragMode(t *testing.T) {
 	m := dragTestModel()
 
-	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-	_, _ = m.handleMouse(tea.MouseMsg(press))
-	motion := tea.MouseEvent{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
-	_, _ = m.handleMouse(tea.MouseMsg(motion))
+	press := mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mousePress}
+	_, _ = m.handleMouse(press.msg())
+	motion := mouseEvent{X: 10, Y: 5, Button: tea.MouseLeft, Action: mouseMotion}
+	_, _ = m.handleMouse(motion.msg())
 
 	dm, cmd := m.Update(dragResetMsg{gen: m.dragResetGen})
 	m2 := dm.(model)
@@ -576,13 +576,13 @@ func TestDragResetMsg_PauseKeepsDragMode(t *testing.T) {
 func TestDragResetMsg_PanelDragOutsideRegionResets(t *testing.T) {
 	m := dragTestModel()
 
-	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 2, Action: tea.MouseActionPress})
-	m.handlePanelMouse(regionBackground, 2, tea.MouseEvent{Y: 4, Action: tea.MouseActionMotion})
+	m.handlePanelMouse(regionBackground, 2, mouseEvent{Y: 2, Action: mousePress})
+	m.handlePanelMouse(regionBackground, 2, mouseEvent{Y: 4, Action: mouseMotion})
 	if !m.panelSelDragging {
 		t.Fatal("expected panelSelDragging after panel motion")
 	}
 	// Pointer leaves the panel for the transcript region.
-	_, _ = m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}))
+	_, _ = m.handleMouse(mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mouseMotion}.msg())
 	if !m.dragSawOutside {
 		t.Fatal("expected dragSawOutside after pointer left the panel region")
 	}
@@ -600,10 +600,10 @@ func TestDragResetMsg_IgnoredAfterRelease(t *testing.T) {
 	m := dragTestModel()
 
 	// Press → drag → release (normal flow).
-	press := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-	_, _ = m.handleMouse(tea.MouseMsg(press))
-	release := tea.MouseEvent{X: 5, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}
-	_, _ = m.handleMouse(tea.MouseMsg(release))
+	press := mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mousePress}
+	_, _ = m.handleMouse(press.msg())
+	release := mouseEvent{X: 5, Y: 5, Button: tea.MouseLeft, Action: mouseRelease}
+	_, _ = m.handleMouse(release.msg())
 	if m.dragResetPending {
 		t.Fatal("expected dragResetPending cleared after release")
 	}

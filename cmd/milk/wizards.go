@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -135,7 +136,7 @@ func firstMissingStep(ac config.AgentConfig) addAgentStep {
 	if !isCLI && ac.Model == "" {
 		return addStepModel
 	}
-	if !isCLI && p != "local" && p != "bedrock" && ac.APIKey == "" {
+	if !isCLI && p != "local" && p != "bedrock" && ac.APIKey == "" && ac.APIKeyEnv == "" {
 		return addStepAPIKey
 	}
 	if p == "bedrock" && ac.AWSRegion == "" {
@@ -176,7 +177,7 @@ func addAgentPrompt(step addAgentStep, ac config.AgentConfig) string {
 }
 
 // handleAddAgentKey handles keypresses during the /agent add wizard.
-func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAddAgentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingAdd = nil
@@ -591,7 +592,7 @@ func mcpAddPrompt(step addMCPStep, current string) string {
 }
 
 // handleAddMCPKey handles keypresses during the /mcp add wizard.
-func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAddMCPKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingMCPAdd = nil
@@ -737,7 +738,7 @@ func copilotHostname(u string) string {
 func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
 	st, banner := initWizardStart(activeConfigDir(m.st))
 	m.pendingInit = st
-	m.appendTranscript(banner + initWizardPrompt(st))
+	m.appendTranscript(banner + initWizardRule() + initWizardPrompt(st))
 	m.ta.Reset()
 	return m, nil
 }
@@ -783,161 +784,8 @@ func initWizardNeedsChatPath(provider string) bool {
 	return strings.ToLower(provider) == "bearer"
 }
 
-// initWizardNextStep advances past the current step based on what fields are needed.
-func initWizardNextStep(st *initWizardState) initWizardStep {
-	p := st.primary.Provider
-	switch st.step {
-	case initStepName:
-		return initStepProvider
-	case initStepProvider:
-		if initWizardNeedsURL(p) {
-			return initStepURL
-		}
-		if initWizardNeedsModel(p) {
-			return initStepModel
-		}
-		return initStepEscalation
-	case initStepURL:
-		if initWizardNeedsChatPath(p) {
-			return initStepChatPath
-		}
-		if p == "local" || p == "" {
-			return initStepRunCmd
-		}
-		return initStepModel
-	case initStepChatPath:
-		if p == "local" || p == "" {
-			return initStepRunCmd
-		}
-		return initStepModel
-	case initStepRunCmd:
-		return initStepModel
-	case initStepModel:
-		if initWizardNeedsAuth(p) {
-			return initStepAuth
-		}
-		if initWizardNeedsAWSRegion(p) {
-			return initStepAWSRegion
-		}
-		return initStepLimits
-	case initStepAuth:
-		// blank api_key → go ask for token_cmd instead
-		if st.primary.APIKey == "" {
-			return initStepTokenCmd
-		}
-		if initWizardNeedsAWSRegion(p) {
-			return initStepAWSRegion
-		}
-		return initStepLimits
-	case initStepTokenCmd:
-		if initWizardNeedsAWSRegion(p) {
-			return initStepAWSRegion
-		}
-		return initStepLimits
-	case initStepAWSRegion:
-		return initStepLimits
-	case initStepLimits:
-		return initStepEscalation
-	case initStepEscalation:
-		return initStepAgentTools
-	case initStepAgentTools:
-		return initStepOpenConfig
-	case initStepOpenConfig:
-		return initStepDone
-	}
-	return initStepDone
-}
-
-// initWizardPrompt returns the prompt text for a given wizard step.
-func initWizardPrompt(st *initWizardState) string {
-	switch st.step {
-	case initStepName:
-		return milkTag() + " primary agent name [local]: "
-	case initStepProvider:
-		return milkTag() + " provider — select:\n" +
-			"  1) local       llama.cpp · Ollama · vLLM · LM Studio (plain HTTP)\n" +
-			"  2) bedrock     AWS Bedrock Converse API\n" +
-			"  3) bearer      OpenRouter · Together.ai · Groq · GitHub Copilot · any Bearer-token API\n" +
-			"  4) claude-cli  Claude Code CLI (no HTTP server needed)\n" +
-			"  5) aider-cli   aider subprocess\n" +
-			"  6) subprocess  generic NDJSON subprocess\n" +
-			milkTag() + " choice [1]: "
-	case initStepURL:
-		hint := ""
-		if st.primary.Provider == "bearer" {
-			hint = " (e.g. https://openrouter.ai/api/v1  ·  https://copilot-api.<org>.ghe.com  ·  https://<res>.cognitiveservices.azure.com/openai)"
-		} else if st.primary.Provider == "local" {
-			hint = " (e.g. http://localhost:8080)"
-		}
-		return milkTag() + " server URL" + hint + ": "
-	case initStepChatPath:
-		defPath := initWizardChatPathDefault(st.primary.URL, "<deployment>")
-		return milkTag() + fmt.Sprintf(" chat path [%s]: ", defPath)
-	case initStepModel:
-		hint := ""
-		if isCopilotURL(st.primary.URL) {
-			hint = " (e.g. claude-sonnet-4.6  or  gpt-4o)"
-		} else if isAzureURL(st.primary.URL) {
-			hint = " (Azure deployment name, e.g. gpt-4.1)"
-		} else if st.primary.Provider == "bearer" {
-			hint = " (e.g. meta-llama/llama-3.1-8b-instruct)"
-		} else if st.primary.Provider == "bedrock" {
-			hint = " (model ARN)"
-		} else if st.primary.Provider == "aider-cli" {
-			hint = " (e.g. gpt-4o  or  claude-3-5-sonnet-20241022)"
-		} else if st.primary.Provider == "subprocess" {
-			hint = " (forwarded to subprocess via --model)"
-		}
-		return milkTag() + " model name" + hint + ": "
-	case initStepAuth:
-		hint := ""
-		if isAzureURL(st.primary.URL) {
-			hint = "\n" + dim("  hint: Azure uses an 'api-key' header, not Bearer — paste your Azure API key here")
-		} else if isCopilotURL(st.primary.URL) {
-			host := copilotHostname(st.primary.URL)
-			if host != "" {
-				hint = "\n" + dim(fmt.Sprintf("  hint: leave blank and use token_cmd = 'gh auth token --hostname %s'", host))
-			} else {
-				hint = "\n" + dim("  hint: leave blank and use token_cmd = 'gh auth token'")
-			}
-		}
-		return milkTag() + " API key (leave blank or type 'default' to use token_cmd instead)" + hint + "\n" + milkTag() + " API key: "
-	case initStepTokenCmd:
-		hint := ""
-		if isCopilotURL(st.primary.URL) {
-			host := copilotHostname(st.primary.URL)
-			if host != "" {
-				hint = fmt.Sprintf(" [gh auth token --hostname %s]", host)
-			} else {
-				hint = " [gh auth token]"
-			}
-		} else {
-			hint = " (e.g. 'gh auth token' or 'op read op://vault/item/field')"
-		}
-		return milkTag() + " token command" + hint + ": "
-	case initStepRunCmd:
-		return milkTag() + " server start command (leave blank or type 'default' to skip)\n" +
-			dim("  e.g. llama-server -m ~/models/qwen2.5-coder-7b-q4_k_m.gguf --port 8080 -ngl 99") + "\n" +
-			milkTag() + " run_cmd: "
-	case initStepAWSRegion:
-		return milkTag() + " AWS region (e.g. us-east-1): "
-	case initStepLimits:
-		if v, ok := modelsdev.Lookup(st.primary.Model); ok {
-			return milkTag() + fmt.Sprintf(" context window in tokens (matched %q in the models.dev catalog) [%d]: ", st.primary.Model, v)
-		}
-		return milkTag() + " context window in tokens, if known (leave blank or type 'default' to skip): "
-	case initStepEscalation:
-		return milkTag() + " use Claude Code CLI as escalation agent? [Y/n]: "
-	case initStepAgentTools:
-		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated), or leave blank / type 'default' to skip: "
-	case initStepOpenConfig:
-		return milkTag() + " open config in editor now? [y/N]: "
-	}
-	return ""
-}
-
 // handleInitWizardKey handles keypresses during the /init wizard.
-func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleInitWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingInit = nil
@@ -963,9 +811,23 @@ func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.hasInferenceAgent = res.Committed.HasInferenceAgent()
 			m, rebuildCmd = m.rebuildRunners()
 			m.appendTranscript(milkTag() + " agents rebuilt from config — active now, no restart needed\n")
+			rebuildCmd = tea.Batch(rebuildCmd, initSmokeCmd(*res.Committed))
+		}
+		if res.RunClaudeLogin && !res.Done {
+			// Hand the terminal to Claude Code's own browser login; the next
+			// question is asked once it returns (claudeLoginDoneMsg).
+			m.appendTranscript(res.Output + milkTag() + " opening Claude Code login in your browser…\n")
+			return m, tea.Batch(rebuildCmd, tea.ExecProcess(exec.Command("claude", "auth", "login"), func(err error) tea.Msg {
+				enableMouseTracking()
+				return claudeLoginDoneMsg{err: err}
+			}))
 		}
 		if res.Output != "" || res.Prompt != "" {
-			m.appendTranscript(res.Output + res.Prompt)
+			rule := ""
+			if res.Prompt != "" {
+				rule = initWizardRule()
+			}
+			m.appendTranscript(res.Output + rule + res.Prompt)
 		}
 		if res.Done {
 			m.pendingInit = nil
@@ -1072,7 +934,7 @@ func (m model) startSwitchAgent(inline string) (model, tea.Cmd) {
 }
 
 // handleSwitchAgentKey handles keypresses during the /agent switch wizard.
-func (m model) handleSwitchAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleSwitchAgentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingSwitch = nil
@@ -1456,7 +1318,7 @@ func (m model) startAgentTool(sub string) (model, tea.Cmd) {
 }
 
 // handleAgentToolWizardKey handles keypresses during the /agent tool wizard.
-func (m model) handleAgentToolWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAgentToolWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingTool = nil

@@ -1,7 +1,7 @@
 package main
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"testing"
 )
 
@@ -16,7 +16,7 @@ func TestHandleKey_PasteAtBufferStart_SetsLeadingPasted(t *testing.T) {
 	}
 
 	pasted := "Here is my earlier turn:\n> /learn milk likes Go\nand the reply"
-	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted), Paste: true})
+	next, _ := m.handlePaste(tea.PasteMsg{Content: pasted})
 	nm := next.(model)
 
 	if !nm.leadingPasted {
@@ -31,14 +31,14 @@ func TestHandleKey_PasteAtBufferStart_SetsLeadingPasted(t *testing.T) {
 func TestHandleKey_PasteAfterTypedPrefix_DoesNotTaint(t *testing.T) {
 	m := newTestModelForPanels(t)
 
-	typed, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/escalate ")})
+	typed, _ := m.handleKey(tea.KeyPressMsg{Code: []rune("/escalate ")[0], Text: "/escalate "})
 	m = typed.(model)
 	if m.leadingPasted {
 		t.Fatal("typing alone must never set leadingPasted")
 	}
 
 	pastedArg := "a long paragraph of context pasted as the escalation reason"
-	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pastedArg), Paste: true})
+	next, _ := m.handlePaste(tea.PasteMsg{Content: pastedArg})
 	nm := next.(model)
 
 	if nm.leadingPasted {
@@ -54,7 +54,7 @@ func TestHandleKey_PasteAfterTypedPrefix_DoesNotTaint(t *testing.T) {
 // next thing they type must not be treated as tainted too.
 func TestHandleKey_BufferEmptiedAfterPaste_ClearsLeadingPasted(t *testing.T) {
 	m := newTestModelForPanels(t)
-	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!echo pwned"), Paste: true})
+	next, _ := m.handlePaste(tea.PasteMsg{Content: "!echo pwned"})
 	m = next.(model)
 	if !m.leadingPasted {
 		t.Fatal("setup: expected leadingPasted true after paste at start")
@@ -62,7 +62,7 @@ func TestHandleKey_BufferEmptiedAfterPaste_ClearsLeadingPasted(t *testing.T) {
 
 	// Backspace away every character of the pasted content.
 	for range []rune("!echo pwned") {
-		n, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+		n, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
 		m = n.(model)
 	}
 	if m.ta.Value() != "" {

@@ -22,6 +22,7 @@ milk routes each prompt between a cheap primary agent and a deeper escalation ag
 - **Memory and safety** — a persistent percept store with consolidation, loop detection with auto-interrupt, task tracking, and session-level tool permissions.
 - **Observability and evaluation** — per-role token usage, OpenTelemetry JSONL exporters, and `milk eval` for side-by-side quality, token, cache, and latency comparisons.
 - **Editor and script surfaces** — `milk serve --acp` for Agent Client Protocol v2 clients, and `--output-format json|stream-json` for one-shot automation.
+- **TUI and skins** — Bubble Tea v2 renderer with synchronized output, overlays, one key registry and spring-animated panels. Two colour skins: the neutral default look and the opt-in `/theme supermilk` (milk-white ground, warm ink, muted olive accent), saved in `config.json`.
 
 ## Installation
 

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/vito/midterm"
 )
@@ -19,7 +19,7 @@ func TestHandleBusyKey_BangExecutesImmediately(t *testing.T) {
 	m.busy = true
 	m.ta.SetValue("!echo pwned-test-marker")
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := next.(model)
 	t.Cleanup(func() {
 		if nm.ptyPane != nil {
@@ -47,7 +47,7 @@ func TestHandleBusyKey_BangModeRePrepended(t *testing.T) {
 	m.bangMode = true
 	m.ta.SetValue("echo pwned-test-marker")
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := next.(model)
 	t.Cleanup(func() {
 		if nm.ptyPane != nil {
@@ -73,7 +73,7 @@ func TestHandleBusyKey_BangSuppressedWhenPasted(t *testing.T) {
 	m.leadingPasted = true
 	m.ta.SetValue("!echo pwned-test-marker")
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := next.(model)
 
 	if nm.ptyPane != nil {

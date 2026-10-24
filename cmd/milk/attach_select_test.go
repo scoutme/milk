@@ -11,10 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
 
 	"github.com/scoutme/milk/internal/agent/local"
 )
@@ -37,22 +35,22 @@ func attachSelTestModel(t *testing.T, content string) *model {
 // attachClick sends a left-button press at the given screen row (content row 0
 // starts at vpRowStart = 2).
 func attachClick(m *model, x, y int) tea.Cmd {
-	_, cmd := m.handleMouse(tea.MouseMsg(tea.MouseEvent{
-		X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress,
-	}))
+	_, cmd := m.handleMouse(mouseEvent{
+		X: x, Y: y, Button: tea.MouseLeft, Action: mousePress,
+	}.msg())
 	return cmd
 }
 
 func attachDrag(m *model, x, y int) {
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{
-		X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion,
-	}))
+	m.handleMouse(mouseEvent{
+		X: x, Y: y, Button: tea.MouseLeft, Action: mouseMotion,
+	}.msg())
 }
 
 func attachRelease(m *model, x, y int) {
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{
-		X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease,
-	}))
+	m.handleMouse(mouseEvent{
+		X: x, Y: y, Button: tea.MouseLeft, Action: mouseRelease,
+	}.msg())
 }
 
 // TestAttachSelection_ExtractsAttachedTextNotTranscript is the core repro:
@@ -113,12 +111,9 @@ func TestAttachSelection_TranscriptSelectionSurvivesAttachSelection(t *testing.T
 // TestAttachSelection_HighlightReachesAttachViewport verifies the highlight is
 // painted into the attach viewport's own content (syncAttachedContent), not
 // into the hidden transcript. Forces a color profile so the reverse-video
-// escape actually renders under `go test`.
+// escape actually renders under `go test`. (Lip Gloss v2 always emits full
+// color; downsampling happens in the output writer, so nothing to force.)
 func TestAttachSelection_HighlightReachesAttachViewport(t *testing.T) {
-	oldProfile := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
-
 	m := attachSelTestModel(t, "highlight target text")
 	attachClick(m, 0, 4)
 	attachDrag(m, 8, 4)
@@ -154,9 +149,9 @@ func TestAttachSelection_RightClickCopiesAttachedText(t *testing.T) {
 		t.Fatalf("attachSelText = %q, want COPYME", m.attachSelText)
 	}
 
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{
-		X: 6, Y: 4, Button: tea.MouseButtonRight, Action: tea.MouseActionPress,
-	}))
+	m.handleMouse(mouseEvent{
+		X: 6, Y: 4, Button: tea.MouseRight, Action: mousePress,
+	}.msg())
 
 	if !strings.Contains(m.copyFeedback, "copied 6 chars") {
 		t.Errorf("copyFeedback = %q, want the attach selection (6 chars) copied", m.copyFeedback)
@@ -215,7 +210,7 @@ func TestHandleAttachKey_EscClearsSelectionBeforeDetach(t *testing.T) {
 	attachClick(m, 0, 4)
 	attachDrag(m, 6, 4) // left dragging: anchor set, end follows motion
 
-	updated, _ := m.handleAttachKey(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	mm := updated.(model)
 	if mm.attached == nil {
 		t.Fatal("first Esc must clear the selection, not detach")
@@ -224,7 +219,7 @@ func TestHandleAttachKey_EscClearsSelectionBeforeDetach(t *testing.T) {
 		t.Errorf("first Esc must clear the attach selection, anchor=%d", mm.attachSelAnchorLine)
 	}
 
-	updated, _ = mm.handleAttachKey(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = mm.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	mm = updated.(model)
 	if mm.attached != nil {
 		t.Error("second Esc must detach")
@@ -243,7 +238,7 @@ func TestHandleAttachKey_CtrlCCopiesSelection(t *testing.T) {
 		t.Fatalf("attachSelText = %q, want CTRLCOPY", m.attachSelText)
 	}
 
-	updated, cmd := m.handleAttachKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated, cmd := m.handleAttachKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	mm := updated.(model)
 	if !strings.Contains(mm.copyFeedback, "copied 8 chars") {
 		t.Errorf("copyFeedback = %q, want the attach selection copied", mm.copyFeedback)

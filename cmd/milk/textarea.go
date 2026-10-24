@@ -9,9 +9,9 @@ import (
 	rw "github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // undoDebugLog is a debug-only file writer for undo/redo diagnostics.
@@ -38,16 +38,18 @@ func buildTextarea() textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = ""
 	ta.ShowLineNumbers = false
-	ta.FocusedStyle.Base = lipgloss.NewStyle()
-	ta.BlurredStyle.Base = lipgloss.NewStyle()
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.FocusedStyle.Prompt = lipgloss.NewStyle()
-	ta.BlurredStyle.Prompt = lipgloss.NewStyle()
+	styles := ta.Styles()
+	styles.Focused.Base = lipgloss.NewStyle()
+	styles.Blurred.Base = lipgloss.NewStyle()
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	styles.Focused.Prompt = lipgloss.NewStyle()
+	styles.Blurred.Prompt = lipgloss.NewStyle()
+	ta.SetStyles(styles)
 	ta.CharLimit = 0
 	ta.MaxHeight = 0
 	ta.SetHeight(1)
 
-	km := textarea.DefaultKeyMap
+	km := textarea.DefaultKeyMap()
 	km.InsertNewline.SetKeys("shift+enter", "alt+enter", "ctrl+n")
 	km.WordBackward.SetKeys("alt+left", "ctrl+left")
 	km.WordForward.SetKeys("alt+right", "ctrl+right")
@@ -241,7 +243,7 @@ func (m *model) updateTA(msg tea.Msg) tea.Cmd {
 	// repositionView() inside ta.Update never scrolls when a new wrap row
 	// appears. After the update, setViewportContent / syncLayout trims it back
 	// to the exact row count via taRows().
-	if km, ok := msg.(tea.KeyMsg); ok {
+	if km, ok := msg.(tea.KeyPressMsg); ok {
 		undoDebugLog("updateTA KEY=%q val_before=%q undoStack=%d lastUndoValue=%q", km.String(), m.ta.Value(), len(m.undoStack), m.lastUndoValue)
 	}
 	m.ta.SetHeight(m.ta.Height() + 1)

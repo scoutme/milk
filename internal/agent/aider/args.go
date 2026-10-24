@@ -12,7 +12,7 @@ import (
 )
 
 // resolveAPIKey returns the API key from ac: runs token_cmd when set,
-// otherwise returns ac.APIKey directly.
+// otherwise returns the configured key (literal or from api_key_env).
 func resolveAPIKey(ac config.AgentConfig) string {
 	if ac.TokenCmd != "" {
 		out, err := exec.Command("sh", "-c", ac.TokenCmd).Output()
@@ -22,7 +22,7 @@ func resolveAPIKey(ac config.AgentConfig) string {
 			}
 		}
 	}
-	return ac.APIKey
+	return ac.ResolvedAPIKey()
 }
 
 // inGitRepo returns true when the current working directory is inside a git repo.

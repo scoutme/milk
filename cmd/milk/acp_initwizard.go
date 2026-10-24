@@ -71,7 +71,19 @@ func (as *acpSession) commitInitWizard(res initWizardResult) string {
 		return "\n" + milkTag() + " config saved, but this session could not reload it (" +
 			err.Error() + ") — new sessions will pick it up\n"
 	}
-	return ""
+	ctx, cancel := context.WithTimeout(context.Background(), initSmokeTimeout)
+	defer cancel()
+	return initSmokeCheckFn(ctx, *res.Committed)
+}
+
+// initLoginNote runs Claude Code's browser login when the wizard asked for it
+// (an ACP client has no terminal to hand over, so it runs headless — the CLI
+// opens the browser itself) and returns the verdict line, "" otherwise.
+func (as *acpSession) initLoginNote(ctx context.Context, res initWizardResult) string {
+	if !res.RunClaudeLogin {
+		return ""
+	}
+	return milkTag() + " opening Claude Code login in your browser…\n" + runClaudeLogin(ctx)
 }
 
 // initWizardFieldHint describes what the blank/'default' answer does for a
@@ -218,6 +230,7 @@ func (as *acpSession) runInitDialogs(ctx context.Context, st *initWizardState) (
 		}
 		wr := initWizardApply(st, answer, opts)
 		b.WriteString(wr.Output)
+		b.WriteString(as.initLoginNote(ctx, wr))
 		b.WriteString(as.commitInitWizard(wr))
 		if wr.Done {
 			return b.String(), true

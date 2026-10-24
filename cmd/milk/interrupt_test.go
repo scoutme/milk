@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // handleInterruptCmd with a running turn: identical to the Ctrl+C branch
@@ -52,7 +52,7 @@ func TestInterrupt_BusyEnterExecutes(t *testing.T) {
 	m.cancelTurn = func() { canceled = true }
 	m.ta.SetValue("/interrupt")
 
-	out, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyEnter})
+	out, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := out.(model)
 	if !canceled {
 		t.Fatal("busy Enter on /interrupt did not cancel the turn")

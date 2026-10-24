@@ -4,7 +4,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/local"
@@ -21,7 +20,8 @@ import (
 func (m *model) sidePanelLines(region panelRegion) (lines []string, inner int) {
 	switch region {
 	case regionMemory:
-		return buildPanelLines(m.mem, memoryPanelInner, m.currentSessionBricks()), memoryPanelInner
+		lines, _ := memoryPanelRows(m.mem, memoryPanelInner, m.currentSessionBricks(), m.memoryExpanded)
+		return lines, memoryPanelInner
 	case regionTasks:
 		return buildTasksPanelLines(m.taskStore, tasksPanelInner), tasksPanelInner
 	case regionBackground:
@@ -68,6 +68,9 @@ func panelShortcut(region panelRegion) string {
 // /panel or memorizing it. Title is truncated, not the hint, if both
 // together would overflow inner.
 func panelTitleLine(title string, region panelRegion, inner int) string {
+	if th.modern {
+		return panelTabStrip(region, inner)
+	}
 	hint := panelShortcut(region)
 	if hint == "" {
 		return stylePanelTitle.Render(truncate(title, inner))
@@ -211,6 +214,9 @@ func (m *model) panelContentFinalized(region panelRegion) bool {
 // (so the finalizing event itself never force-opens a user-closed panel),
 // then this reset — only future content re-opens it.
 func (m *model) resetManualOverrideIfFinalized(region panelRegion) {
+	if region == regionMemory {
+		return
+	}
 	if m.panelManualOverride[region] && m.panelContentFinalized(region) {
 		delete(m.panelManualOverride, region)
 	}
@@ -289,21 +295,6 @@ func (m *model) panelAltBackground(region panelRegion) bool {
 		idx++
 	}
 	return false
-}
-
-// panelAltBackgroundCode returns the raw SGR "set background" escape for the
-// alternating panel tint, or "" when not a TTY. Deliberately a small, fixed
-// step off pure black/white rather than derived from the terminal's actual
-// background (which lipgloss/termenv can't read back) — HasDarkBackground
-// only tells us which direction to step.
-func panelAltBackgroundCode() string {
-	if !isTTY {
-		return ""
-	}
-	if lipgloss.HasDarkBackground() {
-		return "\033[48;2;24;24;28m"
-	}
-	return "\033[48;2;236;236;239m"
 }
 
 // panelOffsetPtr returns a pointer to the model's persisted scroll offset for
@@ -402,9 +393,9 @@ func (m *model) renderSidePanelScrollbar(region panelRegion, h int) string {
 	thumbTop, thumbBot := scrollThumb(h, total, *m.panelOffsetPtr(region))
 	for i := range h {
 		if i >= thumbTop && i <= thumbBot {
-			rows = append(rows, sgr.WithBackground(dim("▌"), bg))
+			rows = append(rows, sgr.WithBackground(scrollThumbGlyph(), bg))
 		} else {
-			rows = append(rows, sgr.WithBackground(dim("│"), bg))
+			rows = append(rows, sgr.WithBackground(scrollTrackGlyph(), bg))
 		}
 	}
 	return strings.Join(rows, "\n")

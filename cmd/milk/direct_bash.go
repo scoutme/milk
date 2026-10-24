@@ -1,13 +1,13 @@
 package main
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // handleDirectBashKey handles y/N keypresses while pendingDirectBash is set.
 // 'y' or Enter launches the command in an embedded PTY pane; anything else
 // (including 'n', Esc, Ctrl+C) routes the original input to the agent.
-func (m model) handleDirectBashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleDirectBashKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	cmd := *m.pendingDirectBash
 	m.pendingDirectBash = nil
 

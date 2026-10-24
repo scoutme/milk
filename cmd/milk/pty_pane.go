@@ -1,6 +1,7 @@
 package main
 
 import (
+	"charm.land/bubbles/v2/key"
 	"errors"
 	"fmt"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/vito/midterm"
@@ -150,13 +151,13 @@ func (m *model) ptySnapshot() string {
 }
 
 // handlePTYKey forwards a key event to the PTY master fd.
-func (m model) handlePTYKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handlePTYKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.ptyPane == nil {
 		return m, nil
 	}
 	// Toast dismissal (issue #162) works in shell mode too — ctrl+g is not
 	// in ptyKeyToBytes (it would be dropped anyway), so intercept it first.
-	if msg.String() == "ctrl+g" && m.dismissToasts() {
+	if key.Matches(msg, keys.dismissToasts) && m.dismissToasts() {
 		return m, nil
 	}
 	if raw := ptyKeyToBytes(msg); len(raw) > 0 {
@@ -167,60 +168,44 @@ func (m model) handlePTYKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ptyKeyToBytes converts a bubbletea KeyMsg to the raw byte sequence the
 // terminal expects. Covers the most common keys; unknown keys are dropped.
-func ptyKeyToBytes(msg tea.KeyMsg) []byte {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		return []byte{0x03}
-	case tea.KeyCtrlD:
-		return []byte{0x04}
-	case tea.KeyCtrlZ:
-		return []byte{0x1a}
-	case tea.KeyCtrlL:
-		return []byte{0x0c}
-	case tea.KeyCtrlU:
-		return []byte{0x15}
-	case tea.KeyCtrlW:
-		return []byte{0x17}
-	case tea.KeyEnter:
-		return []byte{'\r'}
-	case tea.KeyBackspace:
-		return []byte{0x7f}
-	case tea.KeyTab:
-		return []byte{'\t'}
-	case tea.KeyEscape:
-		return []byte{'\x1b'}
-	case tea.KeySpace:
-		return []byte{' '}
-	case tea.KeyUp:
-		return []byte{'\x1b', '[', 'A'}
-	case tea.KeyDown:
-		return []byte{'\x1b', '[', 'B'}
-	case tea.KeyRight:
-		return []byte{'\x1b', '[', 'C'}
-	case tea.KeyLeft:
-		return []byte{'\x1b', '[', 'D'}
-	case tea.KeyHome:
-		return []byte{'\x1b', '[', 'H'}
-	case tea.KeyEnd:
-		return []byte{'\x1b', '[', 'F'}
-	case tea.KeyDelete:
-		return []byte{'\x1b', '[', '3', '~'}
-	case tea.KeyPgUp:
-		return []byte{'\x1b', '[', '5', '~'}
-	case tea.KeyPgDown:
-		return []byte{'\x1b', '[', '6', '~'}
-	case tea.KeyF1:
-		return []byte{'\x1b', 'O', 'P'}
-	case tea.KeyF2:
-		return []byte{'\x1b', 'O', 'Q'}
-	case tea.KeyF3:
-		return []byte{'\x1b', 'O', 'R'}
-	case tea.KeyF4:
-		return []byte{'\x1b', 'O', 'S'}
-	case tea.KeyRunes:
-		if len(msg.Runes) > 0 {
-			return []byte(string(msg.Runes))
+func ptyKeyToBytes(msg tea.KeyPressMsg) []byte {
+	if msg.Mod == tea.ModCtrl {
+		if raw, ok := ptyCtrlBytes[msg.Code]; ok {
+			return raw
 		}
 	}
-	return nil
+	if raw, ok := ptyNamedKeyBytes[msg.Code]; ok {
+		return raw
+	}
+	return []byte(msg.Text)
+}
+
+var ptyCtrlBytes = map[rune][]byte{
+	'c': {0x03},
+	'd': {0x04},
+	'z': {0x1a},
+	'l': {0x0c},
+	'u': {0x15},
+	'w': {0x17},
+}
+
+var ptyNamedKeyBytes = map[rune][]byte{
+	tea.KeyEnter:     {'\r'},
+	tea.KeyBackspace: {0x7f},
+	tea.KeyTab:       {'\t'},
+	tea.KeyEscape:    {'\x1b'},
+	tea.KeySpace:     {' '},
+	tea.KeyUp:        {'\x1b', '[', 'A'},
+	tea.KeyDown:      {'\x1b', '[', 'B'},
+	tea.KeyRight:     {'\x1b', '[', 'C'},
+	tea.KeyLeft:      {'\x1b', '[', 'D'},
+	tea.KeyHome:      {'\x1b', '[', 'H'},
+	tea.KeyEnd:       {'\x1b', '[', 'F'},
+	tea.KeyDelete:    {'\x1b', '[', '3', '~'},
+	tea.KeyPgUp:      {'\x1b', '[', '5', '~'},
+	tea.KeyPgDown:    {'\x1b', '[', '6', '~'},
+	tea.KeyF1:        {'\x1b', 'O', 'P'},
+	tea.KeyF2:        {'\x1b', 'O', 'Q'},
+	tea.KeyF3:        {'\x1b', 'O', 'R'},
+	tea.KeyF4:        {'\x1b', 'O', 'S'},
 }

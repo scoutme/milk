@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/local"
@@ -87,7 +87,7 @@ func (m *model) startAttach(kind attachKind, jobID, label string, buf *livebuf.B
 		jobID: jobID,
 		label: label,
 		buf:   buf,
-		vp:    viewport.New(m.vpWidth(), m.viewportHeight()),
+		vp:    viewport.New(viewport.WithWidth(m.vpWidth()), viewport.WithHeight(m.viewportHeight())),
 	}
 	m.syncAttachedContent()
 	obs.Debug("attach.start", "kind", kind.String(), "job", jobID, "label", label)
@@ -160,11 +160,11 @@ func (m *model) syncAttachedContent() {
 	}
 	vw := m.vpWidth()
 	vpH := m.viewportHeight()
-	if m.attached.vp.Width != vw {
-		m.attached.vp.Width = vw
+	if m.attached.vp.Width() != vw {
+		m.attached.vp.SetWidth(vw)
 	}
-	if m.attached.vp.Height != vpH {
-		m.attached.vp.Height = vpH
+	if m.attached.vp.Height() != vpH {
+		m.attached.vp.SetHeight(vpH)
 	}
 	atBottom := m.attached.vp.AtBottom()
 	lines := m.attachContentLines()
@@ -215,7 +215,7 @@ func tintBlock(content string, width int, bg string) string {
 // else is swallowed — this is a read-only view, not an input surface, and
 // arrow keys in particular stay reserved for input-history navigation
 // elsewhere in the TUI, never repurposed here for scrolling.
-func (m model) handleAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		if m.attachSelAnchorLine >= 0 {
@@ -250,19 +250,19 @@ func (m model) handleAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // attached text never highlights, rebuilds, or copies the hidden transcript
 // underneath. Mirrors the transcript path in handleMouse; every step re-runs
 // syncAttachedContent so the highlight follows the drag.
-func (m *model) handleAttachMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
+func (m *model) handleAttachMouse(ev mouseEvent) (tea.Model, tea.Cmd) {
 	if m.attached == nil {
 		return m, nil
 	}
 	const vpRowStart = 2
-	contentLine := m.attached.vp.YOffset + (ev.Y - vpRowStart)
+	contentLine := m.attached.vp.YOffset() + (ev.Y - vpRowStart)
 	col := ev.X
 	if col < 0 {
 		col = 0
 	}
 	var dragCmd tea.Cmd // set by press/motion; returned at the end
 	switch ev.Action {
-	case tea.MouseActionPress:
+	case mousePress:
 		if ev.Ctrl && m.attachSelAnchorLine >= 0 {
 			// Extend (or shrink) the existing selection to the clicked
 			// position, mirroring the transcript's ctrl+click behavior.
@@ -293,7 +293,7 @@ func (m *model) handleAttachMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 		m.dragResetPending = true
 		m.dragResetGen++
 		dragCmd = dragResetCmd(m.dragResetGen)
-	case tea.MouseActionMotion:
+	case mouseMotion:
 		if m.attachSelAnchorLine >= 0 {
 			m.attachSelDragging = true
 			m.attachSelEndLine = contentLine
@@ -302,7 +302,7 @@ func (m *model) handleAttachMouse(ev tea.MouseEvent) (tea.Model, tea.Cmd) {
 			m.dragResetGen++
 			dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
 		}
-	case tea.MouseActionRelease:
+	case mouseRelease:
 		m.dragResetPending = false
 		setMouseDragMode(false)
 		if m.attachSelAnchorLine < 0 {

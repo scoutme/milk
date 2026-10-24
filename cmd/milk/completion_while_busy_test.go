@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // busyCompletionModel returns a busy model with "/con" typed, ready for a
@@ -23,7 +23,7 @@ func busyCompletionModel(t *testing.T) model {
 	m.ta.SetValue("/con")
 	// Completion works on the token before the cursor; mimic typed input
 	// (SetValue alone leaves the cursor at position 0).
-	m.ta.SetCursor(len([]rune("/con")))
+	m.ta.SetCursorColumn(len([]rune("/con")))
 	return m
 }
 
@@ -32,7 +32,7 @@ func busyCompletionModel(t *testing.T) model {
 func TestBusyTab_StartsCompletion(t *testing.T) {
 	m := busyCompletionModel(t)
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	nm := next.(model)
 
 	if len(nm.tabMatches) == 0 {
@@ -51,14 +51,14 @@ func TestBusyTab_StartsCompletion(t *testing.T) {
 func TestBusyShiftTab_CyclesCompletion(t *testing.T) {
 	m := busyCompletionModel(t)
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	nm := next.(model)
 	if len(nm.tabMatches) == 0 {
 		t.Fatal("Tab while busy started no completion cycle")
 	}
 	before := nm.ta.Value()
 
-	next, _ = nm.handleBusyKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	next, _ = nm.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	ns := next.(model)
 
 	if len(ns.tabMatches) == 0 {
@@ -80,7 +80,7 @@ func TestBusyShiftTab_CyclesCompletion(t *testing.T) {
 func TestBusyEnter_AcceptsCompletion(t *testing.T) {
 	m := busyCompletionModel(t)
 
-	next, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	nm := next.(model)
 	if len(nm.tabMatches) == 0 {
 		t.Fatal("Tab while busy started no completion cycle")
@@ -150,7 +150,7 @@ func TestIdleEnter_AcceptsCompletion(t *testing.T) {
 	m := busyCompletionModel(t)
 	m.busy = false
 
-	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	nm := next.(model)
 	if len(nm.tabMatches) == 0 {
 		t.Fatal("Tab started no completion cycle")

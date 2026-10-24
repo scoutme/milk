@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -14,11 +15,12 @@ import (
 
 	rw "github.com/mattn/go-runewidth"
 
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/aider"
@@ -701,22 +703,13 @@ func permAskPrompt(tool, summary string) string {
 
 // --- Styles ---
 
+// Chrome styles depend on the terminal background; rebuildStyles (theme.go)
+// fills them at startup and again when the background is detected.
 var (
-	styleHeaderBar = lipgloss.NewStyle().
-			Background(lipgloss.AdaptiveColor{Light: "#1E2A4A", Dark: "#0E0E1A"}).
-			Foreground(lipgloss.AdaptiveColor{Light: "#D8E4F8", Dark: "#AABBCC"}).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderBottom(true).
-			BorderForeground(lipgloss.AdaptiveColor{Light: "#4466AA", Dark: "#334466"})
-	styleStatusBar = lipgloss.NewStyle().
-			Background(lipgloss.AdaptiveColor{Light: "#E5E5E5", Dark: "#2B2B2B"})
-	styleStatusBarPerm = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#1A1A00")).
-				Background(lipgloss.AdaptiveColor{Light: "#FFD700", Dark: "#B8860B"})
-	styleBorder = lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderTop(true).
-			BorderForeground(lipgloss.AdaptiveColor{Light: "#AAA", Dark: "#555"})
+	styleHeaderBar     lipgloss.Style
+	styleStatusBar     lipgloss.Style
+	styleStatusBarPerm lipgloss.Style
+	styleBorder        lipgloss.Style
 )
 
 // --- model ---
@@ -770,6 +763,18 @@ type model struct {
 	// scheduled before the restart carries an older gen and is dropped
 	// instead of cutting the browse short (the toastGen pattern).
 	tipsGen int
+
+	// anim holds the spring animations (animations.go); a pointer, so the
+	// copies Bubble Tea passes around share one state. Mutated in Update only.
+	anim *animState
+
+	// palette is the open command palette (palette.go), nil when closed.
+	palette *paletteState
+
+	// blurred is true while the terminal window lacks focus (tea.BlurMsg).
+	// Zero value = focused, so a bare model behaves as before. Background
+	// polling (tips rotation, project/git refresh) pauses while it is set.
+	blurred bool
 	// currentTurnThinking accumulates thinking text for the current in-progress
 	// turn so it can be stored in session.Turn.Thinking when the turn completes.
 	currentTurnThinking *strings.Builder
@@ -854,11 +859,13 @@ type model struct {
 	panelManualOverride map[panelRegion]bool
 
 	// memory panel
-	panelMemory        bool
-	panelOffset        int
-	mem                *memory.Store
-	lastPanelClickID   string
-	lastPanelClickTime time.Time
+	panelMemory          bool
+	memoryExpanded       string
+	memoryPreferencePath string
+	panelOffset          int
+	mem                  *memory.Store
+	lastPanelClickID     string
+	lastPanelClickTime   time.Time
 
 	// tasks panel
 	panelTasks  bool
@@ -1272,8 +1279,8 @@ func (m *model) refreshPrompt() {
 	plain := ansi.Strip(label)
 	m.promptWidth = rw.StringWidth(plain)
 
-	m.ta.SetPromptFunc(m.promptWidth, func(lineIdx int) string {
-		if lineIdx == 0 {
+	m.ta.SetPromptFunc(m.promptWidth, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
 			return label
 		}
 		return ""
@@ -1307,7 +1314,7 @@ func isCtrlEnterCSI(s string) bool {
 // It intercepts the three busy-specific cases, then delegates to handleKey
 // for all navigation, editing, history, undo/redo, and viewport scroll.
 // Safe slash commands (display/read-only) are executed immediately even during a turn.
-func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		if m.cancelTurn != nil {
@@ -1365,7 +1372,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.tabHintsBase = nil
 				m.syncLayout()
 				label := promptLabel(m.st)
-				m.appendTranscript(label + colorizeTokens(input) + "\n")
+				m.appendTranscript(userEcho(label, colorizeTokens(input)))
 				return m.handleSlashInput(cmd, rest)
 			}
 			m.busyHint = cmd + " unavailable while agent is responding"
@@ -1377,11 +1384,12 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.busyHint = "agent is working — Ctrl+Enter to spawn a background agent with this"
 		return m, busyHintClearCmd()
-	case "ctrl+j":
-		// Ctrl+Enter fallback: terminals without extended key protocols send
-		// \n (Ctrl+J) for Ctrl+Enter, which bubbletea reports as KeyCtrlJ —
-		// distinct from Enter (\r / KeyEnter). Primary Ctrl+Enter CSI
-		// handling lives in the main Update switch (unknownCSISequenceMsg).
+	case "ctrl+enter", "ctrl+j":
+		// Bubble Tea v2 parses the extended Ctrl+Enter encodings (kitty
+		// CSI-u, modifyOtherKeys) into "ctrl+enter". Terminals without
+		// extended key protocols send \n (Ctrl+J) for it, which stays distinct
+		// from Enter (\r). The raw-CSI sniffing in Update is kept as a net for
+		// encodings the parser still reports as unknown.
 		input := strings.TrimSpace(stripCompletionPlaceholders(m.ta.Value()))
 		if input == "" {
 			return m, nil
@@ -1404,7 +1412,7 @@ func (m model) handleBusyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Enter submits; "a"/"d" answer every pending prompt and set the session
 // allow-all/deny-all mode for what follows (issue #302); anything else is
 // passed to the textarea normally.
-func (m model) handlePermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handlePermKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		if m.pendingPerm.freeText {
@@ -1814,7 +1822,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// but handlePTYKey while ptyPane is active; mirror that here.
 		return m, nil
 	}
-	ev := tea.MouseEvent(msg)
+	ev := newMouseEvent(msg)
 	region, regionX := m.regionAt(ev.X)
 	// Drag-outside evidence (see dragResetMsg): a motion/release that lands
 	// outside the active drag's own area means the pointer drifted out of the
@@ -1824,9 +1832,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// from a mid-drag pause (keep mode 1002 so motion keeps updating the
 	// highlight while the button is still held).
 	switch ev.Action {
-	case tea.MouseActionPress:
+	case mousePress:
 		m.dragSawOutside = false // a press starts a fresh interaction
-	case tea.MouseActionMotion, tea.MouseActionRelease:
+	case mouseMotion, mouseRelease:
 		switch {
 		case m.attachActive() && m.attachSelAnchorLine >= 0 && m.attachSelDragging:
 			// Same rule as the transcript: the attach view fills the main
@@ -1846,27 +1854,27 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	var dragCmd tea.Cmd // set by press/motion; returned at the end
 	switch ev.Button {
-	case tea.MouseButtonWheelUp:
+	case tea.MouseWheelUp:
 		if p := m.panelOffsetPtr(region); p != nil {
 			if *p > 0 {
 				*p--
 			}
 		} else if m.attached != nil && !m.hasPendingPrompt() {
-			m.attached.vp.ScrollUp(3)
+			dragCmd = m.smoothScroll(&m.attached.vp, -scrollWheelLines)
 		} else {
-			m.vp.ScrollUp(3)
+			dragCmd = m.smoothScroll(&m.vp, -scrollWheelLines)
 		}
-	case tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		if p := m.panelOffsetPtr(region); p != nil {
 			if *p < m.panelMaxOffset(region, m.viewportHeight()) {
 				*p++
 			}
 		} else if m.attached != nil && !m.hasPendingPrompt() {
-			m.attached.vp.ScrollDown(3)
+			dragCmd = m.smoothScroll(&m.attached.vp, scrollWheelLines)
 		} else {
-			m.vp.ScrollDown(3)
+			dragCmd = m.smoothScroll(&m.vp, scrollWheelLines)
 		}
-	case tea.MouseButtonLeft:
+	case tea.MouseLeft:
 		if region != regionNone {
 			return m.handlePanelMouse(region, regionX, ev)
 		}
@@ -1884,9 +1892,9 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.attachActive() {
 			return m.handleAttachMouse(ev)
 		}
-		contentLine := m.vp.YOffset + (ev.Y - vpRowStart)
+		contentLine := m.vp.YOffset() + (ev.Y - vpRowStart)
 		switch ev.Action {
-		case tea.MouseActionPress:
+		case mousePress:
 			if ev.Ctrl && m.selAnchorLine >= 0 {
 				// Extend existing selection to clicked position.
 				m.selEndLine = contentLine
@@ -1912,7 +1920,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.dragResetPending = true
 			m.dragResetGen++
 			dragCmd = dragResetCmd(m.dragResetGen)
-		case tea.MouseActionMotion:
+		case mouseMotion:
 			if m.selAnchorLine >= 0 {
 				m.selDragging = true
 				m.selEndLine = contentLine
@@ -1921,7 +1929,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.dragResetGen++
 				dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
 			}
-		case tea.MouseActionRelease:
+		case mouseRelease:
 			m.dragResetPending = false
 			setMouseDragMode(false)
 			if m.selAnchorLine >= 0 {
@@ -1948,8 +1956,8 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.setViewportContent()
 			}
 		}
-	case tea.MouseButtonRight:
-		if ev.Action == tea.MouseActionPress {
+	case tea.MouseRight:
+		if ev.Action == mousePress {
 			// A drag whose release was dropped can leave mouse mode stuck at 1002;
 			// any subsequent click reliably arrives, so reset it defensively here.
 			m.dragResetPending = false
@@ -2013,7 +2021,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // welcomeScreen returns a centered welcome message shown when the transcript is empty.
 func (m *model) welcomeScreen() string {
-	vpH := m.vp.Height
+	vpH := m.vp.Height()
 	if vpH <= 0 {
 		vpH = m.viewportHeight()
 	}
@@ -2021,8 +2029,8 @@ func (m *model) welcomeScreen() string {
 	escalationAvail := m.agents.escalationAvail
 
 	lines := []string{
-		pulseColors[8] + "◈" + ansiReset + " " + "\033[1;38;2;255;208;96mmilk\033[0m",
-		dim("switch models, not context."),
+		wordmark(),
+		dim(taglineText()),
 		"",
 	}
 
@@ -2125,8 +2133,7 @@ func (m *model) welcomeScreen() string {
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		textarea.Blink,
-		tea.EnableBracketedPaste,
-		tea.EnterAltScreen,
+		tea.RequestBackgroundColor,
 	}
 	if m.panelMemory {
 		cmds = append(cmds, memoryPollTick())
@@ -2182,10 +2189,20 @@ func (m model) Init() tea.Cmd {
 // return only the model, so the tick is armed centrally here rather than
 // threaded through every call site.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, isTick := msg.(animTickMsg); isTick {
+		cmd := m.stepAnimations()
+		return m, cmd
+	}
 	next, cmd := m.updateInner(msg)
 	nm, ok := next.(model)
 	if !ok {
 		return next, cmd
+	}
+	if _, resized := msg.(tea.WindowSizeMsg); !resized {
+		// A resize can show or hide a panel without anyone toggling it: no slide.
+		if c := nm.trackAnimations(&m); c != nil {
+			cmd = tea.Batch(cmd, c)
+		}
 	}
 	if c := nm.armToastTick(); c != nil {
 		return nm, tea.Batch(cmd, c)
@@ -2212,9 +2229,15 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		return m.handleResize(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.ptyPane != nil {
 			return m.handlePTYKey(msg)
+		}
+		if m.palette != nil {
+			return m.handlePaletteKey(msg)
+		}
+		if key.Matches(msg, keys.palette) && m.paletteAvailable() {
+			return m.openPalette()
 		}
 		// F1-F6: global panel show/hide shortcuts, available in any other
 		// mode (busy, permission prompt, wizards, ...) — none of them
@@ -2230,24 +2253,15 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// things still live while a turn streams. bubbles' textarea binds
 		// neither key (word motion is alt+left/right and ctrl+left/right),
 		// so the browse never costs an editing key.
-		switch msg.String() {
-		case "f1":
-			return m.handlePanelCmd("memory")
-		case "f2":
-			return m.handlePanelCmd("tasks")
-		case "f3":
-			return m.handlePanelCmd("background")
-		case "f4":
-			return m.handlePanelCmd("workflow")
-		case "f5":
-			return m.handlePanelCmd("project")
-		case "f6":
-			return m.handlePanelCmd("git")
-		case "alt+up":
+		if panel := keys.panelFor(msg); panel != "" {
+			return m.handlePanelCmd(panel)
+		}
+		switch {
+		case key.Matches(msg, keys.tipPrev):
 			cmd := m.tipSeek(-1) // also restarts the cycling timer
 			m.tipBrowseEcho()
 			return m, cmd
-		case "alt+down":
+		case key.Matches(msg, keys.tipNext):
 			cmd := m.tipSeek(1) // also restarts the cycling timer
 			m.tipBrowseEcho()
 			return m, cmd
@@ -2256,7 +2270,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// like F1-F6 so it works in any mode (busy, prompt, attached…);
 		// bubbles' textarea doesn't bind ctrl+g, so nothing else wants it.
 		// Falls through untouched when no toast is open.
-		if msg.String() == "ctrl+g" && m.dismissToasts() {
+		if key.Matches(msg, keys.dismissToasts) && m.dismissToasts() {
 			return m, nil
 		}
 		// Adding a pending-state check below? Also add it to
@@ -2360,6 +2374,21 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m = m.commitTelegramSetup(msg.token, msg.chatID)
+		return m, nil
+
+	case initSmokeMsg:
+		m.appendTranscript(msg.text)
+		return m, nil
+
+	case claudeLoginDoneMsg:
+		if msg.err != nil {
+			m.appendTranscript(milkTag() + " login did not finish (" + msg.err.Error() + ") — run `claude auth login` yourself, then /config init again\n")
+		} else {
+			m.appendTranscript(milkTag() + " " + green("✓ signed in to Claude Code") + "\n")
+		}
+		if m.pendingInit != nil {
+			m.appendTranscript(initWizardRule() + initWizardPrompt(m.pendingInit))
+		}
 		return m, nil
 
 	case permRequestMsg:
@@ -2778,7 +2807,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// attention is elsewhere, so the tip only advances while they are
 		// actually idle (ADR-0061). An advance also ends the manual-browse
 		// pin (tipPinned), restoring contextual-hint precedence.
-		if !m.busy && !m.hasPendingPrompt() {
+		if !m.busy && !m.hasPendingPrompt() && !m.blurred {
 			m.tipIdx++
 			m.tipPinned = false
 		}
@@ -2915,16 +2944,22 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectRefreshMsg:
-		if m.panelProject {
-			return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd))
+		if !m.panelProject {
+			return m, nil
 		}
-		return m, nil
+		if m.blurred {
+			return m, projectPollTick() // keep the timer alive, skip the work
+		}
+		return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd))
 
 	case gitRefreshMsg:
-		if m.panelGit {
-			return m, tea.Batch(gitPollTick(), refreshGitCmd(m.st.cwd))
+		if !m.panelGit {
+			return m, nil
 		}
-		return m, nil
+		if m.blurred {
+			return m, gitPollTick()
+		}
+		return m, tea.Batch(gitPollTick(), refreshGitCmd(m.st.cwd))
 
 	case projectDataMsg:
 		m.projectFiles = msg.files
@@ -3093,6 +3128,27 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), msg.err))
 		return m, nil
 
+	case tea.FocusMsg:
+		m.blurred = false
+		return m, m.refreshOpenPanelsCmd()
+
+	case tea.BlurMsg:
+		m.blurred = true
+		return m, nil
+
+	case tea.BackgroundColorMsg:
+		if setDarkBackground(msg.IsDark()) {
+			refreshThemeColors()
+			m.colorizeForce = true
+			m.turnColorCache = nil
+			m.turnRawCache = nil
+			m.viewportDirty = true
+		}
+		return m, nil
+
+	case tea.PasteMsg:
+		return m.routePaste(msg)
+
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
@@ -3111,47 +3167,64 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Bracketed paste — let the textarea handle it directly.
+// handlePaste routes a bracketed paste. File paths become an attach prompt or
+// an @-mention; everything else goes to the textarea as one undo step.
+// refreshOpenPanelsCmd refreshes the project/git panels right away, used when
+// the window regains focus after polling was paused.
+func (m model) refreshOpenPanelsCmd() tea.Cmd {
+	if m.st == nil {
+		return nil
+	}
+	var cmds []tea.Cmd
+	if m.panelProject {
+		cmds = append(cmds, refreshProjectCmd(m.st.cwd))
+	}
+	if m.panelGit {
+		cmds = append(cmds, refreshGitCmd(m.st.cwd))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	// Pre-expand to terminal height so repositionView() inside ta.Update never
 	// scrolls on a large paste (updateTA's +1 is insufficient for multi-line pastes).
-	if msg.Paste {
-		// Check whether the pasted content looks like a file path that exists.
-		// If so, ask the user whether to attach it rather than insert it as text.
-		pasted := strings.TrimSpace(string(msg.Runes))
-		if isLikelyFilePath(pasted) {
-			clean := unquoteFilePath(pasted)
-			m.pendingPathPaste = clean
-			m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [Y/n] ", milkTag(), clean))
-			m.syncLayout()
-			return m, nil
-		}
-		// Path-like string that doesn't exist on disk (e.g. Windows UNC path
-		// or a path to a remote file): insert as @path so the agent sees it.
-		if looksLikeFilePath(pasted) {
-			m.ta.InsertString("@" + unquoteFilePath(pasted))
-			m.syncLayout()
-			return m, nil
-		}
-		// Empty paste: the clipboard may hold binary/non-text content that the
-		// terminal couldn't relay. Probe via xclip/wl-paste asynchronously.
-		if pasted == "" {
-			return m, m.probeClipboardCmd()
-		}
-		// The paste lands at the very start of the buffer: the leading token
-		// (what extractSlashCommand/stripBangPrefix/shelldetect inspect) is
-		// about to become pasted content rather than typed content.
-		if m.taCursorOffset() == 0 {
-			m.leadingPasted = true
-		}
-		m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
-		m.ta.SetHeight(m.height)
-		var cmd tea.Cmd
-		cmd = m.updateTA(msg)
+	// Check whether the pasted content looks like a file path that exists.
+	// If so, ask the user whether to attach it rather than insert it as text.
+	pasted := strings.TrimSpace(msg.Content)
+	if isLikelyFilePath(pasted) {
+		clean := unquoteFilePath(pasted)
+		m.pendingPathPaste = clean
+		m.appendTranscript(fmt.Sprintf("%s pasted path %q — attach as file? [Y/n] ", milkTag(), clean))
 		m.syncLayout()
-		return m, cmd
+		return m, nil
 	}
+	// Path-like string that doesn't exist on disk (e.g. Windows UNC path
+	// or a path to a remote file): insert as @path so the agent sees it.
+	if looksLikeFilePath(pasted) {
+		m.ta.InsertString("@" + unquoteFilePath(pasted))
+		m.syncLayout()
+		return m, nil
+	}
+	// Empty paste: the clipboard may hold binary/non-text content that the
+	// terminal couldn't relay. Probe via xclip/wl-paste asynchronously.
+	if pasted == "" {
+		return m, m.probeClipboardCmd()
+	}
+	// The paste lands at the very start of the buffer: the leading token
+	// (what extractSlashCommand/stripBangPrefix/shelldetect inspect) is
+	// about to become pasted content rather than typed content.
+	if m.taCursorOffset() == 0 {
+		m.leadingPasted = true
+	}
+	m.undoPush(false) // paste is always its own undo step; updateTA will skip (same value)
+	m.ta.SetHeight(m.height)
+	var cmd tea.Cmd
+	cmd = m.updateTA(msg)
+	m.syncLayout()
+	return m, cmd
+}
 
+func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Any key other than ctrl+c cancels a pending quit confirmation.
 	if m.quitPending && msg.String() != "ctrl+c" {
 		m.quitPending = false
@@ -3168,9 +3241,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// typing (or scripted input) can deliver several characters in a single
 	// KeyMsg — e.g. "!echo hi" arriving as one tea.KeyRunes burst — and a
 	// plain string match on "!" alone would miss that and insert it literally.
-	if !m.bangMode && m.ta.Value() == "" && msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == '!' {
+	if !m.bangMode && m.ta.Value() == "" && strings.HasPrefix(msg.Text, "!") {
 		m.bangMode = true
-		if rest := string(msg.Runes[1:]); rest != "" {
+		if rest := msg.Text[1:]; rest != "" {
 			m.ta.InsertString(rest)
 		}
 		m.refreshPrompt()
@@ -3357,7 +3430,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		default:
 			// Any printable key replaces the selection.
-			if len(msg.Runes) > 0 || msg.Type == tea.KeySpace {
+			if msg.Text != "" {
 				m = m.taDeleteSelection()
 				// Fall through to let the textarea insert the typed key.
 			}
@@ -3382,33 +3455,48 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleShiftArrow manages keyboard selection in the input textarea.
 // Shift+Arrow keys extend the selection; the anchor is set on the first shift press.
 // The bare direction key is forwarded to the textarea to move the cursor.
-func (m model) handleShiftArrow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// routePaste sends a paste to the right consumer: the PTY pane, the path-aware
+// idle handler, or (in any modal state) straight into the textarea.
+func (m model) routePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.ptyPane != nil {
+		m.ptyPane.ptm.Write([]byte(msg.Content)) //nolint:errcheck
+		return m, nil
+	}
+	if m.hasPendingPrompt() || m.attached != nil || m.searching || (m.inputLocked() && m.pendingWorkflowQuestions == "") {
+		cmd := m.updateTA(msg)
+		m.syncLayout()
+		return m, cmd
+	}
+	return m.handlePaste(msg)
+}
+
+func (m model) handleShiftArrow(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Set anchor at current cursor position before moving.
 	if m.taSelAnchor < 0 {
 		m.taSelAnchor = m.taCursorOffset()
 	}
 
 	// Map shift+arrow → bare direction for the textarea.
-	var bareKey tea.KeyMsg
+	var bareKey tea.KeyPressMsg
 	switch msg.String() {
 	case "shift+left":
-		bareKey = tea.KeyMsg{Type: tea.KeyLeft}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyLeft}
 	case "shift+right":
-		bareKey = tea.KeyMsg{Type: tea.KeyRight}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyRight}
 	case "shift+up":
-		bareKey = tea.KeyMsg{Type: tea.KeyUp}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyUp}
 	case "shift+down":
-		bareKey = tea.KeyMsg{Type: tea.KeyDown}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyDown}
 	case "shift+home":
-		bareKey = tea.KeyMsg{Type: tea.KeyHome}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyHome}
 	case "shift+end":
-		bareKey = tea.KeyMsg{Type: tea.KeyEnd}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyEnd}
 	case "shift+ctrl+left", "shift+alt+left", "ctrl+shift+left":
-		bareKey = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModAlt}
 	case "shift+ctrl+right", "shift+alt+right", "ctrl+shift+right":
-		bareKey = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModAlt}
 	default:
-		bareKey = tea.KeyMsg{Type: tea.KeyRight}
+		bareKey = tea.KeyPressMsg{Code: tea.KeyRight}
 	}
 
 	cmd := m.updateTA(bareKey)
@@ -3419,7 +3507,7 @@ func (m model) handleShiftArrow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // extendTranscriptSel extends or reduces the current transcript selection using
 // Shift+Arrow keys. The anchor stays fixed; only selEndLine/selEndCol moves.
-func (m model) extendTranscriptSel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) extendTranscriptSel(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	lines := m.transcriptPlainLines()
 	maxLine := len(lines) - 1
 
@@ -3484,12 +3572,12 @@ func (m model) extendTranscriptSel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.ready {
 		// Scroll the viewport to keep the moving end of the selection visible.
-		visible0 := m.vp.YOffset
-		visible1 := m.vp.YOffset + m.vp.Height - 1
+		visible0 := m.vp.YOffset()
+		visible1 := m.vp.YOffset() + m.vp.Height() - 1
 		if endLine < visible0 {
 			m.vp.SetYOffset(endLine)
 		} else if endLine > visible1 {
-			m.vp.SetYOffset(endLine - m.vp.Height + 1)
+			m.vp.SetYOffset(endLine - m.vp.Height() + 1)
 		}
 		m.setViewportContent()
 	}
@@ -3776,7 +3864,7 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 		m.loopWarning = ""
 	}
 
-	m.appendTranscript(label + colorizeTokens(input) + "\n")
+	m.appendTranscript(userEcho(label, colorizeTokens(input)))
 
 	// Append to both histories (deduped)
 	m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
@@ -4725,6 +4813,9 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	m := newModel(ctx, st, rtr, agents, mem)
+	if dir, err := config.Dir(); err == nil {
+		m.loadMemoryPreference(filepath.Join(dir, "memory-panel.state"))
+	}
 	m.taskStore = taskStore
 	m.hasInferenceAgent = cfg.HasInferenceAgent()
 	if startupWarning != "" {
@@ -4817,9 +4908,11 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
-	p := tea.NewProgram(m,
-		tea.WithAltScreen(),
-	)
+	setTheme(st.cfg.Theme)
+	animationsEnabled = isTTY && st.cfg.AnimationsEnabled()
+	defer applyThemeTerminal()()
+	p := tea.NewProgram(m)
+	clipboardProgram = p
 	st.program = p
 
 	// Notify the TUI the first time a *later* (post-startup) tool call hits

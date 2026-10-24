@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/exec"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // launchDirectBashFallback runs shellCmd with stdout/stderr piped and

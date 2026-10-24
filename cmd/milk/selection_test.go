@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 // --- wrapLineIntoRows ---
@@ -165,26 +165,26 @@ func selModel() model {
 		selEndLine:    1,
 		selEndCol:     4,
 		colorizeMode:  ColorizeOff,
-		vp:            viewport.New(80, 20),
+		vp:            viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 	}
 	m.vp.SetYOffset(0)
 	return m
 }
 
-func extendSel(m model, kt tea.KeyType) model {
-	result, _ := m.extendTranscriptSel(tea.KeyMsg{Type: kt})
+func extendSel(m model, key tea.KeyPressMsg) model {
+	result, _ := m.extendTranscriptSel(key)
 	return result.(model)
 }
 
 func TestExtendTranscriptSel_ShiftDownMovesEndLine(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyShiftDown)
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
 	if nm.selEndLine != 2 {
 		t.Errorf("shift+down: expected selEndLine=2, got %d", nm.selEndLine)
 	}
 }
 
 func TestExtendTranscriptSel_ShiftUpMovesEndLine(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyShiftUp) // anchor/end at line 1 → end moves to 0
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift}) // anchor/end at line 1 → end moves to 0
 	if nm.selEndLine != 0 {
 		t.Errorf("shift+up: expected selEndLine=0, got %d", nm.selEndLine)
 	}
@@ -193,7 +193,7 @@ func TestExtendTranscriptSel_ShiftUpMovesEndLine(t *testing.T) {
 func TestExtendTranscriptSel_ShiftUpClampedAtZero(t *testing.T) {
 	m := selModel()
 	m.selEndLine = 0
-	nm := extendSel(m, tea.KeyShiftUp)
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
 	if nm.selEndLine < 0 {
 		t.Errorf("shift+up at line 0 should clamp, not go negative, got %d", nm.selEndLine)
 	}
@@ -202,7 +202,7 @@ func TestExtendTranscriptSel_ShiftUpClampedAtZero(t *testing.T) {
 func TestExtendTranscriptSel_ShiftDownClampedAtMax(t *testing.T) {
 	m := selModel()
 	m.selEndLine = 2
-	nm := extendSel(m, tea.KeyShiftDown)
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
 	lines := nm.transcriptPlainLines()
 	maxLine := len(lines) - 1
 	if nm.selEndLine > maxLine {
@@ -211,7 +211,7 @@ func TestExtendTranscriptSel_ShiftDownClampedAtMax(t *testing.T) {
 }
 
 func TestExtendTranscriptSel_ShiftLeftDecrementsCol(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyShiftLeft) // endCol=4 → 3
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModShift}) // endCol=4 → 3
 	if nm.selEndCol != 3 {
 		t.Errorf("shift+left: expected selEndCol=3, got %d", nm.selEndCol)
 	}
@@ -221,7 +221,7 @@ func TestExtendTranscriptSel_ShiftLeftAtLineStartWrapsUp(t *testing.T) {
 	m := selModel()
 	m.selEndLine = 1
 	m.selEndCol = 0
-	nm := extendSel(m, tea.KeyShiftLeft)
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModShift})
 	if nm.selEndLine != 0 {
 		t.Errorf("shift+left at col 0 should wrap to previous line, got line %d", nm.selEndLine)
 	}
@@ -231,7 +231,7 @@ func TestExtendTranscriptSel_ShiftLeftAtLineStartWrapsUp(t *testing.T) {
 }
 
 func TestExtendTranscriptSel_ShiftRightIncrementsCol(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyShiftRight) // endCol=4 → 5
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModShift}) // endCol=4 → 5
 	if nm.selEndCol != 5 {
 		t.Errorf("shift+right: expected selEndCol=5, got %d", nm.selEndCol)
 	}
@@ -242,7 +242,7 @@ func TestExtendTranscriptSel_ShiftRightAtLineEndWrapsDown(t *testing.T) {
 	lines := m.transcriptPlainLines()
 	m.selEndLine = 1
 	m.selEndCol = len([]rune(lines[1])) // at end of "line one"
-	nm := extendSel(m, tea.KeyShiftRight)
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModShift})
 	if nm.selEndLine != 2 {
 		t.Errorf("shift+right at line end should wrap to next line, got line %d", nm.selEndLine)
 	}
@@ -256,7 +256,7 @@ func TestExtendTranscriptSel_NoEndUsesAnchor(t *testing.T) {
 	m := selModel()
 	m.selEndLine = -1
 	m.selEndCol = 0
-	nm := extendSel(m, tea.KeyShiftDown)
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
 	// anchor was at line 1; end should move from 1 to 2.
 	if nm.selEndLine != 2 {
 		t.Errorf("selEndLine=-1: expected selEndLine=2 after shift+down, got %d", nm.selEndLine)
@@ -265,35 +265,35 @@ func TestExtendTranscriptSel_NoEndUsesAnchor(t *testing.T) {
 
 func TestExtendTranscriptSel_BareDownIsNoop(t *testing.T) {
 	m := selModel()
-	nm := extendSel(m, tea.KeyDown) // unrecognised key — no change
+	nm := extendSel(m, tea.KeyPressMsg{Code: tea.KeyDown}) // unrecognised key — no change
 	if nm.selEndLine != m.selEndLine {
 		t.Errorf("bare down should not move transcript selection, got line %d", nm.selEndLine)
 	}
 }
 
 func TestExtendTranscriptSel_CtrlDownMovesEndLine(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyCtrlDown)
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl})
 	if nm.selEndLine != 2 {
 		t.Errorf("ctrl+down: expected selEndLine=2, got %d", nm.selEndLine)
 	}
 }
 
 func TestExtendTranscriptSel_CtrlUpMovesEndLine(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyCtrlUp)
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl})
 	if nm.selEndLine != 0 {
 		t.Errorf("ctrl+up: expected selEndLine=0, got %d", nm.selEndLine)
 	}
 }
 
 func TestExtendTranscriptSel_CtrlLeftDecrementsCol(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyCtrlLeft) // endCol=4 → 3
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl}) // endCol=4 → 3
 	if nm.selEndCol != 3 {
 		t.Errorf("ctrl+left: expected selEndCol=3, got %d", nm.selEndCol)
 	}
 }
 
 func TestExtendTranscriptSel_CtrlRightIncrementsCol(t *testing.T) {
-	nm := extendSel(selModel(), tea.KeyCtrlRight) // endCol=4 → 5
+	nm := extendSel(selModel(), tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl}) // endCol=4 → 5
 	if nm.selEndCol != 5 {
 		t.Errorf("ctrl+right: expected selEndCol=5, got %d", nm.selEndCol)
 	}

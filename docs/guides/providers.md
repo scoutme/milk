@@ -742,6 +742,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `aws_auth_refresh` | bool | `false` | Run the Claude Code credential-process command before each Bedrock call |
 | `sticky_escalation` | bool | `true` | See [docs/guides/workflows.md — Sticky and auto-sticky escalation](workflows.md#sticky-and-auto-sticky-escalation) |
 | `copy_on_select` | bool | `false` | Copy a mouse selection to the clipboard on button release instead of requiring right-click / Ctrl+C |
+| `animations` | bool | `true` | Spring animations in the TUI: side panels slide in and out, the mouse wheel scrolls with inertia. `false` makes both instant |
 
 ---
 

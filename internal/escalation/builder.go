@@ -21,7 +21,8 @@ const identityBlock = "[Milk agent context]\n" +
 	"IMPORTANT: never launch background workflows or background agents (do not pass run_in_background: true to the Workflow tool, and do not use /bg). " +
 	"milk communicates with you via --print, which exits as soon as you respond — background tasks would run unobserved and their results would never be delivered. " +
 	"Always await completion within the same turn before responding. " +
-	"When spawning subagents via the Agent tool, always pass run_in_background: false so they complete synchronously.\n\n"
+	"When spawning subagents via the Agent tool, always pass run_in_background: false so they complete synchronously.\n" +
+	TableGuidance + "\n\n"
 
 // ContextMode describes the relationship between this escalation turn and any prior escalation session.
 type ContextMode int

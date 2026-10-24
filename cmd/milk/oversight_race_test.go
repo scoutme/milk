@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/oversight"

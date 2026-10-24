@@ -56,6 +56,10 @@ type initWizardResult struct {
 	// OpenEditor is set when the user answered "yes" to the TUI's final
 	// open-editor question; the caller runs /config open itself.
 	OpenEditor bool
+	// RunClaudeLogin asks the host to run Claude Code's browser login
+	// (`claude auth login`) now: the TUI hands it the terminal, ACP runs it
+	// headless. The wizard has already moved on to the next question.
+	RunClaudeLogin bool
 }
 
 // initWizardStart starts the wizard: fresh state plus the banner, ready for
@@ -65,8 +69,19 @@ type initWizardResult struct {
 // directory the wizard resolves project-local config against — the host's
 // currently selected directory (activeConfigDir); "" = the process cwd.
 func initWizardStart(cwd string) (*initWizardState, string) {
-	st := &initWizardState{step: initStepName, escCLI: true, cwd: cwd}
-	return st, milkTag() + " setup wizard — configure primary and escalation agents\n\n"
+	st := &initWizardState{step: initStepProvider, escCLI: true, cwd: cwd}
+	st.found = initWizardDiscoverFn()
+	banner := ""
+	if len(st.found) > 0 {
+		st.step = initStepFound
+	} else {
+		banner = milkTag() + " " + yellow("nothing found on this machine yet") + "\n" +
+			dim("         no API keys ("+initWizardSearchedNames()+"), no local model server, no Claude Code.") + "\n" +
+			dim("         No problem — pick one below and I'll tell you where to get it.") + "\n"
+	}
+	return st, milkTag() + " setup wizard — a few questions and you're talking to an agent\n" +
+		dim("  primary = your everyday AI (cheap, fast) · escalation = a stronger one for hard tasks\n"+
+			"  saved to ~/.milk/config.json and applied at once · Enter takes the default · Esc cancels\n") + banner
 }
 
 // initWizardCancelWord reports whether a plain answer aborts the wizard. The
@@ -85,6 +100,15 @@ func initWizardCancelWord(answer string) bool {
 // applies it (a rejected answer re-prompts the same step), advances the state
 // machine, and commits the config when the flow reaches the end.
 func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) initWizardResult {
+	res := initWizardApplyStep(st, answer, opts)
+	if st.runLogin {
+		st.runLogin = false
+		res.RunClaudeLogin = true
+	}
+	return res
+}
+
+func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts) initWizardResult {
 	answer = strings.TrimSpace(answer)
 	// 'default' (or '-', 'enter') stands in for the empty answer that means
 	// "the step's default": the TUI can send an empty line, but ACP chat
@@ -108,39 +132,56 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 		return res
 	}
 
-	providerMap := map[string]string{
-		"1": "local", "local": "local",
-		"2": "bedrock", "bedrock": "bedrock",
-		"3": "bearer", "bearer": "bearer",
-		"4": "claude-cli", "claude-cli": "claude-cli",
-		"5": "aider-cli", "aider-cli": "aider-cli",
-		"6": "subprocess", "subprocess": "subprocess",
-	}
-
 	switch st.step {
-	case initStepName:
+	case initStepFound:
 		if answer == "" {
-			answer = "local"
+			answer = "1"
 		}
-		st.primary.Name = answer
+		n, err := strconv.Atoi(answer)
+		if err != nil || n < 1 || n > len(st.found)+1 {
+			out.WriteString(fmt.Sprintf("%s invalid choice — enter 1–%d\n", milkTag(), len(st.found)+1))
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+		}
+		if n <= len(st.found) {
+			out.WriteString(initWizardTake(st, st.found[n-1]))
+		}
+
+	case initStepClaudeLogin:
+		lower := strings.ToLower(answer)
+		st.loginDone = true
+		if lower == "" || lower == "y" || lower == "yes" {
+			st.runLogin = true
+		} else {
+			out.WriteString(dim("  skipped — run `claude auth login` (or just `claude`) before your first prompt\n"))
+		}
 
 	case initStepProvider:
 		if answer == "" {
 			answer = "1"
 		}
-		provider, ok := providerMap[strings.ToLower(answer)]
-		if !ok {
+		provider := initWizardProviderFromAnswer(answer)
+		if provider == "" {
 			out.WriteString(milkTag() + " invalid choice — enter 1–6 or a provider name\n")
 			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 		st.primary.Provider = provider
+		st.primary.Name = initWizardProviderDefaultName(provider)
 
 	case initStepURL:
+		answer = initWizardPickURL(st.primary.Provider, answer)
 		if answer == "" {
 			out.WriteString(milkTag() + " URL is required\n")
 			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
+		answer = strings.TrimRight(answer, "/")
+		// The standard chat path already starts with /v1, so a base URL that
+		// ends in /v1 (what most provider dashboards show) would double it.
+		if trimmed := strings.TrimSuffix(answer, "/v1"); trimmed != answer && !isCopilotURL(answer) && !isAzureURL(answer) {
+			answer = trimmed
+			out.WriteString(dim("  (dropped the trailing /v1 — milk adds /v1/chat/completions itself)\n"))
+		}
 		st.primary.URL = answer
+		out.WriteString(initWizardProbe(st))
 		// GitHub Copilot: preset the standard headers automatically.
 		if isCopilotURL(answer) {
 			st.primary.Headers = map[string]string{
@@ -154,17 +195,8 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 			out.WriteString(dim("  (Azure OpenAI detected — api-key header will be used)\n"))
 		}
 
-	case initStepChatPath:
-		if answer == "" {
-			// apply the suggested default shown in the prompt
-			answer = initWizardChatPathDefault(st.primary.URL, st.primary.Model)
-		}
-		// Only store if non-standard to keep config minimal.
-		if answer != "/v1/chat/completions" {
-			st.primary.ChatPath = answer
-		}
-
 	case initStepModel:
+		answer = initWizardPickModel(st, answer)
 		if answer == "" && initWizardNeedsModel(st.primary.Provider) {
 			out.WriteString(milkTag() + " model name is required\n")
 			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
@@ -206,8 +238,15 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 		st.primary.AWSRegion = answer
 
 	case initStepEscalation:
+		if answer == "" {
+			answer = initWizardEscalationDefault()
+		}
 		lower := strings.ToLower(answer)
 		st.escCLI = lower != "n" && lower != "no"
+
+	case initStepTuning:
+		lower := strings.ToLower(answer)
+		st.tuning = lower == "y" || lower == "yes"
 
 	case initStepAgentTools:
 		// answer is a comma-separated list of agent names to enable as tools.
@@ -235,6 +274,12 @@ func initWizardApply(st *initWizardState, answer string, opts initWizardOpts) in
 	}
 
 	st.step = initWizardNextStep(st)
+	// A claude-cli primary already is Claude Code: escalating to it again is
+	// meaningless, so the question is not asked.
+	if st.step == initStepEscalation && st.primary.Provider == "claude-cli" {
+		st.escCLI = false
+		st.step = initWizardNextStep(st)
+	}
 	// Skip the agent-tools step when the config has only one agent
 	// (no peer agents to expose as tools yet).
 	if st.step == initStepAgentTools && opts.NumAgents <= 1 {
@@ -281,6 +326,13 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 	// no separate AgentLimits needed here.
 	if st.contextWindowTokens > 0 {
 		st.primary.ContextWindowTokens = st.contextWindowTokens
+	}
+	// Provider-specific chat path (Copilot, Azure) is derived, not asked; only a
+	// non-standard one is stored, to keep the config minimal.
+	if st.primary.Provider == "bearer" {
+		if p := initWizardChatPathDefault(st.primary.URL, st.primary.Model); p != "/v1/chat/completions" {
+			st.primary.ChatPath = p
+		}
 	}
 	cfg := config.InitConfig(st.primary, escalation)
 	// Add tool-agent entries from wizard step.
@@ -345,7 +397,6 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 			sb.WriteString(h + "\n")
 		}
 	}
-	sb.WriteString("\n" + milkTag() + " ready — type a message to start, or /help for all commands\n")
 	return cfg, sb.String(), nil
 }
 
@@ -392,36 +443,48 @@ type initWizardField struct {
 // initWizardFieldFor describes the wizard's current step.
 func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardField {
 	switch st.step {
-	case initStepName:
-		return initWizardField{Name: "agent_name", Label: "primary agent name", Kind: "text", Default: "local"}
+	case initStepFound:
+		f := initWizardField{Name: "found", Label: "use something I found", Kind: "select", Default: "1"}
+		for i, fd := range st.found {
+			f.Options = append(f.Options, initWizardChoice{fmt.Sprint(i + 1), fd.Label + " — " + fd.Detail})
+		}
+		f.Options = append(f.Options, initWizardChoice{fmt.Sprint(len(st.found) + 1), "None of these — let me choose"})
+		return f
+	case initStepClaudeLogin:
+		return initWizardField{Name: "claude_login", Label: "sign in to Claude Code now (opens your browser)?",
+			Kind: "select", Default: "y", Options: []initWizardChoice{{"y", "yes — open the browser"}, {"n", "no — I'll do it later"}}}
 	case initStepProvider:
-		return initWizardField{Name: "provider", Label: "provider", Kind: "select", Default: "local", Options: []initWizardChoice{
-			{"local", "local — llama.cpp · Ollama · vLLM · LM Studio (plain HTTP)"},
-			{"bedrock", "bedrock — AWS Bedrock Converse API"},
-			{"bearer", "bearer — OpenRouter · Together.ai · Groq · GitHub Copilot · any Bearer-token API"},
-			{"claude-cli", "claude-cli — Claude Code CLI (no HTTP server needed)"},
-			{"aider-cli", "aider-cli — aider subprocess"},
-			{"subprocess", "subprocess — generic NDJSON subprocess"},
-		}}
+		return initWizardField{Name: "provider", Label: "which AI answers your everyday prompts", Kind: "select",
+			Default: "local", Options: initWizardProviderChoices}
 	case initStepURL:
-		f := initWizardField{Name: "url", Label: "server URL", Kind: "text", Required: true}
-		// Only directly-usable examples become one-click suggestions — the
-		// prompt's placeholder-shaped ones ("<org>", "<res>") stay text-only.
-		switch st.primary.Provider {
-		case "local":
-			f.Examples = []string{"http://localhost:8080"}
-		case "bearer":
-			f.Examples = []string{"https://openrouter.ai/api/v1"}
+		f := initWizardField{Name: "url", Label: "server URL", Kind: "text",
+			Default: initWizardURLDefault(st.primary.Provider)}
+		f.Required = f.Default == ""
+		// Only directly-usable presets become one-click suggestions (the
+		// default is its own button already).
+		if ps := initWizardURLPresets(st.primary.Provider); len(ps) > 1 {
+			for _, p := range ps[1:] {
+				f.Examples = append(f.Examples, p.URL)
+			}
 		}
 		return f
-	case initStepChatPath:
-		return initWizardField{Name: "chat_path", Label: "chat path", Kind: "text",
-			Default: initWizardChatPathDefault(st.primary.URL, st.primary.Model)}
 	case initStepRunCmd:
 		return initWizardField{Name: "run_cmd", Label: "server start command (optional)", Kind: "text"}
 	case initStepModel:
 		f := initWizardField{Name: "model", Label: "model name", Kind: "text",
 			Required: initWizardNeedsModel(st.primary.Provider)}
+		// Models the server reported: the first is the default, the rest are
+		// one-click examples.
+		if len(st.modelChoices) > 0 {
+			f.Default = st.modelChoices[0]
+			f.Required = false
+			f.Examples = st.modelChoices[1:]
+			return f
+		}
+		if st.modelDefault != "" {
+			f.Default = st.modelDefault
+			f.Required = false
+		}
 		// One-click examples mirror the prompt's "e.g." hints (placeholders
 		// like "<deployment>" stay text-only).
 		switch {
@@ -465,9 +528,13 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 		}
 		return f
 	case initStepEscalation:
-		return initWizardField{Name: "escalation", Label: "use Claude Code CLI as escalation agent?",
-			Kind: "select", Default: "y",
+		return initWizardField{Name: "escalation", Label: "use Claude Code as escalation agent?",
+			Kind: "select", Default: initWizardEscalationDefault(),
 			Options: []initWizardChoice{{"y", "yes"}, {"n", "no"}}}
+	case initStepTuning:
+		return initWizardField{Name: "tuning", Label: "fine-tune optional settings now?",
+			Kind: "select", Default: "n",
+			Options: []initWizardChoice{{"n", "no — use sensible defaults"}, {"y", "yes — ask me"}}}
 	case initStepAgentTools:
 		f := initWizardField{Name: "agent_tools", Label: "agents to enable as tools", Kind: "multiselect"}
 		for _, n := range opts.AgentNames {

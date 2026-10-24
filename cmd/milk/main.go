@@ -2668,8 +2668,10 @@ func init() {
 }
 
 // runOtelDebug enables or disables the full debug logging bundle.
-// On enable: saves the current log_level to pre_debug_log_level, then sets DEBUG.
-// On disable: restores log_level from pre_debug_log_level (falling back to INFO).
+// On enable: saves the current log_level to pre_debug_log_level, then sets DEBUG,
+// and switches a plain log_format to "pretty" (colored, saved in pre_debug_log_format).
+// On disable: restores log_level from pre_debug_log_level (falling back to INFO)
+// and log_format from pre_debug_log_format.
 func runOtelDebug(enable bool) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -2682,6 +2684,7 @@ func runOtelDebug(enable bool) error {
 			cfg.Otel.PreDebugLogLevel = cfg.Otel.LogLevel
 		}
 		cfg.Otel.LogLevel = "DEBUG"
+		savePrettyLogFormat(&cfg.Otel)
 	} else {
 		prev := cfg.Otel.PreDebugLogLevel
 		if prev == "" || strings.EqualFold(prev, "DEBUG") {
@@ -2689,6 +2692,7 @@ func runOtelDebug(enable bool) error {
 		}
 		cfg.Otel.LogLevel = prev
 		cfg.Otel.PreDebugLogLevel = ""
+		restoreLogFormat(&cfg.Otel)
 	}
 	cfg.DebugCLILog = enable
 	cfg.DebugLocalLog = enable
@@ -2697,6 +2701,30 @@ func runOtelDebug(enable bool) error {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
+}
+
+// savePrettyLogFormat switches a plain log format to the colored one while
+// debug is on, remembering the previous value. An explicit "pretty" stays, and
+// "off" stays off: debug never turns a disabled log back on.
+func savePrettyLogFormat(o *config.OtelConfig) {
+	switch o.LogFormat {
+	case obs.LogFormatPretty, "off":
+		return
+	case "":
+		o.PreDebugLogFormat = "text"
+	default:
+		o.PreDebugLogFormat = o.LogFormat
+	}
+	o.LogFormat = obs.LogFormatPretty
+}
+
+// restoreLogFormat undoes savePrettyLogFormat.
+func restoreLogFormat(o *config.OtelConfig) {
+	if o.PreDebugLogFormat == "" {
+		return
+	}
+	o.LogFormat = o.PreDebugLogFormat
+	o.PreDebugLogFormat = ""
 }
 
 // ── milk server ──────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // launchDirectBashFallback is only reachable on Windows in practice: every

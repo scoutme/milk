@@ -5,7 +5,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	rw "github.com/mattn/go-runewidth"
 	"github.com/scoutme/milk/internal/memory"
 )
@@ -27,13 +27,10 @@ type sessionBricks struct {
 
 const recentThreshold = 60 * time.Second
 
+// Panel title/section styles are filled by rebuildStyles (theme.go).
 var (
-	stylePanelTitle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#555", Dark: "#888"}).
-			Bold(true)
-
-	stylePanelSection = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#777", Dark: "#666"})
+	stylePanelTitle   lipgloss.Style
+	stylePanelSection lipgloss.Style
 )
 
 // renderMemoryPanel returns a vertical panel string of exactly h lines and
@@ -71,25 +68,62 @@ func (m *model) renderPanelScrollbar(h int) string {
 }
 
 func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []string {
+	lines, _ := memoryPanelRows(mem, inner, bricks, "")
+	return lines
+}
+
+// Rendering and hit testing share rows so expanding text cannot shift click targets.
+func memoryPanelRows(mem *memory.Store, inner int, bricks sessionBricks, expanded string) ([]string, []string) {
 	var lines []string
+	var ids []string
 
 	addLine := func(s string) {
 		lines = append(lines, s)
+		ids = append(ids, "")
+	}
+	addBrick := func(label, value string, stale bool, ratio float64) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		start := len(lines)
+		limit := 3
+		if expanded == label {
+			limit = utf8.RuneCountInString(value) + 1
+		}
+		addBrickLines(&lines, label, value, inner, stale, ratio, limit)
+		for range lines[start:] {
+			ids = append(ids, label)
+		}
+	}
+	addSection := func(label string, percepts []memory.Percept) {
+		if len(percepts) == 0 {
+			addLine(dim(label + " (0)"))
+			return
+		}
+		addLine(stylePanelSection.Render(label))
+		for _, p := range percepts {
+			start := len(lines)
+			limit := 3
+			if expanded == p.ID {
+				limit = utf8.RuneCountInString(p.Content) + 1
+			}
+			addPerceptLines(&lines, p, inner, time.Now(), limit)
+			for range lines[start:] {
+				ids = append(ids, p.ID)
+			}
+		}
+		addLine("")
 	}
 
 	// Title
 	addLine(panelTitleLine(" memory", regionMemory, inner))
-	addLine("")
+	addLine(dim("F1 close · double-click expand"))
 
 	if mem == nil {
 		addLine(dim("(unavailable)"))
-		return lines
+		return lines, ids
 	}
 
-	now := time.Now()
-
-	// --- CONTEXT BRICKS --- first: a near-fixed height, so it stays put while the
-	// percept sections below it grow
 	primaryLabel := bricks.primaryName
 	if primaryLabel == "" {
 		primaryLabel = "primary"
@@ -107,25 +141,21 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 		escRatio = float64(bricks.localTurnsSince) / float64(bricks.freshThreshold)
 	}
 	escStale := bricks.contextStale
-	addLine(stylePanelSection.Render("CONTEXT BRICKS"))
-	addBrickLines(&lines, "need", bricks.currentNeed, inner, false, 0)
-	addBrickLines(&lines, primaryLabel, bricks.lastLocalSummary, inner, false, 0)
-	addBrickLines(&lines, escalationLabel, bricks.lastEscalationSummary, inner, escStale, escRatio)
-	addBrickLines(&lines, "brief", bricks.escalationBrief, inner, escStale, escRatio)
-	addLine("")
-	addLine(stalenessLegend(inner))
-	addLine("")
+	if strings.TrimSpace(bricks.currentNeed+bricks.lastLocalSummary+bricks.lastEscalationSummary+bricks.escalationBrief) == "" {
+		addLine(dim("CONTEXT BRICKS (0)"))
+	} else {
+		addLine(stylePanelSection.Render("CONTEXT BRICKS"))
+		addBrick("need", bricks.currentNeed, false, 0)
+		addBrick(primaryLabel, bricks.lastLocalSummary, false, 0)
+		addBrick(escalationLabel, bricks.lastEscalationSummary, escStale, escRatio)
+		addBrick("brief", bricks.escalationBrief, escStale, escRatio)
+		addLine("")
+		addLine(stalenessLegend(inner))
+		addLine("")
+	}
 	// --- SESSION ---
 	sessionPercepts := mem.List(memory.ListOpts{Scope: "session"})
-	addLine(stylePanelSection.Render("SESSION"))
-	if len(sessionPercepts) == 0 {
-		addLine(dim("  (empty)"))
-	} else {
-		for _, p := range sessionPercepts {
-			addPerceptLines(&lines, p, inner, now)
-		}
-	}
-	addLine("")
+	addSection("SESSION", sessionPercepts)
 
 	// --- GLOBAL / GLOBAL (core) ---
 	allGlobal := mem.List(memory.ListOpts{Scope: "global"})
@@ -138,30 +168,11 @@ func buildPanelLines(mem *memory.Store, inner int, bricks sessionBricks) []strin
 		}
 	}
 
-	addLine(stylePanelSection.Render("GLOBAL"))
-	if len(normalPercepts) == 0 {
-		addLine(dim("  (empty)"))
-	} else {
-		for _, p := range normalPercepts {
-			addPerceptLines(&lines, p, inner, now)
-		}
-	}
-	addLine("")
-
-	addLine(stylePanelSection.Render("GLOBAL (core)"))
-	if len(corePercepts) == 0 {
-		addLine(dim("  (empty)"))
-	} else {
-		for _, p := range corePercepts {
-			addPerceptLines(&lines, p, inner, now)
-		}
-	}
-
-	return lines
+	addSection("GLOBAL", normalPercepts)
+	addSection("GLOBAL (core)", corePercepts)
+	return lines, ids
 }
 
-// addPerceptLines appends 1–3 lines for a single percept:
-// content wrapped to max 2 lines (then "…"), weight on the first line right-aligned.
 // perceptIDShort returns the first 6 hex chars of p.ID prefixed with "#".
 func perceptIDShort(p memory.Percept) string {
 	if len(p.ID) >= 6 {
@@ -170,7 +181,7 @@ func perceptIDShort(p memory.Percept) string {
 	return "#" + p.ID
 }
 
-func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time) {
+func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time, limits ...int) {
 	recent := now.Sub(p.UpdatedAt) < recentThreshold
 	bullet := "• "
 	if p.Core {
@@ -184,7 +195,11 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 	// First line: bullet + id + content (no weight string)
 	firstW, contW := perceptWrapWidths(p, inner)
 
-	wrapped := wordWrap(p.Content, firstW, contW, 2)
+	limit := 3
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
+	wrapped := wordWrap(p.Content, firstW, contW, limit)
 
 	// Staleness gradient: ratio = 1 - W (high weight = fresh/bright, low = stale/orange)
 	ratio := 1.0 - p.W
@@ -223,7 +238,7 @@ func addPerceptLines(lines *[]string, p memory.Percept, inner int, now time.Time
 // addBrickLines appends lines for a single summary brick.
 // ratio in [0,1] drives a staleness gradient on the content text; ratio=0 is
 // neutral, ratio=1 is fully stale. stale=true also appends a dim "(stale)" label.
-func addBrickLines(lines *[]string, label, value string, inner int, stale bool, ratio float64) {
+func addBrickLines(lines *[]string, label, value string, inner int, stale bool, ratio float64, limits ...int) {
 	suffix := ""
 	if stale {
 		suffix = "(stale)"
@@ -239,7 +254,11 @@ func addBrickLines(lines *[]string, label, value string, inner int, stale bool, 
 		return
 	}
 	firstW, contW := brickWrapWidths(label, stale, inner)
-	wrapped := wordWrap(value, firstW, contW, 3)
+	limit := 3
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
+	wrapped := wordWrap(value, firstW, contW, limit)
 	tint := staleContentColor(ratio)
 	renderLine := func(s string) string { return colorize(s, tint) }
 	for i, line := range wrapped {
@@ -267,105 +286,7 @@ func consumerBadge(p memory.Percept) string {
 // buildPanelLines. Non-percept lines (titles, section headers, blank lines)
 // get an empty string.
 func buildPanelLineIDs(mem *memory.Store, bricks sessionBricks) []string {
-	var ids []string
-	add := func(id string) { ids = append(ids, id) }
-
-	add("") // title
-	add("") // blank
-
-	if mem == nil {
-		add("")
-		return ids
-	}
-
-	addPercept := func(p memory.Percept) {
-		// Shared width calculation with addPerceptLines so the wrapped line
-		// counts — and therefore this click-to-ID mapping — can't drift.
-		const inner = memoryPanelInner
-		firstW, contW := perceptWrapWidths(p, inner)
-		wrapped := wordWrap(p.Content, firstW, contW, 2)
-		for range wrapped {
-			add(p.ID)
-		}
-	}
-
-	addBrick := func(label, value string, stale bool) {
-		const inner = memoryPanelInner
-		if value == "" {
-			add("") // label + "—" is one line, not clickable
-			return
-		}
-		// Shared width calculation with addBrickLines (incl. the "(stale)"
-		// suffix budget) so line counts can't drift (issue #212).
-		firstW, contW := brickWrapWidths(label, stale, inner)
-		wrapped := wordWrap(value, firstW, contW, 3)
-		for range wrapped {
-			add(label) // static brick ID makes lines clickable
-		}
-	}
-
-	// CONTEXT BRICKS section
-	primaryLabel := bricks.primaryName
-	if primaryLabel == "" {
-		primaryLabel = "primary"
-	}
-	escalationLabel := bricks.escalationName
-	if escalationLabel == "" {
-		escalationLabel = "escalation"
-	}
-	add("") // CONTEXT BRICKS header
-	// Staleness flags must match buildPanelLines' addBrickLines calls: only
-	// the escalation and brief bricks get the "(stale)" suffix, and it costs
-	// first-line width — so the same inputs have to feed the wrap here.
-	escStale := bricks.contextStale
-	addBrick("need", bricks.currentNeed, false)
-	addBrick(primaryLabel, bricks.lastLocalSummary, false)
-	addBrick(escalationLabel, bricks.lastEscalationSummary, escStale)
-	addBrick("brief", bricks.escalationBrief, escStale)
-	add("") // blank before legend
-	add("") // staleness legend line
-	add("") // blank after legend
-
-	sessionPercepts := mem.List(memory.ListOpts{Scope: "session"})
-	add("") // SESSION header
-	if len(sessionPercepts) == 0 {
-		add("")
-	} else {
-		for _, p := range sessionPercepts {
-			addPercept(p)
-		}
-	}
-	add("") // blank
-
-	allGlobal := mem.List(memory.ListOpts{Scope: "global"})
-	var corePercepts, normalPercepts []memory.Percept
-	for _, p := range allGlobal {
-		if p.Core {
-			corePercepts = append(corePercepts, p)
-		} else {
-			normalPercepts = append(normalPercepts, p)
-		}
-	}
-
-	add("") // GLOBAL header
-	if len(normalPercepts) == 0 {
-		add("")
-	} else {
-		for _, p := range normalPercepts {
-			addPercept(p)
-		}
-	}
-	add("") // blank
-
-	add("") // GLOBAL (core) header
-	if len(corePercepts) == 0 {
-		add("")
-	} else {
-		for _, p := range corePercepts {
-			addPercept(p)
-		}
-	}
-
+	_, ids := memoryPanelRows(mem, memoryPanelInner, bricks, "")
 	return ids
 }
 

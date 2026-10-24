@@ -5,9 +5,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/sgr"
 )
@@ -187,18 +185,6 @@ func (m *model) armToastTick() tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg { return toastTickMsg{gen: gen} })
 }
 
-// toastBackgroundCode returns the raw SGR background sequence for the toast
-// band ("" when not a TTY), mirroring panelAltBackgroundCode.
-func toastBackgroundCode() string {
-	if !isTTY {
-		return ""
-	}
-	if lipgloss.HasDarkBackground() {
-		return "\033[48;2;26;38;58m" // #1A263A
-	}
-	return "\033[48;2;217;228;245m" // #D9E4F5
-}
-
 // toastContent builds the styled time + message + slash-command hint for one
 // toast, truncating the free-form message so the whole thing fits within
 // width. Returns the styled string and its plain-text cell width — the
@@ -331,14 +317,8 @@ func (m *model) overlayToasts(block string) string {
 		if row >= len(lines) {
 			return
 		}
-		line := ansi.Truncate(lines[row], width, "")
-		tail := ansi.TruncateLeft(lines[row], width, "")
-
-		untouched := ansi.Truncate(line, toastSideMargin+sharedCol, "")
-		rightMargin := ansi.TruncateLeft(line, width-toastSideMargin, "")
-
 		toast := padToastRow(content, plainW, avail, toastContentPadding)
-		lines[row] = untouched + toast + rightMargin + tail
+		lines[row] = overlayRowAt(lines[row], toastSideMargin+sharedCol, toast)
 	}
 
 	for i, ev := range m.toastVisible {

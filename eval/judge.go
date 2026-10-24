@@ -97,7 +97,7 @@ func NewJudgeFromConfig(agentName string) (*Judge, error) {
 	return &Judge{
 		URL:    strings.TrimRight(agent.URL, "/"),
 		Model:  agent.Model,
-		APIKey: agent.APIKey,
+		APIKey: agent.ResolvedAPIKey(),
 	}, nil
 }
 

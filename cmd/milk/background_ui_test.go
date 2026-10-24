@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
@@ -312,7 +312,7 @@ func TestHandleBusyKey_CtrlJSpawnsBackgroundAgent(t *testing.T) {
 	// Ctrl+J: spawns — the actual Spawn call is deferred into a
 	// tea.Cmd to avoid deadlocking bubbletea's unbuffered msgs channel
 	// (p.Send inside onStart would block if called from within Update).
-	updated2, cmd := m2.handleBusyKey(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	updated2, cmd := m2.handleBusyKey(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	m3 := updated2.(model)
 	if m3.ta.Value() != "" {
 		t.Errorf("expected the textarea to be cleared after spawning, got %q", m3.ta.Value())
@@ -427,8 +427,8 @@ func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T
 	}
 }
 
-func teaKeyEnter() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyEnter}
+func teaKeyEnter() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: tea.KeyEnter}
 }
 
 // TestF4TogglesBackgroundPanel verifies the global F1-F6 panel shortcuts:
@@ -447,7 +447,7 @@ func TestF3TogglesBackgroundPanel(t *testing.T) {
 	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
 	m.busy = true
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF3})
 	m2 := updated.(model)
 	if !m2.panelBackground {
 		t.Fatal("expected F3 to open the background panel")
@@ -459,7 +459,7 @@ func TestF3TogglesBackgroundPanel(t *testing.T) {
 		t.Errorf("panel confirmation must not be appended to the transcript (#162), got %q", m2.transcript.String())
 	}
 
-	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyF3})
 	m3 := updated2.(model)
 	if m3.panelBackground {
 		t.Error("expected a second F3 to close it again")
@@ -479,13 +479,13 @@ func TestF4TogglesWorkflowPanel(t *testing.T) {
 	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
 	m.busy = true
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF4})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF4})
 	m2 := updated.(model)
 	if !m2.workflowPanelOpen {
 		t.Fatal("expected F4 to open the workflow panel")
 	}
 
-	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF4})
+	updated2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyF4})
 	m3 := updated2.(model)
 	if m3.workflowPanelOpen {
 		t.Error("expected a second F4 to close it again")

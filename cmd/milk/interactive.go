@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
@@ -45,6 +45,7 @@ const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
 const cmdTips = "/tips"
+const cmdTheme = "/theme"
 const cmdRestart = "/restart"
 const cmdInterrupt = "/interrupt"
 const cmdSetup = "/setup"
@@ -57,6 +58,7 @@ const cmdServer = "/server"
 const cmdBash = "/bash"
 const cmdBg = "/bg"
 const cmdNotifications = "/notifications"
+const cmdKeys = "/keys"
 
 var slashCommands = registryNames()
 
@@ -76,24 +78,45 @@ type initWizardState struct {
 	// AgentContextWindowTokens, not asked separately.
 	// agent-tools step
 	toolAgentNames []string // agent names the user wants to enable as tools
+	// tuning is the answer to the optional-tuning gate: false keeps the
+	// minimal config (primary + escalation only) and skips run_cmd, limits
+	// and agent-tools; true asks them.
+	tuning bool
+	// modelChoices are the model names the chosen server reported (local
+	// provider): the model question offers them as a numbered pick list.
+	modelChoices []string
+	// modelDefault is the model a blank answer means (suggested by a
+	// discovered provider); "" = the model is asked without a default.
+	modelDefault string
+	// found are the credentials discovery offered as the first question;
+	// foundPicked says the user took one (provider/URL/key are then set).
+	found       []initWizardFinding
+	foundPicked bool
+	// claude caches the Claude Code login state for this run; loginDone stops
+	// the login question from being asked twice; runLogin hands the login to
+	// the host through initWizardResult.RunClaudeLogin.
+	claude    *claudeAuthState
+	loginDone bool
+	runLogin  bool
 }
 
 type initWizardStep int
 
 const (
-	initStepName       initWizardStep = iota // ask agent name
-	initStepProvider                         // ask provider (menu 1–6)
-	initStepURL                              // ask URL (providers that need it)
-	initStepChatPath                         // ask chat_path (bearer only, skip if standard)
-	initStepRunCmd                           // ask run_cmd (local provider only, optional)
-	initStepModel                            // ask model
-	initStepAuth                             // ask api_key (blank → go to initStepTokenCmd)
-	initStepTokenCmd                         // ask token_cmd
-	initStepAWSRegion                        // ask aws_region (bedrock only)
-	initStepLimits                           // ask context_window_tokens (proposes a models.dev catalog match)
-	initStepEscalation                       // ask escalation agent choice
-	initStepAgentTools                       // ask which agents to enable as tools
-	initStepOpenConfig                       // ask whether to open config in editor
+	initStepFound       initWizardStep = iota // offer what discovery found (keys, servers, Claude login)
+	initStepProvider                          // ask which AI answers prompts (menu 1–6)
+	initStepURL                               // ask URL (providers that need it)
+	initStepModel                             // ask model
+	initStepAuth                              // ask api_key (blank → go to initStepTokenCmd)
+	initStepTokenCmd                          // ask token_cmd
+	initStepAWSRegion                         // ask aws_region (bedrock only)
+	initStepClaudeLogin                       // offer the Claude Code browser login
+	initStepEscalation                        // ask escalation agent choice
+	initStepTuning                            // gate: fine-tune now? (no → defaults)
+	initStepRunCmd                            // tuning: run_cmd (local provider only)
+	initStepLimits                            // tuning: context_window_tokens (proposes a models.dev catalog match)
+	initStepAgentTools                        // tuning: which agents to enable as tools
+	initStepOpenConfig                        // ask whether to open config in editor
 	initStepDone
 )
 
@@ -298,6 +321,11 @@ func (st *interactiveState) escalationAgentName() string {
 // whether a command was found.
 func extractSlashCommand(input string) (cmd, rest string, found bool) {
 	words := strings.Fields(input)
+	// "/config-init" is the natural way to type the guided setup; without this
+	// it would fall through as plain text and reach a model.
+	if len(words) > 0 && words[0] == "/config-init" {
+		words = append([]string{cmdConfig, "init"}, words[1:]...)
+	}
 	if len(words) == 0 || !strings.HasPrefix(words[0], "/") || !slices.Contains(slashCommands, words[0]) {
 		return "", input, false
 	}
@@ -320,10 +348,12 @@ var busySafeCommands = map[string]bool{
 	"/help":          true,
 	cmdThink:         true,
 	cmdTips:          true,
+	cmdTheme:         true,
 	cmdColorize:      true,
 	cmdPanel:         true,
 	cmdHistory:       true,
 	cmdNotifications: true,
+	cmdKeys:          true,
 	cmdInterrupt:     true,
 	cmdMemory:        true,
 	cmdUsage:         true,
@@ -427,6 +457,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// reach the model's think-block fold state. This case is a no-op
 		// here; the TUI intercepts cmdThink before it reaches
 		// handleSlashCommand. Guard to prevent "unknown command" output.
+	case cmdKeys:
+		// Rendered by the TUI in handleSlashInput (commands.go); no-op here.
 	case cmdNotifications:
 		// History lives on the TUI model; the TUI intercepts this in
 		// handleSlashInput (commands.go) before it reaches here. Guard to
