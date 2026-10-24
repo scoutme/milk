@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/oversight"
@@ -107,7 +107,7 @@ func TestAutoOpenPanel_RespectsExplicitClose(t *testing.T) {
 	}
 
 	// User explicitly closes it via F3 while the job is still running.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF3})
 	m2 := updated.(model)
 	if m2.panelBackground {
 		t.Fatal("expected F3 to close the background panel")
@@ -134,7 +134,7 @@ func TestAutoOpenPanel_RespectsExplicitOpenToo(t *testing.T) {
 	m := newTestModelForPanels(t)
 
 	// User explicitly opens tasks via F2.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF2})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF2})
 	m2 := updated.(model)
 	if !m2.panelTasks {
 		t.Fatal("expected F2 to open the tasks panel")
@@ -155,7 +155,7 @@ func TestPanelClose_FinalizedContentDoesNotStick(t *testing.T) {
 	cases := []struct {
 		name   string
 		region panelRegion
-		key    tea.KeyType
+		key    rune
 	}{
 		{"memory", regionMemory, tea.KeyF1},
 		{"tasks", regionTasks, tea.KeyF2},
@@ -168,13 +168,13 @@ func TestPanelClose_FinalizedContentDoesNotStick(t *testing.T) {
 			// The memory panel starts open; open the others first so the
 			// second press is the closing toggle.
 			if tc.region != regionMemory {
-				updated, _ := m.Update(tea.KeyMsg{Type: tc.key})
+				updated, _ := m.Update(tea.KeyPressMsg{Code: tc.key})
 				m = updated.(model)
 				if !rawPanelOpen(&m, tc.region) {
 					t.Fatalf("expected first press to open the %s panel", tc.name)
 				}
 			}
-			updated, _ := m.Update(tea.KeyMsg{Type: tc.key})
+			updated, _ := m.Update(tea.KeyPressMsg{Code: tc.key})
 			m = updated.(model)
 			if rawPanelOpen(&m, tc.region) {
 				t.Fatalf("expected second press to close the %s panel", tc.name)
@@ -219,9 +219,9 @@ func TestTaskStoreChangedMsg_ManualCloseSticksUntilTasksFinalize(t *testing.T) {
 	}
 
 	// Open then explicitly close via F2 while the task is still open.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF2})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF2})
 	m2 := updated.(model)
-	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF2})
+	updated2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyF2})
 	m3 := updated2.(model)
 	if m3.panelTasks {
 		t.Fatal("expected the second F2 to close the tasks panel")
@@ -283,12 +283,12 @@ func TestBackgroundJobDoneMsg_ResetsManualOverride(t *testing.T) {
 	cancel := spawnRunningBackgroundJob(t, &m)
 
 	// Open then close via F3 while the job is running.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF3})
 	m2 := updated.(model)
 	if !m2.panelBackground {
 		t.Fatal("expected F3 to open the background panel")
 	}
-	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyF3})
 	m3 := updated2.(model)
 	if m3.panelBackground {
 		t.Fatal("expected the second F3 to close the background panel")
@@ -330,9 +330,9 @@ func TestWorkflowProgressMsg_RespectsManualClose(t *testing.T) {
 	m.workflowState = &workflow.State{WorkflowName: "test", Task: "t", Role: "worker"}
 
 	// Open then explicitly close via F4 while the run is in flight.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF4})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF4})
 	m2 := updated.(model)
-	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyF4})
+	updated2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyF4})
 	m3 := updated2.(model)
 	if m3.workflowPanelOpen {
 		t.Fatal("expected the second F4 to close the workflow panel")
@@ -370,7 +370,7 @@ func TestWorkflowProgressMsg_RespectsManualClose(t *testing.T) {
 // panel while percepts exist sticks, and /forget deleting the last percept
 // empties the store — the memory panel's finalization event — resetting
 // the override for its next content.
-func TestForget_ResetsManualOverrideWhenMemoryEmptied(t *testing.T) {
+func TestForget_PreservesMemoryPreferenceWhenEmptied(t *testing.T) {
 	m := newTestModelForPanels(t)
 	store, err := memory.NewStoreParams(t.TempDir(), "sess", memory.Params{})
 	if err != nil {
@@ -382,7 +382,7 @@ func TestForget_ResetsManualOverrideWhenMemoryEmptied(t *testing.T) {
 	m.mem = store
 
 	// Close via F1 while the store still has content → sticky.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyF1})
 	m2 := updated.(model)
 	if m2.panelMemory {
 		t.Fatal("expected F1 to close the memory panel")
@@ -403,8 +403,8 @@ func TestForget_ResetsManualOverrideWhenMemoryEmptied(t *testing.T) {
 	if len(m3.mem.List(memory.ListOpts{Scope: "session"})) != 0 {
 		t.Fatal("expected the percept to be deleted")
 	}
-	if m3.panelManualOverride[regionMemory] {
-		t.Error("expected the manual override to reset once the store is emptied")
+	if !m3.panelManualOverride[regionMemory] {
+		t.Error("emptying memory must preserve the user's panel preference")
 	}
 }
 

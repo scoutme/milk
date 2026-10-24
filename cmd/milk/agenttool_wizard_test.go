@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // toolWizardModel builds a model with just enough state to drive
@@ -26,7 +26,7 @@ func toolWizardModel(t *testing.T) model {
 func sendToolWizardEnter(t *testing.T, m model, answer string) model {
 	t.Helper()
 	m.ta.SetValue(answer)
-	nm, _ := m.handleAgentToolWizardKey(tea.KeyMsg{Type: tea.KeyEnter})
+	nm, _ := m.handleAgentToolWizardKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	out, ok := nm.(model)
 	if !ok {
 		t.Fatalf("handleAgentToolWizardKey returned %T, want model", nm)
@@ -136,7 +136,7 @@ func TestAgentToolWizard_EscCancels(t *testing.T) {
 	m := toolWizardModel(t)
 	m, _ = m.startAgentTool("add")
 
-	nm, _ := m.handleAgentToolWizardKey(tea.KeyMsg{Type: tea.KeyEsc})
+	nm, _ := m.handleAgentToolWizardKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	out, ok := nm.(model)
 	if !ok {
 		t.Fatalf("handleAgentToolWizardKey returned %T, want model", nm)

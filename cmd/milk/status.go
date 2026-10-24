@@ -2,12 +2,15 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/progress"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	rw "github.com/mattn/go-runewidth"
 
@@ -23,8 +26,8 @@ func (m *model) headerBar() string {
 		frame = m.spinnerFrame
 	}
 	logo := headerLogo(frame)
-	tagline := dim("switch models, not context.")
-	taglinePlain := "switch models, not context."
+	taglinePlain := taglineText()
+	tagline := dim(taglinePlain)
 
 	sessID := m.st.sess.ID
 	if len(sessID) > 8 {
@@ -61,6 +64,10 @@ func (m *model) headerBar() string {
 	rightFulPlain := repoURL + " " + version + "  " + sessLabel + "  /help"
 	rightShort := vStyled + dim("  "+sessLabel+"  /help")
 	rightShortPlain := version + "  " + sessLabel + "  /help"
+	if th.modern {
+		rightFull = vStyled + dim("  "+sessLabel+"  ") + colorize("/help", tkAccent.sgrFg())
+		rightFulPlain = version + "  " + sessLabel + "  /help"
+	}
 
 	logoPlain := ansi.Strip(logo)
 	available := m.width - 2
@@ -73,6 +80,7 @@ func (m *model) headerBar() string {
 	gap := max(available-len(leftPlain)-len(rightPlain), 1)
 	bar := left + strings.Repeat(" ", gap) + rightPart + " "
 	if isTTY {
+		bar = tintChrome(bar, chromeHeaderFg.sgrFg(), chromeHeaderBg.sgrBg())
 		return styleHeaderBar.Width(m.width).Render(bar)
 	}
 	return bar
@@ -90,6 +98,15 @@ func (m *model) statusBar() string {
 		rolePart = dim(rolePart)
 		agentPart = dim("agent:") + m.statusAgent()
 	}
+	if th.modern {
+		roleName := strings.ToLower(sessionRole(m.st.sess.State))
+		rolePart = "● " + roleName
+		agentPart = "· " + m.statusAgent()
+		if !isPerm {
+			rolePart = colorize("●", tkAccent.sgrFg()) + dim(" "+roleName)
+			agentPart = dim("· ") + m.statusAgent()
+		}
+	}
 	left := fmt.Sprintf(" %s  %s%s", rolePart, agentPart, tokenStr)
 	right := ""
 	if m.updateInstalling {
@@ -104,6 +121,9 @@ func (m *model) statusBar() string {
 	if isPerm {
 		right += m.statusCwd() + " "
 	} else {
+		if th.modern && m.width >= 110 {
+			right += dim("Alt+↑/↓ history  ·  Ctrl+C exit  ·  ")
+		}
 		right += dim(m.statusCwd() + " ")
 	}
 	if m.credRefreshing {
@@ -267,6 +287,7 @@ func (m *model) statusBar() string {
 		if m.pendingPerm != nil {
 			return styleStatusBarPerm.Width(m.width).MaxWidth(m.width).Render(bar)
 		}
+		bar = tintChrome(bar, chromeStatusBg.sgrBg())
 		return styleStatusBar.Width(m.width).MaxWidth(m.width).Render(bar)
 	}
 	return bar
@@ -478,12 +499,47 @@ func (m *model) statusContextPressure(role string, promptTokens int64) string {
 	label := fmt.Sprintf("ctx:%s/%s", formatTokenCount(numerator), formatTokenCount(int64(window)))
 	switch {
 	case pct >= contextPressureCriticalPct:
-		return red(label)
+		label = red(label)
 	case pct >= contextPressureHighPct:
-		return yellow(label)
+		label = yellow(label)
 	default:
-		return dim(label)
+		label = dim(label)
 	}
+	// The meter is a glance aid; the numbers stay the source of truth, so it
+	// only shows when the bar is wide enough not to crowd them out.
+	if m.width >= contextMeterMinWidth {
+		return contextMeter(pct) + " " + label
+	}
+	return label
+}
+
+// contextMeterMinWidth is the terminal width from which the ctx fragment
+// gets a fill meter in front of its numbers.
+const contextMeterMinWidth = 130
+
+const contextMeterCells = 8
+
+// contextMeterBar is the shared meter: fill color follows the same
+// thresholds as the ctx label (dim, yellow at 75%, red at 90%).
+var contextMeterBar = progress.New(
+	progress.WithWidth(contextMeterCells),
+	progress.WithoutPercentage(),
+	progress.WithFillCharacters('▰', '▱'),
+	progress.WithColorFunc(func(total, _ float64) color.Color {
+		switch {
+		case total*100 >= contextPressureCriticalPct:
+			return lipgloss.Color("1")
+		case total*100 >= contextPressureHighPct:
+			return lipgloss.Color("3")
+		default:
+			return lipgloss.Color("8")
+		}
+	}),
+)
+
+// contextMeter renders pct (clamped to 0-100) as a short fill meter.
+func contextMeter(pct int) string {
+	return contextMeterBar.ViewAs(float64(min(max(pct, 0), 100)) / 100)
 }
 
 // activeTokenRole returns "escalation" or "primary" reflecting which agent will

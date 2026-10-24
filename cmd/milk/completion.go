@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -186,7 +186,7 @@ func (m model) handleTab(dir int) model {
 		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
 	}
 	// Cursor goes after the completed token (before afterCursor).
-	m.ta.SetCursor(precedingLen + len([]rune(completedBefore)))
+	m.ta.SetCursorColumn(precedingLen + len([]rune(completedBefore)))
 
 	// Build hint panel base: all variants styled (yellow sig + dim desc) but
 	// without any highlight. highlightHint then overlays the active entry.
@@ -326,7 +326,7 @@ func (m model) insertActiveCompletion() model {
 	if curLine > 0 {
 		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
 	}
-	m.ta.SetCursor(precedingLen + len([]rune(completedBefore)))
+	m.ta.SetCursorColumn(precedingLen + len([]rune(completedBefore)))
 	return m
 }
 
@@ -754,7 +754,7 @@ func (m *model) commitHintSelection() bool {
 	if curLine > 0 {
 		precedingLen = len([]rune(strings.Join(lines[:curLine], "\n"))) + 1
 	}
-	m.ta.SetCursor(precedingLen + len([]rune(completed)))
+	m.ta.SetCursorColumn(precedingLen + len([]rune(completed)))
 
 	m.tabHints = nil
 	m.tabHintsBase = nil
@@ -791,7 +791,7 @@ func (m model) acceptActiveCompletion() (model, bool) {
 		m.hintIdx = -1
 		if cleared, pos := clearFirstPlaceholder(current); pos >= 0 {
 			m.ta.SetValue(cleared)
-			m.ta.SetCursor(pos)
+			m.ta.SetCursorColumn(pos)
 			m.rebuildInlineHints()
 		}
 		m.syncLayout()
@@ -802,7 +802,7 @@ func (m model) acceptActiveCompletion() (model, bool) {
 			// Same: position cursor at first placeholder if present.
 			if cleared, pos := clearFirstPlaceholder(m.ta.Value()); pos >= 0 {
 				m.ta.SetValue(cleared)
-				m.ta.SetCursor(pos)
+				m.ta.SetCursorColumn(pos)
 				m.rebuildInlineHints()
 			}
 			m.syncLayout()

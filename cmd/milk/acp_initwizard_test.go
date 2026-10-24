@@ -62,13 +62,11 @@ func acpElicitedNames(reqs []acp.CreateElicitationRequest) []string {
 // answers — ending with the config written and the wizard cleared.
 func TestACPInit_FormDialogsDriveWizard(t *testing.T) {
 	server, conn, id, reqs := acpFormSession(t, []acp.CreateElicitationResponse{
-		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // name → default "local"
 		{Action: acp.ElicitationAccept, Content: map[string]any{"provider": "local"}},
-		{Action: acp.ElicitationAccept, Content: map[string]any{"url": "http://localhost:8080"}},
-		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // run_cmd → skip
+		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // url → default
 		{Action: acp.ElicitationAccept, Content: map[string]any{"model": "qwen2.5-coder"}},
-		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // limits → no catalog match
 		{Action: acp.ElicitationAccept, Content: map[string]any{"escalation": "n"}},
+		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // tuning → skip
 	})
 	as := server.session(id)
 
@@ -78,21 +76,19 @@ func TestACPInit_FormDialogsDriveWizard(t *testing.T) {
 		t.Fatal("the form flow must finish the wizard inside the /init turn")
 	}
 	names := acpElicitedNames(*reqs)
-	want := []string{"agent_name", "provider", "url", "run_cmd", "model", "context_window_tokens", "escalation"}
+	want := []string{"provider", "url", "model", "escalation", "tuning"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("elicited fields = %v, want %v", names, want)
 	}
 
 	// The choices and defaults surface is what makes this clickable: the
-	// name field pre-populates its default and the provider field is a
-	// titled select.
-	first := (*reqs)[0].RequestedSchema
-	if d := first.Properties["agent_name"].Default; d != "local" {
-		t.Errorf("agent_name default = %v, want local (clients pre-populate it)", d)
-	}
-	prov := (*reqs)[1].RequestedSchema.Properties["provider"]
+	// provider field is a titled select and the URL pre-populates its default.
+	prov := (*reqs)[0].RequestedSchema.Properties["provider"]
 	if len(prov.OneOf) != 6 || prov.Default != "local" {
 		t.Errorf("provider field = %+v, want a 6-choice select defaulting to local", prov)
+	}
+	if d := (*reqs)[1].RequestedSchema.Properties["url"].Default; d != "http://localhost:11434" {
+		t.Errorf("url default = %v, want the local server's usual address (clients pre-populate it)", d)
 	}
 
 	// Every dialog round trip is closed out with elicitation/complete.
@@ -118,8 +114,8 @@ func TestACPInit_FormDialogsDriveWizard(t *testing.T) {
 	}
 
 	// And the committed config is live in the session.
-	if got := as.st.cfg.ActiveAgent().URL; got != "http://localhost:8080" {
-		t.Errorf("active agent URL = %q, want the wizard's URL", got)
+	if got := as.st.cfg.ActiveAgent().URL; got != "http://localhost:11434" {
+		t.Errorf("active agent URL = %q, want the default URL", got)
 	}
 }
 
@@ -128,14 +124,12 @@ func TestACPInit_FormDialogsDriveWizard(t *testing.T) {
 // once, then the remaining steps return to dialogs and the wizard finishes.
 func TestACPInit_FormSecretStepInChatThenResumes(t *testing.T) {
 	server, conn, id, reqs := acpFormSession(t, []acp.CreateElicitationResponse{
-		{Action: acp.ElicitationAccept, Content: map[string]any{"agent_name": "orb"}},
 		{Action: acp.ElicitationAccept, Content: map[string]any{"provider": "bearer"}},
-		{Action: acp.ElicitationAccept, Content: map[string]any{"url": "https://openrouter.ai/api/v1"}},
-		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // chat_path → default
+		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // url → default
 		{Action: acp.ElicitationAccept, Content: map[string]any{"model": "meta-llama/llama-3.1-8b-instruct"}},
 		// (no response for the credential step — it is asked in chat)
-		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // limits
 		{Action: acp.ElicitationAccept, Content: map[string]any{"escalation": "y"}},
+		{Action: acp.ElicitationAccept, Content: map[string]any{}}, // tuning → skip
 	})
 	as := server.session(id)
 
@@ -145,7 +139,7 @@ func TestACPInit_FormSecretStepInChatThenResumes(t *testing.T) {
 		t.Fatal("the wizard must wait for the credential step in chat")
 	}
 	names := acpElicitedNames(*reqs)
-	if strings.Join(names, ",") != "agent_name,provider,url,chat_path,model" {
+	if strings.Join(names, ",") != "provider,url,model" {
 		t.Fatalf("elicited fields before the credential step = %v", names)
 	}
 	chunks := acpChunks(conn)
@@ -153,14 +147,14 @@ func TestACPInit_FormSecretStepInChatThenResumes(t *testing.T) {
 		t.Errorf("chunk = %q, want the credential question with the chat hand-off note", chunks[0])
 	}
 
-	// Answering in chat resumes the dialogs (limits, escalation) and the
+	// Answering in chat resumes the dialogs (escalation, tuning) and the
 	// wizard finishes without another prompt.
 	acpPromptText(t, server, id, "sk-test")
 	if as.pendingInit != nil {
 		t.Fatal("wizard must be done after the remaining dialogs")
 	}
 	names = acpElicitedNames(*reqs)
-	if strings.Join(names, ",") != "agent_name,provider,url,chat_path,model,context_window_tokens,escalation" {
+	if strings.Join(names, ",") != "provider,url,model,escalation,tuning" {
 		t.Fatalf("elicited fields = %v, want the resumed tail after the credential answer", names)
 	}
 	for _, r := range *reqs {
@@ -193,22 +187,22 @@ func TestACPInit_DismissedDialogFallsBackToChat(t *testing.T) {
 		t.Fatal("a declined dialog must hand the wizard to chat, not end it")
 	}
 	chunks := acpChunks(conn)
-	if !strings.Contains(chunks[0], "continuing the setup wizard in chat") || !strings.Contains(chunks[0], "primary agent name") {
-		t.Errorf("chunk = %q, want the chat hand-off note + the name question", chunks[0])
+	if !strings.Contains(chunks[0], "continuing the setup wizard in chat") || !strings.Contains(chunks[0], "Which AI should answer") {
+		t.Errorf("chunk = %q, want the chat hand-off note + the provider question", chunks[0])
 	}
 
-	acpPromptText(t, server, id, "default") // the empty turn's stand-in → name "local"
-	acpPromptText(t, server, id, "local")   // provider by name, not menu number
+	acpPromptText(t, server, id, "default")               // the empty turn's stand-in → provider local
+	acpPromptText(t, server, id, "http://localhost:8080") // typed URL
 
 	chunks = acpChunks(conn)
-	if !strings.Contains(chunks[1], "provider — select") {
-		t.Errorf("after 'default': chunk = %q, want the provider question (default applied)", chunks[1])
+	if !strings.Contains(chunks[1], "URL") {
+		t.Errorf("after 'default': chunk = %q, want the URL question (default applied)", chunks[1])
 	}
-	if !strings.Contains(chunks[2], "server URL") {
-		t.Errorf("after provider by name: chunk = %q, want the URL question", chunks[2])
+	if !strings.Contains(chunks[2], "model name") {
+		t.Errorf("after the URL: chunk = %q, want the model question", chunks[2])
 	}
-	if as.pendingInit == nil || as.pendingInit.step != initStepURL {
-		t.Fatalf("wizard state = %+v, want pending at initStepURL", as.pendingInit)
+	if as.pendingInit == nil || as.pendingInit.step != initStepModel {
+		t.Fatalf("wizard state = %+v, want pending at initStepModel", as.pendingInit)
 	}
 }
 
@@ -224,18 +218,14 @@ func TestACPInit_ChatDefaultWordWithoutForms(t *testing.T) {
 	if as.formElicit {
 		t.Fatal("no initialize capabilities → the chat wizard, not forms")
 	}
-	acpPromptText(t, server, id, "default")
-	acpPromptText(t, server, id, "bedrock")
+	acpPromptText(t, server, id, "bedrock") // provider by name, not menu number
 
 	chunks := acpChunks(conn)
-	if !strings.Contains(chunks[0], "primary agent name") || !strings.Contains(chunks[0], "type 'default'") {
-		t.Errorf("chunk = %q, want the name question + the default-word hint", chunks[0])
+	if !strings.Contains(chunks[0], "Which AI should answer") || !strings.Contains(chunks[0], "type 'default'") {
+		t.Errorf("chunk = %q, want the provider question + the default-word hint", chunks[0])
 	}
-	if !strings.Contains(chunks[1], "provider — select") {
-		t.Errorf("after 'default': chunk = %q, want the provider question (default applied)", chunks[1])
-	}
-	if !strings.Contains(chunks[2], "server URL") {
-		t.Errorf("after 'bedrock': chunk = %q, want the URL question", chunks[2])
+	if !strings.Contains(chunks[1], "URL") {
+		t.Errorf("after 'bedrock': chunk = %q, want the URL question", chunks[1])
 	}
 	if as.pendingInit == nil || as.pendingInit.step != initStepURL {
 		t.Fatalf("wizard state = %+v, want pending at initStepURL", as.pendingInit)
@@ -279,19 +269,19 @@ func TestACPInit_ChoiceClicksDriveWizard(t *testing.T) {
 	if as.pendingInit != nil {
 		t.Fatal("the choice flow must finish the wizard inside the /init turn")
 	}
-	if len(*reqs) != 7 {
-		t.Fatalf("choice prompts = %d, want one per step (7)", len(*reqs))
+	if len(*reqs) != 5 {
+		t.Fatalf("choice prompts = %d, want one per step (5)", len(*reqs))
 	}
 	first := (*reqs)[0]
-	if !strings.Contains(first.Title, "primary agent name") {
+	if !strings.Contains(first.Title, "which AI answers") {
 		t.Errorf("first prompt title = %q, want the step's question", first.Title)
 	}
 	var names []string
 	for _, o := range first.Options {
 		names = append(names, o.Name)
 	}
-	if strings.Join(names, " | ") != "use default — local | type my own value… | cancel setup" {
-		t.Errorf("first prompt options = %v, want clickable default + typed escape + cancel", names)
+	if len(names) != 7 || !strings.HasPrefix(names[0], "A model on this computer") || !strings.HasSuffix(names[0], "(default)") || names[6] != "cancel setup" {
+		t.Errorf("first prompt options = %v, want the 6 provider choices (default marked) + cancel", names)
 	}
 
 	chunks := acpChunks(conn)
@@ -302,7 +292,7 @@ func TestACPInit_ChoiceClicksDriveWizard(t *testing.T) {
 		t.Errorf("wizard output must never reach the model: %q", chunks[0])
 	}
 	ag := as.st.cfg.ActiveAgent()
-	if ag.Name != "local" || ag.URL != "http://localhost:8080" || ag.Model != "qwen2.5-coder" {
+	if ag.Name != "local" || ag.URL != "http://localhost:11434" || ag.Model != "qwen2.5-coder" {
 		t.Errorf("committed agent = %+v, want the one-click default + example answers", ag)
 	}
 }
@@ -312,8 +302,8 @@ func TestACPInit_ChoiceClicksDriveWizard(t *testing.T) {
 // the flow continues back on the buttons.
 func TestACPInit_ChoiceCustomFallsToTypedInput(t *testing.T) {
 	server, conn, id, reqs := acpChoiceSession(t, func(req acp.RequestPermissionRequest) string {
-		if strings.Contains(req.Title, "primary agent name") {
-			return "pick-1" // type my own value…
+		if strings.Contains(req.Title, "server URL") {
+			return "pick-3" // type my own value…
 		}
 		return "pick-0"
 	})
@@ -324,19 +314,19 @@ func TestACPInit_ChoiceCustomFallsToTypedInput(t *testing.T) {
 		t.Fatal("the typed escape must hand the step to chat, not end the wizard")
 	}
 	chunks := acpChunks(conn)
-	if !strings.Contains(chunks[0], "primary agent name") || !strings.Contains(chunks[0], "type 'default'") {
-		t.Errorf("chunk = %q, want the name question + its per-question default hint", chunks[0])
+	if !strings.Contains(chunks[0], "URL") || !strings.Contains(chunks[0], "type 'default'") {
+		t.Errorf("chunk = %q, want the URL question + its per-question default hint", chunks[0])
 	}
 
-	acpPromptText(t, server, id, "orb")
+	acpPromptText(t, server, id, "http://localhost:9999")
 	if as.pendingInit != nil {
 		t.Fatal("wizard must be done after the typed answer + remaining clicks")
 	}
-	if got := as.st.cfg.ActiveAgent().Name; got != "orb" {
-		t.Errorf("committed name = %q, want the typed answer", got)
+	if got := as.st.cfg.ActiveAgent().URL; got != "http://localhost:9999" {
+		t.Errorf("committed URL = %q, want the typed answer", got)
 	}
-	if len(*reqs) != 7 {
-		t.Errorf("choice prompts = %d, want the typed step skipped and 6 clicks around it", len(*reqs))
+	if len(*reqs) != 5 {
+		t.Errorf("choice prompts = %d, want the URL step asked once (typed escape) with 4 clicks around it", len(*reqs))
 	}
 }
 
@@ -372,8 +362,8 @@ func TestACPInit_ChoiceClientGapFallsBackSilently(t *testing.T) {
 
 	acpPromptText(t, server, id, "/init")
 	chunks := acpChunks(conn)
-	if !strings.Contains(chunks[0], "primary agent name") || !strings.Contains(chunks[0], "type 'default'") {
-		t.Errorf("chunk = %q, want the name question + its per-question default hint", chunks[0])
+	if !strings.Contains(chunks[0], "Which AI should answer") || !strings.Contains(chunks[0], "type 'default'") {
+		t.Errorf("chunk = %q, want the provider question + its per-question default hint", chunks[0])
 	}
 	for _, bad := range []string{"form dialog failed", "permission", "request_permission"} {
 		if strings.Contains(chunks[0], bad) {
@@ -389,8 +379,8 @@ func TestACPInit_ChoiceClientGapFallsBackSilently(t *testing.T) {
 		t.Fatal("the wizard must keep running as typed input")
 	}
 	chunks = acpChunks(conn)
-	if !strings.Contains(chunks[1], "provider — select") {
-		t.Errorf("after 'default': chunk = %q, want the provider question as typed input", chunks[1])
+	if !strings.Contains(chunks[1], "URL") {
+		t.Errorf("after 'default': chunk = %q, want the URL question as typed input", chunks[1])
 	}
 }
 
@@ -399,8 +389,8 @@ func TestACPInit_ChoiceClientGapFallsBackSilently(t *testing.T) {
 // click on skip routes to the token-command step instead of asking for a key.
 func TestACPInit_ChoiceSecretSkipClick(t *testing.T) {
 	server, conn, id, reqs := acpChoiceSession(t, func(req acp.RequestPermissionRequest) string {
-		if strings.Contains(req.Title, "provider") {
-			return "pick-2" // bearer
+		if strings.Contains(req.Title, "which AI") {
+			return "pick-1" // bearer
 		}
 		return "pick-0"
 	})
@@ -428,7 +418,7 @@ func TestACPInit_ChoiceSecretSkipClick(t *testing.T) {
 		t.Errorf("credential prompt options = %v, want skip/type/cancel (no secret on the wire)", names)
 	}
 	ag := as.st.cfg.ActiveAgent()
-	if ag.Provider != "bearer" || ag.APIKey != "" || ag.URL != "https://openrouter.ai/api/v1" {
+	if ag.Provider != "bearer" || ag.APIKey != "" || ag.URL != "https://openrouter.ai/api" {
 		t.Errorf("committed agent = %+v, want bearer with the key skipped", ag)
 	}
 	chunks := acpChunks(conn)

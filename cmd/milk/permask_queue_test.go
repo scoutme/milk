@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/config"
 )
 
 // enterKey is the Enter keystroke handlePermKey answers on.
-func enterKey() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
+func enterKey() tea.KeyPressMsg { return tea.KeyPressMsg{Code: tea.KeyEnter} }
 
 func newPermTestModel() model {
 	return model{

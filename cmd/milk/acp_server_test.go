@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/loop"
@@ -56,6 +57,12 @@ func acpTestServerWithAgent(t *testing.T, h http.HandlerFunc, agentExtra string)
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
+	// The wizard's post-setup smoke check is covered by its own tests; the
+	// stub backend here only speaks streaming.
+	prevSmoke := initSmokeCheckFn
+	initSmokeCheckFn = func(context.Context, config.Config) string { return "" }
+	t.Cleanup(func() { initSmokeCheckFn = prevSmoke })
+	stubWizardModels(t, nil, errors.New("no server"))
 
 	home := t.TempDir()
 	milkDir := filepath.Join(home, ".milk")
@@ -67,6 +74,7 @@ func acpTestServerWithAgent(t *testing.T, h http.HandlerFunc, agentExtra string)
 		t.Fatalf("WriteFile config: %v", err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	cfg, err := config.LoadMerged()
 	if err != nil {

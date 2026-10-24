@@ -94,5 +94,9 @@ func tintDiffSurface(content string, width int) string {
 // render-only — so the single call-site convention holds: applied to the
 // returned render, never to the cached wrap.
 func tintFullRows(content string, width int) string {
-	return tintDiffSurface(tintThinkSurface(dimMilkAnnotationRows(content), width), width)
+	content = dimMilkAnnotationRows(content)
+	if th.modern {
+		content = modernToolRows(content)
+	}
+	return tintDiffSurface(tintThinkSurface(content, width), width)
 }

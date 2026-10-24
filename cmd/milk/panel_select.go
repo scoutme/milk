@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/sgr"
@@ -119,14 +119,14 @@ func (m *model) panelSelLines() []string {
 // other panel); any drag selects panel text for copying, scoped to that
 // panel's own lines so the selection never crosses into the transcript or
 // another panel.
-func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEvent) (tea.Model, tea.Cmd) {
+func (m *model) handlePanelMouse(region panelRegion, regionX int, ev mouseEvent) (tea.Model, tea.Cmd) {
 	const panelRowStart = 2 // same header offset as the main viewport
 	lineIdx := m.panelScrollOffset(region) + (ev.Y - panelRowStart)
 	col := panelContentCol(region, regionX)
 	var dragCmd tea.Cmd // set by press/motion; returned at the end
 
 	switch ev.Action {
-	case tea.MouseActionPress:
+	case mousePress:
 		if ev.Ctrl && m.panelSelRegion == region && m.panelSelAnchorLine >= 0 {
 			// Extend (or shrink) the existing selection to the clicked position,
 			// mirroring the transcript viewport's ctrl+click behavior.
@@ -161,7 +161,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 		m.dragResetPending = true
 		m.dragResetGen++
 		dragCmd = dragResetCmd(m.dragResetGen)
-	case tea.MouseActionMotion:
+	case mouseMotion:
 		if m.panelSelRegion == region && m.panelSelAnchorLine >= 0 {
 			m.panelSelDragging = true
 			m.panelSelEndLine = lineIdx
@@ -169,7 +169,7 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 			m.dragResetGen++
 			dragCmd = dragResetCmd(m.dragResetGen) // reschedule: release hasn't arrived yet
 		}
-	case tea.MouseActionRelease:
+	case mouseRelease:
 		m.dragResetPending = false
 		setMouseDragMode(false)
 		if m.panelSelRegion != region || m.panelSelAnchorLine < 0 {
@@ -208,10 +208,9 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev tea.MouseEv
 }
 
 // handleMemoryPanelClick runs the memory panel's existing click-for-detail
-// behavior: a single click arms the line's ID, and a second click on the same
-// ID within 400ms prints the full percept/brick content to the transcript.
+// behavior: double-click expands or collapses the content in place.
 func (m *model) handleMemoryPanelClick(lineIdx int) {
-	ids := buildPanelLineIDs(m.mem, m.currentSessionBricks())
+	_, ids := memoryPanelRows(m.mem, memoryPanelInner, m.currentSessionBricks(), m.memoryExpanded)
 	if lineIdx < 0 || lineIdx >= len(ids) {
 		return
 	}
@@ -221,15 +220,11 @@ func (m *model) handleMemoryPanelClick(lineIdx int) {
 	}
 	now := time.Now()
 	if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-		bricks := m.currentSessionBricks()
-		var result string
-		if content := brickContent(id, bricks); content != "" {
-			result = milkTag() + " [" + id + "]\n" + content
+		if m.memoryExpanded == id {
+			m.memoryExpanded = ""
 		} else {
-			result = execMemoryShow("#"+id[:min(6, len(id))], m.st)
+			m.memoryExpanded = id
 		}
-		m.appendTranscript(result + "\n")
-		m.vp.GotoBottom()
 		m.lastPanelClickID = ""
 	} else {
 		m.lastPanelClickID = id

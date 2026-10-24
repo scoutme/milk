@@ -155,13 +155,11 @@ func TestACPInitWizard_ConfiguresSessionWithoutRestart(t *testing.T) {
 	// One prompt per wizard answer; want[i] is the substring the answer must
 	// provoke next (prompt or completion summary).
 	steps := []struct{ in, want string }{
-		{"/config init", "primary agent name"},
-		{"", "provider — select"},
-		{"1", "server URL"},
-		{stubURL, "run_cmd:"},
-		{"", "model name"},
-		{"test-model", "context window"},
-		{"", "escalation agent?"},
+		{"/config init", "Which AI should answer"},
+		{"1", "URL"},
+		{stubURL, "model name"},
+		{"test-model", "escalation agent?"},
+		{"n", "tune now"},
 		{"n", "config written to"},
 	}
 	for i, s := range steps {

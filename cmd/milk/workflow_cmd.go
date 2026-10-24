@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/session"
@@ -591,7 +591,7 @@ func formatGenericAgentNames(roles []string, agentNames map[string]string) strin
 
 // handleWorkflowWizardKey handles keypresses while the workflow wizard is active.
 // Ctrl+C and Esc cancel; Enter advances to the next step.
-func (m model) handleWorkflowWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleWorkflowWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingWorkflowWizard = nil
@@ -657,7 +657,7 @@ type genericWorkflowExtendState struct {
 // handleGenericWorkflowExtendKey handles keypresses while a generic extend
 // prompt is pending. y/Enter doubles the exhausted stage's iteration limit
 // and resumes; n/Ctrl+C/Esc dismisses with an error message.
-func (m model) handleGenericWorkflowExtendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleGenericWorkflowExtendKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	ext := m.pendingGenericWorkflowExtend
 	switch msg.String() {
 	case "y", "Y", "enter", "ctrl+m":

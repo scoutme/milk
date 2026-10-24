@@ -124,11 +124,17 @@ func splitTurns(text string) []string {
 // Other modes preserve existing ANSI (e.g. agent label colors, dim thinking)
 // and only add new highlights.
 func colorizeSingle(seg string, mode ColorizeMode) string {
+	return colorizeSingleWidth(seg, mode, 0)
+}
+
+// colorizeSingleWidth is colorizeSingle for a viewport width (0 = no limit):
+// the one thing that depends on it is how wide markdown tables may get.
+func colorizeSingleWidth(seg string, mode ColorizeMode, width int) string {
 	switch mode {
 	case ColorizeFenced:
 		return colorizeCodeBlocks(seg)
 	case ColorizeBalanced:
-		return colorizeCodeBlocks(colorizeMarkdown(seg))
+		return colorizeCodeBlocks(colorizeMarkdownWidth(seg, width))
 	case ColorizeFull:
 		return colorizeFull(seg)
 	default:
@@ -385,7 +391,11 @@ var reTableSepCell = regexp.MustCompile(`^:?-+:?$`)
 // colorizeMarkdown applies light ANSI styling to inline Markdown constructs
 // outside fenced code blocks. Fenced blocks are passed through untouched so
 // they can be handled by colorizeCodeBlocks afterwards.
-func colorizeMarkdown(text string) string {
+func colorizeMarkdown(text string) string { return colorizeMarkdownWidth(text, 0) }
+
+// colorizeMarkdownWidth is colorizeMarkdown for a viewport width: tables wider
+// than width are reflowed into it (0 = no limit).
+func colorizeMarkdownWidth(text string, width int) string {
 	var sb strings.Builder
 	remaining := text
 
@@ -393,11 +403,11 @@ func colorizeMarkdown(text string) string {
 		fenceIdx := findOpenFence(remaining)
 		if fenceIdx == -1 {
 			// No more fences — style the rest.
-			sb.WriteString(applyInlineMarkdown(remaining))
+			sb.WriteString(applyInlineMarkdownWidth(remaining, width))
 			break
 		}
 		// Style the text before the fence, then preserve the fenced block verbatim.
-		sb.WriteString(applyInlineMarkdown(remaining[:fenceIdx]))
+		sb.WriteString(applyInlineMarkdownWidth(remaining[:fenceIdx], width))
 		remaining = remaining[fenceIdx:]
 
 		// Find the end of this fenced block (closing fence on its own line,
@@ -432,7 +442,11 @@ func colorizeMarkdown(text string) string {
 // don't cut it short. Inside a dim context inline styling is skipped entirely:
 // \033[1m (bold) overrides \033[2m (dim) in terminals, so **bold** in dim text
 // would render bright instead of dim.
-func applyInlineMarkdown(text string) string {
+func applyInlineMarkdown(text string) string { return applyInlineMarkdownWidth(text, 0) }
+
+// applyInlineMarkdownWidth is applyInlineMarkdown for a viewport width, see
+// renderTableBlock for how a table is fitted into it.
+func applyInlineMarkdownWidth(text string, width int) string {
 	lines := strings.Split(text, "\n")
 	var carried sgr.State // rendition the previous lines left open
 	i := 0
@@ -457,7 +471,7 @@ func applyInlineMarkdown(text string) string {
 				}
 			}
 			if hasSep {
-				rendered := renderTableBlock(lines[i:j])
+				rendered := renderTableBlock(lines[i:j], width)
 				for k, r := range rendered {
 					lines[i+k] = r
 				}
@@ -637,12 +651,22 @@ func splitTableCells(line string) []string {
 	return cells
 }
 
+// tableMinColumnWidth is the narrowest a column is squeezed to when a table
+// has to fit the viewport; below it the table is left at its natural width
+// (the wrap fallback) rather than turned into one-character columns.
+const tableMinColumnWidth = 6
+
 // renderTableBlock performs a two-pass render of a contiguous slice of raw
 // table lines. Pass 1: collect all cell text and compute the max visual width
 // per column. Pass 2: emit each row with cells padded to the column width.
 // The first non-separator row is treated as the header (bold+cyan). Separator
 // rows are rendered as a dim rule whose dashes fill each column width.
-func renderTableBlock(rawLines []string) []string {
+//
+// maxWidth > 0 is the viewport width: a table wider than it has its widest
+// columns narrowed and the cell text wrapped inside them, so every row stays
+// a row of aligned columns instead of being word-wrapped through its pipes. A
+// row with wrapped cells becomes several physical lines in one entry.
+func renderTableBlock(rawLines []string, maxWidth int) []string {
 	// Pass 1 — split every non-separator row into cells and find per-column max
 	// widths. Separator rows are excluded so their dash counts don't inflate the
 	// column widths beyond what the actual content requires.
@@ -663,6 +687,7 @@ func renderTableBlock(rawLines []string) []string {
 			}
 		}
 	}
+	colWidths = fitTableColumns(colWidths, maxWidth)
 
 	// Determine header row index: first non-separator row followed by a sep.
 	headerIdx := -1
@@ -678,46 +703,106 @@ func renderTableBlock(rawLines []string) []string {
 	// Pass 2 — render each row with equal-width columns.
 	out := make([]string, len(rawLines))
 	for i, raw := range rawLines {
-		var sb strings.Builder
 		if isTableSep(raw) {
-			// Separator row: dim dashes filling each column width.
-			sb.WriteString(ansiDim)
-			sb.WriteString("|")
-			for c, w := range colWidths {
-				sb.WriteString(" ")
-				sb.WriteString(strings.Repeat("-", w))
-				sb.WriteString(" |")
-				_ = c
-			}
-			sb.WriteString(ansiReset)
-		} else {
-			isHeader := i == headerIdx
-			cells := allCells[i]
-			if isHeader {
-				sb.WriteString(ansiBold + ansiCyan)
-			}
-			sb.WriteString("|")
-			for c, w := range colWidths {
-				sb.WriteString(" ")
-				cell := ""
-				if c < len(cells) {
-					cell = cells[c]
-				}
-				styled := styleInlineSpans(cell)
-				sb.WriteString(styled)
-				pad := w - rw.StringWidth(ansi.Strip(styled))
-				if pad > 0 {
-					sb.WriteString(strings.Repeat(" ", pad))
-				}
-				sb.WriteString(" |")
-			}
-			if isHeader {
-				sb.WriteString(ansiReset)
-			}
+			out[i] = tableSeparatorRow(colWidths)
+			continue
 		}
-		out[i] = sb.String()
+		out[i] = tableContentRow(allCells[i], colWidths, i == headerIdx)
 	}
 	return out
+}
+
+// fitTableColumns narrows the widest columns until the table (one "| " / " |"
+// frame per column plus the leading pipe) fits maxWidth. It returns widths
+// unchanged when no limit is set, the table already fits, or even the minimum
+// column width would not fit.
+func fitTableColumns(widths []int, maxWidth int) []int {
+	if maxWidth <= 0 || len(widths) == 0 {
+		return widths
+	}
+	frame := 1 + 3*len(widths)
+	total := frame
+	for _, w := range widths {
+		total += w
+	}
+	if total <= maxWidth || frame+len(widths)*tableMinColumnWidth > maxWidth {
+		return widths
+	}
+	fitted := append([]int(nil), widths...)
+	for total > maxWidth {
+		widest := 0
+		for c, w := range fitted {
+			if w > fitted[widest] {
+				widest = c
+			}
+		}
+		if fitted[widest] <= tableMinColumnWidth {
+			break
+		}
+		fitted[widest]--
+		total--
+	}
+	return fitted
+}
+
+// tableSeparatorRow is the dim rule under the header, dashes filling each
+// column.
+func tableSeparatorRow(colWidths []int) string {
+	var sb strings.Builder
+	sb.WriteString(ansiDim)
+	sb.WriteString("|")
+	for _, w := range colWidths {
+		sb.WriteString(" ")
+		sb.WriteString(strings.Repeat("-", w))
+		sb.WriteString(" |")
+	}
+	sb.WriteString(ansiReset)
+	return sb.String()
+}
+
+// tableContentRow renders one row. A cell wider than its column is wrapped
+// into extra physical lines; shorter cells are padded so the pipes of every
+// line stay in their columns. Each physical line is closed on its own.
+func tableContentRow(cells []string, colWidths []int, isHeader bool) string {
+	pieces := make([][]string, len(colWidths))
+	height := 1
+	for c, w := range colWidths {
+		cell := ""
+		if c < len(cells) {
+			cell = cells[c]
+		}
+		styled := styleInlineSpans(cell)
+		if w > 0 {
+			styled = wrapRows(styled, w)
+		}
+		pieces[c] = strings.Split(styled, "\n")
+		height = max(height, len(pieces[c]))
+	}
+	lines := make([]string, height)
+	for line := range height {
+		var sb strings.Builder
+		if isHeader {
+			sb.WriteString(ansiBold + ansiCyan)
+		}
+		sb.WriteString("|")
+		for c, w := range colWidths {
+			piece := ""
+			if line < len(pieces[c]) {
+				piece = pieces[c][line]
+			}
+			sb.WriteString(" ")
+			sb.WriteString(piece)
+			if pad := w - rw.StringWidth(ansi.Strip(piece)); pad > 0 {
+				sb.WriteString(strings.Repeat(" ", pad))
+			}
+			sb.WriteString(" |")
+		}
+		if isHeader {
+			sb.WriteString(ansiReset)
+		}
+		lines[line] = sb.String()
+	}
+	return strings.Join(lines, "\n")
 }
 
 // --- full mode: glamour ---

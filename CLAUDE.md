@@ -189,7 +189,7 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 ## Tech stack
 
 - Go 1.26.2+ (per `go.mod`), Cobra CLI
-- charmbracelet/bubbletea, bubbles/viewport, bubbles/textarea, lipgloss
+- Bubble Tea v2 (`charm.land/bubbletea/v2`), Bubbles v2 (`viewport`, `textarea`), Lip Gloss v2 (see `docs/internal/plans/bubbletea-v2-ui-modernization-plan.md`). Keys are `tea.KeyPressMsg`, pastes are `tea.PasteMsg`, `View()` returns `tea.View` (alt screen declared there); `mouse.go` flattens v2 mouse messages into one `mouseEvent`; terminal background arrives as `tea.BackgroundColorMsg` (requested in `Init`) and drives `hasDarkBackground()`/`refreshThemeColors()` in `theme.go`; chrome styles are only built by `rebuildStyles()`; `View()` also declares focus reporting and the window title (`window_title.go`), and `model.blurred` pauses background polling; global shortcuts live in `keymap.go` (`key.Binding`, `/keys`), overlays compose through `overlay.go`, and Ctrl+O opens the command palette (`palette.go`). Rationale and what was left out: [ADR-0076](docs/adr/0076-bubbletea-v2-ui-modernization.md). Two skins live in `theme.go` (`/theme off|supermilk`, persisted as `theme` in config): the neutral default and the opt-in supermilk, chrome-only, see [ADR-0077](docs/adr/0077-tui-skins.md).
 - Local agent: OpenAI-compatible inference API **or** AWS Bedrock Converse API (native, not OpenAI-compat)
 - `claude` CLI binary (Claude Code) — configured as `provider: "claude-cli"` in `agents`
 - OpenTelemetry Go SDK with custom file exporters
@@ -198,7 +198,6 @@ Default behavior: resume most recent session for cwd. `--new` creates a fresh se
 
 - Planning mode (offline)
 - Demotion from escalation back to primary mid-session
-- TUI: app-managed drag selection (currently terminal-native; selection highlight sticks to screen coords during scroll — Claude Code works around this with non-native selection)
 
 ## Token tracking: subagents and workflows
 

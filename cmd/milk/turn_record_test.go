@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
+	tea "charm.land/bubbletea/v2"
 	"context"
 	"errors"
-	tea "github.com/charmbracelet/bubbletea"
 	"io"
 	"strings"
 	"testing"

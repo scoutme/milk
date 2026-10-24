@@ -35,19 +35,26 @@ task build
 
 ## Configure a backend
 
-You need at least one working agent to do anything useful — it can serve as primary, escalation, or both. Launch milk with no config and it starts in setup mode:
+You need at least one working agent to do anything useful. Launch milk with no config and run the guided setup:
 
 ```sh
 milk
 ```
 
-Add a backend interactively:
-
 ```
-/agent add
+/config init
 ```
 
-The wizard asks for a name, URL/model (or `claude-cli`/`aider-cli`/`subprocess` provider), and credentials, and appends the entry to `~/.milk/config.json`. Assign it to a role:
+(`/init` is the short alias.) It is a handful of plain questions, one decision per screen, and every question has a default you can accept with Enter:
+
+1. **Which AI answers your everyday prompts?** — a model on this computer (Ollama, llama.cpp, LM Studio, vLLM), a cloud API key (OpenRouter, Groq, Together, GitHub Copilot, …), AWS Bedrock, or the Claude Code CLI you already have. This is the *primary*: cheap and fast.
+2. **Where is it / which model / what key?** — only what that choice needs. A local server defaults to `http://localhost:11434` (Ollama); a cloud API to OpenRouter. Keys are saved only in `config.json` and never sent to the model.
+3. **Hand hard tasks to Claude Code?** — the *escalation*: a stronger AI milk switches to when a task is too hard for the primary. Defaults to yes if the `claude` CLI is on your `PATH`, no otherwise.
+4. **Fine-tune optional settings?** — the server start command, context size and agents-as-tools. Skip it and milk uses sensible defaults; anything you skip can be changed later with `/config`.
+
+Then milk writes `~/.milk/config.json`, applies it immediately (no restart), and sends one tiny request to your primary. If it answers you see "you're ready" plus the first commands to try (`/help`, `/sessions`, `/permissions`); if not, you get the reason — wrong URL, server down, rejected key or model — and your settings stay saved so you can re-run `/config init` or edit them with `/config open`. The same questions in the same order run over ACP (`milk serve --acp`), as forms, clickable choices or plain chat.
+
+Editing `~/.milk/config.json` by hand, or adding more backends one at a time with `/agent add`, is the advanced alternative. Assign any configured agent to a role:
 
 ```
 /agent switch <name> as primary

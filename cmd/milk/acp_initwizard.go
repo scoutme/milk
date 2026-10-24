@@ -71,7 +71,9 @@ func (as *acpSession) commitInitWizard(res initWizardResult) string {
 		return "\n" + milkTag() + " config saved, but this session could not reload it (" +
 			err.Error() + ") — new sessions will pick it up\n"
 	}
-	return ""
+	ctx, cancel := context.WithTimeout(context.Background(), initSmokeTimeout)
+	defer cancel()
+	return initSmokeCheckFn(ctx, *res.Committed)
 }
 
 // initWizardFieldHint describes what the blank/'default' answer does for a

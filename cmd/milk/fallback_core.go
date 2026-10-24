@@ -46,7 +46,11 @@ func claudeConsentQuestion(cfg config.Config, outage bool, reason string) string
 		return fmt.Sprintf("Primary agent %s is unavailable and no escalation agent is configured. Claude Code is available on this host — run this turn on it? %s",
 			primaryDisplayName(cfg), claudeConsentTail)
 	default:
-		return fmt.Sprintf("No escalation agent is configured. Claude Code is available on this host — run this turn on it? %s", claudeConsentTail)
+		hint := ""
+		if !cfg.HasInferenceAgent() {
+			hint = "No agent is set up yet — run /config init for the guided setup. "
+		}
+		return fmt.Sprintf("%sNo escalation agent is configured. Claude Code is available on this host — run this turn on it? %s", hint, claudeConsentTail)
 	}
 }
 

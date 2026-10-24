@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -19,7 +18,7 @@ func layoutTestModel(t *testing.T, width, height int) model {
 		transcript: &strings.Builder{},
 	}
 	m.st = &interactiveState{sess: &session.Session{}}
-	m.ta = textarea.New()
+	m.ta = buildTextarea()
 	// A zero-value model would read as a live selection on line 0 (anchor and
 	// end both 0) and applySelectionHighlight would highlight that row —
 	// start with no selection, like newModel does.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/transport/acp"
 )
@@ -43,7 +43,7 @@ func TestPermissionsCommands_RunWhileBusy(t *testing.T) {
 			m.st.notifier = newNotifier(m.st.cfg)
 			m.busy = true
 			m.ta.SetValue(tt.input)
-			out, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyEnter})
+			out, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 			got := out.(model)
 			if strings.Contains(got.busyHint, "unavailable") {
 				t.Fatalf("busy Enter refused %q: %q", tt.input, got.busyHint)
