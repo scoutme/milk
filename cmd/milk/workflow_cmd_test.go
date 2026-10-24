@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
@@ -758,7 +758,7 @@ func TestHandleGenericWorkflowExtendKey_Yes_RelaunchesWithOverride(t *testing.T)
 		maxIterations: 3,
 	}
 
-	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyPressMsg{Code: []rune("y")[0], Text: "y"})
 	nm := newM.(model)
 	if nm.pendingGenericWorkflowExtend != nil {
 		t.Error("expected pendingGenericWorkflowExtend to be cleared")
@@ -776,7 +776,7 @@ func TestHandleGenericWorkflowExtendKey_No_Halts(t *testing.T) {
 		stageID:       "pass_loop",
 		maxIterations: 3,
 	}
-	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	newM, _ := m.handleGenericWorkflowExtendKey(tea.KeyPressMsg{Code: []rune("n")[0], Text: "n"})
 	nm := newM.(model)
 	if nm.pendingGenericWorkflowExtend != nil {
 		t.Error("expected pendingGenericWorkflowExtend to be cleared")

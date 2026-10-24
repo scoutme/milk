@@ -2,13 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
-	"github.com/aymanbagabas/go-osc52/v2"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/session"
@@ -157,6 +155,12 @@ func (m *model) wrappedTranscript() string {
 	// key because colorization covers the full transcript regardless of scroll
 	// position, and GotoBottom legitimately advances YOffset after every append.
 	vpChanged := vw != m.colorizeVPWidth
+	if vpChanged {
+		// Tables are fitted to the viewport width, so the per-turn colorized
+		// cache is only valid for the width it was built at.
+		m.turnColorCache = nil
+		m.turnRawCache = nil
+	}
 	txGrew := txLen - m.colorizeTransLen
 	if txGrew < 0 {
 		// The display shrank without an explicit invalidate (defensive — every
@@ -229,7 +233,7 @@ func (m *model) wrappedTranscript() string {
 			if i < len(m.turnColorCache) && i < len(m.turnRawCache) && m.turnRawCache[i] == seg {
 				colorized.WriteString(m.turnColorCache[i])
 			} else {
-				result := colorizeSingle(seg, m.colorizeMode)
+				result := colorizeSingleWidth(seg, m.colorizeMode, vw)
 				if i < len(m.turnColorCache) {
 					m.turnColorCache[i] = result
 					m.turnRawCache[i] = seg
@@ -241,7 +245,7 @@ func (m *model) wrappedTranscript() string {
 			}
 		} else {
 			// Last (incomplete) turn: always re-colorize.
-			colorized.WriteString(colorizeSingle(seg, m.colorizeMode))
+			colorized.WriteString(colorizeSingleWidth(seg, m.colorizeMode, vw))
 		}
 	}
 	// Trim completed turns from cache if transcript shrank (shouldn't happen
@@ -335,14 +339,23 @@ func (m *model) clearSelection() {
 	m.selText = ""
 }
 
+// clipboardProgram is the running TUI program, set before Run. Nil outside
+// the TUI (single-prompt mode, tests), where only the OS clipboard is used.
+var clipboardProgram *tea.Program
+
 // copyToClipboard writes text to the system clipboard via atotto/clipboard (which
 // handles WSL via clip.exe, Wayland via wl-copy, X11 via xclip/xsel) and also
-// emits an OSC 52 sequence as a fallback for SSH or tmux environments.
+// asks the terminal to set it (OSC 52 through tea.SetClipboard) as a fallback
+// for SSH or tmux environments.
 var copyToClipboard = func(text string) {
 	// Primary: OS clipboard (works on WSL, X11, Wayland, macOS).
 	_ = clipboard.WriteAll(text)
-	// Secondary: OSC 52 — picked up by terminals that support it (kitty, iTerm2, tmux).
-	osc52.New(text).WriteTo(os.Stderr)
+	// Secondary: the terminal's clipboard, through the renderer. Send blocks
+	// until the event loop reads it, and callers run inside Update, so it goes
+	// out from a goroutine.
+	if p := clipboardProgram; p != nil {
+		go p.Send(tea.SetClipboard(text)())
+	}
 }
 
 // copyOnSelectRelease copies text right after a mouse selection is released
@@ -467,19 +480,22 @@ func writeSeedTurn(b *strings.Builder, st *interactiveState, t session.Turn) {
 		if text == "" {
 			return
 		}
-		b.WriteString(promptLabel(st) + colorizeTokens(text) + "\n")
+		b.WriteString(userEcho(promptLabel(st), colorizeTokens(text)))
 	case session.RoleAssistant:
 		if text == "" {
 			return
 		}
 		name := t.AgentName
-		paint := green
+		role := "primary"
 		if t.Agent == session.AgentEscalation {
-			paint = blue
+			role = "escalation"
 		}
 		if name == "" {
 			name = string(t.Agent)
 		}
-		b.WriteString(bold(paint(name+":")) + " " + text + "\n\n")
+		b.WriteString(agentTag(name, role) + text + "\n")
+		if !th.modern {
+			b.WriteByte('\n')
+		}
 	}
 }

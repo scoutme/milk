@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 type probeModel struct {
@@ -29,7 +29,7 @@ func (p *probeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return p, nil
 }
 
-func (p *probeModel) View() string { return "" }
+func (p *probeModel) View() tea.View { return tea.NewView("") }
 
 // Feeds raw terminal byte sequences (the common encodings of Ctrl+Enter)
 // through a real bubbletea program and prints what Update receives.

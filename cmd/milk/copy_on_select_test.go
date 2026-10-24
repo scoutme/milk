@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/scoutme/milk/internal/config"
 )
 
@@ -19,9 +19,9 @@ func stubClipboard(t *testing.T) *[]string {
 func selectTranscriptWithMouse(m *model) tea.Cmd {
 	m.appendTranscript("hello world\n")
 	m.setViewportContent()
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 0, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}))
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 5, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}))
-	_, cmd := m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 5, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}))
+	m.handleMouse(mouseEvent{X: 0, Y: 2, Button: tea.MouseLeft, Action: mousePress}.msg())
+	m.handleMouse(mouseEvent{X: 5, Y: 2, Button: tea.MouseLeft, Action: mouseMotion}.msg())
+	_, cmd := m.handleMouse(mouseEvent{X: 5, Y: 2, Button: tea.MouseLeft, Action: mouseRelease}.msg())
 	return cmd
 }
 
@@ -66,8 +66,8 @@ func TestCopyOnSelect_ClickWithoutDragDoesNotCopy(t *testing.T) {
 	m.appendTranscript("hello world\n")
 	m.setViewportContent()
 
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 3, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}))
-	m.handleMouse(tea.MouseMsg(tea.MouseEvent{X: 3, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}))
+	m.handleMouse(mouseEvent{X: 3, Y: 2, Button: tea.MouseLeft, Action: mousePress}.msg())
+	m.handleMouse(mouseEvent{X: 3, Y: 2, Button: tea.MouseLeft, Action: mouseRelease}.msg())
 
 	if len(*copied) != 0 {
 		t.Fatalf("a plain click must not copy, got %q", *copied)

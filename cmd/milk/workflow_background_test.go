@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
@@ -72,7 +72,7 @@ func TestCtrlC_WhileTurnBusy_CancelsTurnNotWorkflow(t *testing.T) {
 	m.busy = true
 	m.cancelTurn = func() { turnCancelled = true }
 
-	newM, _ := m.handleBusyKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	newM, _ := m.handleBusyKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	nm := newM.(model)
 	if !turnCancelled || *cancels != 0 || !nm.workflowRunning {
 		t.Errorf("Ctrl+C mid-turn must cancel only the turn: turn=%v workflowCancels=%d running=%v", turnCancelled, *cancels, nm.workflowRunning)
@@ -148,7 +148,7 @@ func TestDesignerAnswer_RoutesEvenWhileTurnBusy_AndStaysBackground(t *testing.T)
 	m.ta = buildTextarea()
 	m.ta.SetValue("use defaults")
 
-	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	newM, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := newM.(model)
 
 	select {

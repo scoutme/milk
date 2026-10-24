@@ -175,6 +175,9 @@ func DeepMerge(dst, src Config) Config {
 	}
 
 	// String overrides ("" = unset — never clobbers the base it merges into)
+	if src.Theme != "" {
+		dst.Theme = src.Theme
+	}
 	if src.ThinkFoldDefault != "" {
 		dst.ThinkFoldDefault = src.ThinkFoldDefault
 	}
@@ -185,6 +188,9 @@ func DeepMerge(dst, src Config) Config {
 	}
 	if src.ShowTips != nil {
 		dst.ShowTips = src.ShowTips
+	}
+	if src.Animations != nil {
+		dst.Animations = src.Animations
 	}
 	if src.CopyOnSelect != nil {
 		dst.CopyOnSelect = src.CopyOnSelect
@@ -508,16 +514,17 @@ const DefaultEscalateAfterRecoveries = 4
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
 	LogLevel            string `json:"log_level"`   // minimum log level: DEBUG | INFO | WARN | ERROR (default INFO)
-	LogFormat           string `json:"log_format"`  // "text" (default, human-readable), "json" (structured), "off" (disabled)
+	LogFormat           string `json:"log_format"`  // "text" (default, human-readable), "json" (structured), "pretty" (colored, for tail -f / less -R), "off" (disabled)
 	LogContext          bool   `json:"log_context"` // when true, log the full serialised request payload on each inference call
 	Traces              bool   `json:"traces"`
 	Metrics             bool   `json:"metrics"`
-	WarnMB              int    `json:"warn_mb"`                       // warn when any otel file exceeds this (0 = off)
-	MaxMB               int    `json:"max_mb"`                        // hard cap, disable otel when exceeded (0 = off)
-	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`         // periodic flush interval (0 = session-end only)
-	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"` // saved by debug enable; restored by debug disable
-	DebugLogMaxBytes    int64  `json:"debug_log_max_bytes"`           // per-file cap, default 104857600 (100 MB)
-	DebugLogMaxFiles    int    `json:"debug_log_max_files"`           // rotated files to keep, default 5
+	WarnMB              int    `json:"warn_mb"`                        // warn when any otel file exceeds this (0 = off)
+	MaxMB               int    `json:"max_mb"`                         // hard cap, disable otel when exceeded (0 = off)
+	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`          // periodic flush interval (0 = session-end only)
+	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"`  // saved by debug enable; restored by debug disable
+	PreDebugLogFormat   string `json:"pre_debug_log_format,omitempty"` // saved by debug enable (which switches to "pretty"); restored by debug disable
+	DebugLogMaxBytes    int64  `json:"debug_log_max_bytes"`            // per-file cap, default 104857600 (100 MB)
+	DebugLogMaxFiles    int    `json:"debug_log_max_files"`            // rotated files to keep, default 5
 }
 
 // AgentConfig holds configuration for a single agent backend.
@@ -1082,6 +1089,10 @@ type Config struct {
 	// seeds TUI display.
 	ThinkFoldDefault string `json:"think_fold_default,omitempty"`
 
+	// Theme selects the TUI colour theme: ""/"off" (default, the original
+	// look) or "supermilk". Switch live with /theme.
+	Theme string `json:"theme,omitempty"`
+
 	// ShowTips controls whether the TUI's idle tip line below the input is
 	// shown (ADR-0061). Can be toggled live with /tips on|off.
 	// unset (default) = shown; false = hidden.
@@ -1091,6 +1102,10 @@ type Config struct {
 	// button is released, instead of waiting for a right-click or ctrl+c.
 	// false (default) = keep the selection until the user copies it.
 	CopyOnSelect *bool `json:"copy_on_select,omitempty"`
+
+	// Animations turns the TUI's spring animations (side panels sliding in
+	// and out, wheel scrolling with inertia) on or off. Unset = on.
+	Animations *bool `json:"animations,omitempty"`
 
 	// StickyEscalation controls whether the escalation agent is automatically
 	// kept for subsequent turns after the router first escalates (without an
@@ -2260,6 +2275,12 @@ func (c Config) ThinkFoldExpanded() bool {
 // to the clipboard immediately (false when unset).
 func (c Config) CopyOnSelectEnabled() bool {
 	return c.CopyOnSelect != nil && *c.CopyOnSelect
+}
+
+// AnimationsEnabled reports whether the TUI's spring animations run (true
+// unless "animations": false is set).
+func (c Config) AnimationsEnabled() bool {
+	return c.Animations == nil || *c.Animations
 }
 
 // StickyEscalationEnabled returns true when router-triggered escalations

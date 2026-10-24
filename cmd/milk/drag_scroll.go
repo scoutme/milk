@@ -3,8 +3,8 @@ package main
 import (
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 const (
@@ -56,7 +56,7 @@ func (m *model) dragEdgeDir(y int) int {
 	switch {
 	case y < top:
 		return -1
-	case y >= top+m.vp.Height:
+	case y >= top+m.vp.Height():
 		return 1
 	}
 	return 0
@@ -74,11 +74,11 @@ func (m *model) stopDragScroll() {
 // the selection end follows the edge line. Terminals send no repeat events for
 // a stationary pointer, so the first outside motion arms a tick loop. A release
 // outside the rows (which the per-view handlers ignore) finalizes the drag here.
-func (m *model) handleDragEdgeMouse(ev tea.MouseEvent, region panelRegion, regionX int) (tea.Cmd, bool) {
-	if ev.Button != tea.MouseButtonLeft {
+func (m *model) handleDragEdgeMouse(ev mouseEvent, region panelRegion, regionX int) (tea.Cmd, bool) {
+	if ev.Button != tea.MouseLeft {
 		return nil, false
 	}
-	if ev.Action == tea.MouseActionPress {
+	if ev.Action == mousePress {
 		m.stopDragScroll()
 		return nil, false
 	}
@@ -88,7 +88,7 @@ func (m *model) handleDragEdgeMouse(ev tea.MouseEvent, region panelRegion, regio
 		return nil, false
 	}
 	dir := m.dragEdgeDir(ev.Y)
-	if ev.Action == tea.MouseActionRelease {
+	if ev.Action == mouseRelease {
 		m.stopDragScroll()
 		if dir == 0 {
 			return nil, false
@@ -136,13 +136,13 @@ func (m *model) handleDragScrollTick(gen uint64) tea.Cmd {
 }
 
 func scrollViewportBy(vp *viewport.Model, dir int) bool {
-	before := vp.YOffset
+	before := vp.YOffset()
 	if dir < 0 {
 		vp.ScrollUp(1)
 	} else {
 		vp.ScrollDown(1)
 	}
-	return vp.YOffset != before
+	return vp.YOffset() != before
 }
 
 // dragAutoScrollStep scrolls the owning view one line toward dragScrollDir and
@@ -166,20 +166,20 @@ func (m *model) dragAutoScrollStep() bool {
 		vp := &m.attached.vp
 		moved := scrollViewportBy(vp, dir)
 		m.attachSelDragging = true
-		m.attachSelEndLine = edgeLine(vp.YOffset, vp.Height, vp.TotalLineCount())
+		m.attachSelEndLine = edgeLine(vp.YOffset(), vp.Height(), vp.TotalLineCount())
 		m.attachSelEndCol = col
 		m.syncAttachedContent()
 		return moved
 	case dragTranscript:
 		moved := scrollViewportBy(&m.vp, dir)
 		m.selDragging = true
-		m.selEndLine = edgeLine(m.vp.YOffset, m.vp.Height, m.vp.TotalLineCount())
+		m.selEndLine = edgeLine(m.vp.YOffset(), m.vp.Height(), m.vp.TotalLineCount())
 		m.selEndCol = col
 		m.setViewportContent()
 		return moved
 	case dragPanel:
 		region := m.panelSelRegion
-		h := m.vp.Height
+		h := m.vp.Height()
 		p := m.panelOffsetPtr(region)
 		before := *p
 		if dir < 0 {

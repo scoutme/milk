@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
@@ -37,7 +37,7 @@ func TestHandleInitWizardKey_CommitRebuildsRunners(t *testing.T) {
 	answer := func(s string) {
 		t.Helper()
 		m.ta.SetValue(s)
-		res, _ := m.handleInitWizardKey(tea.KeyMsg{Type: tea.KeyEnter})
+		res, _ := m.handleInitWizardKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = res.(model)
 	}
 

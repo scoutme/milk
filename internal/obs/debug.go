@@ -20,7 +20,7 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 		format = "text"
 	}
 	switch format {
-	case "text", "json":
+	case "text", "json", LogFormatPretty:
 	default:
 		milkLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 		return func() {}, nil
@@ -47,14 +47,20 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 	}
 
 	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}
-	var h slog.Handler
-	if format == "json" {
-		h = slog.NewJSONHandler(rw, opts)
-	} else {
-		h = slog.NewTextHandler(rw, opts)
-	}
-	milkLogger = slog.New(h)
+	milkLogger = slog.New(newLogHandler(format, rw, opts))
 	return func() { rw.Close() }, nil //nolint:errcheck
+}
+
+// newLogHandler picks the handler for a validated format name.
+func newLogHandler(format string, w io.Writer, opts *slog.HandlerOptions) slog.Handler {
+	switch format {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	case LogFormatPretty:
+		return newPrettyHandler(w, opts.Level.Level())
+	default:
+		return slog.NewTextHandler(w, opts)
+	}
 }
 
 func parseLogLevel(s string) slog.Level {

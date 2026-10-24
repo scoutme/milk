@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/claudesettings"
@@ -45,6 +45,7 @@ const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
 const cmdTips = "/tips"
+const cmdTheme = "/theme"
 const cmdRestart = "/restart"
 const cmdInterrupt = "/interrupt"
 const cmdSetup = "/setup"
@@ -57,6 +58,7 @@ const cmdServer = "/server"
 const cmdBash = "/bash"
 const cmdBg = "/bg"
 const cmdNotifications = "/notifications"
+const cmdKeys = "/keys"
 
 var slashCommands = registryNames()
 
@@ -320,10 +322,12 @@ var busySafeCommands = map[string]bool{
 	"/help":          true,
 	cmdThink:         true,
 	cmdTips:          true,
+	cmdTheme:         true,
 	cmdColorize:      true,
 	cmdPanel:         true,
 	cmdHistory:       true,
 	cmdNotifications: true,
+	cmdKeys:          true,
 	cmdInterrupt:     true,
 	cmdMemory:        true,
 	cmdUsage:         true,
@@ -427,6 +431,8 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// reach the model's think-block fold state. This case is a no-op
 		// here; the TUI intercepts cmdThink before it reaches
 		// handleSlashCommand. Guard to prevent "unknown command" output.
+	case cmdKeys:
+		// Rendered by the TUI in handleSlashInput (commands.go); no-op here.
 	case cmdNotifications:
 		// History lives on the TUI model; the TUI intercepts this in
 		// handleSlashInput (commands.go) before it reaches here. Guard to

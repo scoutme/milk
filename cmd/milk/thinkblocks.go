@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/livebuf"
@@ -119,13 +119,13 @@ const (
 // thinkBgParams is the thinking-surface background as the SGR parameters that
 // set it — the form sgr.State.BG reports, which the full-row painter
 // (tintThinkSurface) matches by value. ansiThinkBg is derived from it.
-const thinkBgParams = "48;5;235"
+var thinkBgParams = originalThinkBgParams
 
 // ansiThinkBg is the thinking-surface background: fold containers render on
 // it so the thinking region is a visibly different surface from the standard
 // transcript (header and body alike, every fold state). Applied at render
 // time only — the transcript and block buffers stay plain.
-const ansiThinkBg = "\033[" + thinkBgParams + "m"
+var ansiThinkBg = "\033[" + thinkBgParams + "m"
 
 // thinkSurfaceLines paints every line of s with code (see paintLines). A blank
 // line still gets its code+reset pair: a blank reasoning line is a row of the
@@ -135,11 +135,21 @@ const ansiThinkBg = "\033[" + thinkBgParams + "m"
 func thinkSurfaceLines(s, code string) string { return paintLines(s, code, true) }
 
 // thinkHeaderLine styles a fold-header line: dim on the thinking surface.
-func thinkHeaderLine(s string) string { return thinkSurfaceLines(s, ansiThinkBg+ansiDim) }
+func thinkHeaderLine(s string) string {
+	if th.modern {
+		return thinkSurfaceLines(s, ansiThinkBg+"\033[3m"+tkMuted.sgrFg())
+	}
+	return thinkSurfaceLines(s, ansiThinkBg+ansiDim)
+}
 
 // thinkBodyLine styles a reasoning body: full-contrast text on the thinking
 // surface (the background — not dimming — marks reasoning).
-func thinkBodyLine(s string) string { return thinkSurfaceLines(s, ansiThinkBg) }
+func thinkBodyLine(s string) string {
+	if th.modern {
+		return thinkSurfaceLines(compactBlankLines(s), ansiThinkBg+"\033[3m"+tkThink.sgrFg())
+	}
+	return thinkSurfaceLines(s, ansiThinkBg)
+}
 
 // tintThinkSurface makes the thinking surface a full-row one. content is the
 // already-wrapped render, whose rows are self-contained (wrapRows): every row

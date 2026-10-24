@@ -60,12 +60,12 @@ func green(s string) string      { return colorize(s, ansiGreen) }
 func blue(s string) string       { return colorize(s, ansiBlue) }
 func yellow(s string) string     { return colorize(s, ansiYellow) }
 func red(s string) string        { return colorize(s, ansiRed) }
-func dim(s string) string        { return colorize(s, ansiDim) }
+func dim(s string) string        { return colorize(s, dimCode()) }
 func bold(s string) string       { return colorize(s, ansiBold) }
 func boldYellow(s string) string { return colorize(s, "\033[1;33m") }
-func boldGold(s string) string   { return colorize(s, "\033[1;38;2;255;208;60m") }
+func boldGold(s string) string   { return colorize(s, accentStyle()) }
 
-func dimLines(s string) string { return colorize(s, ansiDim) }
+func dimLines(s string) string { return colorize(s, dimCode()) }
 
 // milkTag returns the dimmed [milk] system prefix.
 func milkTag() string { return dim("[milk]") }
@@ -105,28 +105,9 @@ func dimMilkAnnotationRows(content string) string {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// pulseColors is a 16-step cosine-eased yellow breathing gradient using truecolor.
-// Cycles from near-black yellow (dim) to bright yellow (peak) and back, giving a
-// smooth sine-wave brightness curve that ANSI dim/bold levels cannot approximate.
-// Advances every spinner tick (80 ms/step → ~1.28 s per full breath).
-var pulseColors = [16]string{
-	"\033[38;2;60;50;0m",
-	"\033[38;2;67;58;1m",
-	"\033[38;2;81;73;4m",
-	"\033[38;2;110;101;9m",
-	"\033[38;2;157;135;15m",
-	"\033[38;2;204;170;20m",
-	"\033[38;2;232;197;25m",
-	"\033[38;2;251;215;28m",
-	"\033[38;2;255;220;30m",
-	"\033[38;2;251;215;28m",
-	"\033[38;2;232;197;25m",
-	"\033[38;2;204;170;20m",
-	"\033[38;2;157;135;15m",
-	"\033[38;2;110;101;9m",
-	"\033[38;2;81;73;4m",
-	"\033[38;2;67;58;1m",
-}
+// pulseColors is the 16-step breathing gradient (theme.go: buildPulse); the
+// original yellow ramp unless a theme is active. Peak at index 8.
+var pulseColors = originalPulse
 
 // pulse applies a cosine-eased breathing color effect keyed to the spinner frame counter.
 func pulse(s string, frame int) string {
@@ -150,6 +131,12 @@ func staleContentColor(ratio float64) string {
 	}
 	if ratio > 1 {
 		ratio = 1
+	}
+	if th.modern {
+		// grey → dark grey: readable on a light ground, staleness reads as
+		// the text settling into the page
+		g := 150 + int(float64(58-150)*ratio)
+		return fmt.Sprintf("\033[0;38;2;%d;%d;%dm", g, g-2, g-6)
 	}
 	// Truecolor gradient, no \033[2m dim modifier:
 	//   ratio=0   → (220, 218, 215)  bright near-white  (full brightness, fresh)
@@ -196,20 +183,11 @@ func stalenessLegend(inner int) string {
 	return out.String()
 }
 
-// logoMark is the diamond glyph used in the header.
-const logoMark = "◈"
-
-// headerLogo returns the styled logo string for the persistent header bar.
-// The ◈ mark pulses through the breathing gradient keyed to frame.
-// Use frame=8 (peak brightness) for a static appearance when idle.
-// Layout: pulsing ◈ · bold "milk" in bright gold
-func headerLogo(frame int) string {
+func headerLogo(_ int) string {
 	if !isTTY {
-		return logoMark + " milk"
+		return "milk"
 	}
-	mark := pulseColors[frame%len(pulseColors)] + logoMark + ansiReset
-	name := boldGold("milk")
-	return mark + " " + name
+	return boldGold("milk")
 }
 
 // Spinner prints an animated spinner on the current line until Stop is called.

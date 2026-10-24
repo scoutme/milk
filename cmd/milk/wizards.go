@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scoutme/milk/internal/agent/claude"
 	"github.com/scoutme/milk/internal/agent/local"
@@ -176,7 +176,7 @@ func addAgentPrompt(step addAgentStep, ac config.AgentConfig) string {
 }
 
 // handleAddAgentKey handles keypresses during the /agent add wizard.
-func (m model) handleAddAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAddAgentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingAdd = nil
@@ -591,7 +591,7 @@ func mcpAddPrompt(step addMCPStep, current string) string {
 }
 
 // handleAddMCPKey handles keypresses during the /mcp add wizard.
-func (m model) handleAddMCPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAddMCPKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingMCPAdd = nil
@@ -937,7 +937,7 @@ func initWizardPrompt(st *initWizardState) string {
 }
 
 // handleInitWizardKey handles keypresses during the /init wizard.
-func (m model) handleInitWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleInitWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingInit = nil
@@ -1072,7 +1072,7 @@ func (m model) startSwitchAgent(inline string) (model, tea.Cmd) {
 }
 
 // handleSwitchAgentKey handles keypresses during the /agent switch wizard.
-func (m model) handleSwitchAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleSwitchAgentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingSwitch = nil
@@ -1456,7 +1456,7 @@ func (m model) startAgentTool(sub string) (model, tea.Cmd) {
 }
 
 // handleAgentToolWizardKey handles keypresses during the /agent tool wizard.
-func (m model) handleAgentToolWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAgentToolWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingTool = nil

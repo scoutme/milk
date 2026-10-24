@@ -1449,6 +1449,7 @@ const systemPromptShared = `Rules:
 3. Call get_session_context with agent: "escalation" to check whether the escalation agent made those changes.
 4. Only proceed with a commit if step 2 OR step 3 returned clear context that explains the changes and their purpose. Use that context to write an accurate commit message.
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.
+- ` + escalation.TableGuidance + `
 - To manage milk's own configuration (agents, MCP servers, memory, routing, etc.), call milk_config_help(topic) for docs instead of guessing config.json's schema. To write changes use bash with "milk config mcp add|remove|assign|unassign ..." or "milk config agent add|remove ..." — ` + escalation.ConfigWriteWarning
 
 // systemPromptWorkflow is used for workflow step executors (designer, generator,

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // bgAgentWizardState is the one-question "which agent runs this background
@@ -61,7 +61,7 @@ func (w *bgAgentWizardState) validChoice(answer string) bool {
 	return false
 }
 
-func (m model) handleBgAgentWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleBgAgentWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingBgAgent = nil

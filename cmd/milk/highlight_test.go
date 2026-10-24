@@ -553,7 +553,7 @@ func TestRenderTableBlock_EqualWidths(t *testing.T) {
 		"| Table rendering | Two-pass renderer |",
 		"| Bug fix | 1-based index |",
 	}
-	rendered := renderTableBlock(rawLines)
+	rendered := renderTableBlock(rawLines, 0)
 	if len(rendered) != 4 {
 		t.Fatalf("expected 4 rendered lines, got %d", len(rendered))
 	}

@@ -104,6 +104,12 @@ Where it shows: the TUI status bar (live `tok/s` estimate while streaming; `(las
 
 `otel.log_context: true` logs the full content of every request payload at DEBUG level to `~/.milk/otel/logs.jsonl` (requires `log_level: "DEBUG"`) — covers the claude-cli static/dynamic context files and prompt, the full local/Bedrock inference request body, and subprocess agents' context/prompt temp files.
 
+### Colored structured log (`log_format: "pretty"`)
+
+`milk.log` is written as `text` by default. `"log_format": "pretty"` writes the same records through Charm's `log` handler: colored level, timestamp, message and `key=value` attributes. Colors are forced into the file, so read it with `tail -f` or `less -R`. `milk otel debug enable` switches a plain format to `pretty` and `milk otel debug disable` restores the previous one (an explicit `pretty`, `json` or `off` is respected; the change applies from the next start).
+
+Every answer from an agent logs one `agent response` line at INFO, so it shows without debug: `agent`, `model`, `role`, `input`, `output`, `cache_read`/`cache_write`, `ttft_ms`, `tok_s` and `cost_usd`. Values the provider did not report are left out, never written as 0.
+
 ### Raw debug logs
 
 Separate from OTel, three flags capture raw protocol traffic verbatim:
@@ -382,6 +388,8 @@ Tips are browsable, not just rotatable:
 | **F1 / F2 / F3 / F4 / F5 / F6** | Show/hide the memory / tasks / background-agents / workflow / project tree / git graph panel — same effect as `/panel <name>`. Works in any mode, including mid-turn. |
 | **Alt+Up / Alt+Down** | Show the previous / next idle tip (same as `/tips prev`, `/tips next`). Referenced at the right edge of every tip line. |
 | **Ctrl+G** | Dismiss all open notification toasts (history stays: `/notifications`) |
+| **Ctrl+O** | Open the command palette: filter the slash commands, Enter puts the command in the input line (Esc closes) |
+| `/keys` | List every shortcut (panels, navigation, input) from the one key registry (`keymap.go`) |
 | **Ctrl+T** | Toggle the most recent thinking block — the one still streaming, else the last completed one (works during streaming). Reasoning renders as foldable blocks, folded by default (streaming included — the header's line count updates live as reasoning arrives): click a `▸ thinking · N lines` header to expand/collapse just that block. |
 
 Turn-unrelated informational events — fold-state changes, panel open/close, background-job lifecycle, credential refreshes — surface as floating toasts in the top-right corner (timestamped, each with the related slash-command hint, auto-expiring after a few seconds). They are **not** part of the transcript; `/notifications` shows the full history with timestamps (`/notifications clear` empties them). Tool calls and turn-bound output stay in the transcript. One deliberate exception: a finished background job's *result* is content rather than lifecycle noise and is appended to the transcript as the job completes (capped to the model's delivery budget, `/bg show <id>` for the rest — see [Background sub-agents](#background-sub-agents)); only its lifecycle *notice* stays toast-only.
