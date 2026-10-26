@@ -660,6 +660,12 @@ type Agent struct {
 	// only, "full" a budgeted Aider-style map per turn. Stable config
 	// (AgentConfig.ProjectMapContext) — copied by cloneForBackground.
 	projectMapContext config.ProjectMapMode
+	// projectMapBudgetFiles/Chars are the window-derived project_map default
+	// caps (config.Config.AgentContextWindowTokens via WithProjectMapBudget);
+	// zero = unwired → the package constants. Stable config — copied by
+	// cloneForBackground.
+	projectMapBudgetFiles int
+	projectMapBudgetChars int
 	// disableProjectInstructions turns off loading the target repo's
 	// AGENTS.md/CLAUDE.md into the system prompt (AgentConfig.DisableProjectInstructions).
 	disableProjectInstructions bool
@@ -973,6 +979,19 @@ func (a *Agent) WithMaxPayloadBytes(n int) *Agent {
 func (a *Agent) WithCompactionTrigger(tokens int) *Agent {
 	copy := *a
 	copy.compactTriggerTokens = tokens
+	return &copy
+}
+
+// WithProjectMapBudget derives project_map's default caps from the agent's
+// resolved context window (0 = unknown → the historical defaults) and wires
+// them onto the ctx for every tool call and pushed block of a run. See
+// projectMapDeriveBudget for the formula; call-site max_files/max_chars args
+// and the hard caps still override per call.
+func (a *Agent) WithProjectMapBudget(window int) *Agent {
+	b := projectMapDeriveBudget(window)
+	copy := *a
+	copy.projectMapBudgetFiles = b.files
+	copy.projectMapBudgetChars = b.chars
 	return &copy
 }
 
@@ -1823,7 +1842,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 			effLimits.ExcludedTools = append(append([]string{}, a.limits.ExcludedTools...), "escalate", "start_workflow")
 		}
 	}
+	ctx = withProjectMapBudget(ctx, projectMapBudget{a.projectMapBudgetFiles, a.projectMapBudgetChars})
 	tools := schemas(mem, a.otelDir, sess, a.toolAgentEntries, a.taskStore, effLimits)
+	applyProjectMapSchemaBudget(tools, projectMapBudget{a.projectMapBudgetFiles, a.projectMapBudgetChars})
 	// Board tools are per-call (registered only when this turn's ctx carries
 	// a shared workflow board — Definition.Board, issue #197), assembled
 	// after filterTools like the other dynamic backing-store tools and
@@ -2695,7 +2716,9 @@ func (a *Agent) RunBackgroundTask(ctx context.Context, jobID string, inbox chan 
 		bgLimits.ExcludedTools = append(append([]string{}, bg.limits.ExcludedTools...), "escalate", "start_workflow")
 	}
 	bgSess := &session.Session{CWD: cwd}
+	ctx = withProjectMapBudget(ctx, projectMapBudget{bg.projectMapBudgetFiles, bg.projectMapBudgetChars})
 	tools := schemas(mem, bg.otelDir, bgSess, nil, nil, bgLimits)
+	applyProjectMapSchemaBudget(tools, projectMapBudget{bg.projectMapBudgetFiles, bg.projectMapBudgetChars})
 	if bg.mcpToolSet != nil {
 		tools = append(tools, bg.mcpToolSet.Schemas(ctx)...)
 	}
@@ -2845,6 +2868,11 @@ func (a *Agent) cloneForBackground() *Agent {
 		// projectMapContext is stable config like supportsVision: without it
 		// a background job would lose its pushed orientation block mid-task.
 		projectMapContext: a.projectMapContext,
+		// The window-derived project_map defaults are stable config too:
+		// without them a background job's project_map calls fall back to the
+		// historical constants instead of the parent's derived ones.
+		projectMapBudgetFiles: a.projectMapBudgetFiles,
+		projectMapBudgetChars: a.projectMapBudgetChars,
 		// Resolve the memory-visibility consumer now: a background job is a
 		// fork of the spawning agent and sees the same percepts it does
 		// (issue #172).
