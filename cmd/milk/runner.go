@@ -228,6 +228,7 @@ func (r *localRunner) Execute(
 		WithCompactionTrigger(cfg.AgentCompactionTriggerTokens(ac)).
 		WithPayloadCompactionThreshold(cfg.AgentPayloadTrimCompactionThreshold(ac)).
 		WithEscalateAfterRecoveries(cfg.AgentEscalateAfterRecoveries(ac)).
+		WithProjectMapBudget(cfg.AgentContextWindowTokens(ac)).
 		WithContextReduction(cfg.AgentContextReduction(&ac), cfg.AgentContextPressureDenominator(&ac))
 
 	// Apply custom prompt (prompt / prompt_file in agent config) when set.

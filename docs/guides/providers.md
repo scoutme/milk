@@ -526,16 +526,18 @@ The [`project_map` tool](tooling.md#built-in-tools) is a *pull*: the agent calls
 |---|---|---|
 | `"minimal"` | Framing header (project identity, docs/build landmarks) + top-level directory shape + a pointer at the tool | ~100–300 tokens (default) |
 | `"off"` | Nothing — the `project_map` tool only | none |
-| `"full"` | A budgeted Aider-style map: files → symbols/signatures, degrading to fit the budget (signatures → names → reference-ranked names → file tree) | up to ~1500 tokens |
+| `"full"` | A budgeted Aider-style map: files → symbols/signatures, degrading to fit the budget (signatures → names → reference-ranked names → file tree) | ~1.5k tokens at the floor; scales with the agent's window (≤ ~12.5k at the 50k-char cap) |
 
 Boolean aliases are accepted: `true` = `"full"`, `false` = `"off"` (also as strings). The block is rebuilt per turn (so `full` never serves yesterday's tree), rides the optional-guidance layer of the [context reduction](#layered-context-reduction-context_reduction) ladder — shed first under pressure — and the tool pointer is only included when the agent actually has `project_map` (e.g. not when `limits.excluded_tools` removes it).
+
+**Both `full` and the tool's own defaults scale with the agent's context window** (ADR-0081 amendment): the resolved window (`context_window_tokens`, else the models.dev catalog lookup, honoring `disable_models_dev_lookup`) derives the default caps — `files = clamp(window/640, 200, 1000)` and `chars = clamp(window/6, 6000, 50000)`. The derivation is growth-only: unknown and small windows keep exactly the historical 200 files / 6000 chars defaults, call-site `max_files`/`max_chars` args plus the hard caps still override per call, and the tool's parameter descriptions state the defaults the current run will actually use — the model never has to guess.
 
 ```json
 { "name": "cloud-big", "provider": "bedrock", "model": "…",
   "project_map_context": "full" }
 ```
 
-Pick per agent: `full` for a capable model with context room to spare (the Aider repo-map measurements were taken on GPT-4-class models), `minimal` for most, `off` for tiny contexts or non-code sessions. `full` costs up to ~1.5k tokens *every turn* — that's the one to think about.
+Pick per agent: `full` for a capable model with context room to spare (the Aider repo-map measurements were taken on GPT-4-class models), `minimal` for most, `off` for tiny contexts or non-code sessions. `full` costs its budget *every turn* — ~1.5k tokens at the floor, more on big windows — that's the one to think about.
 
 ---
 

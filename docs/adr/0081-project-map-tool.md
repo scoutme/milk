@@ -103,6 +103,30 @@ unfamiliar repo is where a pull-only design is weakest. Why not push
 symbols by default: per-turn cost and stale-map trust — both opt-in via
 `full`.
 
+## Amendment — window-derived default caps (2026-10-26)
+
+The tool's default caps are no longer fixed constants: they derive
+growth-only from the agent's resolved context window
+(`config.Config.AgentContextWindowTokens` — explicit `context_window_tokens`,
+else the models.dev catalog lookup):
+
+- `files = clamp(window/640, 200, 1000)`
+- `chars = clamp(window/6, 6000, 50000)`
+
+Floored at the historical 200/6000, so unknown and small windows behave
+exactly as before the derivation existed — nothing shrinks; capped at the
+tool's hard caps. The same budget sizes the `full` push block. Mechanics: the
+turn-runner chain wires `WithProjectMapBudget(cfg.AgentContextWindowTokens(ac))`
+next to the other window-derived turn settings; the budget rides the run's
+context (`withProjectMapBudget`, the `WithImageParts` precedent) so
+`runProjectMap` and `projectMapContextBlock` read one source without widening
+`schemas()`/`dispatchTool` signatures; `applyProjectMapSchemaBudget` stamps
+the actual defaults into the tool's parameter descriptions so the model sees
+its real limits instead of stale constants; `cloneForBackground` copies the
+fields so background jobs keep the parent's derivation (the supportsVision
+lesson). Call-site `max_files`/`max_chars` args and the hard caps still win
+per call; unwired runs (bare `New()`, eval adapters) keep the constants.
+
 ## Consequences
 
 - Five languages outline with signatures; everything else degrades to the

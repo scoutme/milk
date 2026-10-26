@@ -44,6 +44,89 @@ const (
 	projectMapIndexVersion    = 1
 )
 
+// projectMapBudget is a set of project_map default caps (files, chars) with
+// zeros meaning "unwired — use the package constants".
+type projectMapBudget struct{ files, chars int }
+
+type projectMapBudgetKey struct{}
+
+// withProjectMapBudget carries the run's derived project_map defaults on the
+// ctx so dispatchTool's runProjectMap and the pushed projectMapContextBlock
+// see the same numbers without threading them through schemas()' or
+// dispatchTool's signatures (the WithImageParts precedent). A zero budget is
+// a no-op: the ctx stays unwired and every consumer falls back to the
+// constants.
+func withProjectMapBudget(ctx context.Context, b projectMapBudget) context.Context {
+	if b.files <= 0 && b.chars <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, projectMapBudgetKey{}, b)
+}
+
+// projectMapBudgetFrom returns the budget carried by ctx, if any.
+func projectMapBudgetFrom(ctx context.Context) (projectMapBudget, bool) {
+	b, ok := ctx.Value(projectMapBudgetKey{}).(projectMapBudget)
+	return b, ok && b.files > 0 && b.chars > 0
+}
+
+// projectMapDefaultsFrom is the run's default caps: the ctx-derived budget
+// when wired, the historical constants otherwise (bare New(), eval adapters
+// and any Run path that never called WithProjectMapBudget).
+func projectMapDefaultsFrom(ctx context.Context) (files, chars int) {
+	if b, ok := projectMapBudgetFrom(ctx); ok {
+		return b.files, b.chars
+	}
+	return projectMapDefaultMaxFiles, projectMapDefaultMaxChars
+}
+
+// projectMapDeriveBudget derives project_map's default caps from the agent's
+// resolved context window (config.Config.AgentContextWindowTokens — explicit
+// context_window_tokens, else the models.dev lookup). Growth-only: floored
+// at the historical defaults so unknown and small windows behave exactly as
+// before this derivation existed, capped at the tool's hard caps:
+//
+//	files = clamp(window/640, 200,  1000)
+//	chars = clamp(window/6,   6000, 50000)
+//
+// The char floor (6000 ≈ 1.5k tokens) keeps tiny windows usable and the
+// growth stays small relative to any window it derives from (~4% of window
+// in tokens at a 128k window). window <= 0 yields the zero budget = unwired.
+func projectMapDeriveBudget(window int) projectMapBudget {
+	if window <= 0 {
+		return projectMapBudget{}
+	}
+	return projectMapBudget{
+		files: clampInt(window/640, projectMapDefaultMaxFiles, projectMapFilesCap),
+		chars: clampInt(window/6, projectMapDefaultMaxChars, projectMapCharsCap),
+	}
+}
+
+// applyProjectMapSchemaBudget rewrites project_map's parameter descriptions
+// to state the defaults this run actually applies. schemas() is built without
+// agent context, so the window-derived numbers are stamped on here when a
+// budget is wired; unwired keeps the static text, which documents the same
+// constants the run will use.
+func applyProjectMapSchemaBudget(tools []map[string]any, b projectMapBudget) {
+	if b.files <= 0 || b.chars <= 0 {
+		return
+	}
+	for _, t := range tools {
+		fn, _ := t["function"].(map[string]any)
+		if name, _ := fn["name"].(string); name != "project_map" {
+			continue
+		}
+		params, _ := fn["parameters"].(map[string]any)
+		props, _ := params["properties"].(map[string]any)
+		if pf, ok := props["max_files"].(map[string]any); ok {
+			pf["description"] = fmt.Sprintf("Max files to include (default %d — scales with this model's context window; hard cap %d)", b.files, projectMapFilesCap)
+		}
+		if pc, ok := props["max_chars"].(map[string]any); ok {
+			pc["description"] = fmt.Sprintf("Output budget in characters (default %d — scales with this model's context window; hard cap %d); the outline degrades to fit", b.chars, projectMapCharsCap)
+		}
+		return
+	}
+}
+
 // projectMapSym is one outlined declaration: Name is the short identifier
 // ("(*Store).Get"), Full the signature line ("func (s *Store) Get(key string)
 // (string, error)"). Bodies never appear anywhere in either.
@@ -107,8 +190,9 @@ func runProjectMap(ctx context.Context, args map[string]any, cwd string) (string
 		root = filepath.Dir(root)
 	}
 
-	maxFiles := projectMapIntArg(args, "max_files", projectMapDefaultMaxFiles, projectMapFilesCap)
-	maxChars := projectMapIntArg(args, "max_chars", projectMapDefaultMaxChars, projectMapCharsCap)
+	defFiles, defChars := projectMapDefaultsFrom(ctx)
+	maxFiles := projectMapIntArg(args, "max_files", defFiles, projectMapFilesCap)
+	maxChars := projectMapIntArg(args, "max_chars", defChars, projectMapCharsCap)
 
 	out, ok := projectMapBuild(ctx, root, cwd, scopeFile, maxFiles, maxChars)
 	if !ok {
@@ -411,7 +495,8 @@ func projectMapContextBlock(ctx context.Context, root, cwd string, mode config.P
 	case config.ProjectMapOff:
 		return ""
 	case config.ProjectMapFull:
-		out, ok := projectMapBuild(ctx, root, cwd, "", projectMapDefaultMaxFiles, projectMapDefaultMaxChars)
+		defFiles, defChars := projectMapDefaultsFrom(ctx)
+		out, ok := projectMapBuild(ctx, root, cwd, "", defFiles, defChars)
 		if !ok {
 			return ""
 		}
