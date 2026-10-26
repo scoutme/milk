@@ -168,7 +168,7 @@ func TestRegionAt_ProjectAndGit(t *testing.T) {
 	m.width = 240
 	m.panelProject = true
 	m.panelGit = true
-	m.projectLines, m.projectIDs = buildProjectTreeLines([]string{"a.go"}, false, nil, projectPanelInner)
+	m.projectLines, m.projectIDs = buildProjectTreeLines([]string{"a.go"}, false, nil, projectPanelInner, nil)
 	m.gitLines, m.gitIDs = buildGitPanelLines(gitRowsFixture(), "main", 0, "", gitPanelInner)
 
 	main := m.mainWidth()

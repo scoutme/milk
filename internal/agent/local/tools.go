@@ -832,15 +832,25 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 	case "read_file":
 		return runReadFile(args, cwd)
 	case "write_file":
-		return runWriteFile(args, cwd)
+		out, esc := runWriteFile(args, cwd)
+		traceFileChanges(sess, cwd, out, fileDelta{path: strArg(args, "path"), kind: session.ChangeCreated})
+		return out, esc
 	case "edit_file":
-		return runEditFile(args, cwd)
+		out, esc := runEditFile(args, cwd)
+		traceFileChanges(sess, cwd, out, fileDelta{path: strArg(args, "path"), kind: session.ChangeModified})
+		return out, esc
 	case "multiedit":
-		return runMultiEdit(args, cwd)
+		out, esc := runMultiEdit(args, cwd)
+		traceFileChanges(sess, cwd, out, fileDelta{path: strArg(args, "path"), kind: session.ChangeModified})
+		return out, esc
 	case "delete_file":
-		return runDeleteFile(args, cwd)
+		out, esc := runDeleteFile(args, cwd)
+		traceFileChanges(sess, cwd, out, fileDelta{path: strArg(args, "path"), kind: session.ChangeDeleted})
+		return out, esc
 	case "move_file":
-		return runMoveFile(args, cwd)
+		out, esc := runMoveFile(args, cwd)
+		traceFileMove(sess, cwd, out, strArg(args, "source"), strArg(args, "destination"))
+		return out, esc
 	case "http_request":
 		return runHTTPRequest(ctx, args)
 	case "list_dir":

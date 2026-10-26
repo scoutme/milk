@@ -896,13 +896,21 @@ type model struct {
 	backgroundOffset int
 
 	// project tree + git graph panels (issue #206, ADR-0066)
-	panelProject      bool
-	projectOffset     int
-	projectExpanded   map[string]bool
-	projectFiles      []string
-	projectTruncated  bool
-	projectLines      []string
-	projectIDs        []string
+	panelProject     bool
+	projectOffset    int
+	projectExpanded  map[string]bool
+	projectFiles     []string
+	projectTruncated bool
+	projectLines     []string
+	projectIDs       []string
+	// Session changeset for the files panel (issue #331): last porcelain
+	// snapshot (git), the merged map the tree renders, and its cwd/repo
+	// bookkeeping — see changeset.go.
+	changesetFiles    map[string]session.ChangeKind
+	changesetGit      map[string]session.ChangeKind
+	changesetGitOK    bool
+	changesetNoGit    bool
+	changesetCwd      string
 	lastTreeClickPath string
 	lastTreeClickTime time.Time
 	panelGit          bool
@@ -2277,7 +2285,7 @@ func (m model) Init() tea.Cmd {
 	// loading row until a focus cycle refreshed it, with no poll behind it.
 	if m.st != nil {
 		if m.panelProject {
-			cmds = append(cmds, projectPollTick(), refreshProjectCmd(m.st.cwd))
+			cmds = append(cmds, projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 		}
 		if m.panelGit {
 			cmds = append(cmds, gitPollTick(), refreshGitCmd(m.st.cwd))
@@ -3098,7 +3106,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.blurred {
 			return m, projectPollTick() // keep the timer alive, skip the work
 		}
-		return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd))
+		// The changeset's git enrichment rides the same 3s tick: a burst of
+		// tool calls between ticks schedules exactly one status refresh
+		// (the issue #331 coalescing), off the UI goroutine.
+		return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 
 	case gitRefreshMsg:
 		if !m.panelGit {
@@ -3113,6 +3124,24 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectFiles = msg.files
 		m.projectTruncated = msg.truncated
 		m.rebuildProjectTree()
+		// The session trace may have moved since the last snapshot (tool
+		// writes between polls) — resync the changeset with this refresh.
+		m.syncChangeset()
+		return m, nil
+	case changesetMsg:
+		switch {
+		case msg.noRepo:
+			m.changesetNoGit = true
+			m.changesetGitOK = false
+			m.changesetGit = nil
+		case msg.gitOK:
+			m.changesetNoGit = false
+			m.changesetGitOK = true
+			m.changesetGit = msg.files
+		default: // transient git failure: keep the last snapshot
+			return m, nil
+		}
+		m.syncChangeset()
 		return m, nil
 
 	case gitDataMsg:
@@ -3325,7 +3354,7 @@ func (m model) refreshOpenPanelsCmd() tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	if m.panelProject {
-		cmds = append(cmds, refreshProjectCmd(m.st.cwd))
+		cmds = append(cmds, refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 	}
 	if m.panelGit {
 		cmds = append(cmds, refreshGitCmd(m.st.cwd))
