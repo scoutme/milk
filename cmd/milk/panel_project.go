@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,8 +10,10 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/scoutme/milk/internal/livebuf"
+	"github.com/scoutme/milk/internal/session"
 )
 
 // Project tree panel (issue #206, ADR-0066): the session cwd's file layout,
@@ -60,10 +63,13 @@ func (n *treeNode) child(key, name string, dir bool) *treeNode {
 // buildProjectTreeLines renders the tree from a flat file list. A directory
 // is expanded when its path (with trailing slash) is explicitly set in
 // expanded, and otherwise when it is at depth 0 (top level starts open,
-// everything deeper starts collapsed). Returns the rendered lines and one ID
-// per line: "" for non-interactive rows, "d:<dir>/" for directories and the
-// relative path for files.
-func buildProjectTreeLines(files []string, truncated bool, expanded map[string]bool, inner int) (lines, ids []string) {
+// everything deeper starts collapsed). changes (the session changeset, issue
+// #331 — nil for none) adds the summary line, per-file status glyphs and
+// ancestor markers; without it the rendering is byte-identical to the flat
+// tree. Returns the rendered lines and one ID per line: "" for
+// non-interactive rows, "d:<dir>/" for directories and the relative path for
+// files.
+func buildProjectTreeLines(files []string, truncated bool, expanded map[string]bool, inner int, changes map[string]session.ChangeKind) (lines, ids []string) {
 	lines = append(lines, panelTitleLine("project", regionProject, inner))
 	ids = append(ids, "")
 	lines = append(lines, "")
@@ -73,6 +79,22 @@ func buildProjectTreeLines(files []string, truncated bool, expanded map[string]b
 		lines = append(lines, dim("  (loading…)"))
 		ids = append(ids, "")
 		return lines, ids
+	}
+
+	// Ancestor directories of changed files get the muted discoverability
+	// marker so changes under collapsed branches stay visible.
+	changedDirs := map[string]bool{}
+	for p := range changes {
+		parts := strings.Split(p, "/")
+		acc := ""
+		for _, seg := range parts[:max(len(parts)-1, 0)] {
+			acc += seg + "/"
+			changedDirs[acc] = true
+		}
+	}
+	if len(changes) > 0 {
+		lines = append(lines, changesSummaryLine(changes, inner))
+		ids = append(ids, "")
 	}
 
 	root := &treeNode{dir: true}
@@ -121,14 +143,14 @@ func buildProjectTreeLines(files []string, truncated bool, expanded map[string]b
 				if open {
 					glyph = "▾ "
 				}
-				lines = append(lines, treeRow(prefix, glyph, it.name+"/", inner, true))
+				lines = append(lines, treeRow(prefix, glyph, it.name+"/", inner, true, "", changedDirs[p]))
 				ids = append(ids, "d:"+p)
 				if open {
 					walk(n.children[it.key], prefix+"  ", p, depth+1)
 				}
 				continue
 			}
-			lines = append(lines, treeRow(prefix, "  ", it.name, inner, false))
+			lines = append(lines, treeRow(prefix, changeGlyph(changes[p]), it.name, inner, false, changes[p], false))
 			ids = append(ids, p)
 		}
 	}
@@ -146,24 +168,99 @@ func buildProjectTreeLines(files []string, truncated bool, expanded map[string]b
 }
 
 // treeRow renders one indented tree row, rune-truncated to fit inner. Dirs
-// render in the section style so they read as headings among files.
-func treeRow(prefix, glyph, name string, inner int, dir bool) string {
+// render in the section style so they read as headings among files. A file
+// with a change kind renders its compact status glyph (M/A/D/R) in the
+// alignment slot under the dir glyphs — unchanged rows keep their exact
+// historical rendering. marker (dirs only) appends the muted changed-descendant
+// dot, reserving one column for it.
+func treeRow(prefix, glyph, name string, inner int, dir bool, kind session.ChangeKind, marker bool) string {
+	budget := inner
+	if marker {
+		budget--
+	}
 	plain := prefix + glyph
-	if w := utf8.RuneCountInString(plain) + utf8.RuneCountInString(name); w > inner {
-		keep := max(inner-utf8.RuneCountInString(plain)-1, 1)
+	if w := utf8.RuneCountInString(plain) + utf8.RuneCountInString(name); w > budget {
+		keep := max(budget-utf8.RuneCountInString(plain)-1, 1)
 		name = string([]rune(name)[:keep]) + "…"
 	}
 	if dir {
-		return dim(prefix) + stylePanelSection.Render(glyph+name)
+		row := dim(prefix) + stylePanelSection.Render(glyph+name)
+		if marker {
+			row += dim("·")
+		}
+		return row
+	}
+	if kind != "" {
+		return dim(prefix) + changeStyle(kind).Render(glyph+name)
 	}
 	return dim(prefix) + name
 }
 
+// changesSummaryLine renders the at-a-glance changeset (" changes 2M 1A 1D")
+// under the panel title — deletions never appear as rows (gone from disk),
+// so the counts are where they stay visible.
+func changesSummaryLine(changes map[string]session.ChangeKind, inner int) string {
+	counts := map[session.ChangeKind]int{}
+	for _, k := range changes {
+		counts[k]++
+	}
+	var b strings.Builder
+	b.WriteString(dim(" changes "))
+	for _, k := range []session.ChangeKind{session.ChangeCreated, session.ChangeModified, session.ChangeDeleted, session.ChangeRenamed} {
+		if counts[k] == 0 {
+			continue
+		}
+		b.WriteString(changeStyle(k).Render(fmt.Sprintf("%d%s", counts[k], changeLetter(k))))
+		b.WriteString(" ")
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+// changeGlyph / changeLetter: the two-character alignment-slot glyph and the
+// one-character counter letter for one change kind.
+func changeGlyph(k session.ChangeKind) string {
+	if k == "" {
+		return "  "
+	}
+	return changeLetter(k) + " "
+}
+
+func changeLetter(k session.ChangeKind) string {
+	switch k {
+	case session.ChangeCreated:
+		return "A"
+	case session.ChangeModified:
+		return "M"
+	case session.ChangeDeleted:
+		return "D"
+	case session.ChangeRenamed:
+		return "R"
+	}
+	return " "
+}
+
+// changeStyle is the per-kind files-panel style; rebuildStyles (theme.go)
+// fills them for both skins, and the zero value renders plain — so tests and
+// early call paths never carry raw escapes.
+func changeStyle(k session.ChangeKind) lipgloss.Style {
+	switch k {
+	case session.ChangeCreated:
+		return styleChangeCreated
+	case session.ChangeModified:
+		return styleChangeModified
+	case session.ChangeDeleted:
+		return styleChangeDeleted
+	case session.ChangeRenamed:
+		return styleChangeRenamed
+	}
+	return lipgloss.NewStyle()
+}
+
 // rebuildProjectTree recomputes the cached panel lines from the cached file
-// list. Called from Update (never from View, which renders a value copy) so
-// the derived state persists.
+// list and the session changeset. Called from Update (never from View, which
+// renders a value copy) so the derived state persists.
 func (m *model) rebuildProjectTree() {
-	m.projectLines, m.projectIDs = buildProjectTreeLines(m.projectFiles, m.projectTruncated, m.projectExpanded, projectPanelInner)
+	m.projectLines, m.projectIDs = buildProjectTreeLines(m.projectFiles, m.projectTruncated, m.projectExpanded, projectPanelInner, m.changesetFiles)
 }
 
 // projectDirExpanded reports a directory's effective open state (explicit

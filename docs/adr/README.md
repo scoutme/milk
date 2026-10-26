@@ -82,3 +82,4 @@
 * [81. project_map: heuristic multi-language outlines, ranked pruning, persistent index](0081-project-map-tool.md)
 * [82. Tasks panel in-place expansion (memory-panel parity)](0082-tasks-panel-in-place-expansion.md)
 * [83. Busy-input disposition: Enter queues, Ctrl+Enter forks](0083-busy-input-disposition.md)
+* [84. Session changeset in the files panel: dispatch trace + `git status`, rendered glyphs](0084-session-changeset-files-panel.md)

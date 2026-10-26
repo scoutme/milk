@@ -1810,7 +1810,11 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		if m.panelProject {
 			m.notify("project panel: on", "/panel project")
 			// First refresh immediately; the poll keeps it live-ish afterwards.
-			return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd))
+			// The explicit toggle also re-probes git status (the skip flag for
+			// "no repo here" lives until the cwd changes or the panel is
+			// re-opened — e.g. after a mid-session `git init`).
+			m.changesetNoGit = false
+			return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 		}
 		m.notify("project panel: off", "/panel project")
 		return m, nil

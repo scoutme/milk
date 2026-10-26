@@ -81,7 +81,7 @@ func TestRestoreThenInitArmsPopulation(t *testing.T) {
 		t.Fatalf("restore did not open panels: git=%v project=%v", restored.panelGit, restored.panelProject)
 	}
 	got := initBatchLen(t, restored)
-	if want := baseLen + 4; got != want { // 2 cmds per data panel
+	if want := baseLen + 5; got != want { // git: tick+refresh; project: tick+refresh+changeset status
 		t.Errorf("Init batch = %d cmds, want %d (population for restored git+project)", got, want)
 	}
 
@@ -117,7 +117,7 @@ func TestRefreshProjectCmdFilelessFolder(t *testing.T) {
 	if pdm.files == nil {
 		t.Fatalf("fileless folder sent nil files — panel would show (loading…) forever")
 	}
-	lines, _ := buildProjectTreeLines(pdm.files, pdm.truncated, nil, projectPanelInner)
+	lines, _ := buildProjectTreeLines(pdm.files, pdm.truncated, nil, projectPanelInner, nil)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "(empty)") {
 		t.Errorf("fileless folder should render (empty); got %q", joined)

@@ -38,7 +38,7 @@ func (m *model) sidePanelLines(region panelRegion) (lines []string, inner int) {
 			// No data msg yet (restore-at-startup or the first frames after
 			// toggle-open): render the builder's loading row — title included —
 			// instead of an empty box. Empty panel space is unacceptable.
-			lines, _ := buildProjectTreeLines(nil, false, m.projectExpanded, projectPanelInner)
+			lines, _ := buildProjectTreeLines(nil, false, m.projectExpanded, projectPanelInner, m.changesetFiles)
 			return lines, projectPanelInner
 		}
 		return m.projectLines, projectPanelInner

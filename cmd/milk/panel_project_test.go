@@ -24,7 +24,7 @@ func treePlain(lines []string) []string {
 
 func TestBuildProjectTreeLines_Structure(t *testing.T) {
 	files := []string{"cmd/milk/main.go", "cmd/milk/repl.go", "README.md", "go.mod"}
-	lines, ids := buildProjectTreeLines(files, false, nil, projectPanelInner)
+	lines, ids := buildProjectTreeLines(files, false, nil, projectPanelInner, nil)
 	plain := treePlain(lines)
 
 	want := []string{
@@ -60,7 +60,7 @@ func TestBuildProjectTreeLines_Structure(t *testing.T) {
 func TestBuildProjectTreeLines_ExpandOverride(t *testing.T) {
 	files := []string{"cmd/milk/main.go", "README.md"}
 	// cmd/ collapsed explicitly — its children vanish.
-	lines, ids := buildProjectTreeLines(files, false, map[string]bool{"cmd/": false}, projectPanelInner)
+	lines, ids := buildProjectTreeLines(files, false, map[string]bool{"cmd/": false}, projectPanelInner, nil)
 	joined := strings.Join(treePlain(lines), "\n")
 	if strings.Contains(joined, "milk/") {
 		t.Errorf("collapsed dir should hide children; got:\n%s", joined)
@@ -69,7 +69,7 @@ func TestBuildProjectTreeLines_ExpandOverride(t *testing.T) {
 
 	// Deeper dir expanded explicitly — its children appear even though
 	// depth-1 dirs start collapsed.
-	lines, _ = buildProjectTreeLines(files, false, map[string]bool{"cmd/milk/": true}, projectPanelInner)
+	lines, _ = buildProjectTreeLines(files, false, map[string]bool{"cmd/milk/": true}, projectPanelInner, nil)
 	joined = strings.Join(treePlain(lines), "\n")
 	if !strings.Contains(joined, "main.go") {
 		t.Errorf("expanded dir should show children; got:\n%s", joined)
@@ -92,7 +92,7 @@ func TestBuildProjectTreeLines_LoadingEmptyTruncated(t *testing.T) {
 }
 
 func buildProjectTreeLinesFirst(files []string, truncated bool) []string {
-	lines, _ := buildProjectTreeLines(files, truncated, nil, projectPanelInner)
+	lines, _ := buildProjectTreeLines(files, truncated, nil, projectPanelInner, nil)
 	return lines
 }
 

@@ -28,9 +28,16 @@ type sessionBricks struct {
 const recentThreshold = 60 * time.Second
 
 // Panel title/section styles are filled by rebuildStyles (theme.go).
+// styleChange* are the files-panel changeset styles (issue #331): per change
+// kind, both skins; the zero value renders plain.
 var (
 	stylePanelTitle   lipgloss.Style
 	stylePanelSection lipgloss.Style
+
+	styleChangeCreated  lipgloss.Style
+	styleChangeModified lipgloss.Style
+	styleChangeDeleted  lipgloss.Style
+	styleChangeRenamed  lipgloss.Style
 )
 
 // renderMemoryPanel returns a vertical panel string of exactly h lines and

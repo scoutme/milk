@@ -195,6 +195,11 @@ func rebuildStyles() {
 			Bold(true)
 		stylePanelSection = lipgloss.NewStyle().
 			Foreground(adaptiveColor("#777", "#666"))
+		// Changeset (issue #331): dark-on-light tuned for the original skin.
+		styleChangeCreated = lipgloss.NewStyle().Foreground(adaptiveColor("#2f7d32", "#6fbf82"))
+		styleChangeModified = lipgloss.NewStyle().Foreground(adaptiveColor("#8a6a00", "#d0a93c"))
+		styleChangeDeleted = lipgloss.NewStyle().Foreground(adaptiveColor("#a5372b", "#e07b70"))
+		styleChangeRenamed = lipgloss.NewStyle().Foreground(adaptiveColor("#3a5fa8", "#8ab0e8"))
 		return
 	}
 	styleHeaderBar = lipgloss.NewStyle().
@@ -212,6 +217,11 @@ func rebuildStyles() {
 		BorderForeground(tkHairline.adaptive())
 	stylePanelTitle = lipgloss.NewStyle().Foreground(tkAccent.adaptive()).Bold(true)
 	stylePanelSection = lipgloss.NewStyle().Foreground(tkMuted.adaptive()).Bold(true)
+	// Changeset (issue #331): the skin's own ANSI ramp keeps both skins' palettes.
+	styleChangeCreated = lipgloss.NewStyle().Foreground(lipgloss.Color(th.termAnsi[2]))
+	styleChangeModified = lipgloss.NewStyle().Foreground(lipgloss.Color(th.termAnsi[3]))
+	styleChangeDeleted = lipgloss.NewStyle().Foreground(lipgloss.Color(th.termAnsi[1]))
+	styleChangeRenamed = lipgloss.NewStyle().Foreground(lipgloss.Color(th.termAnsi[4]))
 }
 
 // originalPulse is the yellow breathing ramp of the original look.
