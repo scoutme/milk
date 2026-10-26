@@ -44,6 +44,28 @@ func (r *stagedRunner) Run(_ context.Context, _ string, _ io.Writer) (string, er
 	return r.resp, nil
 }
 
+// waitForPanel renders the panel until ready reports true (or a 10s deadline
+// passes) and returns the last rendering either way. Progress reports reach the
+// state asynchronously after the wave signal, so tests must poll instead of
+// sleeping a fixed guess — the old 100ms sleep flaked on loaded CI runners
+// (issue #338; reproduces with sleep(0) as "panel missing" failures).
+func waitForPanel(mu *sync.Mutex, st *workflow.State, width int, ready func(panel string) bool) string {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		rows := buildGenericWorkflowPanelLines(st, width)
+		mu.Unlock()
+		for i := range rows {
+			rows[i] = ansi.Strip(rows[i])
+		}
+		panel := strings.Join(rows, "\n")
+		if ready(panel) || time.Now().After(deadline) {
+			return panel
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // While a later fan-out wave is still running, the workflow panel shows the
 // run as in progress: the root and its ancestors are active and the in-flight
 // items are listed alongside the finished ones. The active and completed
@@ -106,17 +128,16 @@ func TestWorkflowPanel_ShowsRunningItemsOfLaterWave(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("wave 2 never started")
 	}
-	time.Sleep(100 * time.Millisecond) // let the workers' progress reports land
-
-	mu.Lock()
-	rows := buildGenericWorkflowPanelLines(st, 40)
-	mu.Unlock()
-	for i := range rows {
-		rows[i] = ansi.Strip(rows[i])
-	}
-	panel := strings.Join(rows, "\n")
-
-	for _, want := range []string{"▸ workflow", "▸   pass 1", "▸     fanout", "▸       item 3", "▸       item 4", "✓       item 1", "✓       item 2"} {
+	wants := []string{"▸ workflow", "▸   pass 1", "▸     fanout", "▸       item 3", "▸       item 4", "✓       item 1", "✓       item 2"}
+	panel := waitForPanel(&mu, st, 40, func(p string) bool {
+		for _, want := range wants {
+			if !strings.Contains(p, want) {
+				return false
+			}
+		}
+		return true
+	})
+	for _, want := range wants {
 		if !strings.Contains(panel, want) {
 			t.Errorf("panel missing %q:\n%s", want, panel)
 		}
@@ -218,15 +239,12 @@ func TestWorkflowPanel_BuiltinsShowRunInProgress(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatalf("%s: the %s stage never started", tt.name, tt.block)
 			}
-			time.Sleep(100 * time.Millisecond)
-
-			mu.Lock()
-			rows := buildGenericWorkflowPanelLines(st, 40)
-			mu.Unlock()
-			for i := range rows {
-				rows[i] = ansi.Strip(rows[i])
-			}
-			panel := strings.Join(rows, "\n")
+			// Poll rather than sleep the same way as the report above
+			// (issue #338): the active path needs the async progress
+			// reports too.
+			panel := waitForPanel(&mu, st, 40, func(p string) bool {
+				return strings.Contains(p, "▸ workflow") && strings.Count(p, "▸") >= 3
+			})
 			if !strings.Contains(panel, "▸ workflow") {
 				t.Errorf("root not shown active mid-run:\n%s", panel)
 			}
