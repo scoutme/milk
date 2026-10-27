@@ -112,15 +112,16 @@ func (m *model) panelInLayout(region panelRegion) bool {
 }
 
 // panelVisible reports whether a panel occupies layout columns right now:
-// open and width-permitted (panelOpen), and on a tabbed theme the front tab.
-// Everything that measures or joins the layout (mainWidth, regionAt,
-// viewBody, panelX, panelAltBackground, the animation tracker) asks this;
-// panelOpen stays the plain "is this panel open" for state and notifications.
+// in layout (raw open, and the front tab on a tabbed theme — panelInLayout)
+// and within the width budget (panelFits, ADR-0089: count from the width,
+// membership from content recency). Everything that measures or joins the
+// layout (mainWidth, regionAt, viewBody, panelX, panelAltBackground, the
+// animation tracker) asks this — the single visibility predicate; it
+// replaced a per-panel mix of guarded and unguarded checks that made the
+// same width budget show three panels in one combination and only the first
+// one in another.
 func (m *model) panelVisible(region panelRegion) bool {
-	if !m.panelOpen(region) {
-		return false
-	}
-	return !panelTabsActive() || region == m.panelActive()
+	return m.panelFits(region)
 }
 
 // anyPanelVisible reports whether the panel slot is occupied at all — the

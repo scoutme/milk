@@ -141,58 +141,55 @@ func (m *model) mainWidth() int {
 	return w
 }
 
-// sidePanelsWidthExcept sums the widths of the side panels sharing the
-// layout, excluding exclude — raw open flags with the tabbed front-tab
-// filter (panelInLayout), never the width-guarded visibility helpers (those
-// call this, so consulting them here would recurse). Used by the
-// project/git/workflow visibility guards so a panel is only rendered when a
-// usable main area (40 cols) remains.
-func (m *model) sidePanelsWidthExcept(exclude panelRegion) int {
-	w := 0
-	for _, r := range panelRenderOrder {
-		if r != exclude && m.panelInLayout(r) {
-			w += panelWidth(r)
+// panelMinMainWidth is the floor every side-panel width decision protects:
+// panels may claim columns only while at least this many stay for the
+// transcript and input area (the 20-col last-resort clamp in mainWidth is
+// below it and stays unreachable through panel layout).
+const panelMinMainWidth = 40
+
+// panelFits reports whether region occupies layout columns right now — the
+// one visibility rule shared by all six side panels (ADR-0089), in two
+// halves:
+//
+//  1. Budget — how many panels fit at all. Side panels fill the row
+//     left-to-right in panelRenderOrder, each claiming its width while every
+//     panel before it also fits, stopping before the next panel would push
+//     the main area below panelMinMainWidth (40). With uniform 33-col slots
+//     that count is a pure function of the width budget — floor((width-40)/33),
+//     capped by however many panels are open — so the *number* of visible
+//     panels never depends on which panels are open (pre-ADR-0089 memory/
+//     tasks/background had no guard while project/git/workflow demanded 40
+//     free cols, so one combination could show three panels where another
+//     showed one).
+//  2. Selection — which panels fill those slots: panelRankByActivity sorts
+//     the in-layout panels by last content/attention event and the top
+//     `budget` entries are the visible ones. A content event therefore swaps
+//     its panel into view and evicts the least recently relevant one (the
+//     panel that no longer fits is always the tail of the *relevance* rank);
+//     with every timestamp tied — startup, restored state, panels that never
+//     saw an event — the rank degenerates to panelRenderOrder and the layout
+//     is exactly the left-to-right fill.
+//
+// The tabbed front-tab filter (ADR-0079) falls out naturally: only the front
+// tab is in layout, so it is the only candidate and fits unless the terminal
+// is under panelMinMainWidth+panelWidth.
+func (m *model) panelFits(region panelRegion) bool {
+	ranked, n := m.panelRankByActivity()
+	used, slots := 0, 0
+	for i := 0; i < n; i++ {
+		r := ranked[i]
+		if used+panelWidth(r)+panelMinMainWidth > m.width {
+			break
+		}
+		used += panelWidth(r)
+		slots++
+	}
+	for i := 0; i < n; i++ {
+		if ranked[i] == region {
+			return i < slots
 		}
 	}
-	return w
-}
-
-// projectPanelVisible reports whether the project panel is open and the
-// terminal is wide enough to render it alongside a usable main area
-// (minimum 40 cols), like workflowPanelVisible.
-func (m *model) projectPanelVisible() bool {
-	if !m.panelProject {
-		return false
-	}
-	return m.width >= m.sidePanelsWidthExcept(regionProject)+projectPanelWidth+40
-}
-
-// gitPanelVisible — the same guard for the git panel.
-func (m *model) gitPanelVisible() bool {
-	if !m.panelGit {
-		return false
-	}
-	return m.width >= m.sidePanelsWidthExcept(regionGit)+gitPanelWidth+40
-}
-
-// workflowPanelVisible reports whether the workflow panel is open and the
-// terminal is wide enough to render it alongside a usable main area (minimum
-// 40 cols for the transcript) and any other open panels.
-func (m *model) workflowPanelVisible() bool {
-	if !m.workflowPanelOpen {
-		return false
-	}
-	memW := 0
-	if m.panelInLayout(regionMemory) {
-		memW = memoryPanelWidth
-	}
-	if m.panelInLayout(regionTasks) {
-		memW += tasksPanelWidth
-	}
-	if m.panelInLayout(regionBackground) {
-		memW += backgroundPanelWidth
-	}
-	return m.width >= memW+workflowPanelWidth+40
+	return false
 }
 
 // vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.

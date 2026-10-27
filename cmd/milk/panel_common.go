@@ -1,7 +1,10 @@
 package main
 
 import (
+	"hash/fnv"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
@@ -120,6 +123,12 @@ func panelTitleLine(title string, region panelRegion, inner int) string {
 // only fires while the shared slot is free (see the gate below), so live
 // content can never yank the view off the panel the user is looking at.
 func (m *model) autoOpenPanel(region panelRegion) {
+	// Content event → recency stamp (ADR-0089), ahead of every gate: the
+	// panel's content changed whether or not the panel is allowed to open
+	// right now (master switch off, manual override, tab slot busy), and a
+	// budget-hidden panel must still become the freshest candidate so the
+	// next layout pass swaps it in.
+	m.stampPanelActivity(region)
 	// Master switch (ADR-0087, /panel autoopen): off means content never
 	// opens a panel on its own — not even once, not even silently.
 	if !m.panelAutoOpen {
@@ -128,7 +137,7 @@ func (m *model) autoOpenPanel(region panelRegion) {
 	if m.panelManualOverride[region] {
 		return
 	}
-	wasOpen := m.panelOpen(region)
+	wasOpen := m.panelVisible(region)
 	// Tabbed themes (ADR-0079): while another panel occupies the shared
 	// slot, content for a closed panel stays a notification instead of
 	// switching the user's tab — auto-open takes a free slot or none.
@@ -138,7 +147,7 @@ func (m *model) autoOpenPanel(region panelRegion) {
 	if ptr := m.panelOpenPtr(region); ptr != nil {
 		*ptr = true
 	}
-	if !wasOpen && m.panelOpen(region) {
+	if !wasOpen && m.panelVisible(region) {
 		// Tabbed themes (ADR-0079): the panel that just opened takes the
 		// shared slot (the gate above means the slot was free) — once.
 		// Later content for the same already-open panel (every workflow
@@ -274,6 +283,84 @@ func panelSubName(region panelRegion) string {
 	return ""
 }
 
+// regionForPanelSub is the inverse of panelSubName (unknown → regionNone).
+// The /panel <name> toggle uses it to record the recency stamp of the panel
+// it is about to open (ADR-0089) in one place instead of per case.
+func regionForPanelSub(sub string) panelRegion {
+	switch sub {
+	case "memory":
+		return regionMemory
+	case "tasks":
+		return regionTasks
+	case "background":
+		return regionBackground
+	case "workflow":
+		return regionWorkflow
+	case "project":
+		return regionProject
+	case "git":
+		return regionGit
+	}
+	return regionNone
+}
+
+// stampPanelActivity records that region's content just changed — or that
+// the user just paid attention to it (click/wheel, open toggle) — making it
+// the most relevant panel for the width budget to show (ADR-0089). Called
+// from every content event (centrally in autoOpenPanel, plus the events that
+// finalize rather than auto-open) and from attention events; cosmetic
+// refreshes (elapsed counters, no-change polls) must NOT stamp.
+func (m *model) stampPanelActivity(region panelRegion) {
+	if region == regionNone || int(region) >= len(m.panelActivity) {
+		return
+	}
+	m.panelActivity[region] = time.Now()
+}
+
+// panelRankByActivity returns the in-layout panels ordered by relevance for
+// the width budget: most recently stamped first, ties keeping
+// panelRenderOrder (so a fresh session — every timestamp zero — lays out
+// exactly left-to-right, the deterministic startup baseline). Insertion
+// sort into a stack array: at most six elements, no allocation on the
+// per-render panelVisible path (see ADR-0088's render-loop budget).
+func (m *model) panelRankByActivity() (ranked [regionGit + 1]panelRegion, n int) {
+	for _, r := range panelRenderOrder {
+		if !m.panelInLayout(r) {
+			continue
+		}
+		pos := n // strictly-newer wins the slot; equal timestamps keep order
+		for i := 0; i < n; i++ {
+			if m.panelActivity[r].After(m.panelActivity[ranked[i]]) {
+				pos = i
+				break
+			}
+		}
+		copy(ranked[pos+1:n+1], ranked[pos:n])
+		ranked[pos] = r
+		n++
+	}
+	return ranked, n
+}
+
+// memoryContentSig fingerprints what the memory panel would render for the
+// given store (percept rows, expansion-independent), so the 5s refresh tick
+// can tell real content change from a no-op redraw when deciding whether to
+// stamp recency (ADR-0089). Empty string = no store; the first non-empty
+// read only establishes the baseline (callers compare against a non-empty
+// previous value before stamping).
+func (m *model) memoryContentSig() string {
+	if m.mem == nil {
+		return ""
+	}
+	lines, _ := memoryPanelRows(m.mem, memoryPanelInner, m.currentSessionBricks(), "")
+	h := fnv.New64a()
+	for _, l := range lines {
+		_, _ = h.Write([]byte(l))
+		_, _ = h.Write([]byte{0}) // row separator: "ab"+"c" can't hash like "a"+"bc"
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
 // panelDisplayName returns the human-readable panel name used in
 // notifications and confirmations ("background panel", ...).
 func panelDisplayName(region panelRegion) string {
@@ -284,26 +371,6 @@ func panelDisplayName(region panelRegion) string {
 		return panelSubName(region)
 	}
 	return "side"
-}
-
-// panelOpen reports whether the given region's panel is currently part of
-// the layout — the same conditions View() checks before joining it in.
-func (m *model) panelOpen(region panelRegion) bool {
-	switch region {
-	case regionMemory:
-		return m.panelMemory
-	case regionTasks:
-		return m.panelTasks
-	case regionBackground:
-		return m.panelBackground
-	case regionWorkflow:
-		return m.workflowPanelVisible()
-	case regionProject:
-		return m.projectPanelVisible()
-	case regionGit:
-		return m.gitPanelVisible()
-	}
-	return false
 }
 
 // panelRenderOrder is the left-to-right order side panels are joined in by
@@ -335,8 +402,8 @@ func (m *model) panelAltBackground(region panelRegion) bool {
 }
 
 // panelOpenPtr returns a pointer to the model's raw open flag for the given
-// side-panel region (no layout/width gating — panelOpen's visible() checks
-// are render-time only), or nil for regionNone/an unknown region. Toggling
+// side-panel region (no layout/width gating — panelVisible's width budget is
+// render-time only), or nil for regionNone/an unknown region. Toggling
 // (/panel, F1-F6), auto-open and panel-state persistence share it, so the
 // setters can never drift out of sync with the readers.
 func (m *model) panelOpenPtr(region panelRegion) *bool {

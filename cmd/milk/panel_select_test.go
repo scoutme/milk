@@ -194,8 +194,8 @@ func TestRegionAt_PastLastPanelIsNone(t *testing.T) {
 
 func TestRegionAt_WorkflowHiddenWhenTooNarrow(t *testing.T) {
 	m := &model{width: 60, workflowPanelOpen: true}
-	// width 60 < 0 (no memory panel) + workflowPanelWidth(33) + 40 = 73 -> hidden.
-	if m.workflowPanelVisible() {
+	// width 60 < workflowPanelWidth(33) + panelMinMainWidth(40) = 73 -> hidden.
+	if m.panelVisible(regionWorkflow) {
 		t.Fatal("expected workflow panel hidden at width 60")
 	}
 	region, _ := m.regionAt(m.mainWidth())

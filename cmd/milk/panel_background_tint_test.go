@@ -27,7 +27,7 @@ func TestPanelAltBackground_AlternatesByVisibleOrder(t *testing.T) {
 	m.panelBackground = true
 	m.workflowPanelOpen = true
 	m.workflowState = &workflow.State{WorkflowName: "w"}
-	m.width = 400 // wide enough for workflowPanelVisible to return true
+	m.width = 400 // wide enough for every panel to fit the width budget (ADR-0089)
 
 	cases := []struct {
 		region panelRegion
@@ -102,6 +102,7 @@ func TestRenderSidePanel_BackgroundTintPreservesWidth(t *testing.T) {
 	t.Cleanup(func() { isTTY = old })
 
 	m := &model{st: &interactiveState{sess: &session.Session{}}}
+	m.width = 400 // wide enough for both panels to fit the width budget (ADR-0089)
 	m.panelMemory = true
 	m.panelTasks = true // first open panel (adjacent to the chat) -> tinted, second -> plain
 

@@ -1720,6 +1720,9 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 	region := panelRegionForSubName(sub)
 	if panelTabsActive() && region != regionNone {
 		if m.panelRawOpen(region) && region != m.panelActive() {
+			// Moving to the panel is user interest — the same recency
+			// stamp as the width-budget bring-to-front below (ADR-0089).
+			m.stampPanelActivity(region)
 			m.activatePanelTab(region)
 			m.closeAllButPanelTabs(region)
 			m.savePanelStateReport()
@@ -1733,13 +1736,45 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 }
 
 // handlePanelCmdToggle is the plain show/hide toggle behind /panel <name>
-// and F1-F6 (the tab-aware entry point is handlePanelCmd).
+// and F1-F6 (the tab-aware entry point is handlePanelCmd) — plus one rule
+// it owns: a press on a panel the width budget *hid* brings it to the
+// front instead of toggling it closed (see the bring-to-front block below).
 func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
+	r := regionForPanelSub(sub)
+	if r != regionNone && !m.panelRawOpen(r) {
+		// Opening a panel by hand is attention/relevance (ADR-0089): the
+		// panel the user just asked for becomes the freshest candidate, so
+		// it claims a width-budget slot immediately even when the budget is
+		// already full. Closing doesn't stamp — a closed panel is out of
+		// the layout anyway, and re-opening stamps again on its own.
+		m.stampPanelActivity(r)
+	}
 	if m.panelManualOverride == nil {
 		m.panelManualOverride = map[panelRegion]bool{}
 	}
 	if m.panelPrefs == nil {
 		m.panelPrefs = map[panelRegion]bool{}
+	}
+	// Bring-to-front (ADR-0089): a press on a panel that is open but not
+	// shown right now — the width budget gave its slot to fresher panels —
+	// is explicit user interest, the strongest relevance signal there is,
+	// and it must NOT toggle the panel closed: the user pressed the key to
+	// see it. Stamp it so it takes the next slot back, evicting the stalest
+	// panel; only once it is on screen does the next press close it (the
+	// plain toggle below). When the terminal is too narrow to show any
+	// panel at all (below the one-panel floor), no stamp can help — the
+	// press falls through to the plain toggle so the shortcut still does
+	// something.
+	if r != regionNone && m.panelRawOpen(r) && !m.panelVisible(r) {
+		m.stampPanelActivity(r)
+		if m.panelVisible(r) {
+			m.panelManualOverride[r] = true
+			m.panelPrefs[r] = true
+			m.savePanelStateReport()
+			m.syncLayout()
+			m.notify(panelDisplayName(r)+" panel: brought to front", "/panel "+panelSubName(r))
+			return m, nil
+		}
 	}
 	// Every toggle records the manual override; a toggle that *closes* a
 	// panel whose content has already finalized drops it again right away
