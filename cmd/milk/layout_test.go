@@ -16,6 +16,9 @@ func layoutTestModel(t *testing.T, width, height int) model {
 	t.Helper()
 	m := model{
 		transcript: &strings.Builder{},
+		// Content-driven auto-open defaults on (ADR-0087) — this bare
+		// construction means "unset", matching newModel with default config.
+		panelAutoOpen: true,
 	}
 	m.st = &interactiveState{sess: &session.Session{}}
 	m.ta = buildTextarea()

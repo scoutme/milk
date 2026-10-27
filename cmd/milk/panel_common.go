@@ -120,6 +120,11 @@ func panelTitleLine(title string, region panelRegion, inner int) string {
 // only fires while the shared slot is free (see the gate below), so live
 // content can never yank the view off the panel the user is looking at.
 func (m *model) autoOpenPanel(region panelRegion) {
+	// Master switch (ADR-0087, /panel autoopen): off means content never
+	// opens a panel on its own — not even once, not even silently.
+	if !m.panelAutoOpen {
+		return
+	}
 	if m.panelManualOverride[region] {
 		return
 	}

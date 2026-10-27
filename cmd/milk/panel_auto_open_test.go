@@ -580,3 +580,75 @@ func TestPanelContentFinalized(t *testing.T) {
 		}
 	})
 }
+
+func TestAutoOpenPanel_MasterSwitchOff(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.panelAutoOpen = false
+	m.autoOpenPanel(regionTasks)
+	if rawPanelOpen(&m, regionTasks) {
+		t.Error("autoOpenPanel opened the tasks panel with /panel autoopen off")
+	}
+	// The explicit toggle is unaffected: panels still open on request.
+	mm, _ := m.handlePanelCmd("tasks")
+	m = mm.(model)
+	if !rawPanelOpen(&m, regionTasks) {
+		t.Error("explicit /panel tasks did not open the panel with auto-open off")
+	}
+}
+
+func TestApplyMemoryContentDefault_MasterSwitchOff(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.panelAutoOpen = false
+	m.applyMemoryContentDefault()
+	if m.panelMemory {
+		t.Error("applyMemoryContentDefault opened the memory panel with auto-open off")
+	}
+}
+
+func TestPanelAutoOpenCmd_TogglePersists(t *testing.T) {
+	m := newTestModelForPanels(t)
+	if !m.panelAutoOpen {
+		t.Fatal("master switch should default on (pre-switch behaviour)")
+	}
+	mm, _ := m.handlePanelAutoOpenCmd("off")
+	m = mm.(model)
+	if m.panelAutoOpen {
+		t.Error("panelAutoOpen still on after /panel autoopen off")
+	}
+	if m.st.cfg.PanelAutoOpen == nil || *m.st.cfg.PanelAutoOpen {
+		t.Errorf("cfg.PanelAutoOpen = %v, want false", m.st.cfg.PanelAutoOpen)
+	}
+	// The state query reports the new state in the transcript.
+	mm, _ = m.handlePanelAutoOpenCmd("")
+	m = mm.(model)
+	if got := m.transcript.String(); !strings.Contains(got, "panel auto-open: off") {
+		t.Errorf("query transcript = %q, want state report", got)
+	}
+	// Re-enabling restores content-driven behaviour.
+	mm, _ = m.handlePanelAutoOpenCmd("on")
+	m = mm.(model)
+	if !m.panelAutoOpen {
+		t.Error("panelAutoOpen still off after /panel autoopen on")
+	}
+}
+
+func TestPanelAutoOpenCmd_UsageOnBogusArg(t *testing.T) {
+	m := newTestModelForPanels(t)
+	mm, _ := m.handlePanelAutoOpenCmd("yes")
+	m = mm.(model)
+	if got := m.transcript.String(); !strings.Contains(got, "usage: /panel autoopen [on|off]") {
+		t.Errorf("transcript = %q, want usage line", got)
+	}
+	if !m.panelAutoOpen {
+		t.Error("a bogus argument must not change the state")
+	}
+}
+
+func TestPanelAutoOpenCmd_RoutedFromPanelCmd(t *testing.T) {
+	m := newTestModelForPanels(t)
+	mm, _ := m.handlePanelCmd("autoopen off")
+	m = mm.(model)
+	if m.panelAutoOpen {
+		t.Error("handlePanelCmd did not route autoopen to its handler")
+	}
+}

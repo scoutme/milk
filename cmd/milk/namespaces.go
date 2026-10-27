@@ -473,7 +473,7 @@ func (m model) paramLookup(ns string) []string {
 				out = append(out, n)
 			}
 		}
-		return out
+		return append(out, "autoopen")
 	case nsWorkflow:
 		reg, _ := workflow.LoadRegistry()
 		if reg == nil {
