@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -126,10 +127,15 @@ func TestTabbedTheme_MovingToAPanelClosesThePrevious(t *testing.T) {
 	m.panelTasks = true
 	m.activatePanelTab(regionTasks)
 	m.panelMemory = true
+	stampedBefore := m.panelActivity[regionMemory]
+	time.Sleep(2 * time.Millisecond) // distinct clock reading if the move stamps
 	updated, _ = m.handlePanelCmd("memory")
 	m = updated.(model)
 	if m.panelActive() != regionMemory || !m.panelRawOpen(regionMemory) {
 		t.Fatalf("front=%v open=%v after moving to the seeded memory tab", m.panelActive(), m.panelRawOpen(regionMemory))
+	}
+	if !m.panelActivity[regionMemory].After(stampedBefore) {
+		t.Error("moving to a panel is user interest — it must stamp recency (ADR-0089)")
 	}
 	if m.panelRawOpen(regionTasks) {
 		t.Fatal("moving to a hidden panel must close the front one")

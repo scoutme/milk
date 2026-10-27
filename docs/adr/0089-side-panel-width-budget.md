@@ -76,6 +76,12 @@ freshest forever:
   under the user mid-read.
 - **Intent:** opening a panel by hand (`handlePanelCmdToggle`) — the panel
   you just asked for claims a slot immediately, even when the budget is full.
+  A press for a panel the budget *hid* (`/panel <name>` or F1–F6) is intent
+  too — the strongest kind ("user interest is a significant event for the
+  panel"): it brings that panel to the front instead of toggling the panel
+  closed, and only once it is on screen does the next press close it. (Below
+  the one-panel floor no stamp can reveal anything, so there the press falls
+  back to the plain toggle.) Tabbed-theme tab moves stamp the same way.
 - **Never:** cosmetic redraws (elapsed counters), closing, startup/restored
   state (all-zero timestamps → the deterministic left-to-right baseline).
 
@@ -89,6 +95,10 @@ freshest forever:
   least one slot exists (width ≥ 73), so a content event's panel swaps in
   and the least recently relevant panel steps out — panels switch *on
   events*, not on position.
+- **User interest wins outright.** A shortcut press (F1–F6 or `/panel
+  <name>`) for a budget-hidden panel swaps it in as the freshest candidate
+  instead of toggling it closed — the layout answers the user before it
+  answers the feed.
 - **Deterministic baseline.** With every timestamp tied (startup, restored
   layout, panels that never saw an event) the rank degenerates to
   `panelRenderOrder` — the original left-to-right fill, as tie-break only.
@@ -143,5 +153,7 @@ freshest forever:
   widths 60–200 for five combinations, the repro scenario's symmetry, the
   threshold (139) and floor (73), the tied-baseline prefix and floor
   invariants, recency swaps (content event in / stalest out, widen
-  reveals), hand-open claiming a slot, budget-aware auto-open, and the
-  change-only stamping of the memory and git polls.
+  reveals), hand-open claiming a slot, shortcut bring-to-front (hidden panel
+  swaps in on its keypress, the second press closes it, and below the
+  floor the press falls back to the plain toggle), budget-aware auto-open,
+  and the change-only stamping of the memory and git polls.

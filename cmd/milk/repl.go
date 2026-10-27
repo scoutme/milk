@@ -2460,7 +2460,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Same effect as /panel <name>; having six panels
 		// (memory/tasks/background/workflow/project/git)
 		// competing for space makes a quick toggle worth more than typing
-		// the command out.
+		// the command out. A press on a panel the width budget hid brings
+		// it to the front (user interest outranks content recency,
+		// ADR-0089) instead of closing it.
 		//
 		// Alt+Up / Alt+Down: step through the idle tips (same as /tips
 		// prev|next) — global for the same reason, and one of the few

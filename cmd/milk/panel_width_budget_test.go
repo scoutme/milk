@@ -339,3 +339,57 @@ func TestGitDataMsg_StampsOnlyOnGraphChange(t *testing.T) {
 		t.Error("a no-change poll must not restamp — polling would keep git fresher than live events elsewhere")
 	}
 }
+
+// TestPanelShortcut_BringsHiddenPanelToFront: pressing /panel <name> or its
+// F1-F6 shortcut for a panel the width budget hid is explicit user interest
+// — the strongest relevance signal there is (ADR-0089). The press must bring
+// that panel into the layout, evicting the stalest one, and must NOT toggle
+// it closed: the user pressed the key to *see* it. Only once it is on screen
+// does the next press close it (the plain toggle). Below the one-panel floor
+// no stamp can reveal anything, so there the press falls back to the plain
+// toggle — the shortcut always does something.
+func TestPanelShortcut_BringsHiddenPanelToFront(t *testing.T) {
+	m := layoutTestModel(t, 130, 40) // budget: 2 slots (106 <= 130 < 139)
+	m.panelMemory = true
+	m.panelProject = true
+	m.panelGit = true // tie baseline → memory+project show, git hidden
+
+	if m.panelVisible(regionGit) {
+		t.Fatal("baseline: git must start hidden (budget of 2, render-order tie)")
+	}
+
+	next, _ := m.handlePanelCmd("git")
+	m = next.(model)
+	if !m.panelRawOpen(regionGit) {
+		t.Fatal("the press must not close a panel the user just asked to see")
+	}
+	if !m.panelVisible(regionGit) {
+		t.Error("the pressed panel must take a slot back — user interest outranks content recency")
+	}
+	if !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
+		t.Errorf("eviction takes the stalest (project, no event yet); got %v", visiblePanels(&m))
+	}
+	if !toastMentions(m, "git panel: brought to front") {
+		t.Errorf("bring-to-front should explain itself, got %#v", m.toastVisible)
+	}
+
+	// Now that it is shown, the next press is the plain toggle again.
+	next, _ = m.handlePanelCmd("git")
+	m = next.(model)
+	if m.panelRawOpen(regionGit) {
+		t.Error("a second press on the visible panel must close it")
+	}
+
+	// Below the one-panel floor (73 cols) there is no slot to swap into:
+	// the press falls back to the plain toggle so it still has an effect.
+	narrow := layoutTestModel(t, 60, 40)
+	narrow.panelTasks = true
+	if narrow.panelVisible(regionTasks) {
+		t.Fatal("baseline: no panel fits at width 60")
+	}
+	next, _ = narrow.handlePanelCmd("tasks")
+	narrow = next.(model)
+	if narrow.panelRawOpen(regionTasks) {
+		t.Error("with no room to show it, the press falls back to closing the panel")
+	}
+}
