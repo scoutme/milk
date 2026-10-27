@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -333,5 +334,107 @@ func TestJudgeScore_ServerError(t *testing.T) {
 	_, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err == nil {
 		t.Error("expected error for 503 response, got nil")
+	}
+}
+
+func TestParseJudgeScores_TrailingComma(t *testing.T) {
+	input := `[{"criterion": "correctness", "score": 1.0, "reasoning": "ok",},]`
+	scores, err := parseJudgeScores(input)
+	if err != nil {
+		t.Fatalf("parseJudgeScores() error: %v", err)
+	}
+	if len(scores) != 1 || scores[0].Score != 1.0 || scores[0].Criterion != "correctness" {
+		t.Errorf("got %+v", scores)
+	}
+}
+
+func TestParseJudgeScores_UnescapedQuoteAndTrailingComma(t *testing.T) {
+	input := `[{"criterion": "correctness", "score": 0.0, "reasoning": "used "ref" as-is",},]`
+	scores, err := parseJudgeScores(input)
+	if err != nil {
+		t.Fatalf("parseJudgeScores() error: %v", err)
+	}
+	if len(scores) != 1 || scores[0].Score != 0.0 || scores[0].Criterion != "correctness" {
+		t.Errorf("got %+v", scores)
+	}
+}
+
+// seqJudgeServer serves contents[i] for the i-th request (the last entry
+// repeats) and records request bodies and call count.
+type seqJudgeServer struct {
+	srv    *httptest.Server
+	calls  int
+	bodies []string
+}
+
+func mockJudgeServerSequence(contents ...string) *seqJudgeServer {
+	s := &seqJudgeServer{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s.bodies = append(s.bodies, string(body))
+		i := s.calls
+		if i >= len(contents) {
+			i = len(contents) - 1
+		}
+		s.calls++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"content": contents[i]}},
+			},
+		})
+	}))
+	return s
+}
+
+func TestJudgeScore_RetriesOnMalformedOutput(t *testing.T) {
+	s := mockJudgeServerSequence(
+		"Great job! The agent nailed it.", // no JSON array at all
+		`[{"criterion":"correctness","score":1.0,"reasoning":"fixed"}]`,
+	)
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{
+		Prompt: "Test",
+		Rubric: []RubricCriterion{
+			{Criterion: "correctness", Weight: 1, Scoring: "binary"},
+		},
+	}
+	scores, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	if err != nil {
+		t.Fatalf("Score() error: %v", err)
+	}
+	if len(scores) != 1 || scores[0].Score != 1.0 {
+		t.Errorf("got %+v", scores)
+	}
+	if s.calls != 2 {
+		t.Errorf("judge called %d times, want 2", s.calls)
+	}
+	if len(s.bodies) < 2 || !strings.Contains(s.bodies[1], "could not be parsed as JSON") {
+		t.Errorf("retry request did not carry the correction prompt: %v", s.bodies)
+	}
+}
+
+func TestJudgeScore_RetryExhausted(t *testing.T) {
+	s := mockJudgeServerSequence("no json here, ever")
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{
+		Prompt: "Test",
+		Rubric: []RubricCriterion{
+			{Criterion: "correctness", Weight: 1, Scoring: "binary"},
+		},
+	}
+	_, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	if err == nil {
+		t.Fatal("expected error after exhausted retries, got nil")
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("error should mention attempts: %v", err)
+	}
+	if s.calls != 3 {
+		t.Errorf("judge called %d times, want 3", s.calls)
 	}
 }
