@@ -20,6 +20,9 @@ import (
 
 // newTestModelForPanels builds a minimal model for panel auto-open tests,
 // following the same pattern as background_ui_test.go's F-key panel-toggle tests.
+// Sized (400 cols) so the width budget (ADR-0089) lets every panel fit —
+// newModel runs unsized, and panelVisible reports "closed" below the floor
+// for a panel that is logically open.
 func newTestModelForPanels(t *testing.T) model {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
@@ -28,13 +31,15 @@ func newTestModelForPanels(t *testing.T) model {
 		t.Fatal(err)
 	}
 	st := &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}
-	return newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+	m := newModel(context.Background(), st, nil, dispatchAgents{}, nil)
+	m.width = 400
+	return m
 }
 
 // rawPanelOpen reads the panel's open state straight off the model field,
-// bypassing panelOpen's workflow width gating — these tests run on an
-// unsized model, so workflowPanelVisible would report "closed" for a panel
-// that is logically open.
+// bypassing panelVisible's width gating — these tests run on a model whose
+// width may be below the floor (ADR-0089), so a width-gated check would
+// report "closed" for a panel that is logically open.
 func rawPanelOpen(m *model, region panelRegion) bool {
 	switch region {
 	case regionMemory:

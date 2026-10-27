@@ -141,58 +141,54 @@ func (m *model) mainWidth() int {
 	return w
 }
 
-// sidePanelsWidthExcept sums the widths of the side panels sharing the
-// layout, excluding exclude — raw open flags with the tabbed front-tab
-// filter (panelInLayout), never the width-guarded visibility helpers (those
-// call this, so consulting them here would recurse). Used by the
-// project/git/workflow visibility guards so a panel is only rendered when a
-// usable main area (40 cols) remains.
-func (m *model) sidePanelsWidthExcept(exclude panelRegion) int {
-	w := 0
+// panelMinMainWidth is the floor every side-panel width decision protects:
+// panels may claim columns only while at least this many stay for the
+// transcript and input area (the 20-col last-resort clamp in mainWidth is
+// below it and stays unreachable through panel layout).
+const panelMinMainWidth = 40
+
+// panelFits reports whether region can occupy layout columns at the current
+// terminal width — the one width rule shared by all six side panels
+// (ADR-0089). Walk panelRenderOrder left-to-right: each in-layout panel
+// claims its width while every panel before it fits too, and the walk stops
+// before the first panel that would push the main area below
+// panelMinMainWidth. Consequences:
+//
+//   - how many panels show depends only on the width budget, never on which
+//     panels are open — the same total panel width yields the same count in
+//     every combination (pre-ADR-0089 memory/tasks/background had no guard
+//     at all while project/git/workflow demanded 40 free cols, so at a
+//     width where one combination showed all three panels, another showed
+//     only its first one);
+//   - whatever doesn't fit is always the tail of the row: a width shortage
+//     or a newly opened panel can only push out panels that come after the
+//     first one that no longer fits — panels before it keep showing (no
+//     all-or-nothing cliff where everything disappears at once);
+//   - the transcript keeps panelMinMainWidth cols whenever any panel shows.
+//
+// Every slot has the same width (panelSlotWidth), so the first panel that
+// doesn't fit disqualifies every panel after it as well — the visible set is
+// always a prefix of the in-layout row, never a row with holes. The tabbed
+// front-tab filter (ADR-0079) falls out of this naturally: only the front
+// tab is in layout, so it is the first (and only) panel in the walk.
+func (m *model) panelFits(region panelRegion) bool {
+	if !m.panelInLayout(region) {
+		return false
+	}
+	used := 0
 	for _, r := range panelRenderOrder {
-		if r != exclude && m.panelInLayout(r) {
-			w += panelWidth(r)
+		if !m.panelInLayout(r) {
+			continue
 		}
+		if used+panelWidth(r)+panelMinMainWidth > m.width {
+			return false
+		}
+		if r == region {
+			return true
+		}
+		used += panelWidth(r)
 	}
-	return w
-}
-
-// projectPanelVisible reports whether the project panel is open and the
-// terminal is wide enough to render it alongside a usable main area
-// (minimum 40 cols), like workflowPanelVisible.
-func (m *model) projectPanelVisible() bool {
-	if !m.panelProject {
-		return false
-	}
-	return m.width >= m.sidePanelsWidthExcept(regionProject)+projectPanelWidth+40
-}
-
-// gitPanelVisible — the same guard for the git panel.
-func (m *model) gitPanelVisible() bool {
-	if !m.panelGit {
-		return false
-	}
-	return m.width >= m.sidePanelsWidthExcept(regionGit)+gitPanelWidth+40
-}
-
-// workflowPanelVisible reports whether the workflow panel is open and the
-// terminal is wide enough to render it alongside a usable main area (minimum
-// 40 cols for the transcript) and any other open panels.
-func (m *model) workflowPanelVisible() bool {
-	if !m.workflowPanelOpen {
-		return false
-	}
-	memW := 0
-	if m.panelInLayout(regionMemory) {
-		memW = memoryPanelWidth
-	}
-	if m.panelInLayout(regionTasks) {
-		memW += tasksPanelWidth
-	}
-	if m.panelInLayout(regionBackground) {
-		memW += backgroundPanelWidth
-	}
-	return m.width >= memW+workflowPanelWidth+40
+	return false
 }
 
 // vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.

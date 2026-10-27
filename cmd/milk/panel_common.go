@@ -128,7 +128,7 @@ func (m *model) autoOpenPanel(region panelRegion) {
 	if m.panelManualOverride[region] {
 		return
 	}
-	wasOpen := m.panelOpen(region)
+	wasOpen := m.panelVisible(region)
 	// Tabbed themes (ADR-0079): while another panel occupies the shared
 	// slot, content for a closed panel stays a notification instead of
 	// switching the user's tab — auto-open takes a free slot or none.
@@ -138,7 +138,7 @@ func (m *model) autoOpenPanel(region panelRegion) {
 	if ptr := m.panelOpenPtr(region); ptr != nil {
 		*ptr = true
 	}
-	if !wasOpen && m.panelOpen(region) {
+	if !wasOpen && m.panelVisible(region) {
 		// Tabbed themes (ADR-0079): the panel that just opened takes the
 		// shared slot (the gate above means the slot was free) — once.
 		// Later content for the same already-open panel (every workflow
@@ -286,26 +286,6 @@ func panelDisplayName(region panelRegion) string {
 	return "side"
 }
 
-// panelOpen reports whether the given region's panel is currently part of
-// the layout — the same conditions View() checks before joining it in.
-func (m *model) panelOpen(region panelRegion) bool {
-	switch region {
-	case regionMemory:
-		return m.panelMemory
-	case regionTasks:
-		return m.panelTasks
-	case regionBackground:
-		return m.panelBackground
-	case regionWorkflow:
-		return m.workflowPanelVisible()
-	case regionProject:
-		return m.projectPanelVisible()
-	case regionGit:
-		return m.gitPanelVisible()
-	}
-	return false
-}
-
 // panelRenderOrder is the left-to-right order side panels are joined in by
 // View() — memory, tasks, background, workflow, project, git.
 var panelRenderOrder = []panelRegion{regionMemory, regionTasks, regionBackground, regionWorkflow, regionProject, regionGit}
@@ -335,8 +315,8 @@ func (m *model) panelAltBackground(region panelRegion) bool {
 }
 
 // panelOpenPtr returns a pointer to the model's raw open flag for the given
-// side-panel region (no layout/width gating — panelOpen's visible() checks
-// are render-time only), or nil for regionNone/an unknown region. Toggling
+// side-panel region (no layout/width gating — panelVisible's width budget is
+// render-time only), or nil for regionNone/an unknown region. Toggling
 // (/panel, F1-F6), auto-open and panel-state persistence share it, so the
 // setters can never drift out of sync with the readers.
 func (m *model) panelOpenPtr(region panelRegion) *bool {
