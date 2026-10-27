@@ -22,6 +22,19 @@
 > JSON-RPC stdio loop (`milk serve --acp` — see the Phase 2 status note
 > below). This note records status only — the contract below is unchanged.
 >
+> **Status note (2026-10-27 — batch tool activity, ADR-0085):** the phase-4
+> deferral of `tool_use`/`tool_result` is resolved: batch `stream-json` now
+> emits the turn's recorded tool trail as §6.2 `assistant`(tool_use) /
+> `user`(tool_result) message pairs before the final-text `assistant` message
+> and the `result` line (post-hoc reconstruction from `session.TrailStep`, not
+> live deltas; local-provider turns only), and `result.num_turns` reflects the
+> real model iterations. The "every `stream-json` eval run reports
+> `tool_calls: 0`" accepted cost is gone — `eval/adapter_milk.go` consumes the
+> pairs into counts and full tool lists (see
+> [ADR-0085](../../adr/0085-eval-experiment-sandbox-budgets.md)). The
+> `stream_event` partial-delta deferral is unchanged — `capabilities` still
+> only advertises `stream_v1`.
+>
 > **Status note (phase 4 — `--output-format` CLI wiring):** `text|json|
 > stream-json` landed (`cmd/milk/outputformat.go`, wired in `main.go`'s
 > one-shot `run()`), narrower than full §6 fidelity — see this note for what's

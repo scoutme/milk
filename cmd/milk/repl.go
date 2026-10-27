@@ -4780,7 +4780,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 				escalationLocalAgent.WithOtelDir(od)
 			}
 			escalationLocalAgent.WithLogContext(cfg.Otel.LogContext)
-			escalationLocalAgent = escalationLocalAgent.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			escalationLocalAgent = escalationLocalAgent.WithSkipPermissions(skipPermissionsFor(cfg, escAC))
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				escalationLocalAgent.WithPermissions(lp, nil)
 			}
@@ -4892,7 +4892,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	st := &interactiveState{sess: sess, cwd: cwd, cfg: cfg, mem: mem, cs: cs, localPerms: localPerms, toolFutures: map[string]chan string{}, notifier: newNotifier(cfg)}
-	st.skipPermissions.Store(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	st.skipPermissions.Store(skipPermissionsFor(cfg, cfg.ActiveAgent()))
 
 	// Wire token persistence callbacks now that st is available; closures reference
 	// st.sess so they always write to the current session even after /new.

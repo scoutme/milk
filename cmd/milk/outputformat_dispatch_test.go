@@ -48,7 +48,7 @@ func TestOutputFormatStreamJSON_DispatchWiring(t *testing.T) {
 		"hi", "hi", io.Discard, nil, onResponse, nil, nil); err != nil {
 		t.Fatalf("runPrimaryWithSession returned error: %v", err)
 	}
-	emit(enc, buildResultEvent(sess.ID, router.TargetLocal, nil, lastText, 42, before, sess.TokensSnapshot()))
+	emit(enc, buildResultEvent(sess.ID, router.TargetLocal, nil, lastText, 42, 1, before, sess.TokensSnapshot()))
 
 	// Decode the whole stream back and assert the exact shape eval/adapter_milk.go relies on.
 	dec := streamjson.NewDecoder(&stdout)

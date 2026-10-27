@@ -154,7 +154,7 @@ func TestBuildResultEvent_Success(t *testing.T) {
 		"m\x00primary": {Model: "m", Agent: "primary", Prompt: 10, Completion: 5},
 	}
 
-	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "the answer", 1234, before, after)
+	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "the answer", 1234, 1, before, after)
 
 	if ev.Type != streamjson.TypeResult || ev.Subtype != streamjson.ResultSuccess {
 		t.Errorf("Type/Subtype = %q/%q, want result/success", ev.Type, ev.Subtype)
@@ -185,7 +185,7 @@ func TestBuildResultEvent_Success(t *testing.T) {
 }
 
 func TestBuildResultEvent_Error(t *testing.T) {
-	ev := buildResultEvent("sess_123", router.TargetEscalation, errTest, "", 500, nil, nil)
+	ev := buildResultEvent("sess_123", router.TargetEscalation, errTest, "", 500, 1, nil, nil)
 
 	if ev.Subtype != streamjson.ResultErrorDuringExecution {
 		t.Errorf("Subtype = %q, want error_during_execution", ev.Subtype)
@@ -217,7 +217,7 @@ func TestBuildResultEvent_Throughput(t *testing.T) {
 			DecodeSeconds: 4, TTFTSeconds: 1.2, Requests: 2},
 	}
 
-	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, before, after)
+	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, 1, before, after)
 
 	if ev.OutputTokensPerSecond != 50 {
 		t.Errorf("OutputTokensPerSecond = %v, want 50", ev.OutputTokensPerSecond)
@@ -243,7 +243,7 @@ func TestBuildResultEvent_ThroughputOmitted(t *testing.T) {
 		"m\x00primary": {Model: "m", Agent: "primary", Prompt: 10, Completion: 200},
 	}
 
-	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, before, after)
+	ev := buildResultEvent("sess_123", router.TargetLocal, nil, "hi", 5000, 1, before, after)
 
 	if ev.OutputTokensPerSecond != 0 || ev.TTFTMS != 0 {
 		t.Errorf("throughput = %v/%d, want both zero", ev.OutputTokensPerSecond, ev.TTFTMS)
