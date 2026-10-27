@@ -477,6 +477,7 @@ func (m *model) adjustThinkAnchors(idx, oldLen, newLen int) {
 func (m *model) invalidateThinkDisplay() {
 	m.colorizeForce = true
 	m.colorizeTransLen = 0
+	m.thinkGen++
 }
 
 // thinkViewMaxBytes caps the dedicated thinking view's buffer (issue #208's

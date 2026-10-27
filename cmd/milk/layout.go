@@ -4,10 +4,10 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/creack/pty"
+	viewport "github.com/scoutme/milk/internal/vp"
 )
 
 // viewportRebuildThrottle caps how often a streamed chunk triggers a full
@@ -246,8 +246,23 @@ func (m *model) setViewportContent() {
 	vw := m.vpWidth()
 	sep := styleBorder.Width(vw).Render("")
 	transcript := m.wrappedTranscript()
-	content := transcript + "\n" + sep + "\n" + m.colorizeInput(m.ta.View())
-	m.vp.SetContent(content)
+	// Perf (ADR-0088): the transcript part changes far less often than this
+	// runs — it rebuilds on every keystroke — so its rows are cached as a
+	// line slice, content-addressed against the wrapped transcript. Typing
+	// and cursor movement then only rebuild the small input-area tail and
+	// hand the assembled lines to the viewport's split-free SetLines path.
+	if transcript != m.txPartCache || sep != m.txSepCache {
+		m.txPartCache = transcript
+		m.txSepCache = sep
+		// Normalize once per rebuild, the way viewport.SetContentLines
+		// would — SetLines (the per-keystroke path) trusts its lines.
+		m.txLinesCache = viewport.NormalizeLines(strings.Split(transcript+"\n"+sep, "\n"))
+	}
+	inputLines := viewport.NormalizeLines(strings.Split(m.colorizeInput(m.ta.View()), "\n"))
+	lines := make([]string, 0, len(m.txLinesCache)+len(inputLines))
+	lines = append(lines, m.txLinesCache...)
+	lines = append(lines, inputLines...)
+	m.vp.SetLines(lines)
 	m.viewportDirty = false
 	m.lastViewportRebuild = time.Now()
 }

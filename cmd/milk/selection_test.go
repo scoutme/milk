@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	viewport "github.com/scoutme/milk/internal/vp"
 )
 
 // --- wrapLineIntoRows ---
