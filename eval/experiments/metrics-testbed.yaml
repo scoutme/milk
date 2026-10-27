@@ -1,0 +1,58 @@
+# The metrics testbed: one fixed request, run repeatedly against a fresh,
+# sandboxed milk state seeded with your current agent set.
+#
+# Run it:   milk eval run --experiment eval/experiments/metrics-testbed.yaml
+# (add a flag to override anything here, e.g. --repetitions 5)
+#
+# What gets measured and verified per run:
+#   - token counts (in/out, cache create/read)  — report + results.json
+#   - tool calls: count and full list (name/args/result) — report + results.json
+#   - time spent (wall duration, TTFT, output tok/s) — report + results.json
+#   - model turns, model name, routing (primary/escalation), stop reason
+#   - budget verdicts below (PASS/FAIL per run), and mean ± sd across runs
+#
+# The request itself lives in testbed-scenarios/metrics_testbed.yaml — swap
+# the prompt there for the real request whenever you're ready; this file
+# stays as-is.
+name: metrics-testbed
+description: >
+  Fixed request, repeated N times against always-fresh sandboxed state
+  (current agent set, no memory/sessions carry-over) to verify tokens,
+  tool calls, and time budgets run-over-run.
+
+agents:
+  - milk-tui
+scenarios: testbed-scenarios
+
+repetitions: 3
+
+sandbox:
+  # fresh: every run gets a brand-new milk state root (sessions, memory,
+  # history start empty), seeded with the current config.json so the run
+  # uses exactly your current agent set — no nth-run contamination.
+  mode: fresh
+  seed: config
+  # let the agents actually run bash/edit_file/write_file — batch runs have
+  # no interactive permission ask, so mutating tools would otherwise be
+  # denied and the request could only be answered read-only. Only the
+  # sandbox's seeded config copy is touched.
+  allow_tools: true
+
+# Defaults asserted against every run; the scenario's own budget: block can
+# refine any of these field-by-field. Zero/omitted = no limit.
+budget:
+  max_input_tokens: 100000
+  max_output_tokens: 20000
+  max_tool_calls: 30
+  max_duration: 5m
+
+# To compare milk versions side by side instead of just repeating one, add a
+# version matrix — one labeled column per version, same suite, judge, budgets
+# and sandboxes (see docs/reference/eval.md, "Comparing milk versions"):
+# versions:
+#   - label: head
+#     ref: HEAD                # built on demand, cached per commit
+#   - label: v0.8.0
+#     ref: v0.8.0
+#   - label: patched
+#     milk_binary: ~/bin/milk-patched

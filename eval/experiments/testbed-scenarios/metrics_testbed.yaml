@@ -1,0 +1,40 @@
+# The fixed request for the metrics testbed. Replace the prompt (and the
+# setup files, if the real request needs a different workspace) with the
+# actual request under test — the experiment file references this directory.
+category: metrics
+
+scenarios:
+  - name: fixed-request
+    description: >
+      Placeholder request exercising read + edit + run tools so the tool-call
+      list is non-trivial. Swap this prompt for the real request.
+    difficulty: medium
+    setup:
+      files:
+        - path: greet.py
+          content: |
+            def greet(name):
+                # TODO: handle empty names
+                return "Hello, " + name + "!"
+        - path: test_greet.py
+          content: |
+            from greet import greet
+
+            def test_greet():
+                assert greet("world") == "Hello, world!"
+
+            def test_empty():
+                assert greet("") == "Hello, someone!"
+    prompt: >
+      Please improve greet.py: greet("") should return "Hello, someone!"
+      instead of "Hello, !". Make the change and run `python3 -m pytest` to
+      verify the tests in test_greet.py pass.
+    rubric:
+      - criterion: correctness
+        description: Does greet("") return "Hello, someone!" and do the tests pass?
+        weight: 3
+        scoring: binary
+      - criterion: efficiency
+        description: Does the agent use a minimal, purposeful set of tool calls?
+        weight: 1
+        scoring: scale_1_5

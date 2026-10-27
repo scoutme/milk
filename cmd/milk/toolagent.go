@@ -137,7 +137,7 @@ func buildToolRunner(ctx context.Context, ac config.AgentConfig, cfg config.Conf
 		skipPerms: wiring.skipPerms,
 		permMode:  wiring.permMode,
 	})
-	la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	la = la.WithSkipPermissions(skipPermissionsFor(cfg, ac))
 
 	if dbg, err := openLocalDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open tool-agent debug log: %v\n", milkTag(), err)

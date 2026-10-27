@@ -1,6 +1,6 @@
 # Evaluation harness (`milk eval`)
 
-> Runs scenario prompts against real agent backends — the `claude` CLI (driven inside a tmux session exactly as a human would) or the actual `milk` binary (driven as a one-shot batch run consuming its machine-readable `--output-format stream-json` event stream) — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. `--scenarios`/`--results` default to `eval/scenarios`/`eval/results` relative to your current working directory — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
+> Runs scenario prompts against real agent backends — the `claude` CLI (driven inside a tmux session exactly as a human would) or the actual `milk` binary (driven as a one-shot batch run consuming its machine-readable `--output-format stream-json` event stream) — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. Measurement runs get the full toolkit: an [experiment file](#experiment-files) defines the whole suite (adapters, scenarios, repetitions, judge, [sandbox](#sandboxed-runs), [budgets](#metric-budgets)) in one YAML — the same request repeated against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls (count + full list) and time per run, with nth-run variance in the report. `--scenarios`/`--results` default to `eval/scenarios`/`eval/results` relative to your current working directory — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
 >
 > `milk eval` is a subcommand of the main `milk` binary (`cmd/milk/main.go` mounts `eval.Command()`) — there is no separate `milk-eval` binary. Build with `task build` / `task build:local` like any other milk command.
 
@@ -10,6 +10,7 @@
 milk eval --list                                          # available adapters
 milk eval run --agents claude-code,milk-tui                # run every scenario against both
 milk eval run --agents claude-code --category smoke        # fast pipeline sanity check
+milk eval run --experiment eval/experiments/metrics-testbed.yaml   # a whole suite from one file
 milk eval report --results eval/results                    # re-print the last report
 ```
 
@@ -23,10 +24,12 @@ Runs scenarios against one or more adapters, judges each turn, and prints + pers
 
 | Flag | Default | Description |
 | --- | --- | --- |
+| `--experiment` | (none) | Experiment YAML file defining the full suite (adapters, scenarios, repetitions, judge, sandbox, budgets) — see [Experiment files](#experiment-files). Explicitly set flags override its fields. |
 | `--agents` | all registered | Comma-separated adapter names. Supports per-adapter options — see below. |
 | `--scenarios` | `eval/scenarios` | Directory of scenario YAML files. |
 | `--category` | (none) | Filter to one category (`smoke`, `code_generation`, `debugging`, `refactoring`, …). |
 | `--multi-turn` | `false` | Only run scenarios with `multi_turn: true`. |
+| `--repetitions` | `1` | Run every scenario N times, fully isolated (fresh temp workdir, fresh sandbox per run) — for nth-run variance. |
 | `--results` | `eval/results` | Output directory; writes `results.json`. |
 | `--judge-agent` | primary agent | Agent name from `~/.milk/config.json` to use as the LLM judge instead of the primary agent — see [Judging](#judging). |
 
@@ -41,6 +44,111 @@ Regenerates the printed report from an existing `results.json`. `--cache-only` p
 ### `milk eval --list`
 
 Prints registered adapter names and a usage hint. New adapters register themselves via `eval.Register(name, factory)` in an `init()`, same pattern as `eval/adapter_claude.go` / `eval/adapter_milk.go`.
+
+---
+
+## Experiment files
+
+An experiment file defines the **full evaluation suite in one YAML file** — adapters, scenario selection, repetitions, judge, sandboxing and metric budgets — so a complete, repeatable run needs no external scripting:
+
+```sh
+milk eval run --experiment eval/experiments/metrics-testbed.yaml
+```
+
+Explicitly set CLI flags override the experiment's fields one by one (e.g. `--repetitions 5` on the command line beats `repetitions: 3` in the file). Scenario and result paths resolve relative to the experiment file's directory first (an experiment is self-contained), falling back to the working directory.
+
+```yaml
+name: metrics-testbed
+description: fixed request, repeated                               # optional, shown nowhere yet
+agents:                                                           # adapter specs, same bracket syntax as --agents
+  - milk-tui
+scenarios: testbed-scenarios                                      # scenario dir (default eval/scenarios)
+select:                                                           # optional filters
+  category: metrics                                               # one category
+  names: [fixed-request]                                          # exact scenario names (unknown names = error)
+  multi_turn: false                                               # like --multi-turn
+repetitions: 3                                                    # N fully isolated runs per scenario (default 1)
+judge_agent: ""                                                   # "" = primary agent
+results: eval/results/metrics-testbed                             # default: eval/results/<name>
+sandbox:                                                          # see Sandboxed runs
+  mode: fresh                                                     # fresh | off (default off)
+  seed: config                                                    # config (default) | none
+  allow_tools: true                                               # let batch runs execute mutating tools
+  milk_binary: ""                                                 # optional: pin the milk binary to drive
+budget:                                                           # metric thresholds asserted per run (see Metric budgets)
+  max_input_tokens: 100000
+  max_output_tokens: 20000
+  max_tool_calls: 30
+  max_duration: 5m
+versions:                                                         # optional: milk version matrix (see Comparing milk versions)
+  - label: head                                                   # report column (keep short; default: the ref / binary basename)
+    ref: HEAD                                                     # git ref built on demand (cached per commit)
+  - label: v0.8.0
+    ref: v0.8.0
+```
+
+A working example lives at [`eval/experiments/metrics-testbed.yaml`](../../eval/experiments/metrics-testbed.yaml) (with its request scenario under `eval/experiments/testbed-scenarios/`) — the run-from-the-same-request testbed: one fixed request, repeated N times against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls and time per run and their variance across runs.
+
+---
+
+## Sandboxed runs
+
+Without sandboxing, every milk-tui run lives in the real `~/.milk` state root — and the *n*th run then sees the first run's sessions, percept memory, and prompt history, exactly what a measurement run must not. `sandbox.mode: fresh` (or the `milk-tui[--sandbox]` adapter option) gives **every adapter start a brand-new state root** (a `milk-eval-home-*` temp dir, removed on adapter stop — one per scenario run, one per repetition):
+
+- **seeded with your current agent set** (`seed: config`, the default): the fresh root's `config.json` is a verbatim copy of your current one (`~/.milk/config.json`, honoring `--config-root`/`$MILK_CONFIG_ROOT`) — same agents, settings and routing, none of the state (sessions, memory, history, jobs, otel, mcp_oauth all start empty).
+- **`seed: none`** seeds nothing — milk starts from first-run defaults.
+- **`allow_tools: true`** additionally writes `dangerously_skip_permissions: true` onto every seeded agent: batch runs have no interactive permission ask, so mutating tools (`bash`, `edit_file`, `write_file`, …) are otherwise denied ("requires permission — run interactively or enable skip-permissions") and a code-editing request silently degrades to read-only. Only the sandbox's seeded copy is modified — your live config is never touched.
+- **`milk_binary:`** pins the binary the adapter drives (default `~/.local/bin/milk` — run `task build` after code changes, or the harness silently scores a stale binary).
+
+Per-adapter pseudo-flags do the same without an experiment file: `milk-tui[--sandbox]`, `milk-tui[--sandbox-seed,/path/config.json]`, `milk-tui[--allow-tools]`, `milk-tui[--milk-bin,/path/to/milk]`, `milk-tui[--label,<name>]`. Explicit pseudo-flags win over experiment values.
+
+Two caveats: `claude-code` has no sandbox support (it drives a tmux session against the real `~/.claude`; an experiment's `sandbox:` section is skipped for it with a note), and MCP servers needing OAuth are not seeded — their tokens live in the (empty) state root, so the run warns `not authorized` and continues without them.
+
+---
+
+## Comparing milk versions
+
+The version matrix runs the **same suite against several milk binaries side by side** — one labeled `milk-tui` adapter per version — so a single run compares their effectiveness (judge scores, tokens, tool calls, time) on identical scenarios, judge, budgets and fresh sandboxes. Declare it in the experiment file:
+
+```yaml
+versions:
+  - label: head            # report column / results.json key (default: the ref or binary basename)
+    ref: HEAD              # git ref (tag / branch / commit) built on demand
+  - label: v0.8.0
+    ref: v0.8.0
+  - label: patched
+    milk_binary: ~/bin/milk-patched   # prebuilt binary instead (wins over ref)
+```
+
+- **`ref:`** builds `./cmd/milk` via `go build` in a throwaway git worktree of the milk repo (found via the current working directory) and caches the binary under `~/.cache/milk-eval-builds/`, keyed by the resolved commit — re-runs skip the build; a moving branch rebuilds when its commit changes. Build failures (e.g. an old ref with a different toolchain) surface with the compiler's output before any scenario runs.
+- **`milk_binary:`** drives a prebuilt binary as-is (`~` is expanded) — anything from `task build` output to a CI artifact.
+- Labels must be unique (they name the report columns and the `results.json` keys — two adapters sharing one would overwrite each other's data).
+- `versions` combines with `agents` — e.g. a `claude-code` baseline column alongside the version columns — and with `repetitions` (each version × each repetition fully isolated) and `budget:` (asserted per version per run).
+- The report is the usual per-agent comparison with versions as columns (`Weighted Score`, `Tokens`, `Tool calls`, `Duration`, `Budget` per version), plus `Repetition Statistics` per version when repeating.
+
+Without an experiment file the same shape works through the adapter pseudo-flags (each `milk-tui` becomes its own column):
+
+```sh
+milk eval run --category smoke --results /tmp/cmp \
+  --agents 'milk-tui[--label,head,--milk-bin,~/.local/bin/milk],milk-tui[--label,v0.8.0,--milk-bin,/tmp/milk-v080]'
+```
+
+---
+
+## Metric budgets
+
+The automated **verify** half of an evaluation: every run's metrics are checked against thresholds, whatever the judge scores. Budgets come from the experiment file's `budget:` block (defaults for every scenario) and an optional per-scenario `budget:` block, which wins field-by-field. Zero/omitted = no limit. For multi-turn scenarios every metric is the scenario's total across its turns.
+
+| YAML key | Checks | Run metric |
+| --- | --- | --- |
+| `max_input_tokens` | input tokens ≤ N | sum of `tokens.input_tokens` |
+| `max_output_tokens` | output tokens ≤ N | sum of `tokens.output_tokens` |
+| `max_total_tokens` | in+out ≤ N | sum of both |
+| `max_tool_calls` / `min_tool_calls` | tool-call count within bounds | `len(tool_calls)` |
+| `max_num_turns` | model iterations ≤ N | `num_turns` (absent = not checked) |
+| `max_duration` | wall time ≤ duration string (`"90s"`, `"2m30s"`); `max_duration_ms` for the integer form | turn `duration` |
+
+Verdicts render per scenario (`Budget [milk-tui]: PASS` / `FAIL — tool calls 25 > max_tool_calls 20`), as a `Budget` row in the metrics table, and as `N/M pass` in the repetition statistics; `results.json` carries the full verdict per run (`agents[].budget`).
 
 ---
 
@@ -69,6 +177,7 @@ Matches `Scenario` in `eval/scenario.go` — that struct is the source of truth;
 | `Rubric` | `rubric` | list of criteria | Top-level rubric for single-turn scenarios (i.e. those using `prompt:`, not `turns:`). |
 | `Expected` | `expected` → `{contains, files_changed}` | — | Parsed but **not currently consumed** — see caveat below. |
 | `CacheExpect` | `cache_expect` → `{min_cache_hit_rate_after_turn1, no_cache_recreate_after_turn1}` | — | Automated cache-reuse assertions for multi-turn scenarios — see [Multi-turn example](#multi-turn-example-with-cache_expect). |
+| `Budget` | `budget` → `{max_input_tokens, max_output_tokens, max_total_tokens, max_tool_calls, min_tool_calls, max_num_turns, max_duration}` | — | Per-scenario metric budget, winning field-by-field over the experiment's `budget:` — see [Metric budgets](#metric-budgets). |
 
 Each rubric criterion (`rubric:` items, top-level or per-turn):
 
@@ -219,9 +328,9 @@ None of the shipped scenarios use `expected:` (see the no-op caveat above). `ite
 | Adapter | Drives | Requires |
 | --- | --- | --- |
 | `claude-code` | The `claude` CLI, launched inside a fresh tmux session per scenario, in a throwaway git-initialized temp workdir. Reads Claude Code's own transcript JSONL for the response, token usage, and tool calls. | `claude` CLI on `PATH`, logged in |
-| `milk-tui` | The installed `~/.local/bin/milk` binary (built via `task build`), spawned per turn as `milk [flags] "<prompt>" --output-format stream-json`; the adapter consumes the batch JSONL event stream (ADR-0050) for the response and token usage — no session-file scraping. **Tool calls always report as `0`**: the batch stream doesn't emit `tool_use`/`tool_result` events yet (see [docs/guides/tooling.md](../guides/tooling.md#machine-readable-output)), regardless of how many tools the turn actually used. | `milk` built and configured (`~/.milk/config.json`) |
+| `milk-tui` | The installed `~/.local/bin/milk` binary (built via `task build`, or pinned with `--milk-bin`/`sandbox.milk_binary`), spawned per turn as `milk [flags] "<prompt>" --output-format stream-json`; the adapter consumes the batch JSONL event stream (ADR-0050) for the response, token usage, and tool calls — no session-file scraping. Tool calls come from the stream's `tool_use`/`tool_result` message pairs (local-provider turns; a `claude-cli` turn inside milk emits none). | `milk` built and configured (`~/.milk/config.json`) |
 
-The `claude-code` adapter types the prompt into the target program's interactive prompt via `tmux send-keys`/`send-enter` — the same input path a human would use, not an API shortcut — then polls for turn completion (Claude Code: transcript reaches the text block of a `stop_reason: "end_turn"` response, or any non-assistant record after one). Claude Code writes one transcript line per content block, each repeating the response's usage, so token usage is counted once per `message.id`. The `milk-tui` adapter instead runs milk headlessly per turn and waits on the stream's terminal `result` event, which carries the response, `usage`/`model_usage` (incl. `cache_read`/`cache_creation`) and `route_history` directly.
+The `claude-code` adapter types the prompt into the target program's interactive prompt via `tmux send-keys`/`send-enter` — the same input path a human would use, not an API shortcut — then polls for turn completion (Claude Code: transcript reaches the text block of a `stop_reason: "end_turn"` response, or any non-assistant record after one). Claude Code writes one transcript line per content block, each repeating the response's usage, so token usage is counted once per `message.id`. The `milk-tui` adapter instead runs milk headlessly per turn and waits on the stream's terminal `result` event, which carries the response, `usage`/`model_usage` (incl. `cache_read`/`cache_creation`), `num_turns`, `ttft_ms`, `output_tokens_per_second` and `route_history` directly; tool calls are collected from the turn's `tool_use`/`tool_result` message pairs.
 
 ### Per-adapter options
 
@@ -230,6 +339,10 @@ The `claude-code` adapter types the prompt into the target program's interactive
 | Adapter | Option | Example | Effect |
 | --- | --- | --- | --- |
 | `milk-tui` | any `milk` CLI flag | `milk-tui[--agent,mimo-local]` | Forwarded verbatim onto the `milk` launch command — e.g. pin the primary or escalation agent for this eval run without touching `~/.milk/config.json`. |
+| `milk-tui` | `--sandbox` | `milk-tui[--sandbox]` | Fresh milk state root per run, seeded with the current config — see [Sandboxed runs](#sandboxed-runs). |
+| `milk-tui` | `--sandbox-seed <path>` | `milk-tui[--sandbox-seed,cfg.json]` | Sandbox seeded from an explicit config.json (implies `--sandbox`). |
+| `milk-tui` | `--allow-tools` | `milk-tui[--allow-tools]` | Seed the sandbox with `dangerously_skip_permissions` on every agent so batch runs may execute mutating tools. |
+| `milk-tui` | `--milk-bin <path>` | `milk-tui[--milk-bin,./milk]` | Pin the milk binary to drive (adapter pseudo-flag — never forwarded to milk). |
 | `claude-code` | `--cache-cooldown <duration>` | `claude-code[--cache-cooldown,5m]` | Before starting a new session, wait until at least `<duration>` has elapsed since the last `claude-code` turn completed — anywhere, including in a *previous* `milk eval run` invocation (state persists to `~/.milk/eval-claude-cache-activity`). Opt-in; omit for unchanged (possibly cache-warm) behavior. See [Prompt caching](#prompt-caching-and---cache-cooldown). |
 | `claude-code` | any other flag | `claude-code[--append-system-prompt,"..."]` | Forwarded verbatim onto the `claude` launch command. |
 
@@ -253,7 +366,7 @@ The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and to
 
 ## Reports
 
-`GenerateReport` prints per-scenario tables (`correctness`/etc. scores, `Weighted Score`) and per-agent metrics (`Tokens (in/out)`, `Cache (create/read)`, `Cache hit rate`, `Cost USD`, `Duration`, `Tool calls`), followed by an aggregate section (by weighted score, and by cost-efficiency). `GenerateCacheReport` (`--cache-only`) prints just the cache analysis. `GenerateJSON` (`--json`) is the same data as a machine-readable structure — see `ScenarioResult`/`AgentResult` in `eval/scenario.go` and `eval/harness.go`.
+`GenerateReport` prints per-scenario tables (`correctness`/etc. scores, `Weighted Score`) and per-agent metrics (`Tokens (in/out)`, `Cache (create/read)`, `Cache hit rate`, `Cost USD`, `Duration`, `Tool calls`, `Budget`), followed by each agent's **tool-call list in call order** (`Tools [milk-tui] (5): read_file, edit_file, bash`) and the **budget verdict** (`Budget [milk-tui]: PASS` / `FAIL — <violations>`), then an aggregate section (by weighted score, and by cost-efficiency). With `repetitions > 1` (or `--repetitions`), each run is its own labeled section (`Scenario: fixed-request (run 2/3)`) and a **Repetition Statistics** section summarizes nth-run variance per scenario as mean ± sd (`Weighted score`, `Tokens in/out`, `Tool calls`, `Duration`) plus the budget pass rate (`2/3 pass`). `GenerateCacheReport` (`--cache-only`) prints just the cache analysis. `GenerateJSON` (`--json`) is the same data as a machine-readable structure — see `ScenarioResult`/`AgentResult` in `eval/scenario.go` and `eval/harness.go`; per-turn results carry the full tool-call list (name/args/result), `model`, `num_turns`, `ttft_ms`, `output_tokens_per_second`, `stop_reason` and `route_history`, and each run carries its `budget` verdict.
 
 Real output shape (from milk's own report-generator test fixture, not a live run — trimmed to one scenario):
 
@@ -299,7 +412,11 @@ Overall winner: milk-tui (90x cheaper)
 
 ## Known limitations
 
-- **`milk-tui` shells to the *installed* binary** (`~/.local/bin/milk`), not whatever's in your working tree — run `task build` after code changes before evaluating, or the harness silently scores a stale binary.
+- **`milk-tui` shells to the *installed* binary** (`~/.local/bin/milk`), not whatever's in your working tree — run `task build` after code changes before evaluating, or the harness silently scores a stale binary (or pin one with `--milk-bin` / `sandbox.milk_binary`, or let `versions: ref:` build the exact commits — see [Comparing milk versions](#comparing-milk-versions)).
 - **`CostUSD` is unpopulated** (see [Reports](#reports)).
 - **`--cache-cooldown` is `claude-code`-only** — `milk-tui` doesn't exhibit this caching behavior (no Anthropic-style prompt cache in the local-model path), so there's nothing for it to control there.
-- **`expected:` is a no-op** (see [Scenarios](#scenarios)) — it parses but nothing checks it. Scoring is entirely LLM-judge-driven today.
+- **`expected:` is a no-op** (see [Scenarios](#scenarios)) — it parses but nothing checks it. Scoring is entirely LLM-judge-driven today (metric `budget:`, by contrast, *is* enforced — see [Metric budgets](#metric-budgets)).
+- **Tool-call args/results are the stored trail's** — captured size-capped (2000 chars per arg payload, 8KB per result, older results cleared under a 256KB per-turn budget), so a list built from the trail can show cleared-result gaps on tool-heavy turns.
+- **`claude-code` is not sandboxed** — `sandbox:` applies to `milk-tui` only (see [Sandboxed runs](#sandboxed-runs)); its turns also report tool calls from Claude Code's transcript, not milk's trail.
+- **Older `milk-tui` binaries under-report tools** — the tool-trail expansion and real `num_turns` shipped together with `versions:`, so a column built before them reports `Tool calls 0` / `num_turns 1` even when the model called tools. For version comparisons spanning that boundary, read tool metrics as a lower bound and fall back to the judge and `file_changes` for ground truth (observed comparing `v0.7.0`/`v0.8.0` against current).
+- **Judge parse failures are terminal for a run's score** — malformed judge JSON (e.g. an unescaped quote inside `reasoning`) scores the turn `ERR` with no retry, so one flaky judgement drops a repetition from the stats rather than being re-judged.

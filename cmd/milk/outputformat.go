@@ -115,6 +115,111 @@ func buildAssistantEvent(sessionID, text string) *streamjson.Event {
 	return ev
 }
 
+// trailToolInput renders one trail call's arguments as the tool_use block's
+// free-form input payload. The stored trail may carry plain text (non-JSON
+// arguments are cut as plain text at capture) — marshal those as a JSON
+// string so the stream stays parseable (eval's parseMilkStream rejects
+// invalid JSON in tool input outright).
+func trailToolInput(args string) json.RawMessage {
+	if args == "" {
+		return json.RawMessage(`{}`)
+	}
+	if json.Valid([]byte(args)) {
+		return json.RawMessage(args)
+	}
+	b, _ := json.Marshal(args) //nolint:errcheck // string always marshals
+	return b
+}
+
+// trailToolResult renders one trail call's result as the tool_result block's
+// free-form content payload (a JSON string), or nil when the result was
+// cleared at capture (trail budget) — an absent payload is honest, a
+// fabricated one is not.
+func trailToolResult(result string, cleared bool) json.RawMessage {
+	if cleared {
+		return nil
+	}
+	b, _ := json.Marshal(result) //nolint:errcheck // string always marshals
+	return b
+}
+
+// buildToolTrailEvents expands a turn's tool trail (session.TrailStep, the
+// tool activity local-provider agents record per turn) into the §6.2 message
+// pairs the event catalog expects for tool activity: one assistant message
+// per tool-calling iteration — its narration text plus one tool_use block per
+// call — followed by one user message carrying the matching tool_result
+// blocks. Call IDs may be absent in the stored trail (older turns, providers
+// without ids); synthetic per-event ids keep tool_use/tool_result pairing
+// intact without inventing provenance. This is post-hoc reconstruction from
+// the recorded trail, not live mid-turn streaming — the turn's final-text
+// assistant event and the result event follow after these.
+func buildToolTrailEvents(sessionID string, trail []session.TrailStep) []*streamjson.Event {
+	var events []*streamjson.Event
+	seq := 0
+	for _, step := range trail {
+		if len(step.Calls) == 0 {
+			continue
+		}
+		var blocks []streamjson.ContentBlock
+		if step.Text != "" {
+			blocks = append(blocks, streamjson.ContentBlock{Type: "text", Text: step.Text})
+		}
+		type paired struct {
+			id      string
+			result  json.RawMessage
+			cleared bool
+		}
+		var pairs []paired
+		for _, call := range step.Calls {
+			seq++
+			id := call.ID
+			if id == "" {
+				id = fmt.Sprintf("tool_%d", seq)
+			}
+			blocks = append(blocks, streamjson.ContentBlock{
+				Type:  "tool_use",
+				ID:    id,
+				Name:  call.Name,
+				Input: trailToolInput(call.Args),
+			})
+			pairs = append(pairs, paired{id: id, result: trailToolResult(call.Result, call.Cleared), cleared: call.Cleared})
+		}
+
+		asst := &streamjson.Event{Type: streamjson.TypeAssistant, SessionID: sessionID}
+		_ = asst.SetMessageObject(&streamjson.Message{Role: "assistant", Content: blocks}) //nolint:errcheck // Message always marshals
+		events = append(events, asst)
+
+		var resultBlocks []streamjson.ContentBlock
+		for _, p := range pairs {
+			resultBlocks = append(resultBlocks, streamjson.ContentBlock{
+				Type:      "tool_result",
+				ToolUseID: p.id,
+				Content:   p.result,
+			})
+		}
+		user := &streamjson.Event{Type: streamjson.TypeUser, SessionID: sessionID}
+		_ = user.SetMessageObject(&streamjson.Message{Role: "user", Content: resultBlocks}) //nolint:errcheck // Message always marshals
+		events = append(events, user)
+	}
+	return events
+}
+
+// newTurnTrails collects the tool trails of every assistant turn appended to
+// the session during this run (history[start:] — one per dispatch hop when a
+// self-escalation added both a primary and an escalation turn), in order.
+func newTurnTrails(sess *session.Session, start int) []session.TrailStep {
+	var trail []session.TrailStep
+	if sess == nil {
+		return nil
+	}
+	for _, t := range sess.History[min(start, len(sess.History)):] {
+		if t.Role == session.RoleAssistant {
+			trail = append(trail, t.Trail...)
+		}
+	}
+	return trail
+}
+
 // tokenUsageDelta diffs two TokensSnapshot() calls into an aggregate Usage
 // plus a per-model breakdown. A diff (not raw totals) is required because
 // sess persists across invocations when resuming a session — raw totals
@@ -172,16 +277,21 @@ func timingDelta(before, after map[string]session.TokenUsage) (ttftSec, decodeSe
 }
 
 // buildResultEvent builds the terminal, always-exactly-one result line
-// (design §6.4). Scope note: NumTurns is always 1 and RouteHistory is a
-// single hop — this run has no role-aware signal to detect a mid-run
-// self-escalation hand-off (see this file's companion status note).
-func buildResultEvent(sessionID string, target router.Target, turnErr error, lastText string, durationMS int64, before, after map[string]session.TokenUsage) *streamjson.Event {
+// (design §6.4). Scope note: NumTurns reflects the turn's real model
+// iterations (1 + the tool-calling iterations recorded in the trail — see
+// buildToolTrailEvents) and RouteHistory is a single hop — this run has no
+// role-aware signal to detect a mid-run self-escalation hand-off (see this
+// file's companion status note).
+func buildResultEvent(sessionID string, target router.Target, turnErr error, lastText string, durationMS int64, numTurns int64, before, after map[string]session.TokenUsage) *streamjson.Event {
 	isError := turnErr != nil
 	subtype := streamjson.ResultSuccess
 	stopReason := "end_turn"
 	if isError {
 		subtype = streamjson.ResultErrorDuringExecution
 		stopReason = ""
+	}
+	if numTurns < 1 {
+		numTurns = 1
 	}
 
 	usage, modelUsage := tokenUsageDelta(before, after)
@@ -192,7 +302,7 @@ func buildResultEvent(sessionID string, target router.Target, turnErr error, las
 		Subtype:      subtype,
 		SessionID:    sessionID,
 		IsError:      &isError,
-		NumTurns:     1,
+		NumTurns:     numTurns,
 		DurationMS:   durationMS,
 		Result:       lastText,
 		StopReason:   stopReason,

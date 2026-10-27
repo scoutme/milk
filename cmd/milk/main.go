@@ -313,13 +313,12 @@ func run(cmd *cobra.Command, args []string) error {
 	var enc *streamjson.Encoder
 	var onResponse func(string)
 	var lastText string
+	var gotResponse bool
 	if fmtVal != formatText {
 		out = io.Discard
 		onResponse = func(text string) {
 			lastText = text
-			if fmtVal == formatStreamJSON {
-				emit(enc, buildAssistantEvent(sess.ID, text))
-			}
+			gotResponse = true
 		}
 	}
 	if fmtVal == formatStreamJSON {
@@ -328,6 +327,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	before := sess.TokensSnapshot()
+	startHistory := len(sess.History)
 	turnStart := time.Now()
 	var turnErr error
 	switch target {
@@ -349,8 +349,25 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	durationMS := time.Since(turnStart).Milliseconds()
 
+	// Stream-json tool activity: the turn's recorded tool trail is expanded
+	// into §6.2 assistant(tool_use)/user(tool_result) message pairs, emitted
+	// before the final-text assistant message and the result line so the
+	// stream reads in conversation order (tools ran, then the answer). The
+	// trail only exists for local-provider turns — a claude-cli turn emits
+	// no tool events (see docs/reference/eval.md's adapter notes).
+	var trail []session.TrailStep
+	if fmtVal == formatStreamJSON {
+		trail = newTurnTrails(sess, startHistory)
+		for _, ev := range buildToolTrailEvents(sess.ID, trail) {
+			emit(enc, ev)
+		}
+		if gotResponse {
+			emit(enc, buildAssistantEvent(sess.ID, lastText))
+		}
+	}
+
 	if fmtVal != formatText {
-		resEv := buildResultEvent(sess.ID, target, turnErr, lastText, durationMS, before, sess.TokensSnapshot())
+		resEv := buildResultEvent(sess.ID, target, turnErr, lastText, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
 		switch fmtVal {
 		case formatStreamJSON:
 			emit(enc, resEv)
@@ -473,7 +490,7 @@ func buildPrimaryRunner(_ context.Context, cfg config.Config, cwd string, sess *
 	if lp, err := local.OpenPermStore(cwd); err == nil {
 		la.WithPermissions(lp, nil)
 	}
-	la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+	la = la.WithSkipPermissions(skipPermissionsFor(cfg, primaryAC))
 	if dbg, err := openLocalDebugLog(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%s warning: cannot open local debug log: %v\n", milkTag(), err)
 	} else if dbg != nil {
@@ -541,7 +558,7 @@ func buildEscalationRunner(_ context.Context, cfg config.Config, cwd string, ses
 				sess.AddTokensFull(model, role, prompt, completion, cacheRead, cacheCreation)
 				sess.AddTiming(model, role, timing.TTFT, timing.Decode)
 			})
-			la = la.WithSkipPermissions(cliAgentConfig(cfg).DangerouslySkipPermissions)
+			la = la.WithSkipPermissions(skipPermissionsFor(cfg, escAC))
 			if lp, err := local.OpenPermStore(cwd); err == nil {
 				la.WithPermissions(lp, nil)
 			}
@@ -603,6 +620,17 @@ func cliAgentConfig(cfg config.Config) config.AgentConfig {
 		}
 	}
 	return config.AgentConfig{Name: "claude", Provider: "claude-cli", Bin: "claude"}
+}
+
+// skipPermissionsFor resolves the effective auto-approve switch for an
+// agent's tool prompts: the agent's own `dangerously_skip_permissions` (the
+// documented per-agent meaning — "auto-approve all tool uses without
+// prompting", which previously only ever took effect when the flag sat on
+// the claude-cli entry) OR the claude-cli agent's flag (the historical
+// cross-wiring: one flag on the CLI entry doubled as the session-wide
+// switch). OR — never replace — so both documented usages keep working.
+func skipPermissionsFor(cfg config.Config, ac config.AgentConfig) bool {
+	return ac.DangerouslySkipPermissions || cliAgentConfig(cfg).DangerouslySkipPermissions
 }
 
 // cliBaselineTools are pre-approved on every claude-cli invocation regardless of

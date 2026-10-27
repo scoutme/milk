@@ -83,3 +83,5 @@
 * [82. Tasks panel in-place expansion (memory-panel parity)](0082-tasks-panel-in-place-expansion.md)
 * [83. Busy-input disposition: Enter queues, Ctrl+Enter forks](0083-busy-input-disposition.md)
 * [84. Session changeset in the files panel: dispatch trace + `git status`, rendered glyphs](0084-session-changeset-files-panel.md)
+* [85. Eval experiment files, fresh sandboxed runs, and metric budgets](0085-eval-experiment-sandbox-budgets.md)
+* [86. Eval version matrix: compare milk versions side by side](0086-eval-version-matrix.md)

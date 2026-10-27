@@ -395,17 +395,22 @@ milk [flags] "prompt"                              # --output-format text (defau
 
 - **`--output-format text`** — current behavior byte-for-byte, unchanged.
   Interactive TUI mode ignores `--output-format` entirely.
-- **`--output-format stream-json`** — exactly **three** lines on stdout per
-  run, in order: one `system`/`init` event, one completed `assistant`
+- **`--output-format stream-json`** — one `system`/`init` event first, then
+  the turn's events in conversation order, then one terminal `result` event.
+  A turn with tool activity emits its tool trail as `assistant`/`user` message
+  pairs — one `assistant` message per tool-calling iteration (its narration
+  text plus one `tool_use` block per call) followed by one `user` message
+  carrying the matching `tool_result` blocks — and the turn's final `assistant`
   message (the whole response text — **not** token-level deltas; there is no
-  `stream_event`/partial-message emission in batch mode today), and one
-  terminal `result` event. `--output-format json` is that same `result`
-  event alone, as a single `json.MarshalIndent`-ed document.
+  `stream_event`/partial-message emission in batch mode today). Tool events
+  are reconstructed post-hoc from the turn's recorded tool trail (they cover
+  local-provider turns; a `claude-cli` turn emits none) and carry capped
+  args/results — the eval harness consumes them for tool-call counts and
+  lists. `--output-format json` is the `result` event alone, as a single
+  `json.MarshalIndent`-ed document.
 - Nothing else in the full §6 event catalog is emitted in batch mode: no
-  `stream_event` partial deltas, no `tool_use`/`tool_result` events (tool
-  calls happen, just not reported on this wire — see the eval harness's
-  `tool_calls: 0` caveat in [docs/reference/eval.md](../reference/eval.md) if you rely on this),
-  no `system` subtypes beyond `init` (no `agent_switch`, `route`,
+  `stream_event` partial deltas, no `system` subtypes beyond `init` (no
+  `agent_switch`, `route`,
   `notification`, `warning`, `state`, `task_*`, `memory`, `commands`,
   `config_option`, `permission_denied`, `error`). `system/init` itself omits
   `tools` and `mcp_servers` — nothing at the CLI boundary enumerates them
@@ -422,6 +427,6 @@ milk [flags] "prompt"                              # --output-format text (defau
   open-set), **stdout = events only, stderr = prose** (`[milk]` warnings
   stay on stderr, never mirrored into a stdout event yet), exactly one
   terminal `result` per run, and no ANSI escapes ever on this wire. The
-  machine-checkable schema for the three real line shapes is
+  machine-checkable schema for the emitted line shapes is
   [`docs/schema/stream-json.schema.json`](../schema/stream-json.schema.json)
   (golden fixtures under `internal/transport/streamjson/testdata/`).

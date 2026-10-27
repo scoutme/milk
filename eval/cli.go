@@ -60,6 +60,8 @@ func evalRunCmd() *cobra.Command {
 		multiTurn   bool
 		resultsDir  string
 		judgeAgent  string
+		repetitions int
+		experiment  string
 	)
 
 	cmd := &cobra.Command{
@@ -68,29 +70,84 @@ func evalRunCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			// Parse agent names.
-			agentNames := parseCommaList(agents)
-			if len(agentNames) == 0 {
-				agentNames = List()
+			// The experiment file defines the full suite (adapters,
+			// scenarios, repetitions, judge, sandbox, budgets); explicitly
+			// set CLI flags override its fields one by one.
+			var exp *Experiment
+			if experiment != "" {
+				loaded, err := LoadExperiment(experiment)
+				if err != nil {
+					return err
+				}
+				exp = loaded
+				if cmd.Flags().Changed("agents") {
+					exp.Agents = parseCommaList(agents)
+				}
+				if cmd.Flags().Changed("scenarios") {
+					exp.Scenarios = scenarioDir
+				}
+				if cmd.Flags().Changed("category") {
+					exp.Select.Category = category
+				}
+				if cmd.Flags().Changed("multi-turn") {
+					exp.Select.MultiTurn = multiTurn
+				}
+				if cmd.Flags().Changed("judge-agent") {
+					exp.JudgeAgent = judgeAgent
+				}
+				if cmd.Flags().Changed("results") {
+					exp.Results = resultsDir
+				}
+				if cmd.Flags().Changed("repetitions") {
+					exp.Repetitions = repetitions
+				}
 			}
-			if len(agentNames) == 0 {
+
+			// Parse agent names. With an experiment, the specs are the
+			// experiment's agents plus one labeled milk-tui adapter per
+			// versions entry (git refs built on demand) — the version
+			// matrix compares milk binaries side by side in one run.
+			agentSpecs := parseCommaList(agents)
+			judge := judgeAgent
+			if exp != nil {
+				resolved, rerr := exp.ResolveAdapterSpecs()
+				if rerr != nil {
+					return rerr
+				}
+				agentSpecs = resolved
+				judge = exp.JudgeAgent
+			}
+			if len(agentSpecs) == 0 {
+				agentSpecs = List()
+			}
+			if len(agentSpecs) == 0 {
 				return fmt.Errorf("no adapters registered; import adapter packages for side effects")
 			}
 
 			// Create harness.
-			h, err := NewHarness(agentNames, judgeAgent)
+			h, err := NewHarness(agentSpecs, judge)
 			if err != nil {
 				return fmt.Errorf("creating harness: %w", err)
 			}
 
 			// Run scenarios.
-			results, err := h.RunAll(ctx, scenarioDir, agentNames, category, multiTurn)
+			var results []ScenarioResult
+			if exp != nil {
+				results, err = h.RunExperiment(ctx, exp)
+			} else {
+				h.Repetitions = repetitions
+				results, err = h.RunAll(ctx, scenarioDir, agentSpecs, category, multiTurn)
+			}
 			if err != nil {
 				return fmt.Errorf("running scenarios: %w", err)
 			}
 
 			// Write results.
-			if err := writeResults(resultsDir, results); err != nil {
+			outDir := resultsDir
+			if exp != nil {
+				outDir = exp.Results
+			}
+			if err := writeResults(outDir, results); err != nil {
 				return fmt.Errorf("writing results: %w", err)
 			}
 
@@ -108,6 +165,8 @@ func evalRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&multiTurn, "multi-turn", false, "only run multi-turn scenarios")
 	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "output directory for results")
 	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
+	cmd.Flags().IntVar(&repetitions, "repetitions", 1, "run every scenario N times, fully isolated (fresh workdir, fresh sandbox) — for nth-run variance")
+	cmd.Flags().StringVar(&experiment, "experiment", "", "experiment YAML file defining the full suite (adapters, scenarios, repetitions, judge, sandbox, budgets); explicit flags override its fields")
 
 	return cmd
 }
