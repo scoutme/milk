@@ -4,12 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// stubMilkBin returns a harmless executable to stand in for the milk binary
+// where a test only needs Start to exec something ("true" lives at different
+// paths across platforms and is absent on some, e.g. macOS has no /bin/true).
+func stubMilkBin(t *testing.T) string {
+	t.Helper()
+	p, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("no 'true' executable on PATH")
+	}
+	return p
+}
 
 func TestMilkAdapter_SetArgs_PseudoFlags(t *testing.T) {
 	a := &milkAdapter{}
@@ -50,7 +63,7 @@ func TestMilkAdapter_SandboxFreshRootSeededAndCleaned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := &milkAdapter{milkBin: "/bin/true"}
+	a := &milkAdapter{milkBin: stubMilkBin(t)}
 	a.SetArgs([]string{"--sandbox", "--sandbox-seed", seed})
 	if err := a.Start(context.Background(), t.TempDir()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -118,7 +131,7 @@ func TestMilkAdapter_SandboxAllowTools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := &milkAdapter{milkBin: "/bin/true"}
+	a := &milkAdapter{milkBin: stubMilkBin(t)}
 	a.SetArgs([]string{"--sandbox", "--allow-tools", "--sandbox-seed", seed})
 	if err := a.Start(context.Background(), t.TempDir()); err != nil {
 		t.Fatalf("Start: %v", err)
