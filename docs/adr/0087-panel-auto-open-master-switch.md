@@ -45,6 +45,33 @@ once):
   gate (ADR-0079) all behave exactly as before, layering on top when the
   switch is on.
 
+### Companion change: saved panel state is startup layout (amends ADR-0078)
+
+Shipping the master switch exposed a contradiction: with the switch on
+(the default), a restored panel-state file could still silently veto every
+auto-open. `loadPanelState` seeded `panelManualOverride` for every stored
+entry, and with `remember_panel_state` on (default) the ADR-0059 expiry
+never ran — so any panel the user had ever toggled was locked out of its
+next content forever, per folder. Real user state accumulated into exactly
+that: all six panels overridden, auto-open visibly "gone" with nothing
+wrong in config.
+
+ADR-0078's promise ("content-driven auto-open never fights what the user
+last chose") is retired; the master switch now covers that case properly
+(`panel_autoopen off` = layout content never touches). The durable half of
+a toggle moves to a new `panelPrefs` map:
+
+- A manual toggle records both a `panelPrefs` entry (durable, persisted) —
+  and an in-session `panelManualOverride` veto.
+- `loadPanelState` restores open/closed state plus `panelPrefs` — startup
+  layout only. It never seeds the veto.
+- `savePanelState` persists `panelPrefs` ∪ current overrides, so choices
+  accumulate across sessions without ever becoming a veto.
+- `resetManualOverrideIfFinalized` always applies (the
+  `remember_panelState` early-return is gone): an in-session veto covers
+  exactly the live content the user dismissed and expires when it
+  finalizes (ADR-0059, in full, for both persistence modes).
+
 ## Consequences
 
 - `/panel autoopen off` gives a fully static panel layout: panels change
@@ -53,6 +80,9 @@ once):
 - The switch is global while the manual override is per-folder — with the
   switch on nothing changes about the override semantics; with it off the
   override is moot (nothing auto-opens to override).
+- Panels re-open on new content even across sessions (the amended
+  ADR-0078 contract). Users who want a settled layout now have the
+  explicit tool for it: `/panel autoopen off`.
 - Model tests that build `model{}` literals directly (rather than through
   `newModel`) must set `panelAutoOpen: true` to exercise auto-open — the
   zero value means "off", while production always seeds from config

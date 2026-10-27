@@ -1738,6 +1738,9 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	if m.panelManualOverride == nil {
 		m.panelManualOverride = map[panelRegion]bool{}
 	}
+	if m.panelPrefs == nil {
+		m.panelPrefs = map[panelRegion]bool{}
+	}
 	// Every toggle records the manual override; a toggle that *closes* a
 	// panel whose content has already finalized drops it again right away
 	// (resetManualOverrideIfFinalized) — the sticky rule exists to keep
@@ -1746,6 +1749,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	switch sub {
 	case "memory":
 		m.panelManualOverride[regionMemory] = true
+		m.panelPrefs[regionMemory] = true
 		m.panelMemory = !m.panelMemory
 		if !m.panelMemory {
 			m.resetManualOverrideIfFinalized(regionMemory)
@@ -1761,6 +1765,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "tasks":
 		m.panelManualOverride[regionTasks] = true
+		m.panelPrefs[regionTasks] = true
 		m.panelTasks = !m.panelTasks
 		if !m.panelTasks {
 			m.resetManualOverrideIfFinalized(regionTasks)
@@ -1776,6 +1781,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "workflow":
 		m.panelManualOverride[regionWorkflow] = true
+		m.panelPrefs[regionWorkflow] = true
 		m.workflowPanelOpen = !m.workflowPanelOpen
 		if !m.workflowPanelOpen {
 			m.resetManualOverrideIfFinalized(regionWorkflow)
@@ -1790,6 +1796,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "background":
 		m.panelManualOverride[regionBackground] = true
+		m.panelPrefs[regionBackground] = true
 		m.panelBackground = !m.panelBackground
 		if !m.panelBackground {
 			m.resetManualOverrideIfFinalized(regionBackground)
@@ -1804,6 +1811,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "project":
 		m.panelManualOverride[regionProject] = true
+		m.panelPrefs[regionProject] = true
 		m.panelProject = !m.panelProject
 		if !m.panelProject {
 			m.resetManualOverrideIfFinalized(regionProject)
@@ -1823,6 +1831,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "git":
 		m.panelManualOverride[regionGit] = true
+		m.panelPrefs[regionGit] = true
 		m.panelGit = !m.panelGit
 		if !m.panelGit {
 			m.resetManualOverrideIfFinalized(regionGit)

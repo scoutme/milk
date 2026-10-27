@@ -2371,10 +2371,11 @@ func (c Config) QueueWhileBusyEnabled() bool {
 }
 
 // RememberPanelStateEnabled reports whether side-panel state management is
-// durable (ADR-0078): panel open/closed choices persist across sessions
-// and survive content finalization (true when unset —
-// "remember_panel_state": false opts out, restoring ADR-0059's
-// session-only expiry semantics).
+// durable (ADR-0078 as amended by ADR-0087): panel open/closed choices
+// persist per folder and are restored at startup as *startup layout* —
+// they never veto content-driven auto-open (true when unset;
+// "remember_panel_state": false keeps panels session-only, nothing read or
+// written).
 func (c Config) RememberPanelStateEnabled() bool {
 	return c.RememberPanelState == nil || *c.RememberPanelState
 }

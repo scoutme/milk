@@ -860,6 +860,14 @@ type model struct {
 	// (ADR-0059).
 	panelManualOverride map[panelRegion]bool
 
+	// panelPrefs is the durable half of a manual toggle (ADR-0078 as
+	// amended by ADR-0087): the user's chosen open/closed state per panel,
+	// persisted to the folder-bound state file and restored as *startup
+	// layout* only. It never vetoes content-driven auto-open — the
+	// in-session veto while a dismissal covers live content is
+	// panelManualOverride, which expires per ADR-0059.
+	panelPrefs map[panelRegion]bool
+
 	// panel state persistence (ADR-0078): where panel preferences live on
 	// disk (empty = persistence unavailable, e.g. in tests) and whether the
 	// "remember_panel_state" feature is on (default true). panelStateFolder
@@ -1284,6 +1292,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		rememberPanelState:  st.cfg.RememberPanelStateEnabled(),
 		panelAutoOpen:       st.cfg.PanelAutoOpenEnabled(),
 		panelManualOverride: map[panelRegion]bool{},
+		panelPrefs:          map[panelRegion]bool{},
 		selAnchorLine:       -1,
 		selEndLine:          -1,
 		panelSelRegion:      regionNone,
