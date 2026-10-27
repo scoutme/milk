@@ -3,6 +3,7 @@ package eval
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -13,10 +14,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // ScenarioResult aggregates one scenario's outcomes across all tested agents.
+// Repetition is the 1-based run index when the experiment/CLI asked for
+// multiple repetitions of the same scenario (each repetition is its own
+// ScenarioResult, on purpose: nth-run variance is one of the things an
+// experiment measures); it is 0 for a single run.
 type ScenarioResult struct {
 	ScenarioName string                 `json:"scenario_name"`
 	Category     string                 `json:"category"`
 	Difficulty   string                 `json:"difficulty"`
+	Repetition   int                    `json:"repetition,omitempty"`
 	AgentResults map[string]AgentResult `json:"agent_results"`
 }
 
@@ -26,6 +32,9 @@ type AgentResult struct {
 	Scores        []JudgeScore `json:"scores"`
 	WeightedScore float64      `json:"weighted_score"`
 	Cache         CacheMetrics `json:"cache"`
+	// BudgetResult is the pass/fail outcome of the effective budget for this
+	// scenario/agent run (nil when no budget applies).
+	BudgetResult *BudgetResult `json:"budget,omitempty"`
 	// JudgeError is non-empty when the judge failed to score this scenario/agent
 	// at all (e.g. the judge model's own request was rejected by a content
 	// filter, or its output was unparseable even after repair) — as opposed to
@@ -36,16 +45,28 @@ type AgentResult struct {
 	JudgeError string `json:"judge_error,omitempty"`
 }
 
+// BudgetResult is one run's budget check: the budget that was applied and
+// the resulting verdict, violations included verbatim for the report.
+type BudgetResult struct {
+	Budget     Budget   `json:"budget"`
+	Passed     bool     `json:"passed"`
+	Violations []string `json:"violations,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Markdown report generator
 // ---------------------------------------------------------------------------
 
 // GenerateReport produces a full markdown comparison report covering per-scenario
 // tables, multi-turn cache breakdowns, and an aggregate summary with a winner.
+// Repetition entries (same scenario run several times) are labeled per run and
+// summarized in a repetition-statistics section (mean ± sd), so nth-run
+// variance is visible instead of averaged away.
 func GenerateReport(scenarioResults []ScenarioResult) string {
 	var b strings.Builder
 
 	agentNames := collectAgentNames(scenarioResults)
+	repTotals := repCounts(scenarioResults)
 
 	b.WriteString("=== Agent Evaluation Report ===\n\n")
 
@@ -59,7 +80,11 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 			}
 		}
 
-		b.WriteString(fmt.Sprintf("Scenario: %s\n", sr.ScenarioName))
+		title := sr.ScenarioName
+		if n := repTotals[sr.ScenarioName]; n > 1 && sr.Repetition > 0 {
+			title = fmt.Sprintf("%s (run %d/%d)", sr.ScenarioName, sr.Repetition, n)
+		}
+		b.WriteString(fmt.Sprintf("Scenario: %s\n", title))
 		b.WriteString(fmt.Sprintf("Category: %s | Difficulty: %s\n\n", sr.Category, sr.Difficulty))
 
 		// Score comparison table.
@@ -77,6 +102,12 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 		// Token / cost / duration table.
 		b.WriteString(buildMetricsTable(sr, agentNames))
 
+		// The tool-call list behind the count: names in call order, per agent.
+		b.WriteString(buildToolCallList(sr, agentNames))
+
+		// Metric-budget verdicts (the automated pass/fail check).
+		b.WriteString(buildBudgetVerdicts(sr, agentNames))
+
 		// Multi-turn cache breakdown.
 		if isMultiTurn {
 			b.WriteString(buildMultiTurnCacheTable(sr, agentNames))
@@ -85,10 +116,224 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 		b.WriteString("\n")
 	}
 
+	// --- Repetition statistics (mean ± sd across runs) ---
+	if maxRepCount(repTotals) > 1 {
+		b.WriteString(buildRepetitionReport(scenarioResults, agentNames))
+	}
+
 	// --- Aggregate section ---
 	b.WriteString(buildAggregateReport(scenarioResults, agentNames))
 
 	return b.String()
+}
+
+// repCounts counts result entries per scenario name (1 = a single run).
+func repCounts(srs []ScenarioResult) map[string]int {
+	counts := map[string]int{}
+	for _, sr := range srs {
+		counts[sr.ScenarioName]++
+	}
+	return counts
+}
+
+func maxRepCount(counts map[string]int) int {
+	max := 0
+	for _, n := range counts {
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// buildToolCallList renders each agent's tool calls in call order (the list
+// behind the "Tool calls" count). Long lists are truncated — full args and
+// results live in results.json.
+func buildToolCallList(sr ScenarioResult, agentNames []string) string {
+	var b strings.Builder
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok {
+			continue
+		}
+		var names []string
+		for _, r := range ar.RunResults {
+			for _, tc := range r.ToolCalls {
+				names = append(names, tc.Name)
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		list := strings.Join(names, ", ")
+		const maxLen = 160
+		if len(list) > maxLen {
+			list = list[:maxLen] + "…"
+		}
+		b.WriteString(fmt.Sprintf("Tools [%s] (%d): %s\n", name, len(names), list))
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// buildBudgetVerdicts renders one line per agent whose run was checked
+// against a metric budget: PASS, or FAIL with every violation spelled out.
+func buildBudgetVerdicts(sr ScenarioResult, agentNames []string) string {
+	var b strings.Builder
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok || ar.BudgetResult == nil {
+			continue
+		}
+		if ar.BudgetResult.Passed {
+			b.WriteString(fmt.Sprintf("Budget [%s]: PASS\n", name))
+		} else {
+			b.WriteString(fmt.Sprintf("Budget [%s]: FAIL — %s\n", name, strings.Join(ar.BudgetResult.Violations, "; ")))
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// buildRepetitionReport summarizes same-scenario repetitions as mean ± sd
+// per metric — the nth-run variance an experiment with repetitions > 1 is
+// meant to expose. Score is the judge's weighted score; budget is how many
+// runs passed the metric budget.
+func buildRepetitionReport(scenarioResults []ScenarioResult, agentNames []string) string {
+	repTotals := repCounts(scenarioResults)
+	if maxRepCount(repTotals) <= 1 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("=== Repetition Statistics ===\n\n")
+
+	// Group entries by scenario name (first-seen order).
+	var order []string
+	byName := map[string][]ScenarioResult{}
+	for _, sr := range scenarioResults {
+		if _, seen := byName[sr.ScenarioName]; !seen {
+			order = append(order, sr.ScenarioName)
+		}
+		byName[sr.ScenarioName] = append(byName[sr.ScenarioName], sr)
+	}
+
+	for _, name := range order {
+		group := byName[name]
+		if len(group) <= 1 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("Scenario: %s (%d runs)\n", name, len(group)))
+
+		header := columnLabel("", 18)
+		sep := strings.Repeat("─", 18+len(agentNames)*16)
+		for _, an := range agentNames {
+			header += columnLabel(an, 16)
+		}
+		b.WriteString(header + "\n" + sep + "\n")
+
+		type sample struct {
+			scores  []float64
+			inputs  []float64
+			outputs []float64
+			tools   []float64
+			secs    []float64
+			budgetN int
+			budgetD int
+		}
+		samples := map[string]*sample{}
+		for _, an := range agentNames {
+			samples[an] = &sample{}
+		}
+		for _, sr := range group {
+			for _, an := range agentNames {
+				ar, ok := sr.AgentResults[an]
+				if !ok {
+					continue
+				}
+				s := samples[an]
+				if ar.JudgeError == "" {
+					s.scores = append(s.scores, ar.WeightedScore)
+				}
+				var in, out int64
+				var tools int
+				var secs float64
+				for _, r := range ar.RunResults {
+					in += r.Tokens.InputTokens
+					out += r.Tokens.OutputTokens
+					tools += len(r.ToolCalls)
+					secs += r.Duration.Seconds()
+				}
+				s.inputs = append(s.inputs, float64(in))
+				s.outputs = append(s.outputs, float64(out))
+				s.tools = append(s.tools, float64(tools))
+				s.secs = append(s.secs, secs)
+				if ar.BudgetResult != nil {
+					s.budgetD++
+					if ar.BudgetResult.Passed {
+						s.budgetN++
+					}
+				}
+			}
+		}
+
+		meanSDRow := func(label string, vals func(*sample) []float64, format func(float64) string) {
+			row := columnLabel(label, 18)
+			for _, an := range agentNames {
+				m, sd := meanSD(vals(samples[an]))
+				row += columnLabel(fmt.Sprintf("%s ± %s", format(m), format(sd)), 16)
+			}
+			b.WriteString(row + "\n")
+		}
+		meanSDRow("Weighted score", func(s *sample) []float64 { return s.scores },
+			func(v float64) string { return fmt.Sprintf("%.1f", v) })
+		meanSDRow("Tokens in", func(s *sample) []float64 { return s.inputs },
+			func(v float64) string { return formatInt(int64(v)) })
+		meanSDRow("Tokens out", func(s *sample) []float64 { return s.outputs },
+			func(v float64) string { return formatInt(int64(v)) })
+		meanSDRow("Tool calls", func(s *sample) []float64 { return s.tools },
+			func(v float64) string { return fmt.Sprintf("%.1f", v) })
+		meanSDRow("Duration", func(s *sample) []float64 { return s.secs },
+			func(v float64) string { return formatDuration(time.Duration(v * float64(time.Second))) })
+
+		row := columnLabel("Budget", 18)
+		for _, an := range agentNames {
+			s := samples[an]
+			if s.budgetD == 0 {
+				row += columnLabel("—", 16)
+			} else {
+				row += columnLabel(fmt.Sprintf("%d/%d pass", s.budgetN, s.budgetD), 16)
+			}
+		}
+		b.WriteString(row + "\n\n")
+	}
+
+	return b.String()
+}
+
+// meanSD returns the mean and (sample) standard deviation of vals.
+// A single sample has sd 0.
+func meanSD(vals []float64) (mean, sd float64) {
+	if len(vals) == 0 {
+		return 0, 0
+	}
+	for _, v := range vals {
+		mean += v
+	}
+	mean /= float64(len(vals))
+	if len(vals) < 2 {
+		return mean, 0
+	}
+	var sumsq float64
+	for _, v := range vals {
+		d := v - mean
+		sumsq += d * d
+	}
+	return mean, math.Sqrt(sumsq / float64(len(vals)-1))
 }
 
 // GenerateCacheReport produces a cache-focused markdown report for multi-turn
@@ -364,6 +609,29 @@ func buildMetricsTable(sr ScenarioResult, agentNames []string) string {
 		row += columnLabel(fmt.Sprintf("%d", t.toolCalls), 12)
 	}
 	b.WriteString(row + "\n")
+
+	// Budget verdict (metric thresholds) — only when a budget applied.
+	hasBudget := false
+	for _, name := range agentNames {
+		if ar, ok := sr.AgentResults[name]; ok && ar.BudgetResult != nil {
+			hasBudget = true
+		}
+	}
+	if hasBudget {
+		row = columnLabel("Budget", 20)
+		for _, name := range agentNames {
+			ar, ok := sr.AgentResults[name]
+			switch {
+			case !ok || ar.BudgetResult == nil:
+				row += columnLabel("—", 12)
+			case ar.BudgetResult.Passed:
+				row += columnLabel("PASS", 12)
+			default:
+				row += columnLabel("FAIL", 12)
+			}
+		}
+		b.WriteString(row + "\n")
+	}
 
 	return b.String()
 }
@@ -870,6 +1138,7 @@ type JSONScenarioResult struct {
 	ScenarioName string                     `json:"scenario_name"`
 	Category     string                     `json:"category"`
 	Difficulty   string                     `json:"difficulty"`
+	Repetition   int                        `json:"repetition,omitempty"`
 	Agents       map[string]JSONAgentResult `json:"agents"`
 	Winner       string                     `json:"winner"`
 }
@@ -884,6 +1153,8 @@ type JSONAgentResult struct {
 	TotalCostUSD  float64         `json:"total_cost_usd"`
 	DurationSec   float64         `json:"duration_sec"`
 	ToolCalls     int             `json:"tool_calls"`
+	// Budget is the run's metric-budget verdict (null when no budget applied).
+	Budget *BudgetResult `json:"budget,omitempty"`
 	// JudgeError mirrors AgentResult.JudgeError — non-empty means WeightedScore
 	// is not real data (the judge never scored this scenario/agent), so
 	// consumers of the JSON report must exclude it from aggregates rather than
@@ -893,11 +1164,17 @@ type JSONAgentResult struct {
 
 // JSONRunResult is a serializable per-turn result.
 type JSONRunResult struct {
-	Response  string     `json:"response"`
-	Tokens    TokenUsage `json:"tokens"`
-	CostUSD   float64    `json:"cost_usd"`
-	Duration  float64    `json:"duration_sec"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Response              string     `json:"response"`
+	Tokens                TokenUsage `json:"tokens"`
+	CostUSD               float64    `json:"cost_usd"`
+	Duration              float64    `json:"duration_sec"`
+	ToolCalls             []ToolCall `json:"tool_calls,omitempty"`
+	Model                 string     `json:"model,omitempty"`
+	NumTurns              int64      `json:"num_turns,omitempty"`
+	StopReason            string     `json:"stop_reason,omitempty"`
+	RouteHistory          []string   `json:"route_history,omitempty"`
+	TTFTMS                int64      `json:"ttft_ms,omitempty"`
+	OutputTokensPerSecond float64    `json:"output_tokens_per_second,omitempty"`
 }
 
 // JSONAggregate holds cross-scenario summary statistics.
@@ -946,6 +1223,7 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 			ScenarioName: sr.ScenarioName,
 			Category:     sr.Category,
 			Difficulty:   sr.Difficulty,
+			Repetition:   sr.Repetition,
 			Agents:       make(map[string]JSONAgentResult, len(sr.AgentResults)),
 		}
 
@@ -954,17 +1232,24 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 				Scores:        ar.Scores,
 				WeightedScore: ar.WeightedScore,
 				Cache:         ar.Cache,
+				Budget:        ar.BudgetResult,
 				JudgeError:    ar.JudgeError,
 			}
 
 			jar.RunResults = make([]JSONRunResult, 0, len(ar.RunResults))
 			for _, r := range ar.RunResults {
 				jar.RunResults = append(jar.RunResults, JSONRunResult{
-					Response:  r.Response,
-					Tokens:    r.Tokens,
-					CostUSD:   r.CostUSD,
-					Duration:  r.Duration.Seconds(),
-					ToolCalls: r.ToolCalls,
+					Response:              r.Response,
+					Tokens:                r.Tokens,
+					CostUSD:               r.CostUSD,
+					Duration:              r.Duration.Seconds(),
+					ToolCalls:             r.ToolCalls,
+					Model:                 r.Model,
+					NumTurns:              r.NumTurns,
+					StopReason:            r.StopReason,
+					RouteHistory:          r.RouteHistory,
+					TTFTMS:                r.TTFTMS,
+					OutputTokensPerSecond: r.OutputTokensPerSecond,
 				})
 				jar.TotalTokens += r.Tokens.InputTokens + r.Tokens.OutputTokens +
 					r.Tokens.CacheCreate + r.Tokens.CacheRead

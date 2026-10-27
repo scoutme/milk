@@ -17,6 +17,16 @@ type Harness struct {
 	Adapters []AgentAdapter
 	Judge    *Judge
 
+	// Repetitions runs every scenario this many times (fresh adapter state —
+	// and a fresh sandbox, when the adapter supports one — per repetition).
+	// Each repetition is a separate ScenarioResult with Repetition set.
+	// Zero/one means a single run.
+	Repetitions int
+
+	// DefaultBudget is the experiment-level budget every scenario inherits
+	// (a scenario's own budget refines it field-by-field via MergeBudget).
+	DefaultBudget *Budget
+
 	// progress reports phase transitions (starting an adapter, waiting on a
 	// turn, judging) to stderr. Nil until RunAll sets it up; runOne/RunScenario
 	// tolerate nil (progressReporter's methods no-op / fall back to a plain
@@ -189,10 +199,17 @@ func applyBaseDefaults(s *Scenario, base map[string]interface{}) {
 // RunScenario runs a single scenario against all adapters, judges results,
 // and returns the ScenarioResult.
 func (h *Harness) RunScenario(ctx context.Context, scenario Scenario) (ScenarioResult, error) {
+	return h.runScenarioRep(ctx, scenario, 0)
+}
+
+// runScenarioRep is RunScenario with the repetition index to stamp on the
+// result (0 = single run, no repetition labeling).
+func (h *Harness) runScenarioRep(ctx context.Context, scenario Scenario, rep int) (ScenarioResult, error) {
 	sr := ScenarioResult{
 		ScenarioName: scenario.Name,
 		Category:     scenario.Category,
 		Difficulty:   scenario.Difficulty,
+		Repetition:   rep,
 		AgentResults: make(map[string]AgentResult),
 	}
 
@@ -275,11 +292,21 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 	// 6. Compute cache metrics.
 	cache := AggregateCacheMetrics(results)
 
+	// 7. Budget check — the effective budget is the scenario's own over the
+	// experiment-level defaults (MergeBudget), applied per run so the report
+	// can show exactly which repetition blew the budget and why.
+	var budgetResult *BudgetResult
+	if budget := MergeBudget(h.DefaultBudget, scenario.Budget); !budget.IsZero() {
+		verdict := budget.Evaluate(results)
+		budgetResult = &BudgetResult{Budget: *budget, Passed: verdict.Passed, Violations: verdict.Violations}
+	}
+
 	return AgentResult{
 		RunResults:    results,
 		Scores:        scores,
 		WeightedScore: weightedScore,
 		Cache:         cache,
+		BudgetResult:  budgetResult,
 		JudgeError:    judgeError,
 	}, nil
 }
@@ -292,26 +319,9 @@ func (h *Harness) RunAll(ctx context.Context, scenarioDir string, adapterNames [
 		return nil, fmt.Errorf("loading scenarios: %w", err)
 	}
 
-	// Filter by category.
-	if category != "" {
-		var filtered []Scenario
-		for _, s := range scenarios {
-			if strings.EqualFold(s.Category, category) {
-				filtered = append(filtered, s)
-			}
-		}
-		scenarios = filtered
-	}
-
-	// Filter for multi-turn only.
-	if multiTurnOnly {
-		var filtered []Scenario
-		for _, s := range scenarios {
-			if s.MultiTurn {
-				filtered = append(filtered, s)
-			}
-		}
-		scenarios = filtered
+	scenarios, err = FilterScenarios(scenarios, category, nil, multiTurnOnly)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(scenarios) == 0 {
@@ -339,18 +349,47 @@ func (h *Harness) RunAll(ctx context.Context, scenarioDir string, adapterNames [
 	h.progress = newProgressReporter(os.Stderr)
 	defer h.progress.Stop()
 
+	return h.runScenarios(ctx, scenarios), nil
+}
+
+// runScenarios runs each scenario Repetitions times (default 1), scenario
+// outer / repetition inner so same-scenario repetitions stay adjacent in the
+// results list (the report groups and aggregates them that way). Every
+// repetition is a full adapter lifecycle — fresh temp workdir, fresh adapter
+// state, fresh sandbox — so run N never sees run N-1's sessions or memory.
+// A scenario that errors on one repetition logs and keeps the remaining
+// repetitions running.
+func (h *Harness) runScenarios(ctx context.Context, scenarios []Scenario) []ScenarioResult {
+	reps := h.Repetitions
+	if reps < 1 {
+		reps = 1
+	}
 	var results []ScenarioResult
 	for _, scenario := range scenarios {
-		h.progress.Logf("Running scenario: %s", scenario.Name)
-		sr, err := h.RunScenario(ctx, scenario)
-		if err != nil {
-			h.progress.Logf("  ERROR: %v", err)
-			continue
+		for rep := 1; rep <= reps; rep++ {
+			if reps > 1 {
+				h.progress.Logf("Running scenario: %s (run %d/%d)", scenario.Name, rep, reps)
+			} else {
+				h.progress.Logf("Running scenario: %s", scenario.Name)
+			}
+			sr, err := h.runScenarioRep(ctx, scenario, repLabel(reps, rep))
+			if err != nil {
+				h.progress.Logf("  ERROR: %v", err)
+				continue
+			}
+			results = append(results, sr)
 		}
-		results = append(results, sr)
 	}
+	return results
+}
 
-	return results, nil
+// repLabel returns the 1-based repetition index to record, or 0 (no
+// repetition labeling) when the suite ran each scenario only once.
+func repLabel(reps, rep int) int {
+	if reps <= 1 {
+		return 0
+	}
+	return rep
 }
 
 // setupWorkdir creates a temporary directory and writes the setup files into it.

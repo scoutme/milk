@@ -27,12 +27,26 @@ func init() {
 // touched. Multi-turn scenarios keep their conversation because milk keys
 // sessions per working directory and each batch run resumes the workdir's
 // session. Extra args from the --agents spec (e.g. ["--agent", "mimo-local"])
-// are forwarded to the milk invocation unchanged.
+// are forwarded to the milk invocation unchanged, except milk-tui's own
+// pseudo-flags (--sandbox, --sandbox-seed, --milk-bin — see SetArgs), which
+// configure the adapter instead.
 type milkAdapter struct {
 	workdir   string   // working directory passed to Start
 	milkBin   string   // resolved milk binary (overridden in tests)
 	extraArgs []string // extra CLI args from --agents spec
 	cmd       *exec.Cmd
+
+	// sandbox is the isolated-state-root config (--sandbox / --milk-bin
+	// pseudo-flags in the --agents spec, or the experiment's sandbox:
+	// section via SetSandbox). When enabled, each Start gets a brand-new
+	// MILK_CONFIG_ROOT so no run sees a previous run's sessions or memory.
+	sandbox    SandboxConfig
+	sandboxDir string // created per Start, removed per Stop
+
+	// label renames this adapter in reports and results.json (Name()) — for
+	// side-by-side version matrices where several milk-tui adapters run the
+	// same suite against different milk binaries. Empty = "milk-tui".
+	label string
 }
 
 // milkBinary resolves the milk binary to launch. A variable so tests can
@@ -60,6 +74,8 @@ type milkStreamRun struct {
 	DurationMS int64
 	StopReason string
 	RouteHist  []string // route_history targets, one per turn hop
+	TTFTMS     int64    // result.ttft_ms — mean time-to-first-token
+	OutputTPS  float64  // result.output_tokens_per_second — generation throughput
 
 	// system/init + system/state mapping (onto the eval report shapes):
 	// model identity + config warnings from init, and the session-state
@@ -189,6 +205,8 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 			run.NumTurns = ev.NumTurns
 			run.DurationMS = ev.DurationMS
 			run.StopReason = ev.StopReason
+			run.TTFTMS = ev.TTFTMS
+			run.OutputTPS = ev.OutputTokensPerSecond
 			for _, hop := range ev.RouteHistory {
 				run.RouteHist = append(run.RouteHist, hop.Target)
 			}
@@ -263,22 +281,150 @@ func rawText(content json.RawMessage) string {
 
 // --- AgentAdapter ---
 
-func (a *milkAdapter) Name() string          { return "milk-tui" }
-func (a *milkAdapter) SetArgs(args []string) { a.extraArgs = args }
+func (a *milkAdapter) Name() string {
+	if a.label != "" {
+		return a.label
+	}
+	return "milk-tui"
+}
+
+// SetArgs splits milk-tui's pseudo-flags (--sandbox, --sandbox-seed,
+// --milk-bin — adapter behavior, never forwarded to milk) from the extra
+// CLI flags forwarded verbatim onto the milk launch command.
+func (a *milkAdapter) SetArgs(args []string) {
+	var forwarded []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--sandbox":
+			a.sandbox.Enabled = true
+		case "--sandbox-seed":
+			if i+1 < len(args) {
+				i++
+				a.sandbox.SeedConfigPath = args[i]
+				a.sandbox.Enabled = true
+			}
+		case "--milk-bin":
+			if i+1 < len(args) {
+				i++
+				a.sandbox.MilkBinary = args[i]
+			}
+		case "--allow-tools":
+			a.sandbox.AllowTools = true
+		case "--label":
+			if i+1 < len(args) {
+				i++
+				a.label = args[i]
+			}
+		default:
+			forwarded = append(forwarded, args[i])
+		}
+	}
+	a.extraArgs = forwarded
+}
+
+// SetSandbox applies an experiment's sandbox section. Explicit adapter-spec
+// pseudo-flags (parsed first in SetArgs) win over experiment values: the
+// more specific setting is the one that survives.
+func (a *milkAdapter) SetSandbox(c SandboxConfig) {
+	if c.Enabled && !a.sandbox.Enabled {
+		a.sandbox.Enabled = true
+	}
+	if a.sandbox.SeedConfigPath == "" {
+		a.sandbox.SeedConfigPath = c.SeedConfigPath
+	}
+	if a.sandbox.MilkBinary == "" {
+		a.sandbox.MilkBinary = c.MilkBinary
+	}
+	if c.AllowTools {
+		a.sandbox.AllowTools = true
+	}
+}
 
 func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	a.workdir = workdir
 	if a.milkBin == "" {
-		bin, err := milkBinary()
-		if err != nil {
-			return fmt.Errorf("resolving milk binary: %w", err)
+		bin := expandHome(a.sandbox.MilkBinary)
+		if bin == "" {
+			resolved, err := milkBinary()
+			if err != nil {
+				return fmt.Errorf("resolving milk binary: %w", err)
+			}
+			bin = resolved
 		}
 		a.milkBin = bin
 	}
 	if _, err := os.Stat(a.milkBin); err != nil {
 		return fmt.Errorf("milk binary %s: %w", a.milkBin, err)
 	}
+	if a.sandbox.Enabled {
+		if err := a.setupSandbox(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// setupSandbox creates a brand-new milk state root for this run and seeds
+// its config.json from the current one (the agent set and settings — the
+// point is skipping the *state*: sessions, memory, history, jobs, otel and
+// mcp_oauth all live under the state root and start empty). Seeding is a
+// plain copy of config.json: deterministically "my current agent set," no
+// more and no less.
+func (a *milkAdapter) setupSandbox() error {
+	// Defensive: Start without a prior Stop (never happens in the harness
+	// lifecycle) must still not leak the previous root.
+	if a.sandboxDir != "" {
+		_ = os.RemoveAll(a.sandboxDir)
+		a.sandboxDir = ""
+	}
+	dir, err := os.MkdirTemp("", "milk-eval-home-")
+	if err != nil {
+		return fmt.Errorf("creating sandbox state root: %w", err)
+	}
+	if a.sandbox.SeedConfigPath != "" {
+		seed, err := os.ReadFile(expandHome(a.sandbox.SeedConfigPath))
+		if err != nil {
+			os.RemoveAll(dir)
+			return fmt.Errorf("reading sandbox seed config %s: %w", a.sandbox.SeedConfigPath, err)
+		}
+		if a.sandbox.AllowTools {
+			seed, err = allowToolsInConfig(seed)
+			if err != nil {
+				os.RemoveAll(dir)
+				return fmt.Errorf("applying sandbox allow_tools: %w", err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), seed, 0644); err != nil {
+			os.RemoveAll(dir)
+			return fmt.Errorf("seeding sandbox config: %w", err)
+		}
+	}
+	a.sandboxDir = dir
+	return nil
+}
+
+// allowToolsInConfig returns config JSON with dangerously_skip_permissions
+// set on every entry of the agents array — batch runs have no one to answer
+// a permission ask, so mutating tools would be denied without it. Unknown
+// shapes pass through untouched; the live config is never modified (this
+// only ever runs on a seeded sandbox copy).
+func allowToolsInConfig(cfg []byte) ([]byte, error) {
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(cfg))
+	dec.UseNumber() // preserve large integer values byte-exact through re-encode
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	agents, ok := doc["agents"].([]any)
+	if !ok {
+		return cfg, nil
+	}
+	for _, entry := range agents {
+		if agent, ok := entry.(map[string]any); ok {
+			agent["dangerously_skip_permissions"] = true
+		}
+	}
+	return json.Marshal(doc)
 }
 
 // RunPrompt runs one batch turn: `milk --output-format stream-json <prompt>`
@@ -297,6 +443,9 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	cmd := exec.CommandContext(ctx, a.milkBin, args...)
 	cmd.Dir = a.workdir
 	cmd.Stderr = os.Stderr
+	if a.sandboxDir != "" {
+		cmd.Env = append(os.Environ(), "MILK_CONFIG_ROOT="+a.sandboxDir)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return RunResult{}, fmt.Errorf("stdout pipe: %w", err)
@@ -322,11 +471,18 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	afterFiles := snapshotDir(a.workdir)
 
 	res := RunResult{
-		Response:    run.Response,
-		Tokens:      run.Tokens,
-		Duration:    time.Since(start),
-		ToolCalls:   run.ToolCalls,
-		FileChanges: diffSnapshots(beforeFiles, afterFiles),
+		Response:              run.Response,
+		Tokens:                run.Tokens,
+		Duration:              time.Since(start),
+		ToolCalls:             run.ToolCalls,
+		FileChanges:           diffSnapshots(beforeFiles, afterFiles),
+		Model:                 run.Model,
+		NumTurns:              run.NumTurns,
+		StopReason:            run.StopReason,
+		RouteHistory:          run.RouteHist,
+		TTFTMS:                run.TTFTMS,
+		OutputTokensPerSecond: run.OutputTPS,
+		Warnings:              run.Warnings,
 	}
 	if run.IsError {
 		res.Error = fmt.Errorf("milk run failed (result subtype %q): %s", run.Subtype, run.Response)
@@ -334,11 +490,16 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	return res, nil
 }
 
-// Stop kills an in-flight batch run, if any. One-shot runs need no other
-// teardown (the tmux session the TUI adapter drove is gone by design).
+// Stop kills an in-flight batch run, if any, and tears down the sandbox
+// state root (a fresh one is created per Start — per scenario run, per
+// repetition).
 func (a *milkAdapter) Stop() error {
 	if a.cmd != nil && a.cmd.Process != nil {
 		_ = a.cmd.Process.Kill()
+	}
+	if a.sandboxDir != "" {
+		_ = os.RemoveAll(a.sandboxDir)
+		a.sandboxDir = ""
 	}
 	return nil
 }

@@ -27,6 +27,36 @@ type AgentAdapter interface {
 	Stop() error
 }
 
+// SandboxConfig instructs a sandbox-capable adapter to run its agent against
+// a throwaway state root instead of the live one: always fresh per adapter
+// start (per scenario run / per repetition), so no run ever sees a previous
+// run's sessions, memory, or history. Seeding with the current config keeps
+// the run honest — same agent set and settings, none of the state.
+type SandboxConfig struct {
+	// Enabled turns the sandbox on.
+	Enabled bool
+	// SeedConfigPath is a config.json whose contents seed the fresh root's
+	// config.json (the current agent set and settings). Empty = no seeding
+	// (the agent starts from first-run defaults).
+	SeedConfigPath string
+	// MilkBinary optionally pins the binary to drive ("" = adapter default).
+	MilkBinary string
+	// AllowTools writes dangerously_skip_permissions onto every seeded agent
+	// so batch runs may actually execute mutating tools (bash, edit_file, …)
+	// instead of having them denied for lack of an interactive permission
+	// answer. Applies to the seeded sandbox config only — the live config is
+	// never touched.
+	AllowTools bool
+}
+
+// Sandboxable is implemented by adapters that can isolate their agent's
+// state root. The harness applies an experiment's sandbox: section through
+// this interface; adapters that don't implement it (claude-code — a tmux
+// session against the real ~/.claude) simply run unsandboxed.
+type Sandboxable interface {
+	SetSandbox(SandboxConfig)
+}
+
 // AdapterFactory creates a new adapter instance.
 type AdapterFactory func() AgentAdapter
 
