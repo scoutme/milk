@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	viewport "github.com/scoutme/milk/internal/vp"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/livebuf"

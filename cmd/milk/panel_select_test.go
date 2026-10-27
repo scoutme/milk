@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	viewport "github.com/scoutme/milk/internal/vp"
 
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"

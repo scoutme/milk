@@ -16,11 +16,11 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
+	viewport "github.com/scoutme/milk/internal/vp"
 
 	"github.com/scoutme/milk/internal/agent/aider"
 	"github.com/scoutme/milk/internal/agent/claude"
@@ -1169,6 +1169,27 @@ type model struct {
 	// from colorizeTransLen, which is deliberately capped before an open
 	// think block's container and would otherwise re-count it every render.
 	colorizeSeenLen int
+
+	// txPartCache/txSepCache/txLinesCache: the transcript part of the
+	// viewport content cached as rows (ADR-0088). Content-addressed —
+	// rebuilt whenever the wrapped transcript or the separator changes, so
+	// keystrokes stop paying O(transcript bytes) per input event (the old
+	// path concatenated the whole transcript into a content string and let
+	// the viewport re-split and re-measure it on every key).
+	txPartCache  string
+	txSepCache   string
+	txLinesCache []string
+
+	// wrappedTranscript's content-addressed memo (ADR-0088) — see its doc
+	// comment in transcript.go for the key semantics.
+	wrapCacheKey   wrappedTxKey
+	wrapCache      string
+	wrapCacheValid bool
+
+	// thinkGen is the display-invalidation generation bumped by
+	// invalidateThinkDisplay; part of wrappedTranscript's memo key so fold
+	// toggles and thinking-stream re-renders never serve a stale render.
+	thinkGen int
 
 	// Per-turn colorization cache: stores colorized output for each completed
 	// turn (splitTurns segments ending with "\n\n"). Completed turns never

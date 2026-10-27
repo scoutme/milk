@@ -72,6 +72,7 @@ internal/escalation/          # context builder (local transcript → escalation
 internal/instructions/        # loads the target repo's AGENTS.md/CLAUDE.md into agent system/static context
 internal/textbudget/          # shared head+tail truncation helper for bounding large text before prompt hand-off
 internal/sgr/                 # SGR state tracker + row primitives (SelfContain, WithBackground, LastBackground, Highlight) — ADR-0072
+internal/vp/                  # forked bubbles viewport (MIT, ADR-0088): deferred longest-line measurement + SetLines — the per-keystroke render path
 internal/livebuf/             # thread-safe byte-capped text buffer for live background-job/workflow output (ADR-0047)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/mcpauth/             # native MCP OAuth: RFC 9728/8414 discovery, RFC 7591 DCR, PKCE, token store (~/.milk/mcp_oauth/)

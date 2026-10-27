@@ -113,6 +113,13 @@ func (m *model) appendThinkingStreamed(text string) {
 	for i := range m.thinkBlocks {
 		if !m.thinkBlocks[i].closed {
 			m.thinkBlocks[i].buf.WriteString(text)
+			// The display changed while the transcript's length did not —
+			// bump the invalidation generation so wrappedTranscript's memo
+			// re-renders instead of serving the previous chunk (ADR-0088).
+			// Deliberately not invalidateThinkDisplay: the inner cache's
+			// cached-prefix + fresh-tail fast path is what makes streaming
+			// cheap (its commit rule stops before an open container).
+			m.thinkGen++
 			m.syncViewportThrottled()
 			return
 		}
@@ -137,7 +144,59 @@ func (m *model) appendThinkingStreamed(text string) {
 // the viewport content width. When a selection range is active, the selected
 // text region is highlighted with an inverted background, respecting column
 // boundaries on the first and last lines.
+//
+// Perf (ADR-0088): content-addressed memo around the whole render chain.
+// The viewport rebuilds on every keystroke and this is the expensive half
+// of it (wrap + per-row tint + selection highlight over the entire
+// transcript), while cursor movement and typing change none of its inputs.
+// The key covers everything that can change the output: the transcript's
+// length (append-only), the width, the colorize mode, the invalidation flag
+// invalidateThinkDisplay maintains (fold toggles, thinking-stream changes),
+// a plain re-colorize request (colorizeForce — e.g. agentDoneMsg closing
+// markdown fences), and the selection range.
 func (m *model) wrappedTranscript() string {
+	key := m.wrappedTranscriptKey()
+	if m.wrapCacheValid && key == m.wrapCacheKey && !m.colorizeForce {
+		return m.wrapCache
+	}
+	out := m.wrappedTranscriptUncached()
+	// The recompute consumed the invalidation: whatever path ran above,
+	// the display is fresh again.
+	m.colorizeForce = false
+	m.wrapCacheKey = m.wrappedTranscriptKey()
+	m.wrapCache = out
+	m.wrapCacheValid = true
+	return out
+}
+
+// wrappedTranscriptKey snapshots the wrapped-transcript cache key. Taken
+// after a recompute as well (the compute path consumes colorizeForce, so a
+// pre-compute snapshot would poison the cache with a stale flag).
+func (m *model) wrappedTranscriptKey() wrappedTxKey {
+	return wrappedTxKey{
+		txLen:         m.transcript.Len(),
+		width:         m.vpWidth(),
+		mode:          m.colorizeMode,
+		thinkGen:      m.thinkGen,
+		selAnchorLine: m.selAnchorLine,
+		selAnchorCol:  m.selAnchorCol,
+		selEndLine:    m.selEndLine,
+		selEndCol:     m.selEndCol,
+	}
+}
+
+// wrappedTxKey is the memo key for wrappedTranscript — see its doc comment
+// for why every field is part of it.
+type wrappedTxKey struct {
+	txLen                       int
+	width                       int
+	mode                        ColorizeMode
+	thinkGen                    int
+	selAnchorLine, selAnchorCol int
+	selEndLine, selEndCol       int
+}
+
+func (m *model) wrappedTranscriptUncached() string {
 	raw, openAt := m.transcriptDisplayAt()
 	if raw == "" {
 		return m.applySelectionHighlight(m.welcomeScreen())
