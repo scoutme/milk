@@ -1735,6 +1735,14 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 // handlePanelCmdToggle is the plain show/hide toggle behind /panel <name>
 // and F1-F6 (the tab-aware entry point is handlePanelCmd).
 func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
+	// Opening a panel by hand is attention/relevance (ADR-0089): the panel
+	// the user just asked for becomes the freshest candidate, so it claims a
+	// width-budget slot immediately even when the budget is already full.
+	// Closing doesn't stamp — a closed panel is out of the layout anyway,
+	// and re-opening stamps again on its own.
+	if r := regionForPanelSub(sub); r != regionNone && !m.panelRawOpen(r) {
+		m.stampPanelActivity(r)
+	}
 	if m.panelManualOverride == nil {
 		m.panelManualOverride = map[panelRegion]bool{}
 	}

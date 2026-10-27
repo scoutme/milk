@@ -1,9 +1,17 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
 
-// Tests for the unified side-panel width budget (ADR-0089): one fill-in-order
-// rule shared by all six side panels, with a 40-col transcript floor. The
+	"github.com/scoutme/milk/internal/memory"
+)
+
+// Tests for the unified side-panel width budget (ADR-0089): one rule shared
+// by all six side panels — how many fit is a pure function of the width
+// (with a 40-col transcript floor), and *which* fit is decided by content
+// recency (last content/attention event, ties keeping panelRenderOrder). The
 // motivating report: at a terminal width in [119,138], opening
 // memory+project+git showed only memory (project/git were width-guarded)
 // while memory+tasks+background showed all three (no guard at all) — the same
@@ -118,10 +126,12 @@ func TestPanelWidthBudget_ThresholdAndFloor(t *testing.T) {
 
 // TestPanelWidthBudget_PrefixAndMainAreaFloor sweeps widths and open/close
 // combinations (including gaps in the open set) and asserts the two
-// structural guarantees of the fill-in-order rule: the visible set is always
-// a prefix of the in-layout row (no holes), and whenever any panel shows the
-// transcript keeps at least panelMinMainWidth cols — exactly the budget the
-// width guard protects, never the 20-col last-resort clamp.
+// structural guarantees of the budget. These bare models carry no recency
+// stamps — the startup/restored baseline every timestamp ties there — so the
+// relevance rank degenerates to panelRenderOrder and the visible set is the
+// prefix of the in-layout row (no holes). Second: whenever any panel shows,
+// the transcript keeps at least panelMinMainWidth cols — exactly the budget
+// the width guard protects, never the 20-col last-resort clamp.
 func TestPanelWidthBudget_PrefixAndMainAreaFloor(t *testing.T) {
 	combos := []func(*model){
 		func(m *model) { m.panelMemory, m.panelProject, m.panelGit = true, true, true },
@@ -175,28 +185,157 @@ func TestPanelWidthBudget_PrefixAndMainAreaFloor(t *testing.T) {
 	}
 }
 
-// TestAutoOpenPanel_RespectsWidthBudget: content-driven auto-open may arm a
-// panel's raw flag while the budget doesn't fit it — but it must stay
-// invisible (no toast, no layout move) and show up as soon as room appears.
-func TestAutoOpenPanel_RespectsWidthBudget(t *testing.T) {
-	m := layoutTestModel(t, 120, 40)
+// TestAutoOpenPanel_SwapsIntoTheBudget: content is the relevance basis
+// (ADR-0089) — even when every slot is taken, the panel whose content just
+// changed claims one, evicting the least recently relevant panel; below the
+// one-panel floor there is no slot to swap into, so nothing renders or
+// toasts (the raw open is still recorded).
+func TestAutoOpenPanel_SwapsIntoTheBudget(t *testing.T) {
+	m := layoutTestModel(t, 120, 40) // budget: 2 slots (106 <= 120 < 139)
 	m.panelMemory = true
-	m.panelTasks = true // 66 + 73 = 139 > 120 — no room for a third panel
+	m.panelTasks = true // both never-updated → tie → fill order (memory, tasks)
 
 	m.autoOpenPanel(regionBackground)
-	if len(m.toastHistory) != 0 {
-		t.Errorf("auto-open must not toast a panel the width budget can't show, got %#v", m.toastHistory)
-	}
 	if !m.panelRawOpen(regionBackground) {
-		t.Fatal("auto-open must still arm the panel's raw flag")
+		t.Fatal("auto-open must arm the panel's raw flag")
 	}
-	if m.panelVisible(regionBackground) {
-		t.Fatal("background panel must stay hidden while the budget doesn't fit it")
+	if !m.panelVisible(regionBackground) {
+		t.Error("fresh content must swap its panel into the budget even when every slot is taken")
+	}
+	if !m.panelVisible(regionMemory) {
+		t.Error("memory (rank 2: behind background, ahead of tied tasks by render order) must keep its slot")
+	}
+	if m.panelVisible(regionTasks) {
+		t.Error("the stalest panel (no event yet, last in render order) must be the one evicted")
+	}
+	if !toastMentions(m, "background panel opened") {
+		t.Errorf("a panel that just became visible should toast its open, got %#v", m.toastVisible)
 	}
 
-	// Closing an earlier panel frees the budget — the armed panel shows.
-	m.panelTasks = false
-	if !m.panelVisible(regionBackground) {
-		t.Error("background panel must appear once the budget fits it again")
+	// Below the one-panel floor (73 cols) there is no slot to swap into.
+	narrow := layoutTestModel(t, 60, 40)
+	narrow.autoOpenPanel(regionTasks)
+	if !narrow.panelRawOpen(regionTasks) {
+		t.Error("auto-open must still record the raw open state")
+	}
+	if narrow.panelVisible(regionTasks) {
+		t.Error("no panel can fit at width 60")
+	}
+	if len(narrow.toastHistory) != 0 {
+		t.Errorf("no toast for a panel that cannot show, got %#v", narrow.toastHistory)
+	}
+}
+
+// TestPanelActivity_RecencySwapsPanels: the visible set is the budget's
+// most-recently-updated panels (ties keep panelRenderOrder = the startup
+// baseline), and every stamp switches panels on its event — the stalest one
+// leaves. This is the "show the more relevant info" behaviour the recency
+// basis exists for.
+func TestPanelActivity_RecencySwapsPanels(t *testing.T) {
+	m := &model{width: 130, panelMemory: true, panelProject: true, panelGit: true} // 2 slots
+	if !m.panelVisible(regionMemory) || !m.panelVisible(regionProject) || m.panelVisible(regionGit) {
+		t.Fatalf("tie baseline: memory+project fill the budget, git waits; got %v", visiblePanels(m))
+	}
+
+	m.stampPanelActivity(regionGit) // git's content changed
+	if !m.panelVisible(regionGit) || !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
+		t.Errorf("after git update: git (newest) + memory (beats tied project) must show; got %v", visiblePanels(m))
+	}
+
+	m.stampPanelActivity(regionProject) // project's content changed next
+	if !m.panelVisible(regionProject) || !m.panelVisible(regionGit) || m.panelVisible(regionMemory) {
+		t.Errorf("after project update: project+git show, the stalest (memory) leaves; got %v", visiblePanels(m))
+	}
+
+	// Widening the terminal grows the budget — nothing stays hidden.
+	m.width = 139
+	if len(visiblePanels(m)) != 3 {
+		t.Errorf("at 139 cols all three panels fit regardless of recency; got %v", visiblePanels(m))
+	}
+}
+
+// TestPanelToggle_StampedAsMostRelevant: opening a panel by hand is an
+// attention event — the panel the user just asked for wins a slot
+// immediately, evicting the stalest, even though the budget was full.
+func TestPanelToggle_StampedAsMostRelevant(t *testing.T) {
+	m := layoutTestModel(t, 130, 40) // 2 slots
+	m.panelMemory = true
+	m.panelProject = true
+
+	next, _ := m.handlePanelCmdToggle("git")
+	m = next.(model)
+	if !m.panelRawOpen(regionGit) {
+		t.Fatal("toggle must open the git panel")
+	}
+	if !m.panelVisible(regionGit) {
+		t.Error("the panel the user just opened must claim a slot right away")
+	}
+	if !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
+		t.Errorf("eviction takes the stalest (project, no event yet); got %v", visiblePanels(&m))
+	}
+}
+
+// TestMemoryRefresh_StampsOnlyOnChange: the 5s refresh is a poll, not an
+// event — a no-op tick must never outrank panels with real news (first tick
+// = baseline only; a real store change stamps; an unchanged tick keeps the
+// previous stamp).
+func TestMemoryRefresh_StampsOnlyOnChange(t *testing.T) {
+	m := layoutTestModel(t, 200, 40)
+	store, err := memory.NewStoreParams(t.TempDir(), "sess", memory.Params{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mem = store
+
+	next, _ := m.Update(memoryRefreshMsg{})
+	m = next.(model)
+	if !m.panelActivity[regionMemory].IsZero() {
+		t.Fatal("the first tick only establishes the content fingerprint — no stamp")
+	}
+
+	if _, err := store.Record(context.Background(), "a fresh percept", memory.ProducerUser, memory.ConsumerAll, memory.Roles{}, false); err != nil {
+		t.Fatal(err)
+	}
+	next, _ = m.Update(memoryRefreshMsg{})
+	m = next.(model)
+	if m.panelActivity[regionMemory].IsZero() {
+		t.Fatal("a real store change must stamp the memory panel")
+	}
+	stamped := m.panelActivity[regionMemory]
+
+	time.Sleep(5 * time.Millisecond) // distinct clock reading if a re-stamp happens
+	next, _ = m.Update(memoryRefreshMsg{})
+	m = next.(model)
+	if !m.panelActivity[regionMemory].Equal(stamped) {
+		t.Error("an unchanged tick must not restamp — it would pin the memory panel as freshest forever")
+	}
+}
+
+// TestGitDataMsg_StampsOnlyOnGraphChange: the 3s git poll is also cosmetic
+// most of the time — the first load sets the baseline (startup ties keep
+// fill order), a real graph/branch change stamps, an identical re-poll
+// doesn't.
+func TestGitDataMsg_StampsOnlyOnGraphChange(t *testing.T) {
+	m := layoutTestModel(t, 200, 40)
+	m.panelGit = true
+
+	next, _ := m.Update(gitDataMsg{branch: "main"})
+	m = next.(model)
+	if !m.panelActivity[regionGit].IsZero() {
+		t.Fatal("the first data load is the baseline — it must not stamp")
+	}
+
+	next, _ = m.Update(gitDataMsg{branch: "main", err: "not a git repository"}) // error note renders → lines differ
+	m = next.(model)
+	stamped := m.panelActivity[regionGit]
+	if stamped.IsZero() {
+		t.Fatal("the graph content changing is real content change — it must stamp")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	next, _ = m.Update(gitDataMsg{branch: "main", err: "not a git repository"}) // identical refresh poll
+	m = next.(model)
+	if !m.panelActivity[regionGit].Equal(stamped) {
+		t.Error("a no-change poll must not restamp — polling would keep git fresher than live events elsewhere")
 	}
 }

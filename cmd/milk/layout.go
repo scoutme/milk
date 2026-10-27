@@ -147,46 +147,47 @@ func (m *model) mainWidth() int {
 // below it and stays unreachable through panel layout).
 const panelMinMainWidth = 40
 
-// panelFits reports whether region can occupy layout columns at the current
-// terminal width — the one width rule shared by all six side panels
-// (ADR-0089). Walk panelRenderOrder left-to-right: each in-layout panel
-// claims its width while every panel before it fits too, and the walk stops
-// before the first panel that would push the main area below
-// panelMinMainWidth. Consequences:
+// panelFits reports whether region occupies layout columns right now — the
+// one visibility rule shared by all six side panels (ADR-0089), in two
+// halves:
 //
-//   - how many panels show depends only on the width budget, never on which
-//     panels are open — the same total panel width yields the same count in
-//     every combination (pre-ADR-0089 memory/tasks/background had no guard
-//     at all while project/git/workflow demanded 40 free cols, so at a
-//     width where one combination showed all three panels, another showed
-//     only its first one);
-//   - whatever doesn't fit is always the tail of the row: a width shortage
-//     or a newly opened panel can only push out panels that come after the
-//     first one that no longer fits — panels before it keep showing (no
-//     all-or-nothing cliff where everything disappears at once);
-//   - the transcript keeps panelMinMainWidth cols whenever any panel shows.
+//  1. Budget — how many panels fit at all. Side panels fill the row
+//     left-to-right in panelRenderOrder, each claiming its width while every
+//     panel before it also fits, stopping before the next panel would push
+//     the main area below panelMinMainWidth (40). With uniform 33-col slots
+//     that count is a pure function of the width budget — floor((width-40)/33),
+//     capped by however many panels are open — so the *number* of visible
+//     panels never depends on which panels are open (pre-ADR-0089 memory/
+//     tasks/background had no guard while project/git/workflow demanded 40
+//     free cols, so one combination could show three panels where another
+//     showed one).
+//  2. Selection — which panels fill those slots: panelRankByActivity sorts
+//     the in-layout panels by last content/attention event and the top
+//     `budget` entries are the visible ones. A content event therefore swaps
+//     its panel into view and evicts the least recently relevant one (the
+//     panel that no longer fits is always the tail of the *relevance* rank);
+//     with every timestamp tied — startup, restored state, panels that never
+//     saw an event — the rank degenerates to panelRenderOrder and the layout
+//     is exactly the left-to-right fill.
 //
-// Every slot has the same width (panelSlotWidth), so the first panel that
-// doesn't fit disqualifies every panel after it as well — the visible set is
-// always a prefix of the in-layout row, never a row with holes. The tabbed
-// front-tab filter (ADR-0079) falls out of this naturally: only the front
-// tab is in layout, so it is the first (and only) panel in the walk.
+// The tabbed front-tab filter (ADR-0079) falls out naturally: only the front
+// tab is in layout, so it is the only candidate and fits unless the terminal
+// is under panelMinMainWidth+panelWidth.
 func (m *model) panelFits(region panelRegion) bool {
-	if !m.panelInLayout(region) {
-		return false
-	}
-	used := 0
-	for _, r := range panelRenderOrder {
-		if !m.panelInLayout(r) {
-			continue
-		}
+	ranked, n := m.panelRankByActivity()
+	used, slots := 0, 0
+	for i := 0; i < n; i++ {
+		r := ranked[i]
 		if used+panelWidth(r)+panelMinMainWidth > m.width {
-			return false
-		}
-		if r == region {
-			return true
+			break
 		}
 		used += panelWidth(r)
+		slots++
+	}
+	for i := 0; i < n; i++ {
+		if ranked[i] == region {
+			return i < slots
+		}
 	}
 	return false
 }

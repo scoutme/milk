@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -892,6 +893,15 @@ type model struct {
 	// user looked at before, like closing a browser tab. Unused when the
 	// theme has no tabs (panels are laid out side by side there).
 	panelTabMRU []panelRegion
+
+	// panelActivity is each region's last content/attention timestamp — the
+	// recency ranking that picks *which* panels fill the width budget when
+	// not all of them fit (ADR-0089). Zero = never updated (startup/restored
+	// panels tie there and lay out in panelRenderOrder).
+	panelActivity [regionGit + 1]time.Time
+	// memorySig is the last content fingerprint the periodic memory refresh
+	// saw, so only real store changes stamp panelActivity[regionMemory].
+	memorySig string
 
 	// memory panel (in-place expansion mirrors into the tasks panel)
 	panelMemory        bool
@@ -1999,6 +2009,18 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	ev := newMouseEvent(msg)
 	region, regionX := m.regionAt(ev.X)
+	// Attention counts as recency (ADR-0089): pressing or wheel-scrolling
+	// *inside a visible panel* stamps it as what the user is looking at right
+	// now, so a burst of events elsewhere can't swap it out from under them
+	// mid-read. Motion (drags) doesn't stamp — only deliberate presses and
+	// wheel ticks do; regionAt only ever reports visible panels, so hidden
+	// ones can't be attended to.
+	if region != regionNone {
+		switch {
+		case ev.Action == mousePress, ev.Button == tea.MouseWheelUp, ev.Button == tea.MouseWheelDown:
+			m.stampPanelActivity(region)
+		}
+	}
 	// Drag-outside evidence (see dragResetMsg): a motion/release that lands
 	// outside the active drag's own area means the pointer drifted out of the
 	// viewport/panel — the situation where terminals commonly drop the release
@@ -3132,7 +3154,16 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case memoryRefreshMsg:
 		// Content presence is what opens the memory panel (ADR-0078): when
 		// the user hasn't managed it and the store gained content, open it
-		// like any other panel's content event.
+		// like any other panel's content event. Recency (ADR-0089) only
+		// stamps a *change*: the first tick establishes the fingerprint
+		// silently so a no-op redraw never makes the memory panel outrank
+		// genuinely fresher panels.
+		if sig := m.memoryContentSig(); sig != "" && m.memorySig != "" && sig != m.memorySig {
+			m.stampPanelActivity(regionMemory)
+			m.memorySig = sig
+		} else if m.memorySig == "" {
+			m.memorySig = sig // first read: baseline only, never a stamp
+		}
 		if !m.panelMemory && !m.panelContentFinalized(regionMemory) {
 			m.autoOpenPanel(regionMemory)
 		}
@@ -3184,11 +3215,19 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case gitDataMsg:
+		newLines, newIDs := buildGitPanelLines(msg.rows, msg.branch, msg.dirty, msg.err, gitPanelInner)
+		// Recency (ADR-0089): only a change in what the panel would draw
+		// counts — the first load is the baseline (tied panels keep their
+		// startup order), and a no-change refresh poll must not keep the
+		// git panel permanently fresher than panels with real events.
+		if m.gitLines != nil && !slices.Equal(newLines, m.gitLines) {
+			m.stampPanelActivity(regionGit)
+		}
 		m.gitRows = msg.rows
 		m.gitBranch = msg.branch
 		m.gitDirty = msg.dirty
 		m.gitErr = msg.err
-		m.gitLines, m.gitIDs = buildGitPanelLines(m.gitRows, m.gitBranch, m.gitDirty, m.gitErr, gitPanelInner)
+		m.gitLines, m.gitIDs = newLines, newIDs
 		return m, nil
 
 	case attachRefreshMsg:
@@ -3219,6 +3258,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case backgroundJobDoneMsg:
+		// A job finishing is content changing in the panel (status flips,
+		// result row) — recency stamp (ADR-0089) without an auto-open
+		// (the spawn already opened it; this only re-ranks it).
+		m.stampPanelActivity(regionBackground)
 		j := msg.job
 		// The toast (ADR-0048) stays the transient lifecycle notice; the
 		// job's *result* also lands in the transcript now, so it can't pass
@@ -3242,6 +3285,7 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case backgroundShellDoneMsg:
+		m.stampPanelActivity(regionBackground) // shell row status changed (ADR-0089)
 		m.notify(fmt.Sprintf("background shell %s %s", msg.info.ID, msg.info.StatusLabel()), "/bg list")
 		// The last running shell (or job) exiting finalizes the background
 		// panel's content — re-arm auto-open so the next one opens it again

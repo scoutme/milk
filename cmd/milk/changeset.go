@@ -236,6 +236,12 @@ func (m *model) syncChangeset() {
 	if maps.Equal(m.changesetFiles, next) {
 		return
 	}
+	// Recency stamp (ADR-0089): a change after the first load means the
+	// project tree's rendered content actually changed; the first load only
+	// establishes the baseline so startup panels stay tied (render order).
+	if m.changesetFiles != nil {
+		m.stampPanelActivity(regionProject)
+	}
 	m.changesetFiles = next
 	m.rebuildProjectTree()
 }

@@ -87,4 +87,4 @@
 * [86. Eval version matrix: compare milk versions side by side](0086-eval-version-matrix.md)
 * [87. Panel auto-open master switch](0087-panel-auto-open-master-switch.md)
 * [88. TUI render-loop performance: viewport fork + render caches](0088-tui-render-loop-performance.md)
-* [89. Uniform side-panel width budget: fill-in-order with a 40-col floor](0089-side-panel-width-budget.md)
+* [89. Side-panel width budget: recency-ranked panels over a 40-col floor](0089-side-panel-width-budget.md)
