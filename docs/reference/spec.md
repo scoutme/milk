@@ -354,7 +354,11 @@ Independently of `copy_on_select`, dragging a selection past the top or bottom o
 
 ### `remember_panel_state` field
 
-Default `true`. When `true`, a manual side-panel toggle (`/panel <name>` or F1-F6) is a durable preference: the open/closed state of every panel is saved to the folder-bound `~/.milk/panel-state/<name>-<hash>.json`, restored at startup (seeding the manual override, so auto-open never fights it), and never dropped by content finalization. Only manually toggled panels are saved — auto-opened state is transient. When `false`, panels are session-only with the ADR-0059 lifecycle: the override expires when the panel's content finalizes (task store drained, jobs finished, workflow done, percept store emptied), re-arming auto-open for the next content. See [ADR-0078](../adr/0078-persisted-panel-state.md).
+Default `true`. When `true`, a manual side-panel toggle (`/panel <name>` or F1-F6) is a durable preference: the open/closed state of every panel is saved to the folder-bound `~/.milk/panel-state/<name>-<hash>.json` and restored at startup — as *startup layout* only (ADR-0087 amending ADR-0078): a restored choice never seeds the manual override, so new content still auto-opens the panel it belongs to. Only manually toggled panels are saved — auto-opened state is transient. In a session the in-session veto follows ADR-0059 either way: a close sticks exactly while the content it was dismissed over stays live (task store drained, jobs finished, workflow done, percept store emptied), then re-arms auto-open for the next content. When `false`, panels are session-only with nothing read or written. See [ADR-0078](../adr/0078-persisted-panel-state.md) and [ADR-0087](../adr/0087-panel-auto-open-master-switch.md).
+
+### `panel_auto_open` field
+
+Default `true`. Master switch for content-driven panel auto-open (ADR-0087): with it on, panels open themselves when their content becomes active (a task is created, a background job spawns, a workflow starts, percepts arrive), the memory panel follows its content-driven startup default, and manual closes stick per the ADR-0059 rule above. With it off, panels open only on an explicit `/panel <name>` toggle (or F1-F6) — no auto-opens, no toasts, no startup opens. Toggled by `/panel autoopen [on|off]`, which writes this key.
 
 ### `config_editors` field
 

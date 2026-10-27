@@ -12,15 +12,17 @@ import (
 	"github.com/scoutme/milk/internal/memory"
 )
 
-// Panel state persistence (ADR-0078): every panel's manually chosen
-// open/closed state is a durable preference — saved on toggle, restored at
-// startup, never fought by content-driven auto-open. The whole mechanism
-// is feature-gated by "remember_panel_state" (default on); off means
-// session-only panels with ADR-0059's expiry semantics.
+// Panel state persistence (ADR-0078 as amended by ADR-0087): every
+// panel's manually chosen open/closed state is a durable preference —
+// saved on toggle, restored at startup as *startup layout*. Restored state
+// never vetoes content-driven auto-open; the in-session veto while a
+// dismissal covers live content is the manual override (ADR-0059's
+// expiry). The whole mechanism is feature-gated by "remember_panel_state"
+// (default on); off means session-only panels.
 
 // TestPanelState_RoundTripAcrossSessions: a manual toggle in one session
-// comes back as both the panel's state and its manual override in the
-// next, and beats content-driven auto-open.
+// comes back as the panel's state in the next — startup layout, without
+// an auto-open veto (ADR-0087).
 func TestPanelState_RoundTripAcrossSessions(t *testing.T) {
 	m := newTestModelForPanels(t)
 	m.panelStatePath = filepath.Join(t.TempDir(), "panel-state.json")
@@ -43,7 +45,7 @@ func TestPanelState_RoundTripAcrossSessions(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	// Session 2: a fresh model restores both, with overrides seeded.
+	// Session 2: a fresh model restores both as startup layout.
 	m2 := newTestModelForPanels(t)
 	m2.panelStatePath = m1.panelStatePath
 	m2.loadPanelState(m2.panelStatePath)
@@ -53,14 +55,18 @@ func TestPanelState_RoundTripAcrossSessions(t *testing.T) {
 	if !m2.panelTasks {
 		t.Error("expected the remembered tasks open to restore")
 	}
-	if !m2.panelManualOverride[regionMemory] || !m2.panelManualOverride[regionTasks] {
-		t.Error("restored preferences must seed the manual override")
+	if !m2.panelPrefs[regionMemory] || !m2.panelPrefs[regionTasks] {
+		t.Error("restored preferences must seed the durable pref")
+	}
+	if len(m2.panelManualOverride) != 0 {
+		t.Error("restored preferences are startup layout — they must not seed an auto-open veto")
 	}
 
-	// Content presence must not reopen a remembered-closed panel.
+	// New content re-opens a remembered-closed panel: the saved state is
+	// startup layout, not an eternal veto (ADR-0087).
 	m2.autoOpenPanel(regionMemory)
-	if m2.panelMemory {
-		t.Error("expected the remembered close to beat auto-open")
+	if !m2.panelMemory {
+		t.Error("expected new content to re-open the remembered-closed panel")
 	}
 }
 
@@ -118,7 +124,7 @@ func TestPanelState_CorruptOrUnknownFileIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.loadPanelState(m.panelStatePath)
-	if m.panelMemory || len(m.panelManualOverride) != 0 {
+	if m.panelMemory || len(m.panelPrefs) != 0 {
 		t.Error("a corrupt state file must change nothing")
 	}
 
@@ -129,15 +135,16 @@ func TestPanelState_CorruptOrUnknownFileIgnored(t *testing.T) {
 	}
 	m2.loadPanelState(m2.panelStatePath)
 	for _, region := range panelRenderOrder {
-		if m2.panelManualOverride[region] {
-			t.Errorf("unknown panel name must not seed an override for %s", panelSubName(region))
+		if m2.panelPrefs[region] {
+			t.Errorf("unknown panel name must not seed a pref for %s", panelSubName(region))
 		}
 	}
 }
 
 // TestMemoryPanel_DefaultClosedOpensOnContent: the memory panel is closed
 // by default and content presence is what opens it (like other panels) —
-// a remembered manual choice wins over the content check.
+// an in-session manual close wins while it is active; a restored
+// preference does not (it is startup layout only, ADR-0087).
 func TestMemoryPanel_DefaultClosedOpensOnContent(t *testing.T) {
 	store, err := memory.NewStoreParams(t.TempDir(), "sess", memory.Params{})
 	if err != nil {
@@ -162,13 +169,24 @@ func TestMemoryPanel_DefaultClosedOpensOnContent(t *testing.T) {
 		t.Error("expected content presence to open the memory panel")
 	}
 
-	// A remembered close (override seeded by loadPanelState) wins.
+	// An in-session manual close (the sticky override) beats the content
+	// default while it is active.
 	m2 := newTestModelForPanels(t)
 	m2.mem = store
 	m2.panelManualOverride[regionMemory] = true
 	m2.applyMemoryContentDefault()
 	if m2.panelMemory {
-		t.Error("a remembered close must beat the content default")
+		t.Error("a manual close must beat the content default")
+	}
+
+	// A restored preference (panelPrefs) is startup layout only — the
+	// content default still opens the panel (ADR-0087).
+	m3 := newTestModelForPanels(t)
+	m3.mem = store
+	m3.panelPrefs[regionMemory] = true
+	m3.applyMemoryContentDefault()
+	if !m3.panelMemory {
+		t.Error("a restored close must not veto the content default")
 	}
 }
 
@@ -329,5 +347,86 @@ func TestPanelState_FolderTaggedInFile(t *testing.T) {
 	}
 	if strings.Contains(string(data2), `"folder"`) {
 		t.Errorf("no folder bound must mean no folder tag, got %s", data2)
+	}
+}
+
+// TestRestoredCloseDoesNotVetoNewContent is the user-visible contract of
+// the ADR-0087 amendment: a restored closed preference is startup layout —
+// the first new content auto-opens the panel again. (Regression: a restored
+// state file used to seed panelManualOverride, which with the default
+// remember_panel_state silently killed content-driven auto-open for every
+// panel ever toggled.)
+func TestRestoredCloseDoesNotVetoNewContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel-state.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"panels":{"background":false,"workflow":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModelForPanels(t)
+	m.panelStatePath = path
+	m.loadPanelState(path)
+	if m.panelBackground || m.workflowPanelOpen {
+		t.Fatal("restored closed state must start closed")
+	}
+
+	updated, _ := m.Update(backgroundJobStartedMsg{})
+	m2 := updated.(model)
+	if !m2.panelBackground {
+		t.Error("a new background job must auto-open the panel despite the restored close")
+	}
+	m2.autoOpenPanel(regionWorkflow)
+	if !m2.workflowPanelOpen {
+		t.Error("new workflow content must auto-open the panel despite the restored close")
+	}
+}
+
+// TestPanelState_PrefsAccumulateWithoutVeto: toggles in different sessions
+// accumulate in the state file (the durable pref set survives round trips),
+// and the accumulation never turns into an auto-open veto.
+func TestPanelState_PrefsAccumulateWithoutVeto(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel-state.json")
+
+	// Session 1: toggle tasks.
+	m1 := newTestModelForPanels(t)
+	m1.panelStatePath = path
+	updated, _ := m1.Update(tea.KeyPressMsg{Code: tea.KeyF2})
+	m1 = updated.(model)
+	if err := m1.savePanelState(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Session 2: restore, toggle git, save — both prefs must survive.
+	m2 := newTestModelForPanels(t)
+	m2.panelStatePath = path
+	m2.loadPanelState(path)
+	updated, _ = m2.Update(tea.KeyPressMsg{Code: tea.KeyF6})
+	m2 = updated.(model)
+	if err := m2.savePanelState(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"tasks":`) {
+		t.Errorf("the earlier tasks pref must not be dropped, got %s", data)
+	}
+	if !strings.Contains(string(data), `"git":`) {
+		t.Errorf("the new git pref must be recorded, got %s", data)
+	}
+
+	// Session 3: restore — layout comes back, and nothing vetoes auto-open.
+	m3 := newTestModelForPanels(t)
+	m3.panelStatePath = path
+	m3.loadPanelState(path)
+	if !m3.panelTasks {
+		t.Error("expected the tasks pref to restore as open layout")
+	}
+	if len(m3.panelManualOverride) != 0 {
+		t.Error("accumulated prefs must never seed an auto-open veto")
+	}
+	m3.autoOpenPanel(regionBackground)
+	if !m3.panelBackground {
+		t.Error("auto-open must still work after prefs accumulated")
 	}
 }

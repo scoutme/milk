@@ -15,10 +15,14 @@ import (
 // is a durable preference. On a manual toggle (/panel <name> or F1-F6) the
 // state is written to the folder-bound file resolved by panelStatePathFor
 // (~/.milk/panel-state/<name>-<hash>.json, one per project folder) and
-// restored at startup; the restored choice also seeds panelManualOverride,
-// so content-driven auto-open never fights what the user last chose.
-// Auto-opened state is deliberately *not* saved — only manually toggled
-// panels have a preference (panelManualOverride is exactly that set).
+// restored at startup — as *startup layout* only (ADR-0087 amending
+// ADR-0078): the restored choice seeds panelPrefs, never the in-session
+// auto-open veto (panelManualOverride). A remembered close therefore does
+// not lock the panel out of its next content: new activity auto-opens it
+// again, and "never move my layout" is /panel autoopen off's job (ADR-0087).
+// The in-session veto itself follows ADR-0059: a close sticks exactly as
+// long as the content it was dismissed over stays live (see
+// resetManualOverrideIfFinalized).
 //
 // The whole mechanism is feature-gated by the "remember_panel_state"
 // config key (default on). With it off nothing is read or written and
@@ -119,10 +123,11 @@ func adoptLegacyPanelState(configDir, target string) string {
 }
 
 // loadPanelState restores saved panel preferences from path. Entries
-// become both the panel's open state and a sticky manual override; panels
-// without an entry keep the content-driven default (closed until their
-// content appears). A missing or unreadable file is not an error — a fresh
-// install simply has no preferences.
+// become the panel's open state and a durable pref (panelPrefs) — startup
+// layout only, never an auto-open veto (ADR-0087 amending ADR-0078).
+// Panels without an entry keep the content-driven default (closed until
+// their content appears). A missing or unreadable file is not an error — a
+// fresh install simply has no preferences.
 func (m *model) loadPanelState(path string) {
 	m.panelStatePath = path
 	data, err := os.ReadFile(path)
@@ -141,10 +146,10 @@ func (m *model) loadPanelState(path string) {
 		if ptr := m.panelOpenPtr(region); ptr != nil {
 			*ptr = open
 		}
-		if m.panelManualOverride == nil {
-			m.panelManualOverride = map[panelRegion]bool{}
+		if m.panelPrefs == nil {
+			m.panelPrefs = map[panelRegion]bool{}
 		}
-		m.panelManualOverride[region] = true
+		m.panelPrefs[region] = true
 	}
 	if f.Active != "" {
 		if region := panelRegionForSubName(f.Active); region != regionNone {
@@ -153,8 +158,11 @@ func (m *model) loadPanelState(path string) {
 	}
 }
 
-// savePanelState writes the manually toggled panels' current state to the
-// state file (atomic temp+rename, like every other milk state file).
+// savePanelState writes the manually chosen panels' current state to the
+// state file (atomic temp+rename, like every other milk state file). The
+// written set is panelPrefs (restored plus this session's toggles) ∪ the
+// current in-session override, so preferences accumulate across sessions
+// without ever being mistaken for an auto-open veto.
 // No-op when persistence is off or no path is configured (tests, ACP).
 func (m *model) savePanelState() error {
 	if m.panelStatePath == "" || !m.rememberPanelState {
@@ -162,7 +170,7 @@ func (m *model) savePanelState() error {
 	}
 	f := panelStateFile{Version: panelStateFileVersion, Panels: map[string]bool{}, Folder: m.panelStateFolder}
 	for _, region := range panelRenderOrder {
-		if !m.panelManualOverride[region] {
+		if !m.panelPrefs[region] && !m.panelManualOverride[region] {
 			continue
 		}
 		if ptr := m.panelOpenPtr(region); ptr != nil {
@@ -170,11 +178,11 @@ func (m *model) savePanelState() error {
 		}
 	}
 	// The front tab of the shared slot (ADR-0079) is persisted only when
-	// the user themselves chose that panel (manual override) — the same
-	// rule as the open flags above: auto-opened state is not a preference.
-	// An auto-opened front panel is transient anyway (it will not be open
-	// after restore), so nothing is lost by leaving the key out.
-	if active := m.panelActive(); active != regionNone && m.panelManualOverride[active] {
+	// the user themselves chose that panel — the same rule as the open
+	// flags above: auto-opened state is not a preference. An auto-opened
+	// front panel is transient anyway (it will not be open after restore),
+	// so nothing is lost by leaving the key out.
+	if active := m.panelActive(); active != regionNone && (m.panelPrefs[active] || m.panelManualOverride[active]) {
 		f.Active = panelSubName(active)
 	}
 	data, err := json.Marshal(f)

@@ -1714,6 +1714,9 @@ func (m model) handleHistoryCmd(sub string) model {
 // closes it (the slot empties — nothing waits behind), and on a closed one
 // it opens it after the others are out of the way.
 func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
+	if name, arg, _ := strings.Cut(sub, " "); name == "autoopen" {
+		return m.handlePanelAutoOpenCmd(strings.TrimSpace(arg))
+	}
 	region := panelRegionForSubName(sub)
 	if panelTabsActive() && region != regionNone {
 		if m.panelRawOpen(region) && region != m.panelActive() {
@@ -1735,6 +1738,9 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	if m.panelManualOverride == nil {
 		m.panelManualOverride = map[panelRegion]bool{}
 	}
+	if m.panelPrefs == nil {
+		m.panelPrefs = map[panelRegion]bool{}
+	}
 	// Every toggle records the manual override; a toggle that *closes* a
 	// panel whose content has already finalized drops it again right away
 	// (resetManualOverrideIfFinalized) — the sticky rule exists to keep
@@ -1743,6 +1749,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	switch sub {
 	case "memory":
 		m.panelManualOverride[regionMemory] = true
+		m.panelPrefs[regionMemory] = true
 		m.panelMemory = !m.panelMemory
 		if !m.panelMemory {
 			m.resetManualOverrideIfFinalized(regionMemory)
@@ -1758,6 +1765,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "tasks":
 		m.panelManualOverride[regionTasks] = true
+		m.panelPrefs[regionTasks] = true
 		m.panelTasks = !m.panelTasks
 		if !m.panelTasks {
 			m.resetManualOverrideIfFinalized(regionTasks)
@@ -1773,6 +1781,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "workflow":
 		m.panelManualOverride[regionWorkflow] = true
+		m.panelPrefs[regionWorkflow] = true
 		m.workflowPanelOpen = !m.workflowPanelOpen
 		if !m.workflowPanelOpen {
 			m.resetManualOverrideIfFinalized(regionWorkflow)
@@ -1787,6 +1796,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "background":
 		m.panelManualOverride[regionBackground] = true
+		m.panelPrefs[regionBackground] = true
 		m.panelBackground = !m.panelBackground
 		if !m.panelBackground {
 			m.resetManualOverrideIfFinalized(regionBackground)
@@ -1801,6 +1811,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "project":
 		m.panelManualOverride[regionProject] = true
+		m.panelPrefs[regionProject] = true
 		m.panelProject = !m.panelProject
 		if !m.panelProject {
 			m.resetManualOverrideIfFinalized(regionProject)
@@ -1820,6 +1831,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "git":
 		m.panelManualOverride[regionGit] = true
+		m.panelPrefs[regionGit] = true
 		m.panelGit = !m.panelGit
 		if !m.panelGit {
 			m.resetManualOverrideIfFinalized(regionGit)
@@ -1833,9 +1845,52 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		m.notify("git panel: off", "/panel git")
 		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|background|workflow|project|git (or F1-F6)\n")
+		m.appendTranscript(milkTag() + " usage: /panel memory|tasks|background|workflow|project|git|autoopen [on|off] (or F1-F6)\n")
 		return m, nil
 	}
+}
+
+// handlePanelAutoOpenCmd handles /panel autoopen [on|off] — the master
+// switch for content-driven panel auto-open (ADR-0087): with it on (the
+// default) a panel opens itself when its content becomes active, subject
+// to the per-panel manual override (ADR-0059/0078) and the tabbed-theme
+// gate (ADR-0079); with it off, panels open only on an explicit
+// /panel <name> toggle (or F1-F6). Persisted like /tips (config key
+// panel_auto_open), so the choice survives restarts.
+//
+// State *changes* are turn-unrelated informational events → notification
+// toasts (issue #162); the query stays in the transcript like every other
+// explicit query answer.
+func (m model) handlePanelAutoOpenCmd(arg string) (tea.Model, tea.Cmd) {
+	switch arg {
+	case "on", "off":
+		want := arg == "on"
+		other := "on"
+		if want {
+			other = "off"
+		}
+		if m.panelAutoOpen == want {
+			m.notify("panel auto-open: already "+arg, "/panel autoopen "+other)
+			return m, nil
+		}
+		m.panelAutoOpen = want
+		m.st.cfg.PanelAutoOpen = &want
+		if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
+			m.appendTranscript(fmt.Sprintf("%s panel auto-open: %s (config save failed: %v)\n", milkTag(), bold(arg), err))
+		} else {
+			m.notify("panel auto-open: "+arg, "/panel autoopen "+other)
+		}
+		return m, nil
+	case "":
+		state := "off"
+		if m.panelAutoOpen {
+			state = "on"
+		}
+		m.appendTranscript(fmt.Sprintf("%s panel auto-open: %s  (use /panel autoopen on|off)\n", milkTag(), bold(state)))
+		return m, nil
+	}
+	m.appendTranscript(milkTag() + " usage: /panel autoopen [on|off]\n")
+	return m, nil
 }
 
 // handleServerCmd handles /server [status|start for <agent>|stop [<agent>]].

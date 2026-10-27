@@ -165,7 +165,7 @@ var commandRegistry = []cmdSpec{
 	{name: cmdHistory, hosts: hostTUI, desc: "show or set the input history navigation mode", hint: "[global|session]", help: `  /history               show current history navigation mode
   /history global        navigate global input history
   /history session       navigate session input history (default)`},
-	{name: cmdPanel, hosts: hostTUI, desc: "toggle a side panel (memory, tasks, background, workflow, project, git)", hint: "memory|tasks|background|workflow|project|git", help: `  /panel memory          toggle the memory panel (right side) — also F1
+	{name: cmdPanel, hosts: hostTUI, desc: "toggle a side panel (memory, tasks, background, workflow, project, git), or the content-driven auto-open", hint: "memory|tasks|background|workflow|project|git|autoopen [on|off]", help: `  /panel memory          toggle the memory panel (right side) — also F1
                          double-click an entry to expand/collapse its content
   /panel tasks           toggle the tasks panel (right side) — also F2
                          double-click a task to expand/collapse its title
@@ -176,6 +176,10 @@ var commandRegistry = []cmdSpec{
                          double-click a file to insert an @-mention
   /panel git             toggle the git graph panel (right side) — also F6
                          click a commit to preview its summary and diff
+  /panel autoopen [on|off]  show or set content-driven auto-open (default on):
+                         panels open themselves when new content appears
+                         (config key panel_auto_open; off = open only on an
+                         explicit toggle)
                          on a tabbed theme (/theme supermilk) the six panels are
                          tabs of one shared slot: on a hidden tab this switches
                          to it instead of closing, and clicking a tab label

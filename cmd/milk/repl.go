@@ -860,6 +860,14 @@ type model struct {
 	// (ADR-0059).
 	panelManualOverride map[panelRegion]bool
 
+	// panelPrefs is the durable half of a manual toggle (ADR-0078 as
+	// amended by ADR-0087): the user's chosen open/closed state per panel,
+	// persisted to the folder-bound state file and restored as *startup
+	// layout* only. It never vetoes content-driven auto-open — the
+	// in-session veto while a dismissal covers live content is
+	// panelManualOverride, which expires per ADR-0059.
+	panelPrefs map[panelRegion]bool
+
 	// panel state persistence (ADR-0078): where panel preferences live on
 	// disk (empty = persistence unavailable, e.g. in tests) and whether the
 	// "remember_panel_state" feature is on (default true). panelStateFolder
@@ -868,6 +876,14 @@ type model struct {
 	panelStatePath     string
 	panelStateFolder   string
 	rememberPanelState bool
+
+	// panelAutoOpen is the master switch for content-driven auto-open
+	// (ADR-0087, "/panel autoopen on|off", config panel_auto_open,
+	// default on): while off, autoOpenPanel and applyMemoryContentDefault
+	// never open a panel — panels open only on an explicit toggle
+	// (/panel <name> or F1-F6). Per-panel manual overrides and the
+	// tabbed-theme gate layer on top when it is on.
+	panelAutoOpen bool
 
 	// panelTabMRU is the tabbed-theme (ADR-0079) most-recently-viewed stack
 	// of panel tabs, front = the panel in the shared slot. Activation order
@@ -1274,7 +1290,9 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		// store has content (ADR-0078) — see applyMemoryContentDefault.
 		panelMemory:         false,
 		rememberPanelState:  st.cfg.RememberPanelStateEnabled(),
+		panelAutoOpen:       st.cfg.PanelAutoOpenEnabled(),
 		panelManualOverride: map[panelRegion]bool{},
+		panelPrefs:          map[panelRegion]bool{},
 		selAnchorLine:       -1,
 		selEndLine:          -1,
 		panelSelRegion:      regionNone,
@@ -4443,6 +4461,12 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 // startup the panel appearing is the screen itself, not a surprise event
 // needing a toast.
 func (m *model) applyMemoryContentDefault() {
+	// Master switch (ADR-0087, /panel autoopen): off leaves the panel
+	// closed at startup too — the stored content is not "new content" the
+	// user asked to be moved by.
+	if !m.panelAutoOpen {
+		return
+	}
 	if m.panelManualOverride[regionMemory] {
 		return
 	}

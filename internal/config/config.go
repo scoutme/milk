@@ -201,6 +201,9 @@ func DeepMerge(dst, src Config) Config {
 	if src.RememberPanelState != nil {
 		dst.RememberPanelState = src.RememberPanelState
 	}
+	if src.PanelAutoOpen != nil {
+		dst.PanelAutoOpen = src.PanelAutoOpen
+	}
 	if src.StickyEscalation != nil {
 		dst.StickyEscalation = src.StickyEscalation
 	}
@@ -1189,6 +1192,16 @@ type Config struct {
 	// Unset (default) = on; "remember_panel_state": false keeps panels
 	// session-only.
 	RememberPanelState *bool `json:"remember_panel_state,omitempty"`
+
+	// PanelAutoOpen is the master switch for content-driven panel
+	// auto-open (ADR-0087): with it on (the default) a side panel opens
+	// itself when its content becomes active — a task is created, a
+	// background job spawns, a workflow starts, percepts arrive — subject
+	// to the per-panel manual override (ADR-0059/0078) and the tabbed-theme
+	// gate (ADR-0079). "panel_auto_open": false makes panels open only on
+	// an explicit /panel <name> toggle (or F1-F6); the TUI's
+	// "/panel autoopen on|off" writes this key.
+	PanelAutoOpen *bool `json:"panel_auto_open,omitempty"`
 
 	// Animations turns the TUI's spring animations (side panels sliding in
 	// and out, wheel scrolling with inertia) on or off. Unset = on.
@@ -2358,12 +2371,21 @@ func (c Config) QueueWhileBusyEnabled() bool {
 }
 
 // RememberPanelStateEnabled reports whether side-panel state management is
-// durable (ADR-0078): panel open/closed choices persist across sessions
-// and survive content finalization (true when unset —
-// "remember_panel_state": false opts out, restoring ADR-0059's
-// session-only expiry semantics).
+// durable (ADR-0078 as amended by ADR-0087): panel open/closed choices
+// persist per folder and are restored at startup as *startup layout* —
+// they never veto content-driven auto-open (true when unset;
+// "remember_panel_state": false keeps panels session-only, nothing read or
+// written).
 func (c Config) RememberPanelStateEnabled() bool {
 	return c.RememberPanelState == nil || *c.RememberPanelState
+}
+
+// PanelAutoOpenEnabled reports whether content-driven panel auto-open is
+// active (ADR-0087). Unset (default) = on, matching the behaviour the TUI
+// had before the master switch existed; "panel_auto_open": false opens
+// panels only on an explicit toggle.
+func (c Config) PanelAutoOpenEnabled() bool {
+	return c.PanelAutoOpen == nil || *c.PanelAutoOpen
 }
 
 // ThinkFoldExpanded reports whether new thinking blocks in a session start

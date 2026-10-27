@@ -1,6 +1,6 @@
 # 78. Persisted Panel State: `remember_panel_state` and the Content-Driven Memory Panel
 
-- **Status:** accepted
+- **Status:** accepted — amended by [ADR-0087](0087-panel-auto-open-master-switch.md) (restored preferences are *startup layout* only: they no longer seed the auto-open veto, and the in-session veto always expires per ADR-0059 when the dismissed content finalizes)
 - **Date:** 2026-10-24
 
 ## Context

@@ -85,3 +85,4 @@
 * [84. Session changeset in the files panel: dispatch trace + `git status`, rendered glyphs](0084-session-changeset-files-panel.md)
 * [85. Eval experiment files, fresh sandboxed runs, and metric budgets](0085-eval-experiment-sandbox-budgets.md)
 * [86. Eval version matrix: compare milk versions side by side](0086-eval-version-matrix.md)
+* [87. Panel auto-open master switch](0087-panel-auto-open-master-switch.md)

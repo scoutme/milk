@@ -157,8 +157,9 @@ func TestAutoOpenPanel_RespectsExplicitOpenToo(t *testing.T) {
 // *already* settled (emptied/completed/done) must not lock it out of its
 // next new content — the override is dropped immediately, so the very next
 // auto-open trigger still opens the panel. With the default durable panel
-// state (ADR-0078) a close is a remembered preference instead, generalized
-// to every panel — see TestPanelClose_RememberedPreferenceSticks.
+// state (ADR-0078) the close is additionally remembered as startup
+// layout for the next session — see
+// TestPanelClose_RememberedPreferenceIsStartupLayoutOnly.
 func TestPanelClose_FinalizedContentDoesNotStick(t *testing.T) {
 	// Fresh test models have finalized content in every region: nil mem,
 	// nil/empty task store, no running jobs, no workflow state.
@@ -201,13 +202,13 @@ func TestPanelClose_FinalizedContentDoesNotStick(t *testing.T) {
 	}
 }
 
-// TestPanelClose_RememberedPreferenceSticks is the ADR-0078 default
-// contract ("remember_panel_state" on): a manual toggle is a durable
-// preference for *every* panel — memory included and not excepted. It
-// survives content finalization and beats content-driven auto-open; the
-// generalization of what the memory panel alone had when its state first
-// became persistent.
-func TestPanelClose_RememberedPreferenceSticks(t *testing.T) {
+// TestPanelClose_RememberedPreferenceIsStartupLayoutOnly is the ADR-0078
+// contract as amended by ADR-0087 ("remember_panel_state" on): a manual
+// toggle is remembered durably — the open/closed state is restored as
+// *startup layout* — but the restored choice never vetoes content-driven
+// auto-open, and in a session the veto follows ADR-0059 (a close over
+// settled content expires immediately).
+func TestPanelClose_RememberedPreferenceIsStartupLayoutOnly(t *testing.T) {
 	cases := []struct {
 		name   string
 		region panelRegion
@@ -233,12 +234,14 @@ func TestPanelClose_RememberedPreferenceSticks(t *testing.T) {
 			if rawPanelOpen(&m, tc.region) {
 				t.Fatalf("expected second press to close the %s panel", tc.name)
 			}
-			if !m.panelManualOverride[tc.region] {
-				t.Errorf("a remembered close must stay recorded for the %s panel", tc.name)
+			if !m.panelPrefs[tc.region] {
+				t.Errorf("a toggle must be remembered durably for the %s panel", tc.name)
 			}
+			// The close settled content (fresh models are finalized), so the
+			// in-session veto expires per ADR-0059 — new content re-opens.
 			m.autoOpenPanel(tc.region)
-			if rawPanelOpen(&m, tc.region) {
-				t.Errorf("expected the remembered close to beat auto-open for the %s panel", tc.name)
+			if !rawPanelOpen(&m, tc.region) {
+				t.Errorf("expected new content to re-open the %s panel after a close over settled content", tc.name)
 			}
 		})
 	}
@@ -427,12 +430,12 @@ func TestWorkflowProgressMsg_RespectsManualClose(t *testing.T) {
 }
 
 // TestForget_PreservesMemoryPreferenceWhenEmptied: with the durable panel
-// state (ADR-0078, the default) closing the memory panel while percepts
-// exist is a remembered preference — /forget deleting the last percept
-// (the store's finalization event) must not reset it, and the choice must
-// reach the state file for the next session. (The ADR-0059 expiry that
-// emptying used to trigger is the "remember_panel_state": false fallback,
-// pinned by TestPanelClose_FinalizedContentDoesNotStick.)
+// state (ADR-0078 as amended by ADR-0087) closing the memory panel while
+// percepts exist records a durable preference — /forget deleting the last
+// percept (the store's finalization event) must preserve that preference
+// in the state file for the next session's startup layout, while the
+// in-session veto expires per ADR-0059 so the next new content re-opens
+// the panel.
 func TestForget_PreservesMemoryPreferenceWhenEmptied(t *testing.T) {
 	m := newTestModelForPanels(t)
 	m.panelStatePath = filepath.Join(t.TempDir(), "panel-state.json")
@@ -473,8 +476,11 @@ func TestForget_PreservesMemoryPreferenceWhenEmptied(t *testing.T) {
 	if len(m3.mem.List(memory.ListOpts{Scope: "session"})) != 0 {
 		t.Fatal("expected the percept to be deleted")
 	}
-	if !m3.panelManualOverride[regionMemory] {
-		t.Error("emptying memory must preserve the user's panel preference")
+	if !m3.panelPrefs[regionMemory] {
+		t.Error("emptying memory must preserve the user's durable panel preference")
+	}
+	if m3.panelManualOverride[regionMemory] {
+		t.Error("the in-session veto must expire once the content finalizes (ADR-0059)")
 	}
 	data, err := os.ReadFile(m.panelStatePath)
 	if err != nil {
@@ -579,4 +585,76 @@ func TestPanelContentFinalized(t *testing.T) {
 			t.Error("emptied store is finalized")
 		}
 	})
+}
+
+func TestAutoOpenPanel_MasterSwitchOff(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.panelAutoOpen = false
+	m.autoOpenPanel(regionTasks)
+	if rawPanelOpen(&m, regionTasks) {
+		t.Error("autoOpenPanel opened the tasks panel with /panel autoopen off")
+	}
+	// The explicit toggle is unaffected: panels still open on request.
+	mm, _ := m.handlePanelCmd("tasks")
+	m = mm.(model)
+	if !rawPanelOpen(&m, regionTasks) {
+		t.Error("explicit /panel tasks did not open the panel with auto-open off")
+	}
+}
+
+func TestApplyMemoryContentDefault_MasterSwitchOff(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.panelAutoOpen = false
+	m.applyMemoryContentDefault()
+	if m.panelMemory {
+		t.Error("applyMemoryContentDefault opened the memory panel with auto-open off")
+	}
+}
+
+func TestPanelAutoOpenCmd_TogglePersists(t *testing.T) {
+	m := newTestModelForPanels(t)
+	if !m.panelAutoOpen {
+		t.Fatal("master switch should default on (pre-switch behaviour)")
+	}
+	mm, _ := m.handlePanelAutoOpenCmd("off")
+	m = mm.(model)
+	if m.panelAutoOpen {
+		t.Error("panelAutoOpen still on after /panel autoopen off")
+	}
+	if m.st.cfg.PanelAutoOpen == nil || *m.st.cfg.PanelAutoOpen {
+		t.Errorf("cfg.PanelAutoOpen = %v, want false", m.st.cfg.PanelAutoOpen)
+	}
+	// The state query reports the new state in the transcript.
+	mm, _ = m.handlePanelAutoOpenCmd("")
+	m = mm.(model)
+	if got := m.transcript.String(); !strings.Contains(got, "panel auto-open: off") {
+		t.Errorf("query transcript = %q, want state report", got)
+	}
+	// Re-enabling restores content-driven behaviour.
+	mm, _ = m.handlePanelAutoOpenCmd("on")
+	m = mm.(model)
+	if !m.panelAutoOpen {
+		t.Error("panelAutoOpen still off after /panel autoopen on")
+	}
+}
+
+func TestPanelAutoOpenCmd_UsageOnBogusArg(t *testing.T) {
+	m := newTestModelForPanels(t)
+	mm, _ := m.handlePanelAutoOpenCmd("yes")
+	m = mm.(model)
+	if got := m.transcript.String(); !strings.Contains(got, "usage: /panel autoopen [on|off]") {
+		t.Errorf("transcript = %q, want usage line", got)
+	}
+	if !m.panelAutoOpen {
+		t.Error("a bogus argument must not change the state")
+	}
+}
+
+func TestPanelAutoOpenCmd_RoutedFromPanelCmd(t *testing.T) {
+	m := newTestModelForPanels(t)
+	mm, _ := m.handlePanelCmd("autoopen off")
+	m = mm.(model)
+	if m.panelAutoOpen {
+		t.Error("handlePanelCmd did not route autoopen to its handler")
+	}
 }

@@ -2228,3 +2228,51 @@ func TestDeepMerge_ThinkFoldDefault(t *testing.T) {
 		t.Errorf("unset must stay empty: %q", merged.ThinkFoldDefault)
 	}
 }
+
+func TestPanelAutoOpenEnabled(t *testing.T) {
+	var c Config
+	if !c.PanelAutoOpenEnabled() {
+		t.Error("unset panel_auto_open should default to on")
+	}
+	off := false
+	c.PanelAutoOpen = &off
+	if c.PanelAutoOpenEnabled() {
+		t.Error("panel_auto_open: false should be off")
+	}
+	on := true
+	c.PanelAutoOpen = &on
+	if !c.PanelAutoOpenEnabled() {
+		t.Error("panel_auto_open: true should be on")
+	}
+}
+
+func TestPanelAutoOpenJSONRoundTrip(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(`{"panel_auto_open": false}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.PanelAutoOpenEnabled() {
+		t.Error("panel_auto_open: false did not survive the JSON tag")
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"panel_auto_open":false`) {
+		t.Errorf("marshal lost the key: %s", data)
+	}
+}
+
+func TestDeepMerge_PanelAutoOpen(t *testing.T) {
+	off := false
+	on := true
+	base := Config{PanelAutoOpen: &on}
+	merged := DeepMerge(base, Config{PanelAutoOpen: &off})
+	if merged.PanelAutoOpenEnabled() {
+		t.Error("DeepMerge should overwrite panel_auto_open when the source sets it")
+	}
+	merged = DeepMerge(base, Config{})
+	if !merged.PanelAutoOpenEnabled() {
+		t.Error("DeepMerge must not touch panel_auto_open when the source leaves it unset")
+	}
+}

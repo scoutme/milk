@@ -104,11 +104,11 @@ func panelTitleLine(title string, region panelRegion, inner int) string {
 // active (a workflow started, a background job was spawned, a task was
 // saved, ...) — unless the user has explicitly shown or hidden that panel
 // via /panel or its F1-F6 shortcut this session (see panelManualOverride),
-// in which case their choice sticks and this is a no-op. With
-// "remember_panel_state": false the override is not permanent: it is
-// dropped again as soon as the panel's content finalizes (see
-// resetManualOverrideIfFinalized), so the *next* active content auto-opens
-// the panel once more (ADR-0059).
+// in which case their choice sticks and this is a no-op. The override is
+// ADR-0059-scoped: it is dropped again as soon as the panel's content
+// finalizes (see resetManualOverrideIfFinalized), so the *next* active
+// content auto-opens the panel once more — a restored panel-state
+// preference never vetoes auto-open (ADR-0087, it is startup layout only).
 //
 // A silent auto-open is exactly the kind of surprise event that should
 // explain itself: when the panel *transitions* closed→open (issue #162 /
@@ -120,6 +120,11 @@ func panelTitleLine(title string, region panelRegion, inner int) string {
 // only fires while the shared slot is free (see the gate below), so live
 // content can never yank the view off the panel the user is looking at.
 func (m *model) autoOpenPanel(region panelRegion) {
+	// Master switch (ADR-0087, /panel autoopen): off means content never
+	// opens a panel on its own — not even once, not even silently.
+	if !m.panelAutoOpen {
+		return
+	}
 	if m.panelManualOverride[region] {
 		return
 	}
@@ -223,10 +228,11 @@ func (m *model) panelContentFinalized(region panelRegion) bool {
 // respected for the live content it was dismissed over, but no longer
 // blocks genuinely new activity later in the session (ADR-0059).
 //
-// With the default "remember_panel_state" (ADR-0078) this is a no-op for
-// every region: a manual toggle is a durable preference — persisted and
-// restored across sessions — so content finalization never expires it.
-// The ADR-0059 expiry is the feature-off fallback (session-only panels).
+// With "remember_panel_state" (ADR-0078, default on) the toggle's
+// durable half is panelPrefs — the restored startup layout (ADR-0087
+// amendment). The veto itself is always ADR-0059-scoped: it covers
+// exactly the live content the user dismissed, and expires when that
+// content finalizes, so new activity is never locked out of its panel.
 //
 // Called from two kinds of sites:
 //   - handlePanelCmd, when a toggle *closes* the panel — closing a panel
@@ -244,9 +250,6 @@ func (m *model) panelContentFinalized(region panelRegion) bool {
 // (so the finalizing event itself never force-opens a user-closed panel),
 // then this reset — only future content re-opens it.
 func (m *model) resetManualOverrideIfFinalized(region panelRegion) {
-	if m.rememberPanelState {
-		return
-	}
 	if m.panelManualOverride[region] && m.panelContentFinalized(region) {
 		delete(m.panelManualOverride, region)
 	}

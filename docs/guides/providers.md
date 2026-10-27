@@ -775,7 +775,8 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `sticky_escalation` | bool | `true` | See [docs/guides/workflows.md — Sticky and auto-sticky escalation](workflows.md#sticky-and-auto-sticky-escalation) |
 | `copy_on_select` | bool | `false` | Copy a mouse selection to the clipboard on button release instead of requiring right-click / Ctrl+C |
 | `animations` | bool | `true` | Spring animations in the TUI: side panels slide in and out, the mouse wheel scrolls with inertia. `false` makes both instant |
-| `remember_panel_state` | bool | `true` | Durable side-panel preferences (ADR-0078): panel open/closed choices persist per folder to `~/.milk/panel-state/*.json` and survive content finalization. `false` = session-only panels with ADR-0059's expiry |
+| `remember_panel_state` | bool | `true` | Durable side-panel layout (ADR-0078 as amended by ADR-0087): panel open/closed choices persist per folder to `~/.milk/panel-state/*.json` and are restored at startup — as layout only, never vetoing auto-open of new content. `false` = session-only panels |
+| `panel_auto_open` | bool | `true` | Master switch for content-driven panel auto-open (ADR-0087): panels open themselves when new content appears (a manual close sticks only while the dismissed content is live, ADR-0059). `false` = panels open only on an explicit `/panel <name>` toggle (or F1-F6). Toggled by `/panel autoopen on\|off` |
 
 ---
 
