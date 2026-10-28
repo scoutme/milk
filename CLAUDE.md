@@ -77,7 +77,7 @@ internal/livebuf/             # thread-safe byte-capped text buffer for live bac
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/mcpauth/             # native MCP OAuth: RFC 9728/8414 discovery, RFC 7591 DCR, PKCE, token store (~/.milk/mcp_oauth/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
-eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui), judge, report (see docs/reference/eval.md)
+eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui, mimo-code), judge, report (see docs/reference/eval.md)
 ```
 
 ## Key design decisions

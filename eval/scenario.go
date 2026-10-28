@@ -1,6 +1,8 @@
 package eval
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -94,6 +96,53 @@ type RunResult struct {
 	// Warnings surfaced by the run (config warnings, system warnings).
 	Warnings []string `json:"warnings,omitempty"`
 	Error    error    `json:"error,omitempty"`
+}
+
+// MarshalJSON writes Error as its message string. A bare `error` interface
+// otherwise marshals to `{}` (no exported fields), which cannot decode back
+// into an `error`-typed field — turning any run containing a failed turn
+// into an unloadable results.json for `milk eval report` ("json: cannot
+// unmarshal object into Go struct field RunResult…error of type error").
+func (r RunResult) MarshalJSON() ([]byte, error) {
+	type wire RunResult // shed RunResult's methods; the embedded Error field below is shadowed
+	out := struct {
+		wire
+		ErrText string `json:"error,omitempty"`
+	}{wire: wire(r)}
+	if r.Error != nil {
+		out.ErrText = r.Error.Error()
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON restores Error from its message string and tolerates the
+// legacy `{}` object form (files written before the MarshalJSON fix): it
+// carries no message, so the turn is still flagged as failed.
+func (r *RunResult) UnmarshalJSON(data []byte) error {
+	type wire RunResult
+	in := struct {
+		wire
+		ErrText json.RawMessage `json:"error,omitempty"`
+	}{}
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*r = RunResult(in.wire)
+	r.Error = nil
+	switch {
+	case len(in.ErrText) == 0 || string(in.ErrText) == "null":
+	case in.ErrText[0] == '"':
+		var msg string
+		if err := json.Unmarshal(in.ErrText, &msg); err != nil {
+			return err
+		}
+		if msg != "" {
+			r.Error = errors.New(msg)
+		}
+	default:
+		r.Error = errors.New("failed turn (error detail not serialised: legacy object form)")
+	}
+	return nil
 }
 
 // FileChange records a file that was created or modified during a turn.
