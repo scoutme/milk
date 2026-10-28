@@ -43,6 +43,14 @@ type AgentResult struct {
 	// builder must treat this as "no data," not "a real score of 0," and
 	// exclude it from aggregates.
 	JudgeError string `json:"judge_error,omitempty"`
+	// MissingCriteria lists rubric criteria the judge never returned a score
+	// for, even after coverage re-asks (JSON "missing_criteria"). Non-empty
+	// means WeightedScore was computed over a partial rubric — the missing
+	// weights drop out of both numerator and denominator (see WeightedScore) —
+	// so renderers must show those criteria as "—" (never a fabricated 0.0;
+	// a genuine 0.0 lives in Scores and renders normally) and mark the weighted
+	// score partial. JudgeError remains the stronger signal: judge failed outright.
+	MissingCriteria []string `json:"missing_criteria,omitempty"`
 }
 
 // BudgetResult is one run's budget check: the budget that was applied and
@@ -92,10 +100,19 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 
 		// Surface *why* any "ERR" cells above are ERR, not a real 0 — the
 		// judge never scored this scenario/agent, so its WeightedScore is
-		// excluded from every aggregate below rather than treated as data.
+		// excluded from every aggregate below rather than treated as data —
+		// and flag partial rubrics: their weighted score (*) covers only the
+		// criteria the judge returned after coverage re-asks.
 		for _, name := range agentNames {
-			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError != "" {
+			ar, ok := sr.AgentResults[name]
+			if !ok {
+				continue
+			}
+			if ar.JudgeError != "" {
 				b.WriteString(fmt.Sprintf("⚠ judging failed for %s: %s\n", name, ar.JudgeError))
+			}
+			if len(ar.MissingCriteria) > 0 {
+				b.WriteString(fmt.Sprintf("⚠ partial rubric for %s: judge returned no score for %s — the weighted score (*) covers the remaining criteria only\n", name, strings.Join(ar.MissingCriteria, ", ")))
 			}
 		}
 
@@ -393,7 +410,10 @@ func GenerateCacheReport(scenarioResults []ScenarioResult) string {
 
 // buildScoreTable renders the per-scenario score comparison table.
 func buildScoreTable(sr ScenarioResult, agentNames []string) string {
-	// Collect all criterion names (preserving first-seen order).
+	// Collect all criterion names (preserving first-seen order): criteria some
+	// agent was actually scored on, plus criteria the judge skipped for an
+	// agent (MissingCriteria) — a dropped criterion still gets its row instead
+	// of silently vanishing when no agent happened to score it.
 	seen := map[string]bool{}
 	var criteria []string
 	for _, name := range agentNames {
@@ -402,9 +422,23 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 			continue
 		}
 		for _, s := range ar.Scores {
-			if !seen[s.Criterion] {
-				seen[s.Criterion] = true
+			key := strings.ToLower(s.Criterion)
+			if !seen[key] {
+				seen[key] = true
 				criteria = append(criteria, s.Criterion)
+			}
+		}
+	}
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok {
+			continue
+		}
+		for _, c := range ar.MissingCriteria {
+			key := strings.ToLower(c)
+			if !seen[key] {
+				seen[key] = true
+				criteria = append(criteria, c)
 			}
 		}
 	}
@@ -412,11 +446,16 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 		return ""
 	}
 
-	// Build score lookup: criterion -> agent -> score.
+	// Build score lookup: lower(criterion) -> agent -> score, plus an explicit
+	// "was scored" set. The presence set matters: 0.0 is a legitimate score
+	// (binary criteria reach it), so absence cannot be inferred from the zero
+	// value — without this, a criterion the judge never returned for an agent
+	// rendered as a fake 0.0 in its cell.
 	type agentScores map[string]float64
 	lookup := map[string]agentScores{}
+	scored := map[string]map[string]bool{}
 	for _, c := range criteria {
-		lookup[c] = agentScores{}
+		lookup[strings.ToLower(c)] = agentScores{}
 	}
 	for _, name := range agentNames {
 		ar, ok := sr.AgentResults[name]
@@ -424,7 +463,12 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 			continue
 		}
 		for _, s := range ar.Scores {
-			lookup[s.Criterion][name] = s.Score
+			key := strings.ToLower(s.Criterion)
+			lookup[key][name] = s.Score
+			if scored[key] == nil {
+				scored[key] = map[string]bool{}
+			}
+			scored[key][name] = true
 		}
 	}
 
@@ -447,8 +491,16 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 				row += columnLabel("ERR", 12)
 				continue
 			}
-			score := lookup[c][name]
-			row += columnLabel(fmt.Sprintf("%.1f", score), 12)
+			key := strings.ToLower(c)
+			if !scored[key][name] {
+				// Judge never returned this criterion for this agent: render an
+				// explicit gap. The zero value here would be indistinguishable
+				// from a genuine score of 0.0 — exactly the misread the
+				// missing-criteria episode produced.
+				row += columnLabel("—", 12)
+				continue
+			}
+			row += columnLabel(fmt.Sprintf("%.1f", lookup[key][name]), 12)
 		}
 		b.WriteString(row + "\n")
 	}
@@ -470,7 +522,14 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 			row += columnLabel("ERR", 12)
 			continue
 		}
-		row += columnLabel(fmt.Sprintf("%.1f", ar.WeightedScore), 12)
+		weight := fmt.Sprintf("%.1f", ar.WeightedScore)
+		if len(ar.MissingCriteria) > 0 {
+			// Asterisk: computed over the criteria the judge actually returned
+			// (the missing weights dropped out of both sides of the average).
+			// The per-scenario warning line explains it.
+			weight += "*"
+		}
+		row += columnLabel(weight, 12)
 	}
 	b.WriteString(row + "\n")
 	b.WriteString("\n")
@@ -1160,6 +1219,12 @@ type JSONAgentResult struct {
 	// consumers of the JSON report must exclude it from aggregates rather than
 	// treat 0 as a genuine score.
 	JudgeError string `json:"judge_error,omitempty"`
+	// MissingCriteria mirrors AgentResult.MissingCriteria — criteria the judge
+	// never returned a score for. Non-empty means WeightedScore was computed
+	// over a partial rubric (missing weights dropped from numerator and
+	// denominator); consumers should surface the gap rather than read the score
+	// as full-rubric coverage.
+	MissingCriteria []string `json:"missing_criteria,omitempty"`
 }
 
 // JSONRunResult is a serializable per-turn result.
@@ -1229,11 +1294,12 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 
 		for name, ar := range sr.AgentResults {
 			jar := JSONAgentResult{
-				Scores:        ar.Scores,
-				WeightedScore: ar.WeightedScore,
-				Cache:         ar.Cache,
-				Budget:        ar.BudgetResult,
-				JudgeError:    ar.JudgeError,
+				Scores:          ar.Scores,
+				MissingCriteria: ar.MissingCriteria,
+				WeightedScore:   ar.WeightedScore,
+				Cache:           ar.Cache,
+				Budget:          ar.BudgetResult,
+				JudgeError:      ar.JudgeError,
 			}
 
 			jar.RunResults = make([]JSONRunResult, 0, len(ar.RunResults))

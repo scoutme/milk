@@ -36,7 +36,7 @@ Runs scenarios against one or more adapters, judges each turn, and prints + pers
 
 ### `milk eval judge`
 
-Re-scores an existing `results.json` against the scenario rubrics without re-running the agents — useful after fixing a judge bug or rubric, or to try a different `--judge-agent`. Takes `--results`, `--scenarios`, `--judge-agent` (same meaning as above).
+Re-scores an existing `results.json` against the scenario rubrics without re-running the agents — useful after fixing a judge bug or rubric, or to try a different `--judge-agent`. A successful re-score overwrites each agent's scores, records any coverage gaps as `missing_criteria`, and clears a stale `judge_error` left by a previous failed judgment. Takes `--results`, `--scenarios`, `--judge-agent` (same meaning as above).
 
 ### `milk eval report`
 
@@ -150,6 +150,30 @@ The automated **verify** half of an evaluation: every run's metrics are checked 
 | `max_duration` | wall time ≤ duration string (`"90s"`, `"2m30s"`); `max_duration_ms` for the integer form | turn `duration` |
 
 Verdicts render per scenario (`Budget [milk-tui]: PASS` / `FAIL — tool calls 25 > max_tool_calls 20`), as a `Budget` row in the metrics table, and as `N/M pass` in the repetition statistics; `results.json` carries the full verdict per run (`agents[].budget`).
+
+---
+
+## Cost accounting
+
+Every adapter fills `RunResult.CostUSD`, but by different means — know which source produced the cost column you are reading:
+
+| adapter | source |
+| --- | --- |
+| `mimo-code` | **reported** — mimo's own per-step cost events |
+| `claude-code` | **reported** — Claude Code's `total_cost_usd` result line (session-cumulative; the adapter records each turn's delta) |
+| `milk-tui` | **computed** — eval's pricing table over the turn's token usage |
+
+Milk itself carries no price data anywhere (its stream-json `total_cost_usd` field is ratified but reserved — emitted only once milk has a pricing table), so eval prices milk turns: the result's per-model `model_usage` buckets when present (an escalation hop can be a different model than the primary), falling back to the init-reported model over the total tokens.
+
+Built-in prices are $/1M tokens for the models this project benchmarks, taken from the models.dev `xiaomi` catalog (fetched 2026-10-28): `mimo-v2.6-flash` input 0.14 / output 0.28 / cache_read 0.0028, `mimo-v2.6-pro` 0.435 / 0.87 / 0.0036, `mimo-v2.6-pro-ultraspeed` 4.35 / 8.7 / 0.036 (cache_create 0 for all — their endpoints never report cache-write tokens). The pro row was independently cross-checked by least-squares over mimo-code's own reported costs across 24 recorded runs (reproduced to <0.2% typical error), so computed milk costs and reported mimo costs are directly comparable. Override or extend per experiment — keys are model names, exact or path-qualified:
+
+```yaml
+pricing:
+  mimo-v2.6-pro: {input: 0.435, output: 0.87, cache_read: 0.0036}
+  my-local-model: {input: 0, output: 0}   # known-free stays $0 on purpose
+```
+
+An **unknown model costs $0** — never a fabricated figure — which looks exactly like the pre-pricing column: read `$0.000` as *unpriced*, not free. Prices go stale; `pricing:` wins per model, and computed milk costs are estimates (list price × token counts, no provider-specific adjustments).
 
 ---
 
@@ -365,7 +389,9 @@ If you want reproducible, TTL-independent measurements, add `--cache-cooldown <d
 
 **Self-evaluation bias:** if you run `--agents milk-tui` where `milk-tui`'s own primary agent is the same model as the default judge, that model is scoring its own output. This isn't an issue for `claude-code` runs (different model), but for `milk-tui` runs consider `--judge-agent` pointed at an independent, ideally stronger model.
 
-The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and tolerates two categories of malformed LLM output: markdown code fences around the array, and literal (unescaped) `"` characters inside `reasoning` text — `parseJudgeScores` repairs the latter before giving up.
+The judge prompt asks for a JSON array of `{criterion, score, reasoning}` and tolerates two categories of malformed LLM output: markdown code fences around the array, and literal (unescaped) `\"` characters inside `reasoning` text — `parseJudgeScores` repairs the latter before giving up.
+
+A *parseable* reply that skips rubric criteria gets the same re-ask treatment: the judge is corrected with the missing criterion names and retried (up to the same 3 attempts), and if it stays partial the scores it did return are kept, with the gaps recorded as `missing_criteria` per agent in `results.json`. The report renders each missing criterion as `—` — never a fabricated `0.0`, since a genuine 0.0 is real data and renders normally — and marks that agent's weighted score with `*`: `WeightedScore` renormalizes over the returned criteria only, because missing criteria drop out of both the numerator and the denominator of the weighted average. A per-scenario `⚠ partial rubric for <agent>` warning line names the dropped criteria.
 
 ---
 
@@ -425,3 +451,4 @@ Overall winner: milk-tui (90x cheaper)
 - **`claude-code` and `mimo-code` are not sandboxed** — `sandbox:` applies to `milk-tui` only (see [Sandboxed runs](#sandboxed-runs)); `claude-code` turns also report tool calls from Claude Code's transcript, not milk's trail. `mimo-code` runs against the live `~/.mimocode` state root (each scenario still starts a fresh mimo session — the adapter resets its `-s` resume key per scenario), and its `RunResult.Model` stays empty because mimo's event stream carries no model identity — the model shows blank in the report instead of being guessed.
 - **Older `milk-tui` binaries under-report tools** — the tool-trail expansion and real `num_turns` shipped together with `versions:`, so a column built before them reports `Tool calls 0` / `num_turns 1` even when the model called tools. For version comparisons spanning that boundary, read tool metrics as a lower bound and fall back to the judge and `file_changes` for ground truth (observed comparing `v0.7.0`/`v0.8.0` against current).
 - **Judge parse failures are retried, then terminal** — malformed judge JSON (e.g. an unescaped quote inside `reasoning`, a trailing comma) is first salvaged by repair passes and, if still unparseable, re-judged up to 2 more times with an explicit correction ("output only the JSON array, escape all quotes"). A turn is scored `ERR` and dropped from the stats only when all 3 attempts fail to parse.
+- **Judge coverage gaps are retried, then flagged** — a parseable reply that omits rubric criteria is re-asked with the missing names; if still partial after 3 attempts the judgment is kept (coverage loss is data, not a failed turn) and the gap surfaces as `missing_criteria`, `—` cells and a `*` on the weighted score. `results.json` files written before this shipped lack the field — their tables still render unscored cells as `—` (the presence check is independent of the field), but only new runs get the `⚠ partial rubric` warning line.

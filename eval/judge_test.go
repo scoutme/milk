@@ -72,12 +72,15 @@ func TestJudgeScore_SingleTurn(t *testing.T) {
 		{Response: "I fixed the typo: 'projcet' -> 'project'."},
 	}
 
-	scores, err := judge.Score(context.Background(), scenario, results)
+	scores, missing, err := judge.Score(context.Background(), scenario, results)
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
 	}
 	if len(scores) != 2 {
 		t.Fatalf("got %d scores, want 2", len(scores))
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none (full rubric coverage)", missing)
 	}
 	if scores[0].Criterion != "correctness" || scores[0].Score != 1.0 {
 		t.Errorf("scores[0] = %+v, want correctness=1.0", scores[0])
@@ -141,12 +144,15 @@ func TestJudgeScore_MultiTurn(t *testing.T) {
 		{Response: "No changes needed."},
 	}
 
-	scores, err := judge.Score(context.Background(), scenario, results)
+	scores, missing, err := judge.Score(context.Background(), scenario, results)
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
 	}
 	if len(scores) != 2 {
 		t.Fatalf("got %d scores, want 2", len(scores))
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none (full rubric coverage)", missing)
 	}
 	if scores[0].Score != 1.0 {
 		t.Errorf("turn 0 score = %f, want 1.0", scores[0].Score)
@@ -183,12 +189,15 @@ func TestJudgeScore_WithCodeFences(t *testing.T) {
 			{Criterion: "correctness", Description: "Test", Weight: 1, Scoring: "binary"},
 		},
 	}
-	scores, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
 	}
 	if len(scores) != 1 || scores[0].Score != 1.0 {
 		t.Errorf("got %+v, want [correctness=1.0]", scores)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none", missing)
 	}
 }
 
@@ -220,9 +229,12 @@ func TestJudgeScore_ScoreClamping(t *testing.T) {
 			{Criterion: "quality", Description: "Test", Weight: 1, Scoring: "scale_1_5"},
 		},
 	}
-	scores, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none", missing)
 	}
 	if scores[0].Score != 1.0 {
 		t.Errorf("binary score clamping: got %f, want 1.0", scores[0].Score)
@@ -331,7 +343,7 @@ func TestJudgeScore_ServerError(t *testing.T) {
 			{Criterion: "correctness", Weight: 1, Scoring: "binary"},
 		},
 	}
-	_, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	_, _, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err == nil {
 		t.Error("expected error for 503 response, got nil")
 	}
@@ -401,12 +413,15 @@ func TestJudgeScore_RetriesOnMalformedOutput(t *testing.T) {
 			{Criterion: "correctness", Weight: 1, Scoring: "binary"},
 		},
 	}
-	scores, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
 	}
 	if len(scores) != 1 || scores[0].Score != 1.0 {
 		t.Errorf("got %+v", scores)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none after coverage-complete retry", missing)
 	}
 	if s.calls != 2 {
 		t.Errorf("judge called %d times, want 2", s.calls)
@@ -427,7 +442,7 @@ func TestJudgeScore_RetryExhausted(t *testing.T) {
 			{Criterion: "correctness", Weight: 1, Scoring: "binary"},
 		},
 	}
-	_, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	_, _, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
 	if err == nil {
 		t.Fatal("expected error after exhausted retries, got nil")
 	}
@@ -436,5 +451,136 @@ func TestJudgeScore_RetryExhausted(t *testing.T) {
 	}
 	if s.calls != 3 {
 		t.Errorf("judge called %d times, want 3", s.calls)
+	}
+}
+
+// coverageRubric mirrors the routing rubric that exposed the gap: a weight-3
+// criterion the judge silently dropped while still returning a parseable reply.
+func coverageRubric() []RubricCriterion {
+	return []RubricCriterion{
+		{Criterion: "design-sketch", Weight: 1, Scoring: "scale_1_5"},
+		{Criterion: "confirmed-depth", Weight: 3, Scoring: "scale_1_5"},
+		{Criterion: "continuity", Weight: 1, Scoring: "scale_1_5"},
+	}
+}
+
+func TestJudgeScore_CoverageShortfallReaskedThenComplete(t *testing.T) {
+	// First reply parses but skips the weight-3 criterion; the judge must be
+	// corrected with the missing name and returns full coverage on the retry.
+	s := mockJudgeServerSequence(
+		`[{"criterion":"design-sketch","score":5,"reasoning":"ok"},{"criterion":"continuity","score":5,"reasoning":"ok"}]`,
+		`[{"criterion":"design-sketch","score":5,"reasoning":"ok"},{"criterion":"confirmed-depth","score":4,"reasoning":"deep"},{"criterion":"continuity","score":5,"reasoning":"ok"}]`,
+	)
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{Prompt: "Design it.", Rubric: coverageRubric()}
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	if err != nil {
+		t.Fatalf("Score() error: %v", err)
+	}
+	if len(scores) != 3 {
+		t.Fatalf("got %d scores, want 3", len(scores))
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none after a successful coverage retry", missing)
+	}
+	if s.calls != 2 {
+		t.Errorf("judge called %d times, want 2", s.calls)
+	}
+	if len(s.bodies) < 2 || !strings.Contains(s.bodies[1], "did not score every criterion") || !strings.Contains(s.bodies[1], "confirmed-depth") {
+		t.Errorf("coverage retry did not carry the missing criterion name: %v", s.bodies)
+	}
+}
+
+func TestJudgeScore_CoverageShortfallAcceptedAndReported(t *testing.T) {
+	// The judge never returns the weight-3 criterion across all attempts:
+	// accept the partial judgement (data to surface, not a lost turn) and
+	// report exactly which criteria are missing.
+	s := mockJudgeServerSequence(
+		`[{"criterion":"design-sketch","score":5,"reasoning":"ok"},{"criterion":"continuity","score":5,"reasoning":"ok"}]`,
+	)
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{Prompt: "Design it.", Rubric: coverageRubric()}
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "ok"}})
+	if err != nil {
+		t.Fatalf("Score() error: %v", err)
+	}
+	if len(scores) != 2 {
+		t.Fatalf("got %d scores, want the 2 the judge did return", len(scores))
+	}
+	if len(missing) != 1 || missing[0] != "confirmed-depth" {
+		t.Errorf("missing = %v, want [confirmed-depth]", missing)
+	}
+	if s.calls != 3 {
+		t.Errorf("judge called %d times, want 3 (all coverage attempts used)", s.calls)
+	}
+	// The weighted score covers the returned criteria only: (5*1+5*1)/(1+1) = 5,
+	// not the full-rubric (5+15+5)/5 = 5 — equal here by coincidence, but the
+	// renormalization is exactly what must be flagged rather than hidden.
+	if w := WeightedScore(scores, scenario.Rubric); w != 5.0 {
+		t.Errorf("WeightedScore = %v, want 5.0 over the partial rubric", w)
+	}
+}
+
+func TestJudgeScore_MissingDedupedAcrossTurns(t *testing.T) {
+	// Both turns' rubrics contain "correctness" (case variants) and the judge
+	// scores nothing at all: the coverage gap must come back deduplicated and
+	// case-insensitively, in first-seen order.
+	s := mockJudgeServerSequence(`[]`)
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{
+		Turns: []Turn{
+			{Prompt: "one", Rubric: []RubricCriterion{
+				{Criterion: "correctness", Weight: 1, Scoring: "binary"},
+				{Criterion: "efficiency", Weight: 1, Scoring: "scale_1_5"},
+			}},
+			{Prompt: "two", Rubric: []RubricCriterion{
+				{Criterion: "Correctness", Weight: 1, Scoring: "binary"},
+			}},
+		},
+	}
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "a"}, {Response: "b"}})
+	if err != nil {
+		t.Fatalf("Score() error: %v", err)
+	}
+	if len(scores) != 0 {
+		t.Errorf("got %d scores, want 0", len(scores))
+	}
+	if len(missing) != 2 || missing[0] != "correctness" || missing[1] != "efficiency" {
+		t.Errorf("missing = %v, want [correctness efficiency] (deduped, case-insensitive, rubric order)", missing)
+	}
+}
+
+func TestMissingCriteria(t *testing.T) {
+	rubric := []RubricCriterion{
+		{Criterion: "a"}, {Criterion: "b"}, {Criterion: "c"},
+	}
+	cases := []struct {
+		name   string
+		scores []JudgeScore
+		want   []string
+	}{
+		{"full coverage", []JudgeScore{{Criterion: "a"}, {Criterion: "B"}, {Criterion: "c"}}, nil},
+		{"empty scores", []JudgeScore{}, []string{"a", "b", "c"}},
+		{"one gap in rubric order", []JudgeScore{{Criterion: "c"}, {Criterion: "a"}}, []string{"b"}},
+		{"unknown extra ignored", []JudgeScore{{Criterion: "a"}, {Criterion: "b"}, {Criterion: "c"}, {Criterion: "zzz"}}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := missingCriteria(tc.scores, rubric)
+			if len(got) != len(tc.want) {
+				t.Fatalf("missingCriteria() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("missingCriteria() = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }

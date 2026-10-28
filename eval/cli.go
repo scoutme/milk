@@ -233,13 +233,18 @@ func evalJudgeCmd() *cobra.Command {
 
 				for agentName, ar := range sr.AgentResults {
 					progress.Setf("%s/%s: judging %d turn(s)", sr.ScenarioName, agentName, len(ar.RunResults))
-					scores, err := judge.Score(ctx, scenario, ar.RunResults)
+					scores, missing, err := judge.Score(ctx, scenario, ar.RunResults)
 					if err != nil {
 						progress.Logf("warning: scoring %s/%s: %v", sr.ScenarioName, agentName, err)
 						continue
 					}
 					ar.Scores = scores
+					ar.MissingCriteria = missing
 					ar.WeightedScore = WeightedScore(scores, scenario.Rubric)
+					// A successful re-score replaces the previous judgment wholesale:
+					// clear any stale JudgeError so re-judging after a judge fix does
+					// not keep rendering ERR for a now-healthy score.
+					ar.JudgeError = ""
 					sr.AgentResults[agentName] = ar
 				}
 				results[i] = sr

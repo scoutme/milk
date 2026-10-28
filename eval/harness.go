@@ -255,9 +255,11 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 		results = append(results, result)
 	}
 
-	// 4. Judge scores.
+	// 4. Judge scores. missing lists rubric criteria the judge never scored
+	// even after coverage corrections — recorded below so the report renders
+	// them as gaps instead of silently renormalizing the weighted score.
 	h.progress.Setf("%s/%s: judging %d turn(s)", scenario.Name, adapter.Name(), len(results))
-	scores, err := h.Judge.Score(ctx, scenario, results)
+	scores, missing, err := h.Judge.Score(ctx, scenario, results)
 	var judgeError string
 	if err != nil {
 		// Log but do not fail the whole run — we still have RunResults. judgeError
@@ -273,7 +275,10 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 
 	// 5. Compute weighted score. Skipped entirely on a judge error — scores may
 	// be empty or only a partial prefix (multi-turn judging stops at the first
-	// failing turn), and neither is real data worth weighting.
+	// failing turn), and neither is real data worth weighting. A partial
+	// rubric (missing != nil without a judge error) is weighed over the
+	// criteria the judge did return and flagged via MissingCriteria, so the
+	// renormalization is never presented as full coverage.
 	var weightedScore float64
 	if judgeError == "" {
 		weightedScore = WeightedScore(scores, scenario.Rubric)
@@ -302,12 +307,13 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 	}
 
 	return AgentResult{
-		RunResults:    results,
-		Scores:        scores,
-		WeightedScore: weightedScore,
-		Cache:         cache,
-		BudgetResult:  budgetResult,
-		JudgeError:    judgeError,
+		RunResults:      results,
+		Scores:          scores,
+		MissingCriteria: missing,
+		WeightedScore:   weightedScore,
+		Cache:           cache,
+		BudgetResult:    budgetResult,
+		JudgeError:      judgeError,
 	}, nil
 }
 

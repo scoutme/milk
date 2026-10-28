@@ -33,6 +33,11 @@ type claudeAdapter struct {
 	extraArgs        []string // extra CLI args from --agents spec
 	cacheCooldown    time.Duration
 	cacheCooldownErr error
+	// lastCostUSD is the cumulative total_cost_usd Claude Code reported for
+	// previous turns of the current scenario (reset per scenario in Start):
+	// result lines carry the session-cumulative cost, so a turn's cost is the
+	// delta (see turnCostUSD).
+	lastCostUSD float64
 }
 
 // claudeActivityStatePath returns the file used to persist when a claude-code
@@ -77,6 +82,9 @@ type claudeJSONLLine struct {
 	// subagents spawned via the Agent tool and background workflows.
 	SubagentUsage *claudeUsage `json:"subagent_usage,omitempty"`
 	WorkflowUsage *claudeUsage `json:"workflow_usage,omitempty"`
+	// TotalCostUSD is Claude Code's own cost report on result-type lines —
+	// the session-cumulative dollar total (see turnCostUSD).
+	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
 }
 
 type claudeMessage struct {
@@ -85,6 +93,7 @@ type claudeMessage struct {
 	// response's full usage.
 	ID         string               `json:"id"`
 	Role       string               `json:"role"`
+	Model      string               `json:"model,omitempty"` // full model ID per assistant message
 	Content    []claudeContentBlock `json:"content"`
 	Usage      claudeUsage          `json:"usage"`
 	StopReason string               `json:"stop_reason"`
@@ -186,6 +195,7 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 	a.workdir = workdir
 	a.sessionID = uuid.New().String()
 	a.sessionName = "claude-eval-" + a.sessionID[:8]
+	a.lastCostUSD = 0 // fresh scenario: cumulative cost counter restarts
 
 	// Init a git repo so Claude Code treats this as its own project and writes
 	// a transcript under this workdir's project directory rather than an
@@ -361,6 +371,13 @@ func (a *claudeAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult
 	// 4. Extract tokens (sum all assistant messages in the turn).
 	tokens := sumTurnTokens(turnLines)
 
+	// 4b. Cost + model: the result line reports the session-cumulative
+	// total_cost_usd (this turn's cost is the delta since the previous turn);
+	// the model comes from the turn's assistant messages.
+	cost, cumulative := turnCostUSD(turnLines, a.lastCostUSD)
+	a.lastCostUSD = cumulative
+	model := turnModel(turnLines)
+
 	// 5. Extract response text.
 	response := extractResponse(turnLines)
 
@@ -374,6 +391,8 @@ func (a *claudeAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult
 	return RunResult{
 		Response:    response,
 		Tokens:      tokens,
+		CostUSD:     cost,
+		Model:       model,
 		Duration:    time.Since(start),
 		ToolCalls:   toolCalls,
 		FileChanges: fileChanges,
@@ -618,6 +637,36 @@ func sumTurnTokens(lines []claudeJSONLLine) TokenUsage {
 		}
 	}
 	return total
+}
+
+// turnCostUSD returns this turn's dollar cost and the new cumulative total.
+// Claude Code writes the session-cumulative total_cost_usd on its result
+// line, so the turn's own cost is the delta against prevCumulative (0 at
+// scenario start). A total below the running sum (session reset, transcript
+// restart) is taken at face value instead of subtracting.
+func turnCostUSD(lines []claudeJSONLLine, prevCumulative float64) (turnCost, cumulative float64) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		if l.Type != "result" || l.TotalCostUSD <= 0 {
+			continue
+		}
+		if l.TotalCostUSD < prevCumulative {
+			return l.TotalCostUSD, l.TotalCostUSD
+		}
+		return l.TotalCostUSD - prevCumulative, l.TotalCostUSD
+	}
+	return 0, prevCumulative
+}
+
+// turnModel returns the model of the turn's last assistant message that
+// carries one (Claude Code puts the full model ID on every message).
+func turnModel(lines []claudeJSONLLine) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].Type == "assistant" && lines[i].Message.Model != "" {
+			return lines[i].Message.Model
+		}
+	}
+	return ""
 }
 
 // extractResponse concatenates all text content blocks from assistant messages.
