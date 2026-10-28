@@ -2,7 +2,7 @@
 
 Date: 2026-10-13
 
-Status: Accepted
+Status: Accepted — decay, recall-ordering and promotion rules superseded by [ADR-0090](0090-memory-consolidation-v3.md)
 
 ## Context
 

@@ -22,11 +22,17 @@ func closeTo(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 // TestReconfirmTrajectory validates the ground-truth W path for an inference
 // percept (born 0.7 via ProducerLocal): each re-statement adds +0.05 up to the
-// 0.85 cap, and two re-confirmations cross the 0.80 promotion threshold at
-// consolidation.
+// 0.90 cap — and, since ADR-0090, corroboration in one run earns Evidence 1 at
+// most, so the fast-climbing W is still held back from promotion until a
+// second distinct run confirms it.
 func TestReconfirmTrajectory(t *testing.T) {
-	s := newTestStore(t, true)
+	dir := t.TempDir()
 	ctx := context.Background()
+	s, err := NewStoreParams(dir, "traj", Params{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	freezeClock(s)
 
 	first, err := s.Record(ctx, "milk is configured to escalate to claude cli", ProducerLocal, ConsumerAll, Roles{}, false)
 	if err != nil {
@@ -56,16 +62,42 @@ func TestReconfirmTrajectory(t *testing.T) {
 		}
 	}
 
-	// Fully re-confirmed (W 0.90) survives the pre-promotion decay (−0.10 →
-	// 0.80 = promoteThreshold) and graduates at consolidation.
+	// Five re-statements in one sitting are one corroboration event.
+	if got := s.session.Percepts[0].Evidence; got != 1 {
+		t.Fatalf("Evidence = %d after one run of reinforcement, want 1", got)
+	}
+
+	// Fully re-confirmed (W 0.90) is still held back: Evidence 1 cannot
+	// graduate an inference percept (promotion_deferred).
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	if len(s.global.Percepts) != 1 || !closeTo(s.global.Percepts[0].W, 0.80) {
-		t.Errorf("expected the percept promoted to global at W 0.80, got global=%v", s.global.Percepts)
+	if len(s.global.Percepts) != 0 {
+		t.Fatalf("one run must not promote, got global=%v", s.global.Percepts)
 	}
-	if len(s.session.Percepts) != 0 {
-		t.Errorf("expected empty session after promotion, got %d", len(s.session.Percepts))
+
+	// A second Store lifetime re-confirming the fact is the second distinct
+	// run: Evidence 2, W at the cap → graduates.
+	s2, err := NewStoreParams(dir, "traj", Params{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	freezeClock(s2)
+	out, err := s2.Record(ctx, "milk is configured to escalate to claude cli", ProducerLocal, ConsumerAll, Roles{}, false)
+	if err != nil || !out.Reinforced {
+		t.Fatalf("run 2 reinforce: %+v, %v", out, err)
+	}
+	if err := s2.Consolidate(); err != nil {
+		t.Fatalf("run 2 Consolidate: %v", err)
+	}
+	if len(s2.global.Percepts) != 1 || !closeTo(s2.global.Percepts[0].W, 0.90) {
+		t.Errorf("expected the percept promoted to global at W 0.90, got global=%v", s2.global.Percepts)
+	}
+	if got := s2.global.Percepts[0].Evidence; got != 2 {
+		t.Errorf("promoted Evidence = %d, want 2 (one per run)", got)
+	}
+	if len(s2.session.Percepts) != 0 {
+		t.Errorf("expected empty session after promotion, got %d", len(s2.session.Percepts))
 	}
 }
 
@@ -87,8 +119,9 @@ func TestReconfirmNeverLowers(t *testing.T) {
 	}
 }
 
-// TestReconfirmTouchesUpdatedAt: reinforcement refreshes recency (the Query
-// bonus must come back after a re-statement).
+// TestReconfirmTouchesUpdatedAt: reinforcement refreshes the rank score's
+// recency factor (and adds the evidence factor), so a re-statement recovers
+// recall ordering.
 func TestReconfirmTouchesUpdatedAt(t *testing.T) {
 	s := newTestStore(t, true)
 	ctx := context.Background()
@@ -99,14 +132,14 @@ func TestReconfirmTouchesUpdatedAt(t *testing.T) {
 			s.session.Percepts[i].UpdatedAt = time.Now().Add(-90 * 24 * time.Hour)
 		}
 	}
-	before := s.recencyScore(s.session.Percepts[0], time.Now())
+	before := s.rankScore(s.session.Percepts[0], time.Now())
 
 	if out2, _ := s.Record(ctx, "the deploy target is a k3s cluster", ProducerLocal, ConsumerAll, Roles{}, false); !out2.Reinforced {
 		t.Fatal("expected reinforcement")
 	}
-	after := s.recencyScore(s.session.Percepts[0], time.Now())
+	after := s.rankScore(s.session.Percepts[0], time.Now())
 	if after <= before {
-		t.Errorf("recency score did not recover: %v -> %v", before, after)
+		t.Errorf("rank score did not recover: %v -> %v", before, after)
 	}
 }
 
@@ -160,8 +193,8 @@ func TestRecencyOrdering(t *testing.T) {
 }
 
 // TestGlobalDecay validates the gentle global pass: non-core (promoted)
-// percepts decay GlobalDecayPerSession per consolidation but stop at the
-// prune floor; core percepts never decay.
+// percepts decay toward the prune floor with a running-time half-life of
+// global_half_life_days; core percepts never decay.
 func TestGlobalDecay(t *testing.T) {
 	s := newTestStore(t, true)
 	ctx := context.Background()
@@ -171,18 +204,33 @@ func TestGlobalDecay(t *testing.T) {
 	}
 	s.global.Percepts = append(s.global.Percepts, Percept{
 		ID: "promoted-1", Content: "build with go 1.25", Producer: ProducerLocal, W: 0.80,
+		UpdatedAt: s.now().Add(-time.Hour),
 	})
 
-	for i := 0; i < 50; i++ { // far beyond the floor
-		if err := s.Consolidate(); err != nil {
-			t.Fatalf("Consolidate: %v", err)
+	// One global half-life of running time: 0.20 + 0.60·0.5 = 0.50.
+	advanceClock(s, time.Duration(globalHalfLifeDays)*24*time.Hour)
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	for _, p := range s.global.Percepts {
+		if p.ID == "promoted-1" && !closeTo(p.W, 0.50) {
+			t.Fatalf("after one half-life W = %v, want 0.50", p.W)
 		}
+	}
+
+	// Two more half-lives: sinks further but never below the floor.
+	advanceClock(s, 2*time.Duration(globalHalfLifeDays)*24*time.Hour)
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
 	}
 
 	for _, p := range s.global.Percepts {
 		if p.ID == "promoted-1" {
-			if p.W != pruneThreshold {
-				t.Errorf("expected decay floor at %v, got %v", pruneThreshold, p.W)
+			if !closeTo(p.W, 0.20+0.60*math.Pow(0.5, 3)) {
+				t.Errorf("after three half-lives W = %v, want %v", p.W, 0.20+0.60*math.Pow(0.5, 3))
+			}
+			if p.W <= pruneThreshold {
+				t.Error("global decay must stop at the prune floor, never below")
 			}
 		} else if p.W != 1.0 {
 			t.Errorf("core percept must not decay, got W %v", p.W)
@@ -225,12 +273,16 @@ func TestEdgeWiring(t *testing.T) {
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Ground truth: birth 0.7 − decay 0.10 − contradicts 0.10 = 0.50 (the
-	// duplicate edge must NOT bite twice).
+	// Ground truth (no running time elapsed): birth 0.7 − contradicts 0.10 =
+	// 0.60 (the duplicate edge must NOT bite twice), and a contradicts edge is
+	// a conflict, not corroboration — no Evidence either side.
 	for _, p := range s.session.Percepts {
 		if p.ID == a.ID || p.ID == b.ID {
-			if !closeTo(p.W, 0.50) {
-				t.Errorf("contradicts endpoint %s W = %v, want 0.50", p.ID[:8], p.W)
+			if !closeTo(p.W, 0.60) {
+				t.Errorf("contradicts endpoint %s W = %v, want 0.60", p.ID[:8], p.W)
+			}
+			if p.Evidence != 0 {
+				t.Errorf("contradicts endpoint %s Evidence = %d, want 0", p.ID[:8], p.Evidence)
 			}
 		}
 	}
@@ -245,13 +297,30 @@ func TestEdgeWiring(t *testing.T) {
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Ground truth for d: 0.60 − global decay 0.02 + edge boost 0.05 = 0.63.
+	// Ground truth for d: 0.60 + edge boost 0.05 = 0.65 (no running time
+	// elapsed, no decay), plus one Evidence point for the positive edge.
 	for _, p := range s.global.Percepts {
-		if p.ID == "g2" && !closeTo(p.W, 0.63) {
-			t.Errorf("extends target W = %v, want 0.63", p.W)
+		if p.ID == "g2" {
+			if !closeTo(p.W, 0.65) {
+				t.Errorf("extends target W = %v, want 0.65", p.W)
+			}
+			if p.Evidence != 1 {
+				t.Errorf("extends target Evidence = %d, want 1 (positive-edge corroboration)", p.Evidence)
+			}
 		}
-		if p.ID == "g1" && !closeTo(p.W, 0.58) {
-			t.Errorf("extends source (decay only) W = %v, want 0.58", p.W)
+		if p.ID == "g1" && !closeTo(p.W, 0.60) {
+			t.Errorf("extends source (decay only) W = %v, want 0.60", p.W)
+		}
+	}
+
+	// The corroboration point is per run: another pass on the same edge does
+	// not double-count it.
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("second Consolidate: %v", err)
+	}
+	for _, p := range s.global.Percepts {
+		if p.ID == "g2" && p.Evidence != 1 {
+			t.Errorf("Evidence = %d after a second pass on the same edge, want 1 (once per run)", p.Evidence)
 		}
 	}
 }
@@ -282,11 +351,11 @@ func TestRecordMemoryRelationTool(t *testing.T) {
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Ground truth: target decays 0.02 (non-core global) and takes the
-	// contradicts penalty 0.10; source does too.
+	// Ground truth (no running time elapsed): the target takes the contradicts
+	// penalty 0.10; source does too.
 	for _, p := range s.global.Percepts {
-		if p.ID == target.ID && p.W != before-globalDecayPerSession-edgeNegativeDelta {
-			t.Errorf("contradicts target W = %v, want %v", p.W, before-globalDecayPerSession-edgeNegativeDelta)
+		if p.ID == target.ID && p.W != before-edgeNegativeDelta {
+			t.Errorf("contradicts target W = %v, want %v", p.W, before-edgeNegativeDelta)
 		}
 	}
 }
@@ -345,9 +414,13 @@ func TestCorpusEffect(t *testing.T) {
 			})
 		}
 	}
+	// One running day of milk time between consolidations — chatty or quiet,
+	// decay is time-based.
+	freezeClock(s)
 
 	var counts []int
 	for round := 1; round <= 3; round++ {
+		advanceClock(s, 24*time.Hour)
 		if err := s.ConsolidateCtx(ctx); err != nil {
 			t.Fatalf("consolidation %d: %v", round, err)
 		}
@@ -360,16 +433,21 @@ func TestCorpusEffect(t *testing.T) {
 		// noise-sensitive around the prune threshold, so assert the model's
 		// claims rather than brittle counts): the weak half of the session
 		// corpus is pruned within 3 consolidations, the strong percepts
-		// survive, and nothing is ever deleted from global — its weights
-		// just sink (0.80 → 0.74 after 3 rounds).
+		// survive (their W only halves over the 3 running days), and nothing
+		// is ever deleted from global — its weights just sink
+		// (0.80 → 0.2 + 0.6·2^(−3/60) ≈ 0.7796).
+		if counts[0] != 13 {
+			t.Errorf("after 1 running day only the two W=0.2 percepts should prune, got %v", counts)
+		}
 		if counts[2] >= 15 || counts[2] > counts[0] {
 			t.Errorf("expected session corpus to shrink across consolidations, got %v", counts)
 		}
-		if counts[2] < 2 {
-			t.Errorf("expected the 0.6/0.7 percepts to survive 3 consolidations, got %v", counts)
+		if counts[2] < 7 {
+			t.Errorf("expected the 0.5/0.6/0.7 percepts to survive 3 consolidations, got %v", counts)
 		}
-		if !closeTo(s.global.Percepts[0].W, 0.74) {
-			t.Errorf("expected global decay 0.80 → 0.74 after 3 consolidations, got %v", s.global.Percepts[0].W)
+		if !closeTo(s.global.Percepts[0].W, 0.2+0.6*math.Pow(0.5, 3.0/globalHalfLifeDays)) {
+			t.Errorf("expected global decay 0.80 → %v after 3 running days, got %v",
+				0.2+0.6*math.Pow(0.5, 3.0/globalHalfLifeDays), s.global.Percepts[0].W)
 		}
 		if len(s.global.Percepts) != 16 {
 			t.Errorf("expected 16 global percepts (none deleted by decay), got %d", len(s.global.Percepts))

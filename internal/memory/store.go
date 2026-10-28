@@ -40,6 +40,11 @@ type Store struct {
 	// consolidation). clock is time.Now except in tests.
 	lastTick time.Time
 	clock    func() time.Time
+	// evidenceAwarded tracks which Percepts already earned their Evidence
+	// point in this Store's lifetime (one milk run): corroboration counts at
+	// most once per run, so Evidence >= 2 implies two distinct runs
+	// (ADR-0090). In-memory only — the count persists, the set does not.
+	evidenceAwarded map[string]struct{}
 }
 
 // NewStore opens (or creates) the global store and optional session store
@@ -143,8 +148,8 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 		W:         initialWeight(producer, core),
 		Roles:     roles,
 		Core:      core,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: s.now(),
+		UpdatedAt: s.now(),
 	}
 
 	var scopeLabel string
@@ -166,9 +171,10 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 
 // reinforceLocked boosts the existing Percept with the given ID in whichever
 // store holds it (W += ReconfirmBoost capped at ReconfirmCap, UpdatedAt
-// touched) and persists that store. Caller must hold s.mu.
+// touched, Evidence +1 at most once per Store lifetime) and persists that
+// store. Caller must hold s.mu.
 func (s *Store) reinforceLocked(ctx context.Context, id string, similarity float64) (RecordOutcome, error) {
-	now := time.Now()
+	now := s.now()
 	for i := range s.global.Percepts {
 		if s.global.Percepts[i].ID == id {
 			existing := s.global.Percepts[i].Content
@@ -176,6 +182,9 @@ func (s *Store) reinforceLocked(ctx context.Context, id string, similarity float
 			s.global.Percepts[i].UpdatedAt = now
 			s.global.Percepts[i].LastUsedAt = now
 			s.global.Percepts[i].IdleSeconds = 0
+			if s.awardEvidenceLocked(id) {
+				s.global.Percepts[i].Evidence++
+			}
 			metricsReinforce(ctx)
 			return RecordOutcome{ID: id, Reinforced: true, Similarity: similarity, Existing: existing, W: s.global.Percepts[i].W},
 				s.saveFile(s.globalPath, s.global)
@@ -186,6 +195,9 @@ func (s *Store) reinforceLocked(ctx context.Context, id string, similarity float
 			existing := s.session.Percepts[i].Content
 			s.session.Percepts[i].W = reinforceW(s.session.Percepts[i].W, s.params)
 			s.session.Percepts[i].UpdatedAt = now
+			if s.awardEvidenceLocked(id) {
+				s.session.Percepts[i].Evidence++
+			}
 			metricsReinforce(ctx)
 			var saveErr error
 			if s.sessionPath != "" {
@@ -199,17 +211,31 @@ func (s *Store) reinforceLocked(ctx context.Context, id string, similarity float
 	return RecordOutcome{ID: id, Similarity: similarity}, nil
 }
 
+// awardEvidenceLocked grants Percept id one corroboration event unless it
+// already earned one in this Store's lifetime, and reports whether it was
+// granted now. Caller must hold s.mu.
+func (s *Store) awardEvidenceLocked(id string) bool {
+	if _, ok := s.evidenceAwarded[id]; ok {
+		return false
+	}
+	if s.evidenceAwarded == nil {
+		s.evidenceAwarded = make(map[string]struct{})
+	}
+	s.evidenceAwarded[id] = struct{}{}
+	return true
+}
+
 func initialWeight(producer Producer, core bool) float64 {
 	if core {
 		return 1.0
 	}
 	switch producer {
 	case ProducerUser:
-		return 0.9 // promotes after one session (0.9−0.10 = 0.80 == promoteThreshold)
+		return 0.9 // promotion fast path: graduates on the first consolidation pass
 	case ProducerSystem:
-		return 0.4 // low-confidence hint; pruned after two sessions
+		return 0.4 // low-confidence hint; decays to the prune threshold in a few running days
 	default: // ProducerLocal, ProducerEscalation
-		return 0.7 // inference; promoted via re-confirmation (reinforce ×2) or positive edges
+		return 0.7 // inference; promoted via corroboration in a second run (Evidence 2) or positive edges
 	}
 }
 
@@ -237,8 +263,8 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 		W:         1.0,
 		Core:      true,
 		Roles:     roles,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: s.now(),
+		UpdatedAt: s.now(),
 	}
 	s.global.Percepts = append(s.global.Percepts, p)
 
@@ -248,13 +274,12 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 }
 
 // Query returns Percepts matching a keyword query, ordered by token-overlap
-// count desc, then effective weight (W plus a recency bonus — a recently
-// updated percept outranks an equally relevant stale one; the bonus halves
-// every RecencyHalfLifeDays and never extends past a small constant) desc,
-// then raw W desc. maxResults <= 0 means no limit. minConfidence filters by
-// raw W (not the recency-adjusted score, so old facts are never hidden by
-// age alone). caller restricts results to percepts visible to that agent
-// (ConsumerAll = no restriction).
+// count desc, then rank score (W scaled by the recency and evidence factors —
+// see rankScore; a recently updated, corroborated percept outranks an equally
+// relevant stale one) desc, then raw W desc. maxResults <= 0 means no limit.
+// minConfidence filters by raw W (not the rank score, so old facts are never
+// hidden by age alone). caller restricts results to percepts visible to that
+// agent (ConsumerAll = no restriction).
 //
 // Matching is token-based (tokenize, shared with FindSimilar/FilterByRelevance)
 // rather than literal substring — a query like "dog name" must still match a
@@ -270,7 +295,7 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 
 	all := s.allPercepts()
 	queryTokens := tokenize(query)
-	now := time.Now()
+	now := s.now()
 
 	type scored struct {
 		p     Percept
@@ -286,7 +311,7 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 			continue
 		}
 		if len(queryTokens) == 0 {
-			candidates = append(candidates, scored{p: p, score: s.recencyScore(p, now)})
+			candidates = append(candidates, scored{p: p, score: s.rankScore(p, now)})
 			continue
 		}
 		hits := 0
@@ -296,7 +321,7 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 			}
 		}
 		if hits > 0 {
-			candidates = append(candidates, scored{p: p, hits: hits, score: s.recencyScore(p, now)})
+			candidates = append(candidates, scored{p: p, hits: hits, score: s.rankScore(p, now)})
 		}
 	}
 
@@ -326,15 +351,32 @@ func (s *Store) Query(ctx context.Context, query string, minConfidence float64, 
 	return out
 }
 
-// recencyScore is W plus the recency bonus used for recall ordering: a
-// percept updated moments ago gets +RecencyBoost, halving every
-// RecencyHalfLifeDays (ADR-0053). Ordering only — it never gates visibility.
-func (s *Store) recencyScore(p Percept, now time.Time) float64 {
+// rankScore is the derived ordering score (ADR-0090), never stored:
+//
+//	rank = W · (1 + r) · (1 + e)
+//	r = RecencyBoost · 0.5^(age_days / RecencyHalfLifeDays)   // since UpdatedAt
+//	e = rankEvidenceFactor · min(Evidence, rankEvidenceCap)
+//
+// It orders recall, PruneGlobal eviction and the injection budget. Every
+// *gate* (min_confidence, promote_threshold, prune_threshold) reads raw W, so
+// recency and corroboration can never hide or mint a fact.
+func (s *Store) rankScore(p Percept, now time.Time) float64 {
 	ageDays := now.Sub(p.UpdatedAt).Hours() / 24
 	if ageDays < 0 {
 		ageDays = 0
 	}
-	return p.W + s.params.RecencyBoost*math.Pow(0.5, ageDays/s.params.RecencyHalfLifeDays)
+	r := s.params.RecencyBoost * math.Pow(0.5, ageDays/s.params.RecencyHalfLifeDays)
+	e := rankEvidenceFactor * math.Min(float64(p.Evidence), rankEvidenceCap)
+	return p.W * (1 + r) * (1 + e)
+}
+
+// SortByRank orders percepts in place by descending rank score (highest
+// first) — the order the injection budget drops from when over budget.
+func (s *Store) SortByRank(percepts []Percept) {
+	now := s.now()
+	sort.SliceStable(percepts, func(i, j int) bool {
+		return s.rankScore(percepts[i], now) > s.rankScore(percepts[j], now)
+	})
 }
 
 // AddEdge records a typed directed relation between two Percepts (ADR-0053):
@@ -509,8 +551,10 @@ func (s *Store) FindByIDPrefix(prefix string) []Percept {
 	return out
 }
 
-// PruneGlobal removes lowest-weight non-core percepts from the global store
-// until the total count is at most max. Does nothing when max <= 0.
+// PruneGlobal removes lowest-ranked non-core percepts from the global store
+// until the total count is at most max (eviction order is ascending rank
+// score — see rankScore; core percepts are never evicted). Does nothing when
+// max <= 0.
 func (s *Store) PruneGlobal(max int) error {
 	if max <= 0 {
 		return nil
@@ -523,7 +567,7 @@ func (s *Store) PruneGlobal(max int) error {
 		return nil
 	}
 
-	// Stable-sort ascending by weight, keeping core percepts at the top so
+	// Stable-sort ascending by rank score, keeping core percepts at the top so
 	// they are never evicted by the slice trim below.
 	sorted := make([]Percept, len(percepts))
 	copy(sorted, percepts)
@@ -538,12 +582,11 @@ func (s *Store) PruneGlobal(max int) error {
 		}
 	}
 
-	// Sort non-core ascending by weight so lowest-weight are at the front.
-	for i := 1; i < len(nonCore); i++ {
-		for j := i; j > 0 && nonCore[j].W < nonCore[j-1].W; j-- {
-			nonCore[j], nonCore[j-1] = nonCore[j-1], nonCore[j]
-		}
-	}
+	// Sort non-core ascending by rank score so the lowest-ranked are at the front.
+	now := s.now()
+	sort.SliceStable(nonCore, func(i, j int) bool {
+		return s.rankScore(nonCore[i], now) < s.rankScore(nonCore[j], now)
+	})
 
 	// Drop from the low-weight end of nonCore until total fits.
 	total := len(core) + len(nonCore)

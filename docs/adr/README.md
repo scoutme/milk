@@ -88,3 +88,4 @@
 * [87. Panel auto-open master switch](0087-panel-auto-open-master-switch.md)
 * [88. TUI render-loop performance: viewport fork + render caches](0088-tui-render-loop-performance.md)
 * [89. Side-panel width budget: recency-ranked panels over a 40-col floor](0089-side-panel-width-budget.md)
+* [90. Memory consolidation v3: running-time decay and evidence-gated promotion](0090-memory-consolidation-v3.md)

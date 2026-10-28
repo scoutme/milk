@@ -15,10 +15,11 @@ The design below extracts the RFC's **cognitive model** and maps it onto milk's 
 | Hippocampus | `internal/memory` package — sole memory store |
 | Percept | `memory.Percept` — atomic memory unit |
 | Engram | `memory.Engram` — Percepts grouped by subject |
-| NREM Overnight Cycle | lightweight consolidation run at session end |
+| NREM Overnight Cycle | lightweight consolidation run after every primary turn and at exit |
 | REM / NeoCortex | deferred (no UKB equivalent in milk today) |
 | Memory API Gateway | `get_memory` and `record_memory` local agent tools |
-| Confidence Weight | `w float64` on each Percept, decays per session |
+| Confidence Weight | `w float64` on each Percept, decays with milk running time (ADR-0090) |
+| Evidence | `evidence int` on each Percept — corroboration events, ≤1 per run; gates promotion |
 | Inter-Percept edges | stored in Engram as typed relation records |
 | Raw signal ingestion | local HTTP agents record Percepts via tool calls (milk provides the tools directly); embedded agents spawned via CLI/subprocess (e.g. Claude Code) request Percept writes via nonce-tagged emission, which milk's stream layer intercepts and executes |
 | Vector DB + semantic recall | Phase 2 — currently keyword substring matching in `Store.Query` |
@@ -57,12 +58,16 @@ type Percept struct {
     ID        string    // uuid
     Content   string    // bracketed natural-language assertion
     Producer  string    // "user" | "local" | "claude" | "system"
+    Consumer  string    // which agent(s) receive this at injection; empty = all
     W         float64   // confidence weight [0,1]
     Roles     Roles     // Neo-Davidsonian: Action, Agent, Recipient, Theme, When, Where
     EngramID  string    // parent Engram (empty = unassigned)
     CreatedAt time.Time
     UpdatedAt time.Time
     Core      bool      // exempt from decay if true
+    LastUsedAt time.Time // last re-statement, recall or injection (archive clock)
+    IdleSeconds float64 // summed milk running time unused (global only)
+    Evidence  int       // corroboration events, awarded at most once per run
 }
 
 type Roles struct {
