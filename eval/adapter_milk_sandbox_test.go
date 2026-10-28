@@ -202,3 +202,73 @@ func TestMilkAdapter_SandboxEnvAndBinary(t *testing.T) {
 		t.Errorf("forwarded flags missing from milk argv:\n%s", argv)
 	}
 }
+
+// TestMilkAdapter_RunPromptKeepsPartialOnFailure: a batch run that dies
+// (turn deadline, non-zero exit) must return everything parsed before the
+// failure alongside the error. The harness records partial results next to
+// the error; returning an empty result scored a ~10-minute killed turn as 0.
+func TestMilkAdapter_RunPromptKeepsPartialOnFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub binary is a sh script")
+	}
+	for _, tc := range []struct {
+		name         string
+		events       []string
+		wantErr      string
+		wantResponse string
+	}{
+		{
+			name: "stream ends without terminal result",
+			events: []string{
+				`{"type":"system","subtype":"init","session_id":"s","seq":0,"session_state":"idle","capabilities":["stream_v1"]}`,
+				`{"type":"assistant","session_id":"s","seq":1,"agent":"primary","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"partial work before the kill"}]}}`,
+			},
+			wantErr:      "no terminal result event",
+			wantResponse: "partial work before the kill",
+		},
+		{
+			name: "terminal error result then exit 1",
+			events: []string{
+				`{"type":"system","subtype":"init","session_id":"s","seq":0,"session_state":"idle","capabilities":["stream_v1"]}`,
+				`{"type":"assistant","session_id":"s","seq":1,"agent":"primary","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"working"}]}}`,
+				`{"type":"result","subtype":"error","session_id":"s","seq":2,"is_error":true,"num_turns":1,"duration_ms":9000,"result":"one-shot budget exhausted","stop_reason":"deadline","usage":{"input_tokens":10,"output_tokens":5}}`,
+			},
+			wantErr:      "exit status",
+			wantResponse: "one-shot budget exhausted",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			stub := filepath.Join(tmp, "milk-stub")
+			script := "#!/bin/sh\n"
+			for _, ev := range tc.events {
+				script += "echo " + strconv.Quote(ev) + "\n"
+			}
+			script += "exit 1\n"
+			if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			a := &milkAdapter{}
+			a.SetArgs([]string{"--milk-bin", stub})
+			if err := a.Start(context.Background(), tmp); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			defer a.Stop()
+
+			res, err := a.RunPrompt(context.Background(), "hi")
+			if err == nil {
+				t.Fatal("expected an error from the exiting stub, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+			if res.Response != tc.wantResponse {
+				t.Errorf("partial Response = %q, want %q", res.Response, tc.wantResponse)
+			}
+			if res.Duration <= 0 {
+				t.Errorf("partial Duration = %v, want > 0", res.Duration)
+			}
+		})
+	}
+}

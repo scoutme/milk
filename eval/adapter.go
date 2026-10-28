@@ -52,7 +52,8 @@ type SandboxConfig struct {
 // Sandboxable is implemented by adapters that can isolate their agent's
 // state root. The harness applies an experiment's sandbox: section through
 // this interface; adapters that don't implement it (claude-code — a tmux
-// session against the real ~/.claude) simply run unsandboxed.
+// session against the real ~/.claude; mimo-code — batch runs against the
+// live ~/.mimocode) simply run unsandboxed.
 type Sandboxable interface {
 	SetSandbox(SandboxConfig)
 }

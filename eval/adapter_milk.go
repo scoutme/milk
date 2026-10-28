@@ -106,7 +106,10 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			// Keep the partial run: a killed process (turn deadline, crash)
+			// still streamed everything before the cut, and the harness
+			// records partial results next to the error.
+			return run, err
 		}
 		switch ev.Type {
 		case streamjson.TypeSystem:
@@ -227,15 +230,19 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 		}
 	}
 
-	if !seenResult {
-		return nil, fmt.Errorf("milk stream-json run truncated: no terminal result event")
-	}
 	if run.Response == "" {
 		run.Response = run.Text
 	}
 	// system/state's idle stop_reason fills in for a missing result.stop_reason.
 	if run.StopReason == "" {
 		run.StopReason = run.StateStopReason
+	}
+	if !seenResult {
+		// A killed run (turn deadline, crash, non-zero exit) never writes the
+		// terminal result line: return the partial run WITH the error so the
+		// streamed output survives — the harness keeps partials, and an empty
+		// run would score a long killed turn as nothing.
+		return run, fmt.Errorf("milk stream-json run truncated: no terminal result event")
 	}
 	return run, nil
 }
@@ -461,15 +468,28 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	// line, nothing buffered until exit).
 	run, parseErr := parseMilkStream(stdout)
 	waitErr := cmd.Wait()
+
+	// Map whatever the stream produced even on failure: a killed run (turn
+	// deadline, crash, non-zero exit) still streamed output and file edits
+	// before dying, and the harness keeps a partial result next to its error.
+	// Returning an empty result here scored a ~10-minute killed turn as 0.
+	afterFiles := snapshotDir(a.workdir)
+	res := milkRunResult(run, start, beforeFiles, afterFiles)
 	if parseErr != nil {
-		return RunResult{}, fmt.Errorf("parsing milk stream-json output: %w", parseErr)
+		return res, fmt.Errorf("parsing milk stream-json output: %w", parseErr)
 	}
 	if waitErr != nil {
-		return RunResult{}, fmt.Errorf("milk batch run: %w", waitErr)
+		if res.Error != nil {
+			return res, fmt.Errorf("milk batch run: %w (stream: %v)", waitErr, res.Error)
+		}
+		return res, fmt.Errorf("milk batch run: %w", waitErr)
 	}
+	return res, nil
+}
 
-	afterFiles := snapshotDir(a.workdir)
-
+// milkRunResult maps a parsed stream (full or partial) onto the eval
+// RunResult shape.
+func milkRunResult(run *milkStreamRun, start time.Time, beforeFiles, afterFiles map[string]string) RunResult {
 	res := RunResult{
 		Response:              run.Response,
 		Tokens:                run.Tokens,
@@ -487,7 +507,7 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	if run.IsError {
 		res.Error = fmt.Errorf("milk run failed (result subtype %q): %s", run.Subtype, run.Response)
 	}
-	return res, nil
+	return res
 }
 
 // Stop kills an in-flight batch run, if any, and tears down the sandbox

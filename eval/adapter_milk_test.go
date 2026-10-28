@@ -177,28 +177,39 @@ func TestParseMilkStream_InitStateMapping(t *testing.T) {
 }
 
 // TestParseMilkStream_TruncatedAndMalformed pins the one framing rule a
-// consumer must enforce: the terminal result line is required (a stream
-// without one is a truncated run). Malformed lines are decode errors.
+// consumer must enforce: the terminal result line is required — a stream
+// without one is a truncated run, returned as the PARTIAL run WITH the error
+// so the harness keeps the streamed output. Malformed lines are decode
+// errors (likewise partial-carrying).
 func TestParseMilkStream_TruncatedAndMalformed(t *testing.T) {
 	const initLine = `{"type":"system","subtype":"init","session_id":"s","seq":0,"session_state":"idle","capabilities":["stream_v1"]}`
+	const textLine = `{"type":"assistant","session_id":"s","seq":1,"agent":"primary","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"partial work before the kill"}]}}`
 	const resultLine = `{"type":"result","subtype":"success","session_id":"s","seq":1,"is_error":false,"num_turns":1,"duration_ms":10,"result":"hi","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
 
 	for _, tc := range []struct {
-		name    string
-		stream  string
-		wantErr string
+		name        string
+		stream      string
+		wantErr     string
+		wantPartial string
 	}{
-		{"empty", "", "no terminal result event"},
-		{"no result", initLine + "\n", "no terminal result event"},
-		{"garbage line", initLine + "\n" + "not json\n" + resultLine + "\n", "decode"},
+		{"empty", "", "no terminal result event", ""},
+		{"no result", initLine + "\n" + textLine + "\n", "no terminal result event", "partial work before the kill"},
+		{"garbage line", initLine + "\n" + "not json\n" + resultLine + "\n", "decode", ""},
 	} {
-		_, err := parseMilkStream(strings.NewReader(tc.stream))
+		run, err := parseMilkStream(strings.NewReader(tc.stream))
 		if err == nil {
 			t.Errorf("%s: expected error containing %q, got nil", tc.name, tc.wantErr)
 			continue
 		}
 		if !strings.Contains(err.Error(), tc.wantErr) {
 			t.Errorf("%s: error %q does not mention %q", tc.name, err, tc.wantErr)
+		}
+		if run == nil {
+			t.Errorf("%s: partial run must be returned alongside the error, got nil", tc.name)
+			continue
+		}
+		if tc.wantPartial != "" && run.Response != tc.wantPartial {
+			t.Errorf("%s: partial Response = %q, want %q", tc.name, run.Response, tc.wantPartial)
 		}
 	}
 
