@@ -1,6 +1,7 @@
-# The fixed request for the metrics testbed. Replace the prompt (and the
-# setup files, if the real request needs a different workspace) with the
-# actual request under test — the experiment file references this directory.
+# The fixed request for the metrics testbed — part of the pristine example
+# (see ../metrics-testbed.yaml). To run a real request, copy this directory
+# to ~/.milk/eval/experiments/ (machine-local) and edit your copy's prompt and
+# setup files; keep this one as-is.
 category: metrics
 
 scenarios:

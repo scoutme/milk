@@ -1,6 +1,6 @@
 # Evaluation harness (`milk eval`)
 
-> Runs scenario prompts against real agent backends — the `claude` CLI (driven inside a tmux session exactly as a human would), the actual `milk` binary (driven as a one-shot batch run consuming its machine-readable `--output-format stream-json` event stream), or mimocode's `mimo` CLI (the same one-shot batch shape over `mimo run --format json`) — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. Measurement runs get the full toolkit: an [experiment file](#experiment-files) defines the whole suite (adapters, scenarios, repetitions, judge, [sandbox](#sandboxed-runs), [budgets](#metric-budgets)) in one YAML — the same request repeated against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls (count + full list) and time per run, with nth-run variance in the report. `--scenarios`/`--results` default to `eval/scenarios`/`eval/results` relative to your current working directory — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
+> Runs scenario prompts against real agent backends — the `claude` CLI (driven inside a tmux session exactly as a human would), the actual `milk` binary (driven as a one-shot batch run consuming its machine-readable `--output-format stream-json` event stream), or mimocode's `mimo` CLI (the same one-shot batch shape over `mimo run --format json`) — scores the responses with an LLM judge against a rubric, and reports token/cache/quality comparisons. This is for anyone validating milk against their own configured agents (which primary/escalation agent actually performs best on their real workloads, not just milk's own maintainers benchmarking milk internals), and for comparing against other harnesses/backends on the same scenarios. Measurement runs get the full toolkit: an [experiment file](#experiment-files) defines the whole suite (adapters, scenarios, repetitions, judge, [sandbox](#sandboxed-runs), [budgets](#metric-budgets)) in one YAML — the same request repeated against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls (count + full list) and time per run, with nth-run variance in the report. `--scenarios` defaults to `eval/scenarios` relative to your current working directory; `--results` defaults to `~/.milk/eval/results` (the eval artifact home under the milk state root — outside the source tree, see [docs/internal/eval-artifacts.md](../internal/eval-artifacts.md)) — see [Scenarios](#scenarios) for where those defaults come from and how to point at your own directory instead.
 >
 > `milk eval` is a subcommand of the main `milk` binary (`cmd/milk/main.go` mounts `eval.Command()`) — there is no separate `milk-eval` binary. Build with `task build` / `task build:local` like any other milk command.
 
@@ -12,7 +12,7 @@ milk eval run --agents claude-code,milk-tui                # run every scenario 
 milk eval run --agents milk-tui,mimo-code --category smoke # milk vs mimocode on the smoke check
 milk eval run --agents claude-code --category smoke        # fast pipeline sanity check
 milk eval run --experiment eval/experiments/metrics-testbed.yaml   # a whole suite from one file
-milk eval report --results eval/results                    # re-print the last report
+milk eval report --results ~/.milk/eval/results/<run>     # re-print a saved report
 ```
 
 ---
@@ -31,7 +31,7 @@ Runs scenarios against one or more adapters, judges each turn, and prints + pers
 | `--category` | (none) | Filter to one category (`smoke`, `code_generation`, `debugging`, `refactoring`, …). |
 | `--multi-turn` | `false` | Only run scenarios with `multi_turn: true`. |
 | `--repetitions` | `1` | Run every scenario N times, fully isolated (fresh temp workdir, fresh sandbox per run) — for nth-run variance. |
-| `--results` | `eval/results` | Output directory; writes `results.json`. |
+| `--results` | `~/.milk/eval/results` | Output directory (outside the source tree, under the milk state root); writes `results.json`. |
 | `--judge-agent` | primary agent | Agent name from `~/.milk/config.json` to use as the LLM judge instead of the primary agent — see [Judging](#judging). |
 
 ### `milk eval judge`
@@ -56,7 +56,7 @@ An experiment file defines the **full evaluation suite in one YAML file** — ad
 milk eval run --experiment eval/experiments/metrics-testbed.yaml
 ```
 
-Explicitly set CLI flags override the experiment's fields one by one (e.g. `--repetitions 5` on the command line beats `repetitions: 3` in the file). Scenario and result paths resolve relative to the experiment file's directory first (an experiment is self-contained), falling back to the working directory.
+Explicitly set CLI flags override the experiment's fields one by one (e.g. `--repetitions 5` on the command line beats `repetitions: 3` in the file). `~/` is expanded in both path fields. Relative scenario paths resolve against the experiment file's directory first (an experiment is self-contained), falling back to the working directory; relative result paths behave like the `--results` flag (working directory). Run outputs default outside the source tree, under the eval artifact home (`~/.milk/eval/results/<name>`, i.e. `<milk state root>/eval/results/<name>` — see [docs/internal/eval-artifacts.md](../internal/eval-artifacts.md)).
 
 ```yaml
 name: metrics-testbed
@@ -70,7 +70,7 @@ select:                                                           # optional fil
   multi_turn: false                                               # like --multi-turn
 repetitions: 3                                                    # N fully isolated runs per scenario (default 1)
 judge_agent: ""                                                   # "" = primary agent
-results: eval/results/metrics-testbed                             # default: eval/results/<name>
+results: ~/.milk/eval/results/metrics-testbed                     # default: ~/.milk/eval/results/<name>
 sandbox:                                                          # see Sandboxed runs
   mode: fresh                                                     # fresh | off (default off)
   seed: config                                                    # config (default) | none
@@ -88,7 +88,7 @@ versions:                                                         # optional: mi
     ref: v0.8.0
 ```
 
-A working example lives at [`eval/experiments/metrics-testbed.yaml`](../../eval/experiments/metrics-testbed.yaml) (with its request scenario under `eval/experiments/testbed-scenarios/`) — the run-from-the-same-request testbed: one fixed request, repeated N times against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls and time per run and their variance across runs.
+A working example lives at [`eval/experiments/metrics-testbed.yaml`](../../eval/experiments/metrics-testbed.yaml) (with its request scenario under `eval/experiments/testbed-scenarios/`) — the run-from-the-same-request testbed: one fixed request, repeated N times against always-fresh sandboxed state seeded with your current agent set, verifying tokens, tool calls and time per run and their variance across runs. Keep that example pristine: for your own comparisons, copy it into `~/.milk/eval/experiments/` (machine-local, outside the repo) and edit your copy — what belongs in the repo versus machine-local is defined in [docs/internal/eval-artifacts.md](../internal/eval-artifacts.md).
 
 ---
 
@@ -155,7 +155,7 @@ Verdicts render per scenario (`Budget [milk-tui]: PASS` / `FAIL — tool calls 2
 
 ## Scenarios
 
-The default scenarios ship as YAML files under `eval/scenarios/` in the milk repo — there's nothing to install or generate, they're just checked-in examples you can read, copy, or run as-is. `--scenarios`/`--results` (see [Commands](#commands)) resolve relative to your current working directory and default to `eval/scenarios`/`eval/results`, so running `milk eval run` from the repo root picks them up automatically. Running from elsewhere, or want your own scenario set entirely (a different directory, a different repo, scenarios specific to your own project)? Pass `--scenarios <path>` — any directory with the same file format works, the default is just a convenient starting point, not a requirement.
+The default scenarios ship as YAML files under `eval/scenarios/` in the milk repo — there's nothing to install or generate, they're just checked-in examples you can read, copy, or run as-is. `--scenarios` (see [Commands](#commands)) resolves relative to your current working directory and defaults to `eval/scenarios`, so running `milk eval run` from the repo root picks them up automatically; `--results` defaults outside the source tree, under `~/.milk/eval/results`. Running from elsewhere, or want your own scenario set entirely (a different directory, a different repo, scenarios specific to your own project)? Pass `--scenarios <path>` — any directory with the same file format works, the default is just a convenient starting point, not a requirement.
 
 A file starting with `_` (e.g. `_base.yaml`) is a shared-defaults file, not an executable scenario — it's skipped when loading, and its `default_scoring`/`default_weight` backfill any rubric criterion that omits them in the same directory.
 

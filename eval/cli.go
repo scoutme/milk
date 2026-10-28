@@ -70,6 +70,13 @@ func evalRunCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
+			// --results defaults outside the source tree (<milk state root>/
+			// eval/results); resolved here, not at flag registration, so
+			// --config-root/$MILK_CONFIG_ROOT is already applied.
+			if !cmd.Flags().Changed("results") {
+				resultsDir = DefaultResultsDir()
+			}
+
 			// The experiment file defines the full suite (adapters,
 			// scenarios, repetitions, judge, sandbox, budgets); explicitly
 			// set CLI flags override its fields one by one.
@@ -163,7 +170,7 @@ func evalRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agents, "agents", "", "comma-separated adapter names (default: all registered)")
 	cmd.Flags().StringVar(&category, "category", "", "filter by category name")
 	cmd.Flags().BoolVar(&multiTurn, "multi-turn", false, "only run multi-turn scenarios")
-	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "output directory for results")
+	cmd.Flags().StringVar(&resultsDir, "results", DefaultResultsDir(), "output directory for results (default: <milk state root>/eval/results)")
 	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 	cmd.Flags().IntVar(&repetitions, "repetitions", 1, "run every scenario N times, fully isolated (fresh workdir, fresh sandbox) — for nth-run variance")
 	cmd.Flags().StringVar(&experiment, "experiment", "", "experiment YAML file defining the full suite (adapters, scenarios, repetitions, judge, sandbox, budgets); explicit flags override its fields")
@@ -187,6 +194,10 @@ func evalJudgeCmd() *cobra.Command {
 		Short: "Re-score existing results against scenario rubrics",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+
+			if !cmd.Flags().Changed("results") {
+				resultsDir = DefaultResultsDir()
+			}
 
 			// Load scenarios for rubric lookup.
 			scenarios, err := LoadScenarios(scenarioDir)
@@ -247,7 +258,7 @@ func evalJudgeCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "results directory from a prior run")
+	cmd.Flags().StringVar(&resultsDir, "results", DefaultResultsDir(), "results directory from a prior run")
 	cmd.Flags().StringVar(&scenarioDir, "scenarios", "eval/scenarios", "scenario files directory for rubric lookup")
 	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 
@@ -270,6 +281,10 @@ func evalReportCmd() *cobra.Command {
 		Use:   "report",
 		Short: "Generate a comparison report from existing results",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("results") {
+				resultsDir = DefaultResultsDir()
+			}
+
 			// Load results.
 			results, err := loadResults(resultsDir)
 			if err != nil {
@@ -300,7 +315,7 @@ func evalReportCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&resultsDir, "results", "eval/results", "results directory")
+	cmd.Flags().StringVar(&resultsDir, "results", DefaultResultsDir(), "results directory")
 	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "output file (default: stdout)")
 	cmd.Flags().BoolVar(&cacheOnly, "cache-only", false, "only show cache analysis")
 	cmd.Flags().BoolVar(&jsonFmt, "json", false, "output in JSON format")

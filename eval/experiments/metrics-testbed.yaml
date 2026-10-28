@@ -1,7 +1,12 @@
 # The metrics testbed: one fixed request, run repeatedly against a fresh,
 # sandboxed milk state seeded with your current agent set.
 #
-# Run it:   milk eval run --experiment eval/experiments/metrics-testbed.yaml
+# This is the pristine worked example linked from docs/reference/eval.md —
+# don't repurpose it for a real comparison. Copy the whole directory into
+# ~/.milk/eval/experiments/ (machine-local, outside the repo; see
+# docs/internal/eval-artifacts.md) and swap the prompt in your copy instead.
+#
+# Run it as-is:   milk eval run --experiment eval/experiments/metrics-testbed.yaml
 # (add a flag to override anything here, e.g. --repetitions 5)
 #
 # What gets measured and verified per run:
@@ -11,9 +16,9 @@
 #   - model turns, model name, routing (primary/escalation), stop reason
 #   - budget verdicts below (PASS/FAIL per run), and mean ± sd across runs
 #
-# The request itself lives in testbed-scenarios/metrics_testbed.yaml — swap
-# the prompt there for the real request whenever you're ready; this file
-# stays as-is.
+# The request itself lives in testbed-scenarios/metrics_testbed.yaml — to try
+# a real request, copy this directory to ~/.milk/eval/experiments/ and swap
+# the prompt in your copy; this file stays untouched as the example.
 name: metrics-testbed
 description: >
   Fixed request, repeated N times against always-fresh sandboxed state
