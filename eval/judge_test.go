@@ -556,6 +556,64 @@ func TestJudgeScore_MissingDedupedAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestSnapCriterion(t *testing.T) {
+	rubric := []RubricCriterion{
+		{Criterion: "design"},
+		{Criterion: "design-quality"},
+		{Criterion: "proportional"},
+		{Criterion: "confirmed-depth"},
+	}
+	cases := []struct{ in, want string }{
+		{"proportional", "proportional"},    // exact
+		{"  Proportional ", "proportional"}, // trim + case
+		{"proportional (binary, weight 2): Is the answer a direct, short listing…", "proportional"}, // observed glue
+		{"proportional: is it short?", "proportional"},                                              // ':' boundary
+		{"confirmed-depth clearly established the design", "confirmed-depth"},                       // space boundary
+		{"confirmed-depth — the user was told", "confirmed-depth"},                                  // em-dash boundary
+		{"design-quality: solid", "design-quality"},                                                 // longest wins; '-' is no boundary for "design"
+		{"design-agnostic", "design-agnostic"},                                                      // '-' must not let "design" claim it
+		{"efficiency", "efficiency"},                                                                // unknown criterion: unchanged
+	}
+	for _, c := range cases {
+		if got := snapCriterion(c.in, rubric); got != c.want {
+			t.Errorf("snapCriterion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestJudgeScore_GluedCriterionNameSnappedBeforeCoverage(t *testing.T) {
+	// The judge echoes the rubric line verbatim as the criterion name — the
+	// exact failure the routing-reps study hit on "proportional". The snap
+	// must canonicalize it BEFORE the coverage check: no wasted correction
+	// retry (calls==1), the score counts under its canonical name, and the
+	// weighted average includes its weight.
+	s := mockJudgeServerSequence(
+		`[{"criterion":"proportional (binary, weight 2): Is the answer a direct, short listing of the files — exactly the small ask — without a large essay?","score":1,"reasoning":"short and direct"}]`,
+	)
+	defer s.srv.Close()
+
+	judge := &Judge{URL: s.srv.URL, HTTPClient: s.srv.Client()}
+	scenario := Scenario{Prompt: "List them.", Rubric: []RubricCriterion{
+		{Criterion: "proportional", Weight: 2, Scoring: "binary"},
+	}}
+	scores, missing, err := judge.Score(context.Background(), scenario, []RunResult{{Response: "files: a.go b.go"}})
+	if err != nil {
+		t.Fatalf("Score() error: %v", err)
+	}
+	if s.calls != 1 {
+		t.Errorf("judge called %d times, want 1 (snapped name must not trigger a coverage retry)", s.calls)
+	}
+	if len(scores) != 1 || scores[0].Criterion != "proportional" {
+		t.Fatalf("scores = %+v, want one score with criterion %q", scores, "proportional")
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none (the glued name IS the criterion)", missing)
+	}
+	if w := WeightedScore(scores, scenario.Rubric); w != 1.0 {
+		t.Errorf("WeightedScore = %v, want 1.0 (score must count under its canonical name)", w)
+	}
+}
+
 func TestMissingCriteria(t *testing.T) {
 	rubric := []RubricCriterion{
 		{Criterion: "a"}, {Criterion: "b"}, {Criterion: "c"},

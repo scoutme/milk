@@ -219,6 +219,15 @@ func (j *Judge) scoreTurn(ctx context.Context, description, prompt, response str
 			messages = append(messages, chatMessage{Role: "assistant", Content: content})
 			continue
 		}
+		// Canonicalize BEFORE the coverage check: judges routinely echo the
+		// rubric line verbatim as the criterion name (observed in the
+		// routing-reps study: "proportional (binary, weight 2): <full
+		// description>"). An exact match reads that as a missing criterion —
+		// burning correction retries the judge keeps failing (it re-echoes
+		// the same line) — while WeightedScore/findCriterion silently drop
+		// the returned score as unknown, excluding its weight from the
+		// average exactly like the coverage gap this check exists to catch.
+		parsed = snapScores(parsed, rubric)
 		scores = parsed
 		parseErr = nil
 		missing = missingCriteria(parsed, rubric)
@@ -504,6 +513,56 @@ func findCriterion(name string, rubric []RubricCriterion) *RubricCriterion {
 		}
 	}
 	return nil
+}
+
+// snapCriterion maps a judge-echoed criterion name back to the canonical
+// rubric criterion it names. Judges often echo the rubric line verbatim —
+// "proportional (binary, weight 2): <full description>" instead of
+// "proportional" — which breaks every exact-match consumer downstream
+// (missingCriteria reports a phantom gap, WeightedScore skips the score as
+// unknown, findCriterion skips the clamp). Matching: exact (case-insensitive)
+// first, then a rubric-name prefix ending at a word boundary (space, tab,
+// "(", ":", ";", em dash), longest rubric name winning. "-" is not a
+// boundary, so "design" never claims "design-quality". Names that match no
+// rubric criterion are returned trimmed but otherwise unchanged (the judge's
+// own extra criteria stay extra).
+func snapCriterion(name string, rubric []RubricCriterion) string {
+	trimmed := strings.TrimSpace(name)
+	lower := strings.ToLower(trimmed)
+	for i := range rubric {
+		if strings.ToLower(rubric[i].Criterion) == lower {
+			return rubric[i].Criterion
+		}
+	}
+	best := ""
+	for i := range rubric {
+		c := rubric[i].Criterion
+		if len(trimmed) <= len(c) || !strings.HasPrefix(lower, strings.ToLower(c)) {
+			continue
+		}
+		rest := trimmed[len(c):]
+		switch {
+		case strings.HasPrefix(rest, " "), strings.HasPrefix(rest, "\t"),
+			strings.HasPrefix(rest, "("), strings.HasPrefix(rest, ":"),
+			strings.HasPrefix(rest, ";"), strings.HasPrefix(rest, "—"):
+			if len(c) > len(best) {
+				best = c
+			}
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return trimmed
+}
+
+// snapScores canonicalizes every score's criterion name in place (see
+// snapCriterion) and returns the slice.
+func snapScores(scores []JudgeScore, rubric []RubricCriterion) []JudgeScore {
+	for i := range scores {
+		scores[i].Criterion = snapCriterion(scores[i].Criterion, rubric)
+	}
+	return scores
 }
 
 // missingCriteria returns the rubric criteria (in rubric order, original
