@@ -4,7 +4,7 @@ Date: 2026-05-24
 
 ## Status
 
-Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md) and [ADR-0020](0020-memory-system-refinements.md) on consolidation constants
+Accepted — partially supersedes [ADR-0016](0016-memory-system-percept-store.md) and [ADR-0020](0020-memory-system-refinements.md) on consolidation constants; its decay/recall/promotion constants are superseded by [ADR-0090](0090-memory-consolidation-v3.md)
 
 ## Context
 

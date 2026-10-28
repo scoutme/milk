@@ -919,7 +919,7 @@ func memoryDir() (string, error) {
 }
 
 // memParams maps the config "memory" block to the memory package's
-// weight-model Params (ADR-0053). Zero fields fall back to the built-in
+// weight-model Params (ADR-0090). Zero fields fall back to the built-in
 // defaults inside the memory package (Params.normalized).
 func memParams(cfg config.Config) memory.Params {
 	m := cfg.Memory
@@ -927,8 +927,8 @@ func memParams(cfg config.Config) memory.Params {
 		return memory.Params{}
 	}
 	return memory.Params{
-		DecayPerSession:        m.DecayPerSession,
-		GlobalDecayPerSession:  m.GlobalDecayPerSession,
+		SessionHalfLifeDays:    m.SessionHalfLifeDays,
+		GlobalHalfLifeDays:     m.GlobalHalfLifeDays,
 		ReconfirmBoost:         m.ReconfirmBoost,
 		ReconfirmCap:           m.ReconfirmCap,
 		PromoteThreshold:       m.PromoteThreshold,
@@ -1873,7 +1873,8 @@ func perceptsForAgent(cfg config.Config, mem *memory.Store, prompt string, forEs
 	if mem == nil {
 		return nil
 	}
-	// List returns percepts sorted by weight descending — required for LimitInjection.
+	// List returns percepts sorted by weight descending; the injection
+	// budget drops by rank score, so re-sort before LimitInjection.
 	all := mem.List(memory.ListOpts{})
 	var candidates []memory.Percept
 	for _, p := range all {
@@ -1900,6 +1901,7 @@ func perceptsForAgent(cfg config.Config, mem *memory.Store, prompt string, forEs
 		candidates = memory.FilterByRelevance(candidates, prompt)
 	}
 
+	mem.SortByRank(candidates)
 	candidates = memory.LimitInjection(candidates, cfg.AgentPerceptInjectMaxCount(ac), cfg.AgentPerceptInjectMaxByteCount(ac))
 
 	out := make([]string, len(candidates))

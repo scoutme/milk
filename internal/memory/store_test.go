@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T, withSession bool) *Store {
@@ -17,7 +18,24 @@ func newTestStore(t *testing.T, withSession bool) *Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	freezeClock(s)
 	return s
+}
+
+// freezeClock pins the store clock to the current instant so Δt between a
+// Record and a Consolidate is exactly zero unless the test moves time with
+// advanceClock (running-time decay is otherwise wall-time sensitive).
+func freezeClock(s *Store) {
+	now := time.Now()
+	s.clock = func() time.Time { return now }
+	s.lastTick = now
+}
+
+// advanceClock moves the store's frozen clock forward by d, accruing d of
+// milk running time since the previous pass.
+func advanceClock(s *Store, d time.Duration) {
+	now := s.now().Add(d)
+	s.clock = func() time.Time { return now }
 }
 
 func TestRecord_GlobalWhenNoSession(t *testing.T) {

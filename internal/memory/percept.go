@@ -55,6 +55,11 @@ type Percept struct {
 	// 2-day ones. Only global Percepts accrue it; it drives archiving of stale
 	// global Percepts (see archive.go).
 	IdleSeconds float64 `json:"idle_seconds,omitempty"`
+	// Evidence counts corroboration events (near-duplicate reinforcement and
+	// positive-edge boosts), awarded at most once per Store lifetime so
+	// Evidence >= 2 means the fact held up in at least two distinct runs
+	// (ADR-0090). Drives the promotion gate and the rank score.
+	Evidence int `json:"evidence,omitempty"`
 }
 
 // Engram groups Percepts that share a subject. CompositeW is the mean weight

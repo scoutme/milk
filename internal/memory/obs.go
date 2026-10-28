@@ -54,7 +54,7 @@ func logRecall(ctx context.Context, query string, resultsN int, sessionID string
 }
 
 // logConsolidation emits an INFO log for a consolidation run.
-func logConsolidation(ctx context.Context, sessionID string, before, decayed, pruned, promoted, globalTotal int) {
+func logConsolidation(ctx context.Context, sessionID string, before, decayed, pruned, promoted, deferred, globalTotal int) {
 	logger := global.Logger(scope)
 	var r log.Record
 	r.SetSeverity(log.SeverityInfo)
@@ -66,6 +66,7 @@ func logConsolidation(ctx context.Context, sessionID string, before, decayed, pr
 		log.Int("decayed", decayed),
 		log.Int("pruned", pruned),
 		log.Int("promoted", promoted),
+		log.Int("promotion_deferred", deferred),
 		log.Int("global_total", globalTotal),
 	)
 	logger.Emit(ctx, r)
@@ -86,10 +87,11 @@ func metricsRecall(ctx context.Context) {
 }
 
 // metricsConsolidation records consolidation counters and the global size gauge.
-func metricsConsolidation(ctx context.Context, decayed, pruned, promoted, globalTotal int) {
+func metricsConsolidation(ctx context.Context, decayed, pruned, promoted, deferred, globalTotal int) {
 	obs.Add(ctx, meterScope, "milk.memory.consolidation.decayed", int64(decayed))
 	obs.Add(ctx, meterScope, "milk.memory.consolidation.pruned", int64(pruned))
 	obs.Add(ctx, meterScope, "milk.memory.consolidation.promoted", int64(promoted))
+	obs.Add(ctx, meterScope, "milk.memory.consolidation.promotion_deferred", int64(deferred))
 	obs.SetGauge(ctx, meterScope, "milk.memory.global_size", int64(globalTotal))
 }
 
@@ -125,13 +127,14 @@ func traceRecall(ctx context.Context, query string) (context.Context, func(int, 
 }
 
 // traceConsolidation returns a span for the NREM consolidation run.
-func traceConsolidation(ctx context.Context) (context.Context, func(decayed, pruned, promoted int, err error)) {
+func traceConsolidation(ctx context.Context) (context.Context, func(decayed, pruned, promoted, deferred int, err error)) {
 	ctx, span := obs.StartSpan(ctx, "milk.memory.consolidation")
-	return ctx, func(decayed, pruned, promoted int, err error) {
+	return ctx, func(decayed, pruned, promoted, deferred int, err error) {
 		span.SetAttributes(
 			attribute.Int("decayed", decayed),
 			attribute.Int("pruned", pruned),
 			attribute.Int("promoted", promoted),
+			attribute.Int("promotion_deferred", deferred),
 		)
 		obs.EndSpan(span, err)
 	}

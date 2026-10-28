@@ -6,7 +6,7 @@ Running milk day to day: memory, observability, loop detection, task tracking, c
 
 ## Memory
 
-milk keeps a **Percept store** — small remembered facts that survive across sessions, separate from conversation history. Percepts are **reinforced** when re-stated (a repeated fact gains weight), **decay** when not (session end runs NREM consolidation: decay → edges → prune → promote), and graduate to the global store when their weight crosses the promotion threshold. The full weight model is below ([Memory weight model](#memory-weight-model)) and in [ADR-0053](../adr/0053-memory-weight-model.md).
+milk keeps a **Percept store** — small remembered facts that survive across sessions, separate from conversation history. Percepts are **reinforced** when re-stated (a repeated fact gains weight and evidence), **decay** with milk running time when not (NREM consolidation runs after every primary-agent turn and at exit: decay → edges → prune → archive → promote), and graduate to the global store when strong *and* corroborated. The full weight model is below ([Memory weight model](#memory-weight-model)) and in [ADR-0090](../adr/0090-memory-consolidation-v3.md).
 
 ### Commands
 
@@ -38,13 +38,14 @@ Agents backed by an inference server (HTTP or Bedrock) get four memory tools wit
 
 ### Memory weight model
 
-Every Percept carries a confidence weight `w` in `[0,1]`. Five forces move it (ADR-0053). "Consolidation" below runs after every turn handled by the primary agent, when milk exits, and after a single-prompt run — so the per-consolidation decay amounts tick per turn, not once per session:
+Every Percept carries a confidence weight `w` in `[0,1]` and an `evidence` count of corroborations (ADR-0090). Six forces move them. "Consolidation" below runs after every turn handled by the primary agent, when milk exits, and after a single-prompt run — and it counts *milk running time* (summed over sessions, like the staleness clock), never turns or sessions, so a chatty session forgets no faster than a quiet one:
 
 1. **Birth** — `user` facts start at 0.9, inference (`primary`/`escalation`) at 0.7, system hints at 0.4, `core` (`/learn`) at 1.0.
-2. **Reinforcement (re-confirmation)** — re-stating a near-duplicate fact (Jaccard token overlap ≥ 0.60) strengthens the existing percept instead of inserting a copy: `w += 0.05`, capped at 0.90, `updated_at` touched (which also restores the recency bonus). The cap is `promote_threshold + decay_per_session` on purpose: a fully re-confirmed inference percept survives the pre-promotion decay and graduates at the next consolidation — repeated confirmation is a real promotion path. Weights never decrease through reinforcement.
-3. **NREM consolidation** (session end) — session percepts decay −0.10, typed edges fire (below), percepts at `w ≤ 0.20` are pruned, and `w ≥ 0.80` percepts are promoted to the global store (promotion happens *after* the global pass, so fresh promotions aren't decayed twice).
-4. **Global decay and archiving** — promoted (non-core) global percepts get a gentle −0.02 per consolidation, floored at 0.20: old facts sink in rank. Decay alone never removes them; **staleness** does (below). `core` percepts never decay and are never archived.
-5. **Recency (recall ordering only)** — `get_memory` orders by token-hit count, then `w + 0.10 × 0.5^(age/30d)`: a recently updated fact wins ties but a more relevant old fact always ranks first, and `min_confidence` gates raw `w` — age never hides a fact.
+2. **Reinforcement (re-confirmation)** — re-stating a near-duplicate fact (Jaccard token overlap ≥ 0.60) strengthens the existing percept instead of inserting a copy: `w += 0.05`, capped at 0.90, `updated_at` touched. Weights never decrease through reinforcement, and no single sitting can mint a trusted fact: corroboration counts at most once per run (`evidence += 1`).
+3. **Running-time decay** — non-core session percepts decay with a 3-running-day half-life (`w *= 2^(−Δt/3d)`, pruned at `w ≤ 0.20`); global ones sink toward the prune floor with a 60-running-day half-life. Δt runs from the last re-confirmation, so a fact restated yesterday decays like a fact restated yesterday, not like its birthday. `core` never decays.
+4. **Typed edges** (below) — `extends`/`updates`/`derives` corroborate the target (+0.05, and +1 evidence at most once per run), `contradicts` marks a conflict (both endpoints −0.10).
+5. **Promotion — strength plus durability.** `core` and `user` facts graduate to the global store at `w ≥ 0.80` (explicit assertions take the fast path). Everything else needs `w ≥ 0.80` **and** `evidence ≥ 2` — corroborated in at least two distinct runs. A live `contradicts` edge blocks both endpoints until the conflict is resolved (`/forget` of one side). Held-back candidates are counted in the `promotion_deferred` metric.
+6. **Rank score (ordering only)** — recall, eviction and the injection budget order by `rank = w · (1 + r) · (1 + e)` with `r = 0.10 × 0.5^(age/30d)` (since `updated_at`) and `e = 0.05 · min(evidence, 4)`. Every *gate* (`min_confidence`, promotion, pruning) reads raw `w` — age or corroboration never hide or mint a fact.
 
 **Stale global percepts are archived** (ADR-0056). A global percept is stale when it has decayed to `prune_threshold` *and* has gone unused for `global_archive_after_days` (default 14) of milk running time. The clock counts the time milk is running, summed over sessions — one 20-day session counts like ten 2-day ones — and is independent of how often consolidation runs. *Used* means re-stated, returned by `get_memory`, or injected into a prompt; any use restarts the clock. Stale percepts are **moved**, not deleted, to `~/.milk/memory/global-archive.jsonl` (one JSON line each, with when and why, plus the edges touching them). Percepts that existed before this feature start their clock at zero, so nothing is archived right after an upgrade. Set `global_archive_after_days` negative to disable.
 
@@ -54,7 +55,7 @@ Every Percept carries a confidence weight `w` in `[0,1]`. Five forces move it (A
 
 **Edges** (wired via `record_memory`'s `relation` + `related_to`): `extends`/`updates`/`derives` corroborate the target (+0.05 at consolidation), `contradicts` marks a conflict (both endpoints −0.10). The producer agent decides semantics — milk never fabricates relations. Edges are stored with the "from" percept's store file and apply to endpoints in that same file.
 
-All knobs are prepopulated in the generated config's `memory` block (`decay_per_session`, `global_decay_per_session`, `reconfirm_boost`, `reconfirm_cap`, `promote_threshold`, `prune_threshold`, `recency_boost`, `recency_half_life_days`, `global_archive_after_days`); zero/missing fields fall back to the defaults above. OTel: `milk.memory.consolidation.*` counters (including `global_decayed`) and `milk.memory.percept_events{event=reinforce}`, and `milk.memory.global_archived`.
+All knobs are prepopulated in the generated config's `memory` block (`session_half_life_days`, `global_half_life_days`, `reconfirm_boost`, `reconfirm_cap`, `promote_threshold`, `prune_threshold`, `recency_boost`, `recency_half_life_days`, `global_archive_after_days`); zero/missing fields fall back to the defaults above. OTel: `milk.memory.consolidation.*` counters (including `global_decayed` and `promotion_deferred`) and `milk.memory.percept_events{event=reinforce}`, and `milk.memory.global_archived`.
 
 ### Tuning
 

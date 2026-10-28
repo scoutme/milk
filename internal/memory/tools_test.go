@@ -13,6 +13,7 @@ func newToolsStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	freezeClock(s)
 	return s
 }
 

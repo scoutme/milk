@@ -21,7 +21,8 @@ func FilterByRelevance(percepts []Percept, prompt string) []Percept {
 }
 
 // LimitInjection trims percepts to fit within maxCount and maxBytes.
-// percepts must already be sorted by weight descending (highest first).
+// percepts must already be sorted by rank score descending (highest first),
+// so the budget drops the lowest-ranked — see Store.SortByRank.
 // A limit of 0 means no restriction for that dimension.
 func LimitInjection(percepts []Percept, maxCount, maxBytes int) []Percept {
 	var out []Percept
