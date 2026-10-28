@@ -10,6 +10,7 @@ import (
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/transport/streamjson"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 // outputFormat is the validated value of --output-format. See
@@ -274,6 +275,66 @@ func timingDelta(before, after map[string]session.TokenUsage) (ttftSec, decodeSe
 		reqs += max(dReqs, 0)
 	}
 	return ttftSec, decodeSec, reqs
+}
+
+// responseCapture collects a one-shot turn's response text for the
+// machine-readable formats (text mode keeps the raw stdout passthrough
+// instead). onSegment receives each contiguous chunk as it streams — so a
+// turn killed by the --turn-timeout budget keeps its partial text — and
+// onResponse receives the final full text on success, replacing the
+// accumulated chunks.
+type responseCapture struct {
+	text string
+}
+
+func (c *responseCapture) onSegment(chunk string) { c.text += chunk }
+
+func (c *responseCapture) onResponse(final string) { c.text = final }
+
+// oneShotResultText is the terminal result line's text: the captured
+// response, falling back to the turn error when the turn failed before any
+// text streamed (a budget kill with zero output still needs a diagnosable
+// result line — the design's failed-turn example puts the error message
+// there, and --output-format json has no separate error banner line).
+func oneShotResultText(captured string, turnErr error) string {
+	if captured == "" && turnErr != nil {
+		return turnErr.Error()
+	}
+	return captured
+}
+
+// buildErrorEvent builds the system/error banner emitted before the terminal
+// result when a one-shot turn fails (design §6.3: is_error, message,
+// recoverable — "error banner (terminal result still emitted)"). recoverable
+// mirrors milk's own retry classification: transient HTTP/2 stream failures
+// may succeed on a retry as-is; a budget expiry or context cancellation will
+// not (workflow.IsRetryableTurnError).
+func buildErrorEvent(sessionID string, turnErr error) *streamjson.Event {
+	isErr := true
+	recoverable := workflow.IsRetryableTurnError(turnErr)
+	ev := &streamjson.Event{
+		Type:        streamjson.TypeSystem,
+		Subtype:     streamjson.SubtypeError,
+		SessionID:   sessionID,
+		IsError:     &isErr,
+		Recoverable: &recoverable,
+	}
+	_ = ev.SetMessageText(turnErr.Error()) // string form of a Go error always marshals
+	return ev
+}
+
+// emitOneShotOutcome writes a finished one-shot turn's terminal sequence for
+// --output-format stream-json: the assistant message whenever any text was
+// captured (including a killed turn's partial stream), the system/error
+// banner when the turn failed, and exactly one result event last.
+func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router.Target, turnErr error, captured string, durationMS, numTurns int64, before, after map[string]session.TokenUsage) {
+	if captured != "" {
+		emit(enc, buildAssistantEvent(sessionID, captured))
+	}
+	if turnErr != nil {
+		emit(enc, buildErrorEvent(sessionID, turnErr))
+	}
+	emit(enc, buildResultEvent(sessionID, target, turnErr, oneShotResultText(captured, turnErr), durationMS, numTurns, before, after))
 }
 
 // buildResultEvent builds the terminal, always-exactly-one result line
