@@ -27,7 +27,7 @@ func TestLoadExperiment_Defaults(t *testing.T) {
 	if exp.Scenarios == "" {
 		t.Error("Scenarios should default, not stay empty")
 	}
-	if exp.Results != filepath.Join("eval", "results", "my-suite") {
+	if exp.Results != filepath.Join(DefaultResultsDir(), "my-suite") {
 		t.Errorf("Results = %q", exp.Results)
 	}
 	if exp.SandboxEnabled() {

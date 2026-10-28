@@ -26,7 +26,12 @@ Thumbs.db
 # aider
 .aider.*
 .aider*
+
+# Local eval artifacts (docs/internal/eval-artifacts.md) — these default to
+# <milk state root>/eval (~/.milk/eval), outside the tree; kept as a safety
+# net for explicit --results paths into the repo
 eval/results/
+eval/experiments/local/
 
 # Website (mkdocs)
 website/site/

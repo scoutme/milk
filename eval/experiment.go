@@ -45,8 +45,10 @@ type Experiment struct {
 	// JudgeAgent names the agent from config.json that scores responses
 	// ("" = the primary agent, same as --judge-agent).
 	JudgeAgent string `yaml:"judge_agent"`
-	// Results is the output directory. Empty = "eval/results/<name>" (or
-	// "eval/results" when the experiment has no name).
+	// Results is the output directory. Empty = <milk state root>/eval/results/
+	// <name> (~/.milk/eval/results/<name>, or .../eval/results when the
+	// experiment has no name) — outside the source tree.
+	// "~/" is expanded.
 	Results string `yaml:"results"`
 	// Repetitions runs every scenario N times against every adapter, each
 	// repetition fully isolated (fresh workdir, fresh sandbox) so nth-run
@@ -130,11 +132,15 @@ func LoadExperiment(path string) (*Experiment, error) {
 		return nil, fmt.Errorf("parsing experiment file %s: %w", path, err)
 	}
 
-	// Scenario and result paths resolve relative to the experiment file's
-	// directory first — an experiment is self-contained wherever milk eval is
-	// invoked from — falling back to the current working directory (the CLI
-	// flag semantics). Defaults match the CLI flags.
+	// Scenario and result paths: "~/" is expanded in both. Relative scenario
+	// paths resolve against the experiment file's directory first — an
+	// experiment is self-contained wherever milk eval is invoked from —
+	// falling back to the current working directory (the CLI flag semantics).
+	// Relative result paths behave like the --results flag (working directory).
+	// The defaults live outside the source tree, under the eval artifact home
+	// (docs/internal/eval-artifacts.md).
 	dir := filepath.Dir(path)
+	exp.Scenarios = expandHome(exp.Scenarios)
 	if exp.Scenarios == "" {
 		exp.Scenarios = "eval/scenarios"
 	}
@@ -143,11 +149,12 @@ func LoadExperiment(path string) (*Experiment, error) {
 			exp.Scenarios = filepath.Join(dir, exp.Scenarios)
 		}
 	}
+	exp.Results = expandHome(exp.Results)
 	if exp.Results == "" {
 		if exp.Name != "" {
-			exp.Results = filepath.Join("eval", "results", exp.Name)
+			exp.Results = filepath.Join(DefaultResultsDir(), exp.Name)
 		} else {
-			exp.Results = "eval/results"
+			exp.Results = DefaultResultsDir()
 		}
 	}
 	if exp.Repetitions == 0 {
