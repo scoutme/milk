@@ -56,12 +56,13 @@ var (
 	flagList         bool
 	flagListAll      bool
 	flagDrop         bool
-	flagAgent        string // --agent: override primary agent name
-	flagEscalation   string // --escalation-agent: override escalation agent name
-	flagLocal        bool   // --local: write to .milk/config.json (project-local)
-	flagGlobal       bool   // --global: write to ~/.milk/config.json (global)
-	flagOutputFormat string // --output-format: text|json|stream-json for one-shot prompts
-	flagConfigRoot   string // --config-root: alternate milk state root instead of ~/.milk
+	flagAgent        string        // --agent: override primary agent name
+	flagEscalation   string        // --escalation-agent: override escalation agent name
+	flagLocal        bool          // --local: write to .milk/config.json (project-local)
+	flagGlobal       bool          // --global: write to ~/.milk/config.json (global)
+	flagOutputFormat string        // --output-format: text|json|stream-json for one-shot prompts
+	flagTurnTimeout  time.Duration // --turn-timeout: hard wall-clock budget for one-shot turns (<=0 disables)
+	flagConfigRoot   string        // --config-root: alternate milk state root instead of ~/.milk
 )
 
 // Set via -ldflags at build time.
@@ -118,6 +119,7 @@ func init() {
 	rootCmd.Flags().StringVar(&flagAgent, "agent", "", "Override primary agent (by name)")
 	rootCmd.Flags().StringVar(&flagEscalation, "escalation-agent", "", "Override escalation agent (by name)")
 	rootCmd.Flags().StringVar(&flagOutputFormat, "output-format", "text", "Output format for one-shot prompts: text|json|stream-json")
+	rootCmd.Flags().DurationVar(&flagTurnTimeout, "turn-timeout", 20*time.Minute, "Hard wall-clock budget for one-shot prompt turns (0 disables). On expiry the turn fails with a named 'turn budget exceeded' error plus a system/error event; TUI/session turns are bounded by limits.turn_deadline_secs instead")
 
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(otelCmd)
@@ -256,8 +258,17 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s warning: memory store unavailable: %v\n", milkTag(), err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	// One-shot runs get a hard wall-clock budget: --turn-timeout, default 20m,
+	// 0 disables (was a hardcoded context.WithTimeout(10 * time.Minute), which
+	// killed long turns with an unexplained bare "Error: context deadline
+	// exceeded" — found by milk eval, where the failing scenario's timeout had
+	// neither a knob nor a name).
+	ctx := context.Background()
+	if flagTurnTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, flagTurnTimeout)
+		defer cancel()
+	}
 
 	primaryRunner, localAgent, err := buildPrimaryRunner(ctx, cfg, cwd, sess)
 	if err != nil {
@@ -290,7 +301,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	decision, err := rtr.Route(ctx, sess, prompt, flagEscalate, flagPrimary)
 	if err != nil {
-		return fmt.Errorf("routing: %w", err)
+		return fmt.Errorf("routing: %w", oneShotBudgetErr(err, flagTurnTimeout))
 	}
 
 	target := resolveTarget(decision.Target, localAvail, escalationAvail)
@@ -311,15 +322,12 @@ func run(cmd *cobra.Command, args []string) error {
 	// docs/internal/design/machine-readable-output-design.md for scope.
 	out := io.Writer(os.Stdout)
 	var enc *streamjson.Encoder
-	var onResponse func(string)
-	var lastText string
-	var gotResponse bool
+	var onResponse, onSegment func(string)
+	var capture responseCapture
 	if fmtVal != formatText {
 		out = io.Discard
-		onResponse = func(text string) {
-			lastText = text
-			gotResponse = true
-		}
+		onResponse = capture.onResponse
+		onSegment = capture.onSegment
 	}
 	if fmtVal == formatStreamJSON {
 		enc = streamjson.NewEncoder(os.Stdout)
@@ -338,15 +346,16 @@ func run(cmd *cobra.Command, args []string) error {
 				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
 			}()
 		}
-		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, out, nil, onResponse, nil, nil)
+		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, out, nil, onResponse, onSegment, nil)
 	case router.TargetEscalation:
 		// onWorkflowStart is nil: single-prompt CLI mode has no bubbletea
 		// model to launch a workflow against — see runPrimaryWithSession's
 		// doc comment on the same parameter.
-		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, out, nil, onResponse, nil, nil)
+		turnErr = runEscalation(ctx, cfg, sess, escalationRunner, "", mem, prompt, out, nil, onResponse, onSegment, nil)
 	default:
 		return fmt.Errorf("unknown routing target: %s", target)
 	}
+	turnErr = oneShotBudgetErr(turnErr, flagTurnTimeout)
 	durationMS := time.Since(turnStart).Milliseconds()
 
 	// Stream-json tool activity: the turn's recorded tool trail is expanded
@@ -361,21 +370,12 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, ev := range buildToolTrailEvents(sess.ID, trail) {
 			emit(enc, ev)
 		}
-		if gotResponse {
-			emit(enc, buildAssistantEvent(sess.ID, lastText))
-		}
-	}
-
-	if fmtVal != formatText {
-		resEv := buildResultEvent(sess.ID, target, turnErr, lastText, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
-		switch fmtVal {
-		case formatStreamJSON:
-			emit(enc, resEv)
-		case formatJSON:
-			resEv.TS = nowTS()
-			b, _ := json.MarshalIndent(resEv, "", "  ") //nolint:errcheck // Event always marshals
-			os.Stdout.Write(append(b, '\n'))            //nolint:errcheck // stdout write
-		}
+		emitOneShotOutcome(enc, sess.ID, target, turnErr, capture.text, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
+	} else if fmtVal == formatJSON {
+		resEv := buildResultEvent(sess.ID, target, turnErr, oneShotResultText(capture.text, turnErr), durationMS, 1, before, sess.TokensSnapshot())
+		resEv.TS = nowTS()
+		b, _ := json.MarshalIndent(resEv, "", "  ") //nolint:errcheck // Event always marshals
+		os.Stdout.Write(append(b, '\n'))            //nolint:errcheck // stdout write
 	}
 
 	obs.Inc(ctx, milkScope, "milk.turns.total",
@@ -392,6 +392,18 @@ func run(cmd *cobra.Command, args []string) error {
 		)
 	}
 	return turnErr
+}
+
+// oneShotBudgetErr names an expired one-shot turn budget. Without this the
+// budget's context deadline surfaced as a bare, unexplained
+// "Error: context deadline exceeded"; the wrapper keeps errors.Is intact and
+// points at the knob (--turn-timeout, 0 disables). budget <= 0 means no
+// deadline exists, so nothing can be expired.
+func oneShotBudgetErr(err error, budget time.Duration) error {
+	if err == nil || budget <= 0 || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("turn budget of %s exceeded (--turn-timeout, 0 disables): %w", budget, err)
 }
 
 // buildPrimaryRunner constructs the TurnRunner for the primary agent role.

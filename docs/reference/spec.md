@@ -304,6 +304,7 @@ Not available over ACP (the client cannot survive its server process being repla
 | `--list --all` | List all sessions across all directories |
 | `--drop [--session <ref>]` | Delete the referenced session, or — without a ref — the cwd's current session |
 | `--output-format text\|json\|stream-json` | Single-prompt mode only (ignored by the REPL); `text` (default) is unchanged, `json`/`stream-json` emit machine-readable output — see [docs/guides/tooling.md](../guides/tooling.md#machine-readable-output) |
+| `--turn-timeout <duration>` | Single-prompt mode only: hard wall-clock budget for the run (default `20m`, `0` disables). On expiry the turn fails with a named `turn budget of … exceeded (--turn-timeout, 0 disables)` error on stderr (exit 1), `stream-json` adds a `system/error` banner before the terminal `result`, and any text streamed before the kill is kept as partial output. TUI/session turns are bounded by `limits.turn_deadline_secs` instead |
 
 **Resumed sessions in the TUI.** When the TUI starts on a stored session (the default for the cwd, or `--session`/`--continue`), the transcript is pre-populated with its prior user/assistant turns instead of the welcome screen, under a `[milk] resumed session …` banner. The window mirrors ACP's history replay: the first 10 and last 200 turns, each message capped at 8 KB, with a gap marker pointing at `/export` for the rest; tool calls and reasoning are not replayed. `--new` (and a session with no history) starts empty; `/new`, `/clear` and `/drop` keep the visible transcript as is.
 

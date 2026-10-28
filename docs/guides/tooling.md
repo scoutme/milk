@@ -408,11 +408,22 @@ milk [flags] "prompt"                              # --output-format text (defau
   args/results — the eval harness consumes them for tool-call counts and
   lists. `--output-format json` is the `result` event alone, as a single
   `json.MarshalIndent`-ed document.
+- **Turn budget & failed turns** — one-shot runs are bounded by a hard
+  wall-clock budget: `--turn-timeout` (default `20m`, `0` disables), covering
+  routing plus the turn of that invocation. When it expires the run fails
+  with a named error on stderr and exit 1 — `turn budget of 20m0s exceeded
+  (--turn-timeout, 0 disables): context deadline exceeded`, never a bare
+  `Error: context deadline exceeded` — `stream-json` emits a `system/error`
+  banner (`is_error`, `message`, `recoverable`) before the terminal
+  `result`, and the `result` keeps whatever text streamed before the kill
+  (falling back to the error message when nothing did, so `json` consumers
+  still get a diagnosable document). A turn that fails for any other reason
+  gets the same banner and partial-text treatment.
 - Nothing else in the full §6 event catalog is emitted in batch mode: no
-  `stream_event` partial deltas, no `system` subtypes beyond `init` (no
-  `agent_switch`, `route`,
+  `stream_event` partial deltas, no `system` subtypes beyond `init` — plus
+  `error` on a failed turn (no `agent_switch`, `route`,
   `notification`, `warning`, `state`, `task_*`, `memory`, `commands`,
-  `config_option`, `permission_denied`, `error`). `system/init` itself omits
+  `config_option`, `permission_denied`). `system/init` itself omits
   `tools` and `mcp_servers` — nothing at the CLI boundary enumerates them
   cheaply yet.
 - `--permission-mode`/`--allow-tool`/`--no-partial-messages` flags described
