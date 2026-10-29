@@ -105,9 +105,10 @@ type Edge struct {
 }
 ```
 
-Edges are stored as a flat list on the Store. Weight propagation on consolidation:
-- `extends`, `updates`, `derives` → increment target `W` by `+0.05` (capped at 1.0)
-- `contradicts` → decrement both ends by `−0.10`
+Edges are stored as a flat list on the Store. Weight propagation on consolidation (ADR-0091 — one event per percept per run, each applied as its marginal derived delta):
+- `extends`, `derives` → corroborate the target (Evidence +1)
+- `updates` → corroborate the source (the newer claim) and supersede the target (faster forgetting, promotion blocked)
+- `contradicts` → one conflict event on both ends (`−0.10` each, saturating at `−0.30`)
 
 ### Store file format
 

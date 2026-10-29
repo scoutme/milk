@@ -941,9 +941,9 @@ func memParams(cfg config.Config) memory.Params {
 	return memory.Params{
 		SessionHalfLifeDays:    m.SessionHalfLifeDays,
 		GlobalHalfLifeDays:     m.GlobalHalfLifeDays,
-		ReconfirmBoost:         m.ReconfirmBoost,
 		ReconfirmCap:           m.ReconfirmCap,
 		PromoteThreshold:       m.PromoteThreshold,
+		PromoteStableDays:      m.PromoteStableDays,
 		PruneThreshold:         m.PruneThreshold,
 		RecencyBoost:           m.RecencyBoost,
 		RecencyHalfLifeDays:    m.RecencyHalfLifeDays,

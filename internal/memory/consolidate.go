@@ -6,54 +6,78 @@ import (
 	"time"
 )
 
-// Weight-model constants and their defaults (ADR-0090 "memory consolidation
-// v3"; supersedes the decay, recall-ordering and promotion rules of ADR-0025
-// and ADR-0053 — reinforcement, typed edges and staleness-archiving stand).
+// Weight-model constants and their defaults (ADR-0091 "memory consolidation
+// v4"; supersedes the weighing and reinforcement rules of ADR-0090, whose
+// running-time decay, evidence gating and rank ordering stand). Reinforcement,
+// typed edges and staleness-archiving stand.
 //
 // The NREM consolidation pipeline runs after every primary-agent turn and at
 // exit. Its rules never count passes or sessions: every interval is Δt, the
 // milk running time since the previous pass — the same "summed over sessions"
-// clock idle_seconds and global_archive_after_days use (ADR-0056):
+// clock idle_seconds and global_archive_after_days use (ADR-0056).
+//
+// Weighing — W is derived from persisted primitives, then decayed in time:
+//
+//	W = derivedW(p) = clamp(Prior + corrobBoost(Evidence)
+//	                         − contraPenalty(Contradictions)
+//	                         − supersedPenalty·Superseded)
+//
+// Every event (reinforcement, positive edge, contradicts edge) shifts W by
+// exactly its marginal derivedW(after) − derivedW(before) — and re-affirmation
+// (reinforcement) refreshes W to derivedW outright — so boosts telescope and
+// consolidation is idempotent: re-running a pass over the same events changes
+// nothing. One sitting can never mint a trusted fact: events are awarded at
+// most once per Store lifetime, and the corroboration term saturates, so the
+// tenth echo in one run counts as little as the second.
+//
+// The pass:
 //
 //  1. Decay — non-core W falls exponentially with a half-life in running
 //     time: session W multiplies by 2^(−Δt/session_half_life_days); global W
 //     decays toward PruneThreshold with global_half_life_days. Core is exempt.
-//  2. Edge propagation — the target of extends/updates/derives gains
-//     EdgeBoost and one Evidence point (at most once per Store lifetime);
-//     both endpoints of contradicts lose EdgeNegativeDelta.
-//  3. Prune — session Percepts with W <= PruneThreshold are removed.
-//  4. Archive — stale global Percepts move to the archive (ADR-0056, rules
+//     The half-life grows with UseCount (a used fact forgets slower, at most
+//     2×) and halves while the Percept is superseded.
+//  2. Edge events — the corroborated endpoint of a positive edge (target of
+//     extends/derives, source of updates) gains one Evidence event; each
+//     endpoint of contradicts gains one Contradictions event; live updates
+//     edges mark their target superseded. Each event applies its marginal W
+//     delta exactly once per Store lifetime.
+//  3. Durability tracking — AboveThresholdSince is set at the first pass that
+//     observes derivedW >= PromoteThreshold and cleared if it dips: promotion
+//     wants an unbroken run above the gate, not a boost burst. Forgetting
+//     (decay of W) does not clear it — forgetting is not falsifying.
+//  4. Prune — session Percepts with W <= PruneThreshold are removed.
+//  5. Archive — stale global Percepts move to the archive (ADR-0056, rules
 //     unchanged: weight decayed to the prune floor and unused for
 //     GlobalArchiveAfterDays of running time).
-//  5. Promote — core and user Percepts with W >= PromoteThreshold graduate on
-//     the fast path (explicit assertions); everything else also needs
-//     Evidence >= evidencePromote, i.e. corroborated in at least two distinct
-//     Store lifetimes. A live contradicts edge blocks both endpoints until
-//     the conflict is resolved. Promotion is applied after the global pass so
-//     fresh promotions are not decayed again in this run.
+//  6. Promote — core and user Percepts with derivedW >= PromoteThreshold
+//     graduate on the fast path (explicit assertions); everything else also
+//     needs Evidence >= evidencePromote (corroborated in at least two distinct
+//     Store lifetimes) and durability: derivedW at/above the threshold for
+//     PromoteStableDays of running time. A live contradicts edge or an
+//     updates supersession defers until resolved. Promotion is applied after
+//     the global pass so fresh promotions are not decayed again in this run.
 //
 // The global store is never emptied by decay alone — only staleness-archiving
 // or the size cap removes a promoted fact.
 //
-// Reinforcement (ADR-0053): re-stating a near-duplicate fact boosts the
-// existing Percept by ReconfirmBoost, capped at ReconfirmCap, touches
-// UpdatedAt, and is one corroboration event (Evidence +1, once per Store
-// lifetime). Weights never decrease through reinforcement, and a single
-// sitting can never mint a trusted fact: one run yields at most Evidence 1.
+// Reinforcement (ADR-0053): re-stating a near-duplicate fact re-affirms the
+// existing Percept — one corroboration event (Evidence +1, once per Store
+// lifetime), UseCount +1, UpdatedAt touched, W refreshed to derivedW.
+// Repetition within the same run adds nothing: echo is not corroboration.
 //
 // Ordering (recall, PruneGlobal eviction, the injection budget) uses the
-// derived rank score — see rankScore — which is never stored. Every gate
-// (min_confidence, promote_threshold, prune_threshold) reads raw W, so age or
-// hype can never hide or mint a fact.
+// derived rank score — see rankScore — which is never stored. Visibility and
+// death read raw W (min_confidence, prune_threshold) so age can never hide a
+// fact and weak facts die; promotion reads derivedW (the undecayed strength)
+// because forgetting is not falsifying — and hype can never mint a fact:
+// derivedW is saturated, run-capped and durability-gated.
 const (
 	sessionHalfLifeDays = 3    // running-time half-life of non-core session Percepts
 	globalHalfLifeDays  = 60   // running-time half-life of non-core global Percepts
-	reconfirmBoost      = 0.05 // W gained per reinforcement
-	reconfirmCap        = 0.90 // reinforcement cannot mint perfect confidence
+	reconfirmCap        = 0.90 // non-core W ceiling: corroboration never mints perfect confidence
 	promoteThreshold    = 0.80 // only genuinely high-confidence percepts graduate to global
 	pruneThreshold      = 0.20 // cull weak percepts before they accumulate
-	edgeBoost           = 0.05 // positive edge (extends/updates/derives) boosts the target
-	edgeNegativeDelta   = 0.10 // contradicts penalizes both endpoints
 	recencyBoost        = 0.10 // max rank-score recency factor for a just-updated percept
 	recencyHalfLifeDays = 30   // age at which the recency factor has halved
 	globalArchiveAfter  = 14   // days of milk running time a global percept may sit unused before it is archived
@@ -66,6 +90,17 @@ const (
 	rankEvidenceCap    = 4    // Evidence levels beyond which the rank factor stops growing
 	evidencePromote    = 2    // distinct-run corroborations required off the promotion fast path
 	maxW               = 1.0
+
+	// Derived-weight terms (ADR-0091).
+	promoteStableDays  = 1    // running days derivedW must sit at/above PromoteThreshold before non-fast-path promotion
+	corrobMax          = 0.25 // asymptotic W gain from corroboration (corroboration(2) = 0.125: a twice-corroborated inference fact clears the gate)
+	corrobHalfSat      = 2    // Evidence count at which the corroboration gain is half of corrobMax
+	contraDelta        = 0.10 // W lost per contradiction event
+	contraMax          = 0.30 // contradiction losses saturate here
+	supersedPenalty    = 0.10 // W lost while a live updates edge supersedes the Percept
+	supersedHalfLife   = 0.5  // half-life multiplier while superseded — the newer claim wins by faster forgetting
+	useDecaySlowing    = 0.25 // half-life growth per use
+	useDecaySlowingCap = 4    // max counted uses (half-life grows at most 2×)
 )
 
 // Params holds the tunable weight-model knobs. The zero value falls back to
@@ -81,14 +116,16 @@ type Params struct {
 	// non-core global Percept's weight sinks toward PruneThreshold.
 	// Default 60.
 	GlobalHalfLifeDays float64 `json:"global_half_life_days,omitempty"`
-	// ReconfirmBoost is added to a Percept's W when a near-duplicate fact is
-	// re-stated (reinforcement). Default 0.05.
-	ReconfirmBoost float64 `json:"reconfirm_boost,omitempty"`
-	// ReconfirmCap caps reinforcement-driven W. Default 0.90.
+	// ReconfirmCap caps corroboration-driven W (non-core). Default 0.90.
 	ReconfirmCap float64 `json:"reconfirm_cap,omitempty"`
 	// PromoteThreshold is the W at which session Percepts graduate to the
 	// global store. Default 0.80.
 	PromoteThreshold float64 `json:"promote_threshold,omitempty"`
+	// PromoteStableDays is how long, in milk running time, a non-fast-path
+	// Percept must have sat at/above PromoteThreshold before it graduates —
+	// the durability gate: a boost burst cannot mint a fact. Default 1;
+	// negative disables the gate.
+	PromoteStableDays float64 `json:"promote_stable_days,omitempty"`
 	// PruneThreshold is the W at or below which session Percepts are culled
 	// (and below which global decay stops). Default 0.20.
 	PruneThreshold float64 `json:"prune_threshold,omitempty"`
@@ -110,9 +147,9 @@ func DefaultParams() Params {
 	return Params{
 		SessionHalfLifeDays:    sessionHalfLifeDays,
 		GlobalHalfLifeDays:     globalHalfLifeDays,
-		ReconfirmBoost:         reconfirmBoost,
 		ReconfirmCap:           reconfirmCap,
 		PromoteThreshold:       promoteThreshold,
+		PromoteStableDays:      promoteStableDays,
 		PruneThreshold:         pruneThreshold,
 		RecencyBoost:           recencyBoost,
 		RecencyHalfLifeDays:    recencyHalfLifeDays,
@@ -130,14 +167,14 @@ func (p Params) normalized() Params {
 	if p.GlobalHalfLifeDays <= 0 {
 		p.GlobalHalfLifeDays = d.GlobalHalfLifeDays
 	}
-	if p.ReconfirmBoost <= 0 {
-		p.ReconfirmBoost = d.ReconfirmBoost
-	}
 	if p.ReconfirmCap <= 0 {
 		p.ReconfirmCap = d.ReconfirmCap
 	}
 	if p.PromoteThreshold <= 0 {
 		p.PromoteThreshold = d.PromoteThreshold
+	}
+	if p.PromoteStableDays == 0 {
+		p.PromoteStableDays = d.PromoteStableDays // negative = gate disabled, kept as is
 	}
 	if p.PruneThreshold <= 0 {
 		p.PruneThreshold = d.PruneThreshold
@@ -154,10 +191,10 @@ func (p Params) normalized() Params {
 	return p
 }
 
-// Consolidate runs the NREM pass: running-time decay → edge propagation →
-// prune → staleness-archive → evidence-gated promotion (see the pipeline
-// comment above). Session-scoped Percepts that pass the promotion gate are
-// moved to the global store. Both files are saved.
+// Consolidate runs the NREM pass: running-time decay → edge events →
+// durability tracking → prune → staleness-archive → evidence-gated promotion
+// (see the pipeline comment above). Session-scoped Percepts that pass the
+// promotion gate are moved to the global store. Both files are saved.
 func (s *Store) Consolidate() error {
 	return s.ConsolidateCtx(context.Background())
 }
@@ -173,6 +210,8 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 	// accrueAndArchiveLocked accrues into idle_seconds. A zero lastTick (a
 	// hand-built Store) or a backwards clock counts nothing.
 
+	s.normalizeLocked()
+
 	var before, decayed, pruned, promoted, deferred int
 	var promoteLater []Percept
 
@@ -183,19 +222,23 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 		// 1. Decay — session W multiplies by 2^(−Δt/half-life) (floor 0).
 		decayed = decayPercepts(percepts, now, s.lastTick, p.SessionHalfLifeDays, 0)
 
-		// 2. Edge propagation, then Evidence for positive-edge boosts.
-		percepts = applyEdges(percepts, s.session.Edges)
-		s.awardEdgeEvidence(percepts, s.session.Edges)
+		// 2. Edge events — evidence/conflict/supersession counts and their
+		// marginal W deltas, each applied at most once per Store lifetime.
+		s.applyEdgeEvents(percepts, s.session.Edges)
 
-		// 3. Prune — remove Percepts with W <= PruneThreshold.
+		// 3. Durability tracking — the promotion gate wants an unbroken run
+		// above the threshold, not a boost burst.
+		trackDurability(percepts, now, p.PromoteThreshold)
+
+		// 4. Prune — remove Percepts with W <= PruneThreshold.
 		percepts, pruned = prunePerceptsCount(percepts, p.PruneThreshold)
 
-		// 5 (staged) — the promotion gate. Applied below, after the global
+		// 6 (staged) — the promotion gate. Applied below, after the global
 		// pass, so freshly promoted percepts are not decayed again in this run.
 		contradicted := contradictedIDs(s.session.Edges)
 		remaining := percepts[:0]
 		for _, q := range percepts {
-			if promote, hold := promotionGate(q, contradicted[q.ID], p.PromoteThreshold); promote {
+			if promote, hold := promotionGate(q, contradicted[q.ID], now, p.PromoteThreshold, p.PromoteStableDays); promote {
 				promoted++
 				promoteLater = append(promoteLater, q)
 			} else {
@@ -209,12 +252,11 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 	}
 
 	// Global pass — the same time-based decay, floored at PruneThreshold so
-	// nothing is deleted by decay alone, then edges and their Evidence.
+	// nothing is deleted by decay alone, then edge events.
 	globalDecayed := decayPercepts(s.global.Percepts, now, s.lastTick, p.GlobalHalfLifeDays, p.PruneThreshold)
-	s.global.Percepts = applyEdges(s.global.Percepts, s.global.Edges)
-	s.awardEdgeEvidence(s.global.Percepts, s.global.Edges)
+	s.applyEdgeEvents(s.global.Percepts, s.global.Edges)
 
-	// 4. Staleness archiving (ADR-0056 rules, unchanged) — also accrues the
+	// 5. Staleness archiving (ADR-0056 rules, unchanged) — also accrues the
 	// idle_seconds of globals not used since the previous pass.
 	archived := s.accrueAndArchiveLocked()
 
@@ -248,6 +290,123 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 	return saveErr
 }
 
+// --- derived weight (ADR-0091) ---
+
+// corrobBoost is the saturating W gain for c corroboration events:
+// corrobMax·c/(c + corrobHalfSat). The second corroboration matters far more
+// than the tenth — repetition is not corroboration.
+func corrobBoost(c int) float64 {
+	if c <= 0 {
+		return 0
+	}
+	return corrobMax * float64(c) / float64(c+corrobHalfSat)
+}
+
+// contraPenalty is the W loss for k contradiction events, saturating at
+// contraMax so a persistent conflict can never grind a fact below its prior
+// by penalty alone — pruning decides when a conflicted fact is truly dead.
+func contraPenalty(k int) float64 {
+	if k <= 0 {
+		return 0
+	}
+	p := contraDelta * float64(k)
+	if p > contraMax {
+		p = contraMax
+	}
+	return p
+}
+
+// derivedW is the primitive-derived strength of a Percept (the boost side of
+// W — time decay is layered on top at consolidation, see decayPercepts):
+//
+//	W = clamp(Prior + corrobBoost(Evidence) − contraPenalty(Contradictions)
+//	          − supersedPenalty·Superseded)
+//
+// Non-core W is capped at ReconfirmCap: corroboration never mints perfect
+// confidence (Core is exempt). Because it reads only persisted primitives,
+// the boost side of W is idempotent and order-independent.
+func derivedW(p Percept) float64 {
+	w := p.Prior + corrobBoost(p.Evidence) - contraPenalty(p.Contradictions)
+	if p.Superseded > 0 {
+		w -= supersedPenalty
+	}
+	if !p.Core && w > reconfirmCap {
+		w = reconfirmCap
+	}
+	return clampW(w)
+}
+
+// applyEvent moves the primitive counts to (e, k, s) and shifts W by exactly
+// derivedW(after) − derivedW(before). Events telescope: however many passes
+// they arrive in, the accumulated boost equals the full derivation, and
+// decayed weight is never restored by a mere event.
+func applyEvent(p *Percept, e, k, s int) {
+	before := derivedW(*p)
+	p.Evidence, p.Contradictions, p.Superseded = e, k, s
+	p.W = clampW(p.W + (derivedW(*p) - before))
+}
+
+// useFactor is the forgetting slowdown for a fact that keeps being put to
+// use (spaced repetition): a used fact forgets up to 2× slower. Repetition
+// buys persistence, never truth — W is untouched.
+func useFactor(useCount int) float64 {
+	if useCount > useDecaySlowingCap {
+		useCount = useDecaySlowingCap
+	}
+	return 1 + useDecaySlowing*float64(useCount)
+}
+
+// normalizePriors seeds the provenance prior of pre-v4 Percepts (Prior == 0)
+// once: Prior := W with the count-derived boosts backed out (W − corrobBoost
+// + contraPenalty + supersession), so deriving them again cannot
+// double-count them. Boosts the older models baked flat into W stay in Prior
+// — a one-time, monotone-safe approximation. No existing fact is promoted by
+// migration itself: AboveThresholdSince starts fresh, so the durability gate
+// defers every non-fast-path promotion to a later pass. Called on every
+// mutation path (hand-built Percepts included).
+func normalizePriors(percepts []Percept) {
+	for i := range percepts {
+		if percepts[i].Prior != 0 {
+			continue
+		}
+		prior := percepts[i].W - corrobBoost(percepts[i].Evidence) + contraPenalty(percepts[i].Contradictions)
+		if percepts[i].Superseded > 0 {
+			prior += supersedPenalty
+		}
+		if prior < 0 {
+			prior = 0
+		}
+		if prior > maxW {
+			prior = maxW
+		}
+		percepts[i].Prior = prior
+	}
+}
+
+// normalizeLocked runs the pre-v4 Prior migration over both stores.
+// Caller must hold s.mu.
+func (s *Store) normalizeLocked() {
+	normalizePriors(s.global.Percepts)
+	normalizePriors(s.session.Percepts)
+}
+
+// trackDurability maintains AboveThresholdSince: set at the first pass that
+// observes derivedW at/above the threshold, cleared when derivedW dips —
+// durability means an unbroken run above the gate. Only events move derivedW
+// (forgetting decays W, not the derived strength), so a decayed-but-unchallenged
+// fact stays durable.
+func trackDurability(percepts []Percept, now time.Time, threshold float64) {
+	for i := range percepts {
+		if derivedW(percepts[i]) >= threshold {
+			if percepts[i].AboveThresholdSince.IsZero() {
+				percepts[i].AboveThresholdSince = now
+			}
+		} else {
+			percepts[i].AboveThresholdSince = time.Time{}
+		}
+	}
+}
+
 // decayPercepts applies the running-time decay accrued between since (the
 // previous pass) and now to every non-core Percept in place, and reports how
 // many weights changed. Each Percept decays only over the part of the interval
@@ -258,6 +417,10 @@ func (s *Store) ConsolidateCtx(ctx context.Context) error {
 // floor is 0 for session Percepts (W multiplies by 2^(−Δt/half-life)) and
 // PruneThreshold for global ones (W decays toward the floor and snaps into it
 // once within floorSnapBand).
+//
+// The half-life is modulated: it grows with UseCount (useFactor — a used fact
+// forgets slower) and halves while the Percept is superseded by a live
+// updates edge.
 func decayPercepts(percepts []Percept, now, since time.Time, halfLifeDays, floor float64) int {
 	if since.IsZero() || !now.After(since) {
 		return 0
@@ -275,7 +438,11 @@ func decayPercepts(percepts []Percept, now, since time.Time, halfLifeDays, floor
 		if dt <= 0 {
 			continue
 		}
-		factor := math.Pow(0.5, dt.Hours()/(halfLifeDays*24))
+		h := halfLifeDays * useFactor(percepts[i].UseCount)
+		if percepts[i].Superseded > 0 {
+			h *= supersedHalfLife
+		}
+		factor := math.Pow(0.5, dt.Hours()/(h*24))
 		w := floor + (percepts[i].W-floor)*factor
 		if floor > 0 && w-floor < floorSnapBand {
 			w = floor
@@ -291,44 +458,43 @@ func decayPercepts(percepts []Percept, now, since time.Time, halfLifeDays, floor
 	return n
 }
 
-func applyEdges(percepts []Percept, edges []Edge) []Percept {
-	idx := make(map[string]int, len(percepts))
-	for i, p := range percepts {
-		idx[p.ID] = i
-	}
-	for _, e := range edges {
-		switch e.Relation {
-		case RelationExtends, RelationUpdates, RelationDerives:
-			if i, ok := idx[e.To]; ok {
-				percepts[i].W = clampW(percepts[i].W + edgeBoost)
-			}
-		case RelationContradicts:
-			if i, ok := idx[e.From]; ok {
-				percepts[i].W = clampW(percepts[i].W - edgeNegativeDelta)
-			}
-			if i, ok := idx[e.To]; ok {
-				percepts[i].W = clampW(percepts[i].W - edgeNegativeDelta)
+// applyEdgeEvents folds this pass's edge activity into the primitives and
+// applies each event's marginal W delta exactly once per Store lifetime:
+//
+//   - positive edges (extends/derives → target, updates → source — the newer
+//     claim that supersedes) award one Evidence event (shared per-run cap with
+//     reinforcement: one corroboration per percept per run);
+//   - contradicts awards one Contradictions event per endpoint (its own
+//     per-run cap) and never counts as corroboration;
+//   - live updates edges mark their target superseded (refreshed every pass,
+//     so removing the edge lifts the penalty again).
+//
+// Re-running a pass over the same edges changes nothing. Caller must hold s.mu.
+func (s *Store) applyEdgeEvents(percepts []Percept, edges []Edge) {
+	for i := range percepts {
+		id := percepts[i].ID
+		e, k, sup := percepts[i].Evidence, percepts[i].Contradictions, 0
+		for _, ed := range edges {
+			switch ed.Relation {
+			case RelationExtends, RelationDerives:
+				if ed.To == id && s.awardEvidenceLocked(id) {
+					e++
+				}
+			case RelationUpdates:
+				if ed.From == id && s.awardEvidenceLocked(id) {
+					e++
+				}
+				if ed.To == id {
+					sup = 1
+				}
+			case RelationContradicts:
+				if (ed.From == id || ed.To == id) && s.awardConflictLocked(id) {
+					k++
+				}
 			}
 		}
-	}
-	return percepts
-}
-
-// awardEdgeEvidence grants one Evidence point per Percept targeted by an
-// extends/updates/derives edge at this consolidation — the edge's boost is a
-// corroboration event — at most once per Store lifetime (ADR-0090). Caller
-// must hold s.mu.
-func (s *Store) awardEdgeEvidence(percepts []Percept, edges []Edge) {
-	idx := make(map[string]int, len(percepts))
-	for i, p := range percepts {
-		idx[p.ID] = i
-	}
-	for _, e := range edges {
-		switch e.Relation {
-		case RelationExtends, RelationUpdates, RelationDerives:
-			if i, ok := idx[e.To]; ok && s.awardEvidenceLocked(e.To) {
-				percepts[i].Evidence++
-			}
+		if e != percepts[i].Evidence || k != percepts[i].Contradictions || sup != percepts[i].Superseded {
+			applyEvent(&percepts[i], e, k, sup)
 		}
 	}
 }
@@ -349,23 +515,33 @@ func contradictedIDs(edges []Edge) map[string]bool {
 
 // promotionGate reports whether p graduates to the global store at this pass
 // and, if not, whether it was a would-be promotion held back (counted as
-// promotion_deferred). Core and user facts take the fast path at
-// W >= threshold — they are explicit assertions; everything else also needs
-// Evidence >= evidencePromote, corroborated in at least two distinct runs.
-func promotionGate(p Percept, contradicted bool, threshold float64) (promote, deferred bool) {
-	if p.W < threshold {
+// promotion_deferred). The threshold check reads derivedW — the undecayed
+// strength — because forgetting is not falsifying: a fact affirmed strongly
+// yesterday and a fact affirmed strongly this minute are equally true. Core
+// and user facts take the fast path — they are explicit assertions. Everything
+// else must also be corroborated in at least two distinct runs (Evidence >=
+// evidencePromote) and durable: derivedW at/above the threshold for
+// PromoteStableDays of running time — a boost burst cannot graduate on
+// momentum. A live contradicts edge or an updates supersession defers until
+// the conflict is resolved.
+func promotionGate(p Percept, contradicted bool, now time.Time, threshold, stableDays float64) (promote, deferred bool) {
+	if derivedW(p) < threshold {
 		return false, false
 	}
-	if contradicted {
+	if contradicted || p.Superseded > 0 {
 		return false, true
 	}
 	if p.Core || p.Producer == ProducerUser {
 		return true, false
 	}
-	if p.Evidence >= evidencePromote {
-		return true, false
+	if p.Evidence < evidencePromote {
+		return false, true
 	}
-	return false, true
+	if stableDays > 0 && (p.AboveThresholdSince.IsZero() ||
+		now.Sub(p.AboveThresholdSince) < time.Duration(stableDays*24)*time.Hour) {
+		return false, true
+	}
+	return true, false
 }
 
 func prunePerceptsCount(percepts []Percept, threshold float64) ([]Percept, int) {
@@ -387,20 +563,6 @@ func clampW(w float64) float64 {
 	}
 	if w < 0 {
 		return 0
-	}
-	return w
-}
-
-// reinforceW applies a re-confirmation boost to an existing Percept's weight:
-// W gains ReconfirmBoost, capped at ReconfirmCap — and never decreases (a
-// percept already above the cap keeps its weight). Returns the result.
-func reinforceW(w float64, p Params) float64 {
-	if w >= p.ReconfirmCap {
-		return w
-	}
-	w += p.ReconfirmBoost
-	if w > p.ReconfirmCap {
-		w = p.ReconfirmCap
 	}
 	return w
 }

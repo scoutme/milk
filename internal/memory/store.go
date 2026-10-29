@@ -45,6 +45,10 @@ type Store struct {
 	// most once per run, so Evidence >= 2 implies two distinct runs
 	// (ADR-0090). In-memory only — the count persists, the set does not.
 	evidenceAwarded map[string]struct{}
+	// conflictAwarded is the same per-run cap for Contradictions events (the
+	// negative channel is tracked separately — one percept can earn one of
+	// each per run; ADR-0091). In-memory only.
+	conflictAwarded map[string]struct{}
 }
 
 // NewStore opens (or creates) the global store and optional session store
@@ -126,9 +130,9 @@ type RecordOutcome struct {
 //
 // If the incoming content is too similar to an existing Percept (Jaccard
 // overlap ≥ DuplicateSimilarityThreshold), Record does NOT insert a new
-// Percept: it reinforces the existing one (W += ReconfirmBoost capped at
-// ReconfirmCap, UpdatedAt touched — a re-stated fact is corroborated, not
-// rejected) and reports Reinforced in the outcome.
+// Percept: it re-affirms the existing one (one corroboration event per run,
+// UpdatedAt touched, W refreshed to derivedW — a re-stated fact is
+// corroborated, not rejected) and reports Reinforced in the outcome.
 func (s *Store) Record(ctx context.Context, content string, producer Producer, consumer Consumer, roles Roles, core bool) (RecordOutcome, error) {
 	ctx, end := traceRecord(ctx, producer)
 	defer func() { end(nil) }()
@@ -136,6 +140,7 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.normalizeLocked()
 	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
 		return s.reinforceLocked(ctx, dup.ID, jaccardSimilarity(tokenize(content), tokenize(dup.Content)))
 	}
@@ -146,6 +151,7 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 		Producer:  producer,
 		Consumer:  consumer,
 		W:         initialWeight(producer, core),
+		Prior:     initialWeight(producer, core),
 		Roles:     roles,
 		Core:      core,
 		CreatedAt: s.now(),
@@ -169,35 +175,41 @@ func (s *Store) Record(ctx context.Context, content string, producer Producer, c
 	return RecordOutcome{ID: p.ID, W: p.W}, saveErr
 }
 
-// reinforceLocked boosts the existing Percept with the given ID in whichever
-// store holds it (W += ReconfirmBoost capped at ReconfirmCap, UpdatedAt
-// touched, Evidence +1 at most once per Store lifetime) and persists that
-// store. Caller must hold s.mu.
+// reinforceLocked re-affirms the existing Percept with the given ID in
+// whichever store holds it (ADR-0091): one corroboration event (Evidence +1,
+// at most once per Store lifetime), UseCount +1, UpdatedAt touched, and W
+// refreshed to derivedW — a fact re-stated now is exactly as strong as its
+// primitives say. Repetition within the same run adds nothing: echo is not
+// corroboration. Persists that store. Caller must hold s.mu.
 func (s *Store) reinforceLocked(ctx context.Context, id string, similarity float64) (RecordOutcome, error) {
 	now := s.now()
 	for i := range s.global.Percepts {
 		if s.global.Percepts[i].ID == id {
-			existing := s.global.Percepts[i].Content
-			s.global.Percepts[i].W = reinforceW(s.global.Percepts[i].W, s.params)
-			s.global.Percepts[i].UpdatedAt = now
-			s.global.Percepts[i].LastUsedAt = now
-			s.global.Percepts[i].IdleSeconds = 0
+			p := &s.global.Percepts[i]
+			existing := p.Content
 			if s.awardEvidenceLocked(id) {
-				s.global.Percepts[i].Evidence++
+				p.Evidence++
 			}
+			p.UseCount++
+			p.UpdatedAt = now
+			p.LastUsedAt = now
+			p.IdleSeconds = 0
+			p.W = derivedW(*p)
 			metricsReinforce(ctx)
-			return RecordOutcome{ID: id, Reinforced: true, Similarity: similarity, Existing: existing, W: s.global.Percepts[i].W},
+			return RecordOutcome{ID: id, Reinforced: true, Similarity: similarity, Existing: existing, W: p.W},
 				s.saveFile(s.globalPath, s.global)
 		}
 	}
 	for i := range s.session.Percepts {
 		if s.session.Percepts[i].ID == id {
-			existing := s.session.Percepts[i].Content
-			s.session.Percepts[i].W = reinforceW(s.session.Percepts[i].W, s.params)
-			s.session.Percepts[i].UpdatedAt = now
+			p := &s.session.Percepts[i]
+			existing := p.Content
 			if s.awardEvidenceLocked(id) {
-				s.session.Percepts[i].Evidence++
+				p.Evidence++
 			}
+			p.UseCount++
+			p.UpdatedAt = now
+			p.W = derivedW(*p)
 			metricsReinforce(ctx)
 			var saveErr error
 			if s.sessionPath != "" {
@@ -225,6 +237,25 @@ func (s *Store) awardEvidenceLocked(id string) bool {
 	return true
 }
 
+// awardConflictLocked grants Percept id one contradiction event unless it
+// already earned one in this Store's lifetime, and reports whether it was
+// granted now. Separate channel from awardEvidenceLocked: a conflicted fact
+// can also be corroborated in the same run. Caller must hold s.mu.
+func (s *Store) awardConflictLocked(id string) bool {
+	if _, ok := s.conflictAwarded[id]; ok {
+		return false
+	}
+	if s.conflictAwarded == nil {
+		s.conflictAwarded = make(map[string]struct{})
+	}
+	s.conflictAwarded[id] = struct{}{}
+	return true
+}
+
+// initialWeight is the provenance prior: the strength of a fresh Percept from
+// who asserted it alone, before corroboration, contradiction and
+// supersession are folded in (ADR-0091 — the prior is persisted on the
+// Percept, and derivedW grows or shrinks W from it).
 func initialWeight(producer Producer, core bool) float64 {
 	if core {
 		return 1.0
@@ -251,6 +282,7 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.normalizeLocked()
 	if dup := s.findSimilarLocked(content, DuplicateSimilarityThreshold); dup != nil {
 		return s.reinforceLocked(ctx, dup.ID, jaccardSimilarity(tokenize(content), tokenize(dup.Content)))
 	}
@@ -261,6 +293,7 @@ func (s *Store) RecordGlobal(ctx context.Context, content string, producer Produ
 		Producer:  producer,
 		Consumer:  consumer,
 		W:         1.0,
+		Prior:     1.0,
 		Core:      true,
 		Roles:     roles,
 		CreatedAt: s.now(),
@@ -379,12 +412,14 @@ func (s *Store) SortByRank(percepts []Percept) {
 	})
 }
 
-// AddEdge records a typed directed relation between two Percepts (ADR-0053):
-// extends/updates/derives corroborate the target (To), contradicts weakens
-// both endpoints — all applied at consolidation. The edge is stored in the
-// same store file as the "from" Percept and only affects endpoints present in
-// that file at consolidation time. Both endpoints must already exist;
-// identical (From, To, Relation) triples are stored once.
+// AddEdge records a typed directed relation between two Percepts (ADR-0053,
+// relation semantics ADR-0091): extends/derives corroborate the target (To),
+// updates corroborates the source (From — the newer claim) and supersedes the
+// target (To), contradicts weakens both endpoints — all applied at
+// consolidation. The edge is stored in the same store file as the "from"
+// Percept and only affects endpoints present in that file at consolidation
+// time. Both endpoints must already exist; identical (From, To, Relation)
+// triples are stored once.
 func (s *Store) AddEdge(fromID, toID string, rel Relation) error {
 	switch rel {
 	case RelationExtends, RelationUpdates, RelationDerives, RelationContradicts:

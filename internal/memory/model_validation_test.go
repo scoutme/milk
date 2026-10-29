@@ -21,10 +21,12 @@ func closeTo(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 // --- B: reinforcement ---
 
 // TestReconfirmTrajectory validates the ground-truth W path for an inference
-// percept (born 0.7 via ProducerLocal): each re-statement adds +0.05 up to the
-// 0.90 cap — and, since ADR-0090, corroboration in one run earns Evidence 1 at
-// most, so the fast-climbing W is still held back from promotion until a
-// second distinct run confirms it.
+// percept (born 0.7 via ProducerLocal) under the ADR-0091 derived model:
+// re-statement in the same run is echo — it adds nothing to W beyond the
+// run's single corroboration event — while corroboration in a distinct second
+// run moves derivedW past the promotion threshold. W is refreshed to derivedW
+// at every re-affirmation, so the trajectory is the corroboration series
+// 0.7 + corrobBoost(n), not a flat +0.05 per restatement.
 func TestReconfirmTrajectory(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -42,7 +44,15 @@ func TestReconfirmTrajectory(t *testing.T) {
 		t.Fatalf("expected birth W 0.7 (ProducerLocal), got %v", first.W)
 	}
 
-	want := []float64{0.75, 0.80, 0.85, 0.90, 0.90} // +0.05 ×4 to the 0.90 cap, then stays
+	// First restatement earns the run's one corroboration event; the four
+	// after it are echo and change nothing.
+	want := []float64{
+		0.7 + corrobBoost(1),
+		0.7 + corrobBoost(1),
+		0.7 + corrobBoost(1),
+		0.7 + corrobBoost(1),
+		0.7 + corrobBoost(1),
+	}
 	for i, w := range want {
 		out, err := s.Record(ctx, "milk is configured to escalate to claude cli", ProducerLocal, ConsumerAll, Roles{}, false)
 		if err != nil {
@@ -55,7 +65,7 @@ func TestReconfirmTrajectory(t *testing.T) {
 			t.Errorf("reinforce %d: kept ID %s, want %s", i+1, out.ID, first.ID)
 		}
 		if !closeTo(out.W, w) {
-			t.Errorf("reinforce %d: W = %v, want %v", i+1, out.W, w)
+			t.Errorf("reinforce %d: W = %v, want %v (echo in one run must not climb)", i+1, out.W, w)
 		}
 		if len(s.session.Percepts) != 1 {
 			t.Fatalf("reinforcement must not insert: %d percepts in session", len(s.session.Percepts))
@@ -67,8 +77,8 @@ func TestReconfirmTrajectory(t *testing.T) {
 		t.Fatalf("Evidence = %d after one run of reinforcement, want 1", got)
 	}
 
-	// Fully re-confirmed (W 0.90) is still held back: Evidence 1 cannot
-	// graduate an inference percept (promotion_deferred).
+	// One corroboration (derivedW 0.783) is still held back: Evidence 1
+	// cannot graduate an inference percept (promotion_deferred).
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
@@ -77,7 +87,8 @@ func TestReconfirmTrajectory(t *testing.T) {
 	}
 
 	// A second Store lifetime re-confirming the fact is the second distinct
-	// run: Evidence 2, W at the cap → graduates.
+	// run: Evidence 2, derivedW 0.7 + corrobBoost(2) = 0.825 — over the gate,
+	// but the durability window starts only now.
 	s2, err := NewStoreParams(dir, "traj", Params{})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -87,11 +98,21 @@ func TestReconfirmTrajectory(t *testing.T) {
 	if err != nil || !out.Reinforced {
 		t.Fatalf("run 2 reinforce: %+v, %v", out, err)
 	}
+	if !closeTo(out.W, 0.7+corrobBoost(2)) {
+		t.Errorf("run 2 W = %v, want %v", out.W, 0.7+corrobBoost(2))
+	}
 	if err := s2.Consolidate(); err != nil {
 		t.Fatalf("run 2 Consolidate: %v", err)
 	}
-	if len(s2.global.Percepts) != 1 || !closeTo(s2.global.Percepts[0].W, 0.90) {
-		t.Errorf("expected the percept promoted to global at W 0.90, got global=%v", s2.global.Percepts)
+	if len(s2.global.Percepts) != 0 {
+		t.Fatalf("the durability window must gate run 2, got global=%v", s2.global.Percepts)
+	}
+	advanceClock(s2, 25*time.Hour)
+	if err := s2.Consolidate(); err != nil {
+		t.Fatalf("run 2 durable Consolidate: %v", err)
+	}
+	if len(s2.global.Percepts) != 1 || s2.global.Percepts[0].ID != first.ID {
+		t.Fatalf("expected the percept promoted to global once durable, got global=%v", s2.global.Percepts)
 	}
 	if got := s2.global.Percepts[0].Evidence; got != 2 {
 		t.Errorf("promoted Evidence = %d, want 2 (one per run)", got)
@@ -297,12 +318,12 @@ func TestEdgeWiring(t *testing.T) {
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Ground truth for d: 0.60 + edge boost 0.05 = 0.65 (no running time
+	// Ground truth for d: 0.60 + one corroboration marginal (no running time
 	// elapsed, no decay), plus one Evidence point for the positive edge.
 	for _, p := range s.global.Percepts {
 		if p.ID == "g2" {
-			if !closeTo(p.W, 0.65) {
-				t.Errorf("extends target W = %v, want 0.65", p.W)
+			if !closeTo(p.W, 0.60+corrobBoost(1)) {
+				t.Errorf("extends target W = %v, want %v", p.W, 0.60+corrobBoost(1))
 			}
 			if p.Evidence != 1 {
 				t.Errorf("extends target Evidence = %d, want 1 (positive-edge corroboration)", p.Evidence)
@@ -314,13 +335,18 @@ func TestEdgeWiring(t *testing.T) {
 	}
 
 	// The corroboration point is per run: another pass on the same edge does
-	// not double-count it.
+	// not double-count it — neither the Evidence nor the W boost.
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("second Consolidate: %v", err)
 	}
 	for _, p := range s.global.Percepts {
-		if p.ID == "g2" && p.Evidence != 1 {
-			t.Errorf("Evidence = %d after a second pass on the same edge, want 1 (once per run)", p.Evidence)
+		if p.ID == "g2" {
+			if p.Evidence != 1 {
+				t.Errorf("Evidence = %d after a second pass on the same edge, want 1 (once per run)", p.Evidence)
+			}
+			if !closeTo(p.W, 0.60+corrobBoost(1)) {
+				t.Errorf("edge boost must apply once per run, got W = %v", p.W)
+			}
 		}
 	}
 }
@@ -351,11 +377,11 @@ func TestRecordMemoryRelationTool(t *testing.T) {
 	if err := s.Consolidate(); err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
-	// Ground truth (no running time elapsed): the target takes the contradicts
-	// penalty 0.10; source does too.
+	// Ground truth (no running time elapsed): the target takes the contradiction
+	// penalty contraDelta; source does too.
 	for _, p := range s.global.Percepts {
-		if p.ID == target.ID && p.W != before-edgeNegativeDelta {
-			t.Errorf("contradicts target W = %v, want %v", p.W, before-edgeNegativeDelta)
+		if p.ID == target.ID && !closeTo(p.W, before-contraDelta) {
+			t.Errorf("contradicts target W = %v, want %v", p.W, before-contraDelta)
 		}
 	}
 }

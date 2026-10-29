@@ -126,18 +126,30 @@ func TestRecord_DuplicateReinforces(t *testing.T) {
 }
 
 func TestRecord_ReinforceCapAndPromotionPath(t *testing.T) {
-	s := newTestStore(t, false)
-	// Inference percept starts at 0.7 (initialWeight) — can never be promoted
-	// by decay/edges alone; reinforcement is its promotion path (ADR-0053).
-	out, err := s.Record(context.Background(), "milk routes coding tasks to the local model", ProducerLocal, ConsumerAll, Roles{}, false)
+	dir := t.TempDir()
+	ctx := context.Background()
+	content := "milk routes coding tasks to the local model"
+
+	// Inference percept starts at 0.7 (initialWeight) — cannot be promoted by
+	// decay/edges alone; corroboration in distinct runs is its promotion path
+	// (ADR-0091: W = 0.7 + corrobBoost(n), saturating at the reconfirm cap).
+	s, err := NewStoreParams(dir, "", Params{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	freezeClock(s)
+	out, err := s.Record(ctx, content, ProducerLocal, ConsumerAll, Roles{}, false)
 	if err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 	if out.W != 0.7 {
 		t.Fatalf("expected initial W 0.7, got %v", out.W)
 	}
+
+	// Echo-proof: six re-statements in ONE run earn one corroboration and
+	// nothing more — repetition is not corroboration.
 	for i := 0; i < 6; i++ {
-		out, err = s.Record(context.Background(), "milk routes coding tasks to the local model", ProducerLocal, ConsumerAll, Roles{}, false)
+		out, err = s.Record(ctx, content, ProducerLocal, ConsumerAll, Roles{}, false)
 		if err != nil {
 			t.Fatalf("reinforce %d failed: %v", i, err)
 		}
@@ -145,11 +157,36 @@ func TestRecord_ReinforceCapAndPromotionPath(t *testing.T) {
 			t.Fatalf("reinforce %d: expected reinforcement", i)
 		}
 	}
-	if out.W != reconfirmCap {
-		t.Errorf("expected W capped at %v after repeated reinforcement, got %v", reconfirmCap, out.W)
+	if !closeTo(out.W, 0.7+corrobBoost(1)) {
+		t.Errorf("in-run repetition: W = %v, want %v (one event per run)", out.W, 0.7+corrobBoost(1))
 	}
-	if out.W < promoteThreshold {
-		t.Errorf("reinforcement cap %v must sit at/above promoteThreshold %v", out.W, promoteThreshold)
+
+	// Distinct runs are the promotion path: each re-opening of the store
+	// earns one more event and W climbs the saturating corroboration series.
+	prev := out.W
+	for run := 2; run <= 6; run++ {
+		s, err = NewStoreParams(dir, "", Params{})
+		if err != nil {
+			t.Fatalf("reopen run %d: %v", run, err)
+		}
+		freezeClock(s)
+		out, err = s.Record(ctx, content, ProducerLocal, ConsumerAll, Roles{}, false)
+		if err != nil {
+			t.Fatalf("run %d reinforce: %v", run, err)
+		}
+		if out.W <= prev {
+			t.Errorf("run %d: W = %v, must climb across runs (was %v)", run, out.W, prev)
+		}
+		if out.W > reconfirmCap {
+			t.Errorf("run %d: W = %v, must never pass the reconfirm cap %v", run, out.W, reconfirmCap)
+		}
+		prev = out.W
+	}
+	if prev < promoteThreshold {
+		t.Errorf("reinforcement trajectory must reach promoteThreshold %v, got %v", promoteThreshold, prev)
+	}
+	if prev > reconfirmCap || prev < reconfirmCap-0.05 {
+		t.Errorf("repeated corroboration converges on the cap %v, got %v", reconfirmCap, prev)
 	}
 }
 

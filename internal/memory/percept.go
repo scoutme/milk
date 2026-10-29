@@ -36,11 +36,16 @@ type Roles struct {
 // Percept is an atomic memory unit: a single natural-language assertion with
 // provenance, a confidence weight, and optional semantic roles.
 type Percept struct {
-	ID        string    `json:"id"`
-	Content   string    `json:"content"`
-	Producer  Producer  `json:"producer"`
-	Consumer  Consumer  `json:"consumer,omitempty"` // which agent(s) receive this at injection; empty = all
-	W         float64   `json:"w"`                  // confidence weight [0,1]
+	ID       string   `json:"id"`
+	Content  string   `json:"content"`
+	Producer Producer `json:"producer"`
+	Consumer Consumer `json:"consumer,omitempty"` // which agent(s) receive this at injection; empty = all
+	W        float64  `json:"w"`                  // confidence weight [0,1]
+	// Prior is the provenance prior: strength from who asserted the fact alone
+	// (see initialWeight), before corroboration, contradiction and
+	// supersession are folded in (ADR-0091). Zero on pre-v4 Percepts — seeded
+	// once at the first consolidation (migration, see normalizePriors).
+	Prior     float64   `json:"prior,omitempty"`
 	Roles     Roles     `json:"roles"`
 	EngramID  string    `json:"engram_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -58,8 +63,23 @@ type Percept struct {
 	// Evidence counts corroboration events (near-duplicate reinforcement and
 	// positive-edge boosts), awarded at most once per Store lifetime so
 	// Evidence >= 2 means the fact held up in at least two distinct runs
-	// (ADR-0090). Drives the promotion gate and the rank score.
+	// (ADR-0090). Drives the derived W, the promotion gate and the rank score.
 	Evidence int `json:"evidence,omitempty"`
+	// Contradictions counts contradicts-edge conflicts touching this Percept,
+	// at most once per Store lifetime — the negative counterpart of Evidence
+	// (ADR-0091). Drives the derived W and blocks promotion while live.
+	Contradictions int `json:"contradictions,omitempty"`
+	// Superseded counts live updates edges targeting this Percept (0/1): a
+	// newer claim supersedes it — it forgets faster and cannot promote until
+	// the supersession is resolved (ADR-0091).
+	Superseded int `json:"superseded,omitempty"`
+	// UseCount counts uses: re-statement, recall, injection. Repetition buys
+	// persistence (a used fact forgets slower) — never truth (ADR-0091).
+	UseCount int `json:"use_count,omitempty"`
+	// AboveThresholdSince is when derivedW was first observed at/above
+	// PromoteThreshold on an unbroken run — the durability gate for promotion
+	// (ADR-0091). Zero while derivedW sits below the threshold.
+	AboveThresholdSince time.Time `json:"above_threshold_since,omitempty"`
 }
 
 // Engram groups Percepts that share a subject. CompositeW is the mean weight

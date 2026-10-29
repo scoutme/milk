@@ -4,7 +4,7 @@ Date: 2026-10-28
 
 ## Status
 
-Accepted 2026-10-28 — supersedes the decay, recall-ordering and promotion rules of [ADR-0025](0025-memory-decay-constant-retuning.md) and [ADR-0053](0053-memory-weight-model.md). Reinforcement, typed edges, and staleness-archiving ([ADR-0056](0056-archive-stale-global-percepts.md)) stand as they are.
+Accepted 2026-10-28 — supersedes the decay, recall-ordering and promotion rules of [ADR-0025](0025-memory-decay-constant-retuning.md) and [ADR-0053](0053-memory-weight-model.md). Reinforcement, typed edges, and staleness-archiving ([ADR-0056](0056-archive-stale-global-percepts.md)) stand as they are. Later, [ADR-0091](0091-memory-consolidation-v4.md) supersedes the weighing and reinforcement rules below (running-time decay, evidence gating and rank ordering stand).
 
 ## Context
 

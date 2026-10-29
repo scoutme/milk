@@ -4,10 +4,11 @@ import "strings"
 
 // DuplicateSimilarityThreshold is the Jaccard similarity score above which a
 // new percept is considered a near-duplicate of an existing one. Instead of
-// inserting a second copy, Record/RecordGlobal reinforce the existing percept
-// (ADR-0053: a re-stated fact is corroborated — W += ReconfirmBoost, capped —
-// not rejected). Chosen to catch rewordings and subset/superset phrasings
-// while allowing genuinely new assertions through.
+// inserting a second copy, Record/RecordGlobal re-affirm the existing percept
+// (ADR-0053/0091: a re-stated fact is corroborated — one event per run, W
+// refreshed to its derived strength — not rejected). Chosen to catch
+// rewordings and subset/superset phrasings while allowing genuinely new
+// assertions through.
 const DuplicateSimilarityThreshold = 0.60
 
 // tokenize lower-cases s, strips punctuation, and returns the unique word set.
