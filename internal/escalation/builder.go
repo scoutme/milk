@@ -17,7 +17,8 @@ import (
 const identityBlock = "[Milk agent context]\n" +
 	"You are running inside milk, a multi-agent router. " +
 	"You share session history and memory with the other agent in this session. " +
-	"Expect mid-conversation hand-offs and multi-turn resumes.\n" +
+	"You join and leave mid-conversation and resume across turns. " +
+	"The conversation history is your own working context — you have the complete conversation including tool activity; continue as the owner of this work and don't recap unless asked.\n" +
 	"IMPORTANT: never launch background workflows or background agents (do not pass run_in_background: true to the Workflow tool, and do not use /bg). " +
 	"milk communicates with you via --print, which exits as soon as you respond — background tasks would run unobserved and their results would never be delivered. " +
 	"Always await completion within the same turn before responding. " +
@@ -160,7 +161,7 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode, percepts []str
 
 	// First and Returning: Claude needs full orientation (identity is in static context).
 	if sess.EscalationBrief != "" {
-		b.WriteString("[Escalation brief from primary agent]\n")
+		b.WriteString("[Escalation brief]\n")
 		b.WriteString(sess.EscalationBrief)
 		b.WriteString("\n\n")
 	}

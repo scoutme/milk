@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/textbudget"
 )
 
 var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -372,8 +373,17 @@ func lastLocalBoundary(history []Turn) int {
 	return last + 1
 }
 
+// brickResultMaxChars is the per-tool-result cap inside a summary brick.
+// It used to be a silent 500 chars — enough to keep a claim and lose the
+// evidence behind it; truncation now carries an explicit pointer to the full
+// result, so the brick can quote more without pretending to be complete.
+const brickResultMaxChars = 1500
+
 // renderTurns serialises a slice of turns to text, collapsing consecutive
-// identical tool calls and truncating long tool results.
+// identical tool calls and truncating long tool results (with an explicit
+// pointer — never a silent cut). Tool activity is rendered from both storage
+// shapes: legacy per-call turns (ToolCalls + RoleToolResult) and the trail
+// kept on the assistant turn.
 func renderTurns(turns []Turn) string {
 	var b strings.Builder
 	prevToolName := ""
@@ -385,6 +395,13 @@ func renderTurns(turns []Turn) string {
 		}
 		prevToolName = ""
 		prevToolCount = 0
+	}
+
+	result := func(content string) string {
+		if len(content) > brickResultMaxChars {
+			return content[:brickResultMaxChars] + "\n... (truncated — full result in the session history)"
+		}
+		return content
 	}
 
 	for _, t := range turns {
@@ -415,17 +432,36 @@ func renderTurns(turns []Turn) string {
 						prevToolCount = 1
 					}
 				}
+			} else if len(t.Trail) > 0 {
+				// Trail-era turn: tool calls and results live on the turn.
+				for _, step := range t.Trail {
+					for _, c := range step.Calls {
+						if prevToolName == c.Name {
+							prevToolCount++
+						} else {
+							flushTool()
+							fmt.Fprintf(&b, "[Tool: %s] %s\n", c.Name, c.Args)
+							prevToolName = c.Name
+							prevToolCount = 1
+						}
+						if c.Cleared {
+							fmt.Fprintf(&b, "[Tool result] (cleared — full result in the session history)\n")
+						} else {
+							fmt.Fprintf(&b, "[Tool result] %s\n", result(c.Result))
+						}
+					}
+				}
+				flushTool()
+				if t.Content != "" {
+					fmt.Fprintf(&b, "Assistant (%s): %s\n", t.Agent, ansiEscRe.ReplaceAllString(t.Content, ""))
+				}
 			} else {
 				flushTool()
 				fmt.Fprintf(&b, "Assistant (%s): %s\n", t.Agent, ansiEscRe.ReplaceAllString(t.Content, ""))
 			}
 		case RoleToolResult:
 			// Don't flush on tool results — they belong to the preceding tool call run.
-			content := t.Content
-			if len(content) > 500 {
-				content = content[:500] + "\n... (truncated)"
-			}
-			fmt.Fprintf(&b, "[Tool result] %s\n", content)
+			fmt.Fprintf(&b, "[Tool result] %s\n", result(t.Content))
 		}
 	}
 	flushTool()
@@ -461,15 +497,34 @@ func buildBrick(history []Turn, agent Agent, budgetChars int) string {
 	if len(turns) == 0 {
 		return ""
 	}
-	// Trim from oldest end until within budget.
-	for len(turns) > 0 {
+	if budgetChars <= 0 {
+		return renderTurns(turns) // no limit
+	}
+	// Trim from the oldest end until within budget — and say so when it
+	// happens: a summary must never silently look complete.
+	dropped := 0
+	plural := func(n int) string {
+		if n == 1 {
+			return ""
+		}
+		return "s"
+	}
+	for {
 		rendered := renderTurns(turns)
+		if dropped > 0 {
+			rendered = fmt.Sprintf("(earlier activity omitted — %d turn%s)\n", dropped, plural(dropped)) + rendered
+		}
 		if len(rendered) <= budgetChars {
 			return rendered
 		}
+		if len(turns) <= 1 {
+			// Even the newest turn alone is over budget: keep a head+tail of
+			// it rather than dropping the turn entirely.
+			return textbudget.SummarizeLong(rendered, budgetChars)
+		}
 		turns = turns[1:]
+		dropped++
 	}
-	return ""
 }
 
 // RebuildSummaryBricks recomputes LastLocalSummary and LastEscalationSummary from

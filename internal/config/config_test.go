@@ -207,8 +207,8 @@ func TestAgentContextBudget_Override(t *testing.T) {
 func TestAgentContextBudget_Zero_UsesDefault(t *testing.T) {
 	cfg := Config{}
 	ac := AgentConfig{Limits: &AgentLimits{ContextBudgetChars: intPtr(0)}}
-	if got := cfg.AgentContextBudget(ac); got != 12000 {
-		t.Errorf("expected built-in default 12000, got %d", got)
+	if got := cfg.AgentContextBudget(ac); got != 3000 {
+		t.Errorf("expected built-in default 3000, got %d", got)
 	}
 }
 

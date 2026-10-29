@@ -91,3 +91,4 @@
 * [90. Memory consolidation v3: running-time decay and evidence-gated promotion](0090-memory-consolidation-v3.md) *(weighing/reinforcement superseded by 91)*
 * [91. Memory consolidation v4: derived weights, echo-proof corroboration, supersession and durability](0091-memory-consolidation-v4.md)
 * [92. Memory consolidation v5: confidence × activation, producer-aware forgetting, engram stability, contradiction resolution](0092-memory-consolidation-v5.md) *(proposed — not implemented; v4 still governs)*
+* [93. Escalation context parity: summary as index, transcript as ground truth](0093-escalation-context-parity.md) *(amends 29 for the local hand-off path)*

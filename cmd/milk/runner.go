@@ -290,7 +290,13 @@ func (r *localRunner) Execute(
 
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
-			overhead := agent.SystemOverheadChars(sess) + len(orientationText)
+			// Budget parity with the primary path: orientation (brief, need,
+			// summary brick) is overhead the transcript must not pay for —
+			// escalation should not receive a smaller working context than the
+			// primary had. The brick is a TL;DR index (context_budget_chars,
+			// default 3000) into the transcript now carrying the tool
+			// evidence, so total request size stays roughly flat.
+			overhead := agent.SystemOverheadChars(sess)
 			msgBudget = max(1, msgBudget-overhead)
 		}
 		if ac.DisableCompaction {

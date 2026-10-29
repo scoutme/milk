@@ -1218,7 +1218,8 @@ type Config struct {
 	// ContextBudgetChars is the maximum number of characters injected per
 	// agent summary brick (last_local_summary / last_claude_summary) in the
 	// escalation system prompt. Turns are included newest-first until the
-	// budget is exhausted. Default: 12000.
+	// budget is exhausted. The brick is a TL;DR index into the transcript,
+	// which carries the tool evidence — keep this small. Default: 3000.
 	ContextBudgetChars int `json:"context_budget_chars,omitempty"`
 
 	// MemoryReinjectionTurns is the number of escalation turns after which the
@@ -1590,10 +1591,12 @@ func defaults() Config {
 }
 
 // ContextBudget returns the configured context budget in characters,
-// falling back to 12000 when unset.
+// falling back to 3000 when unset. The brick is a TL;DR index into the
+// transcript (which now carries the tool evidence), not the evidence itself —
+// the pre-parity default of 12000 duplicated the transcript instead.
 func (c Config) ContextBudget() int {
 	if c.ContextBudgetChars <= 0 {
-		return 12000
+		return 3000
 	}
 	return c.ContextBudgetChars
 }
@@ -1894,7 +1897,7 @@ func (c Config) AgentContextBudget(a AgentConfig) int {
 		if v < 0 {
 			return 0
 		}
-		return intOr(v, 12000)
+		return intOr(v, 3000)
 	}
 	return c.ContextBudget()
 }
