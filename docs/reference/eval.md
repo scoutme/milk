@@ -13,6 +13,7 @@ milk eval run --agents milk-tui,mimo-code --category smoke # milk vs mimocode on
 milk eval run --agents claude-code --category smoke        # fast pipeline sanity check
 milk eval run --experiment eval/experiments/metrics-testbed.yaml   # a whole suite from one file
 milk eval report --results ~/.milk/eval/results/<run>     # re-print a saved report
+milk eval report --results ~/.milk/eval/results/<run> --html  # self-contained HTML → <run>/report.html
 ```
 
 ---
@@ -40,7 +41,7 @@ Re-scores an existing `results.json` against the scenario rubrics without re-run
 
 ### `milk eval report`
 
-Regenerates the printed report from an existing `results.json`. `--cache-only` prints just the cache-hit analysis; `--json` emits machine-readable output; `-o/--output` writes to a file instead of stdout.
+Regenerates the printed report from an existing `results.json`. `--cache-only` prints just the cache-hit analysis; `--json` emits machine-readable output; `--html` emits a self-contained HTML report (one file, no external assets, light/dark aware) — without `-o` it writes `<results>/report.html`; `-o/--output` writes to a file instead of stdout for every format.
 
 ### `milk eval --list`
 
@@ -397,7 +398,7 @@ A *parseable* reply that skips rubric criteria gets the same re-ask treatment: t
 
 ## Reports
 
-`GenerateReport` prints per-scenario tables (`correctness`/etc. scores, `Weighted Score`) and per-agent metrics (`Tokens (in/out)`, `Cache (create/read)`, `Cache hit rate`, `Cost USD`, `Duration`, `Tool calls`, `Budget`), followed by each agent's **tool-call list in call order** (`Tools [milk-tui] (5): read_file, edit_file, bash`) and the **budget verdict** (`Budget [milk-tui]: PASS` / `FAIL — <violations>`), then an aggregate section (by weighted score, and by cost-efficiency). With `repetitions > 1` (or `--repetitions`), each run is its own labeled section (`Scenario: fixed-request (run 2/3)`) and a **Repetition Statistics** section summarizes nth-run variance per scenario as mean ± sd (`Weighted score`, `Tokens in/out`, `Tool calls`, `Duration`) plus the budget pass rate (`2/3 pass`). `GenerateCacheReport` (`--cache-only`) prints just the cache analysis. `GenerateJSON` (`--json`) is the same data as a machine-readable structure — see `ScenarioResult`/`AgentResult` in `eval/scenario.go` and `eval/harness.go`; per-turn results carry the full tool-call list (name/args/result), `model`, `num_turns`, `ttft_ms`, `output_tokens_per_second`, `stop_reason` and `route_history`, and each run carries its `budget` verdict.
+`GenerateReport` prints per-scenario tables (`correctness`/etc. scores, `Weighted Score`) and per-agent metrics (`Tokens (in/out)`, `Cache (create/read)`, `Cache hit rate`, `Cost USD`, `Duration`, `Tool calls`, `Budget`), followed by each agent's **tool-call list in call order** (`Tools [milk-tui] (5): read_file, edit_file, bash`) and the **budget verdict** (`Budget [milk-tui]: PASS` / `FAIL — <violations>`), then an aggregate section (by weighted score, and by cost-efficiency). With `repetitions > 1` (or `--repetitions`), each run is its own labeled section (`Scenario: fixed-request (run 2/3)`) and a **Repetition Statistics** section summarizes nth-run variance per scenario as mean ± sd (`Weighted score`, `Tokens in/out`, `Tool calls`, `Duration`) plus the budget pass rate (`2/3 pass`). `GenerateCacheReport` (`--cache-only`) prints just the cache analysis. `GenerateJSON` (`--json`) is the same data as a machine-readable structure — see `ScenarioResult`/`AgentResult` in `eval/scenario.go` and `eval/harness.go`; per-turn results carry the full tool-call list (name/args/result), `model`, `num_turns`, `ttft_ms`, `output_tokens_per_second`, `stop_reason` and `route_history`, and each run carries its `budget` verdict. `GenerateHTML` (`--html`) is the same content as a single self-contained HTML file: real tables built on the shared score-grid model (so `ERR`/`—`/`*` cells match the text report exactly), judge reasoning collapsed per agent, repetition statistics and aggregates included — generated into `<results>/report.html` by default so it lands next to its `results.json`.
 
 Real output shape (from milk's own report-generator test fixture, not a live run — trimmed to one scenario):
 
@@ -444,7 +445,7 @@ Overall winner: milk-tui (90x cheaper)
 ## Known limitations
 
 - **`milk-tui` shells to the *installed* binary** (`~/.local/bin/milk`), not whatever's in your working tree — run `task build` after code changes before evaluating, or the harness silently scores a stale binary (or pin one with `--milk-bin` / `sandbox.milk_binary`, or let `versions: ref:` build the exact commits — see [Comparing milk versions](#comparing-milk-versions)).
-- **`CostUSD` is unpopulated by the milk adapters** (see [Reports](#reports)) — `RunResult.CostUSD` stays `$0.000` for `milk-tui`/`claude-code`. The `mimo-code` adapter *does* populate it (mimo reports per-step cost), so the cost columns are real for the mimo column while milk's remain zero; token counts and cache columns are the reliable cross-adapter comparison either way.
+- **`CostUSD` is computed from a pricing table** (see [Cost accounting](#cost-accounting)) — `milk-tui` prices each `model_usage` bucket against the built-in table (or an experiment `pricing:` override), `claude-code` reports Claude Code's own `total_cost_usd` (as a per-turn delta), and `mimo-code` uses mimo's reported per-step cost. A `$0.000` cell means the model has **no configured price** (e.g. an arbitrary local endpoint) — not that the run was free; token counts and cache columns remain the model-independent comparison.
 - **`--cache-cooldown` is `claude-code`-only** — `milk-tui` doesn't exhibit this caching behavior (no Anthropic-style prompt cache in the local-model path), so there's nothing for it to control there.
 - **`expected:` is a no-op** (see [Scenarios](#scenarios)) — it parses but nothing checks it. Scoring is entirely LLM-judge-driven today (metric `budget:`, by contrast, *is* enforced — see [Metric budgets](#metric-budgets)).
 - **Tool-call args/results are the stored trail's** — captured size-capped (2000 chars per arg payload, 8KB per result, older results cleared under a 256KB per-turn budget), so a list built from the trail can show cleared-result gaps on tool-heavy turns.

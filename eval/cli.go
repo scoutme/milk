@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -280,6 +281,7 @@ func evalReportCmd() *cobra.Command {
 		outputFile string
 		cacheOnly  bool
 		jsonFmt    bool
+		htmlFmt    bool
 	)
 
 	cmd := &cobra.Command{
@@ -297,22 +299,37 @@ func evalReportCmd() *cobra.Command {
 			}
 
 			var report string
-			if jsonFmt {
+			switch {
+			case htmlFmt:
+				report = GenerateHTML(results)
+			case jsonFmt:
 				data := GenerateJSON(results)
 				report = string(data)
-			} else if cacheOnly {
+			case cacheOnly:
 				report = GenerateCacheReport(results)
-			} else {
+			default:
 				report = GenerateReport(results)
 			}
 
-			// Write output.
-			if outputFile != "" {
+			// Write output. HTML defaults into the results directory (a report is
+			// a file to open and share, not a stream to pipe); every other format
+			// keeps its stdout/-o behavior.
+			switch {
+			case htmlFmt && outputFile == "":
+				path := filepath.Join(resultsDir, "report.html")
+				if err := os.MkdirAll(resultsDir, 0o755); err != nil {
+					return fmt.Errorf("creating results dir: %w", err)
+				}
+				if err := os.WriteFile(path, []byte(report), 0644); err != nil {
+					return fmt.Errorf("writing report: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "Report written to %s\n", path)
+			case outputFile != "":
 				if err := os.WriteFile(outputFile, []byte(report), 0644); err != nil {
 					return fmt.Errorf("writing report: %w", err)
 				}
 				fmt.Fprintf(os.Stderr, "Report written to %s\n", outputFile)
-			} else {
+			default:
 				fmt.Print(report)
 			}
 
@@ -324,6 +341,7 @@ func evalReportCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "output file (default: stdout)")
 	cmd.Flags().BoolVar(&cacheOnly, "cache-only", false, "only show cache analysis")
 	cmd.Flags().BoolVar(&jsonFmt, "json", false, "output in JSON format")
+	cmd.Flags().BoolVar(&htmlFmt, "html", false, "output a self-contained HTML report (default: write <results>/report.html)")
 
 	return cmd
 }

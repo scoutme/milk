@@ -408,25 +408,44 @@ func GenerateCacheReport(scenarioResults []ScenarioResult) string {
 // Table builders
 // ---------------------------------------------------------------------------
 
-// buildScoreTable renders the per-scenario score comparison table.
-func buildScoreTable(sr ScenarioResult, agentNames []string) string {
-	// Collect all criterion names (preserving first-seen order): criteria some
-	// agent was actually scored on, plus criteria the judge skipped for an
-	// agent (MissingCriteria) — a dropped criterion still gets its row instead
-	// of silently vanishing when no agent happened to score it.
+// scoreGrid is the shared model behind the text and HTML score tables — one
+// implementation of the subtle bits (criterion union incl. MissingCriteria
+// rows, the scored-presence set so 0.0 ≠ absent, ERR vs "—", the partial-rubric
+// asterisk) so the two renderers cannot drift apart. Cells carry their display
+// text already: "%.1f" scores, "ERR" (judge never scored), "—" (criterion
+// never returned for that agent), "-" (agent absent), weighted adds "*" when
+// computed over a partial rubric.
+type scoreGrid struct {
+	criteria []string
+	cells    map[string]map[string]string // lower(criterion) -> agent -> text
+	weighted map[string]string            // agent -> text
+}
+
+// buildScoreGrid computes the score table model for one scenario.
+func buildScoreGrid(sr ScenarioResult, agentNames []string) scoreGrid {
+	g := scoreGrid{
+		cells:    map[string]map[string]string{},
+		weighted: map[string]string{},
+	}
+
+	// Criterion rows: criteria some agent was actually scored on, plus criteria
+	// the judge skipped for an agent (MissingCriteria) — a dropped criterion
+	// still gets its row instead of silently vanishing.
 	seen := map[string]bool{}
-	var criteria []string
+	addCriterion := func(c string) {
+		key := strings.ToLower(c)
+		if !seen[key] {
+			seen[key] = true
+			g.criteria = append(g.criteria, c)
+		}
+	}
 	for _, name := range agentNames {
 		ar, ok := sr.AgentResults[name]
 		if !ok {
 			continue
 		}
 		for _, s := range ar.Scores {
-			key := strings.ToLower(s.Criterion)
-			if !seen[key] {
-				seen[key] = true
-				criteria = append(criteria, s.Criterion)
-			}
+			addCriterion(s.Criterion)
 		}
 	}
 	for _, name := range agentNames {
@@ -435,28 +454,16 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 			continue
 		}
 		for _, c := range ar.MissingCriteria {
-			key := strings.ToLower(c)
-			if !seen[key] {
-				seen[key] = true
-				criteria = append(criteria, c)
-			}
+			addCriterion(c)
 		}
 	}
-	if len(criteria) == 0 {
-		return ""
-	}
 
-	// Build score lookup: lower(criterion) -> agent -> score, plus an explicit
-	// "was scored" set. The presence set matters: 0.0 is a legitimate score
+	// Score lookup + explicit "was scored" presence. 0.0 is a legitimate score
 	// (binary criteria reach it), so absence cannot be inferred from the zero
 	// value — without this, a criterion the judge never returned for an agent
 	// rendered as a fake 0.0 in its cell.
-	type agentScores map[string]float64
-	lookup := map[string]agentScores{}
+	lookup := map[string]map[string]float64{}
 	scored := map[string]map[string]bool{}
-	for _, c := range criteria {
-		lookup[strings.ToLower(c)] = agentScores{}
-	}
 	for _, name := range agentNames {
 		ar, ok := sr.AgentResults[name]
 		if !ok {
@@ -464,12 +471,67 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 		}
 		for _, s := range ar.Scores {
 			key := strings.ToLower(s.Criterion)
-			lookup[key][name] = s.Score
-			if scored[key] == nil {
+			if lookup[key] == nil {
+				lookup[key] = map[string]float64{}
 				scored[key] = map[string]bool{}
 			}
+			lookup[key][name] = s.Score
 			scored[key][name] = true
 		}
+	}
+
+	for _, c := range g.criteria {
+		key := strings.ToLower(c)
+		row := map[string]string{}
+		for _, name := range agentNames {
+			switch {
+			case sr.AgentResults[name].JudgeError != "":
+				// map zero value: JudgeError=="" when the agent has no entry —
+				// handled by the scored check below.
+				if _, ok := sr.AgentResults[name]; ok {
+					row[name] = "ERR"
+					continue
+				}
+				row[name] = "—"
+			case !scored[key][name]:
+				// Judge never returned this criterion for this agent: an
+				// explicit gap, not a zero value indistinguishable from a
+				// genuine 0.0 — exactly the misread the missing-criteria
+				// episode produced.
+				row[name] = "—"
+			default:
+				row[name] = fmt.Sprintf("%.1f", lookup[key][name])
+			}
+		}
+		g.cells[key] = row
+	}
+
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		switch {
+		case !ok:
+			g.weighted[name] = "-"
+		case ar.JudgeError != "":
+			// Not a real 0 — the judge never scored this scenario/agent at all.
+			g.weighted[name] = "ERR"
+		default:
+			w := fmt.Sprintf("%.1f", ar.WeightedScore)
+			if len(ar.MissingCriteria) > 0 {
+				// Asterisk: computed over the criteria the judge actually
+				// returned (the missing weights dropped out of both sides).
+				w += "*"
+			}
+			g.weighted[name] = w
+		}
+	}
+	return g
+}
+
+// buildScoreTable renders the per-scenario score comparison table.
+func buildScoreTable(sr ScenarioResult, agentNames []string) string {
+	g := buildScoreGrid(sr, agentNames)
+	if len(g.criteria) == 0 {
+		return ""
 	}
 
 	// Header.
@@ -484,23 +546,10 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 	b.WriteString(sep + "\n")
 
 	// Rows.
-	for _, c := range criteria {
+	for _, c := range g.criteria {
 		row := columnLabel(c, 20)
 		for _, name := range agentNames {
-			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError != "" {
-				row += columnLabel("ERR", 12)
-				continue
-			}
-			key := strings.ToLower(c)
-			if !scored[key][name] {
-				// Judge never returned this criterion for this agent: render an
-				// explicit gap. The zero value here would be indistinguishable
-				// from a genuine score of 0.0 — exactly the misread the
-				// missing-criteria episode produced.
-				row += columnLabel("—", 12)
-				continue
-			}
-			row += columnLabel(fmt.Sprintf("%.1f", lookup[key][name]), 12)
+			row += columnLabel(g.cells[strings.ToLower(c)][name], 12)
 		}
 		b.WriteString(row + "\n")
 	}
@@ -509,27 +558,7 @@ func buildScoreTable(sr ScenarioResult, agentNames []string) string {
 	b.WriteString(sep + "\n")
 	row := columnLabel("Weighted Score", 20)
 	for _, name := range agentNames {
-		ar, ok := sr.AgentResults[name]
-		if !ok {
-			row += columnLabel("-", 12)
-			continue
-		}
-		if ar.JudgeError != "" {
-			// Not a real 0 — the judge never scored this scenario/agent at all
-			// (e.g. its request was rejected by a content filter). Distinct from
-			// a genuine WeightedScore of 0.0 so it isn't misread as "the agent
-			// failed every criterion," and every aggregate below excludes it.
-			row += columnLabel("ERR", 12)
-			continue
-		}
-		weight := fmt.Sprintf("%.1f", ar.WeightedScore)
-		if len(ar.MissingCriteria) > 0 {
-			// Asterisk: computed over the criteria the judge actually returned
-			// (the missing weights dropped out of both sides of the average).
-			// The per-scenario warning line explains it.
-			weight += "*"
-		}
-		row += columnLabel(weight, 12)
+		row += columnLabel(g.weighted[name], 12)
 	}
 	b.WriteString(row + "\n")
 	b.WriteString("\n")
