@@ -18,6 +18,81 @@ scenarios:
       the exact failure mode of routing the confirmation to the cheap primary.
     difficulty: hard
     multi_turn: true
+    # Seeded 2026-10-29 (issue #355): the workdir carries its own
+    # percept-store reference so "our percept store" resolves inside the
+    # isolated directory instead of sending the agent hunting for a live
+    # repository (the routing-reps escapes). Pre-seed runs ran against an
+    # empty workdir — not comparable with seeded runs.
+    setup:
+      files:
+        - path: percept-store/README.md
+          content: |
+            # Percept Store
+
+            Small store of learned percepts (short facts) and their
+            relations. A percept carries:
+
+            - `weight` (0.0–1.0): how much we currently trust it
+            - a tier: transient (fresh) / core (high-confidence) /
+              user (stated directly by the user)
+            - evidence: independent observations supporting it
+            - relations to other percepts: extends, derives, contradicts
+
+            A consolidation pass runs periodically over the whole store and
+            must keep weights honest: stale facts fade, corroborated ones
+            gain standing, stable high-confidence facts are promoted to the
+            core tier, and contradicted claims must stop out-weighing their
+            contradictors. The current implementation applies small fixed
+            deltas per pass, ignores wall-clock age, and is tripped up when
+            a relation points from a newer claim at an older one.
+
+            See `store.go` for the types.
+        - path: percept-store/store.go
+          content: |
+            package percept
+
+            import "time"
+
+            // Tier is the confidence tier of a percept.
+            type Tier int
+
+            const (
+            	Transient Tier = iota // freshly observed, low standing
+            	Core                  // high-confidence, promoted
+            	User                  // stated directly by the user
+            )
+
+            // RelationKind is how two percepts reference each other.
+            type RelationKind int
+
+            const (
+            	Extends RelationKind = iota
+            	Derives
+            	Contradicts
+            )
+
+            // Percept is one learned fact.
+            type Percept struct {
+            	ID        string
+            	Content   string
+            	Weight    float64 // 0.0–1.0 standing
+            	Tier      Tier
+            	Evidence  int // corroborating observations
+            	UpdatedAt time.Time
+            }
+
+            // Relation links two percepts by ID.
+            type Relation struct {
+            	Kind RelationKind
+            	From string // percept ID
+            	To   string // percept ID
+            }
+
+            // Store holds all percepts and relations.
+            type Store struct {
+            	Percepts  map[string]*Percept
+            	Relations []Relation
+            }
     turns:
       - prompt: >-
           I want to design the new memory consolidation for our percept store:
@@ -59,6 +134,71 @@ scenarios:
       scenario catches.
     difficulty: easy
     multi_turn: true
+    # Seeded 2026-10-29 (issue #355): "our flaky HTTP client" and "this
+    # project" now resolve to files created in the run's own workdir — the
+    # earlier runs graded "list the files in this project" against an EMPTY
+    # directory (vacuous proportional passes) and invited agents to go
+    # looking for a real repository. Not comparable with pre-seed runs.
+    setup:
+      files:
+        - path: go.mod
+          content: |
+            module example.com/ops-httpclient
+
+            go 1.22
+        - path: README.md
+          content: |
+            # ops-httpclient
+
+            Internal HTTP client used by the batch jobs. Known flaky
+            against the upstream API: intermittent 5xx and timeouts.
+            No retry logic yet — every call fails on the first error.
+        - path: httpclient/client.go
+          content: |
+            package client
+
+            import (
+            	"context"
+            	"fmt"
+            	"io"
+            	"net/http"
+            	"time"
+            )
+
+            // Client is the shared HTTP client for batch jobs.
+            // It is intentionally retry-free: callers fail fast today.
+            type Client struct {
+            	Base string
+            	HTTP *http.Client
+            }
+
+            func New(base string) *Client {
+            	return &Client{
+            		Base: base,
+            		HTTP: &http.Client{Timeout: 10 * time.Second},
+            	}
+            }
+
+            // Get performs a GET and fails on any non-2xx reply.
+            func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
+            	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+path, nil)
+            	if err != nil {
+            		return nil, fmt.Errorf("build request: %w", err)
+            	}
+            	resp, err := c.HTTP.Do(req)
+            	if err != nil {
+            		// Timeouts and temporary net errors land here, unwrapped.
+            		return nil, fmt.Errorf("do request: %w", err)
+            	}
+            	defer resp.Body.Close()
+            	if resp.StatusCode >= 500 {
+            		return nil, fmt.Errorf("upstream 5xx: status %d", resp.StatusCode)
+            	}
+            	if resp.StatusCode >= 400 {
+            		return nil, fmt.Errorf("client error: status %d", resp.StatusCode)
+            	}
+            	return io.ReadAll(resp.Body)
+            }
     turns:
       - prompt: >-
           Design a retry strategy for our flaky HTTP client: backoff, jitter,

@@ -2,6 +2,7 @@ package eval
 
 import (
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"testing"
 )
@@ -119,5 +120,26 @@ func TestLoadScenarios_BadDir(t *testing.T) {
 	_, err := LoadScenarios("/nonexistent/dir")
 	if err == nil {
 		t.Error("expected error for nonexistent dir")
+	}
+}
+
+// TestProjectReferencingPromptsSeedWorkdir locks the isolation invariant
+// from issue #355: a scenario whose prompts reference "our <thing>" or
+// "this project" must seed that material into its own working directory.
+// Without a seed, agents go looking for a real repository outside the
+// temp workdir and write eval output into whatever project they find on
+// the machine (observed in the routing-reps study).
+func TestProjectReferencingPromptsSeedWorkdir(t *testing.T) {
+	refRe := regexp.MustCompile(`(?i)\bthis project\b|\bour\b`)
+	scenarios, err := LoadScenarios(scenariosDir())
+	if err != nil {
+		t.Fatalf("LoadScenarios error: %v", err)
+	}
+	for _, s := range scenarios {
+		for i, turn := range s.Turns {
+			if refRe.MatchString(turn.Prompt) && len(s.Setup.Files) == 0 {
+				t.Errorf("scenario %q turn %d references a project in its prompt but seeds no setup files (issue #355)", s.Name, i+1)
+			}
+		}
 	}
 }
