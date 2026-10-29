@@ -1077,7 +1077,7 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 	turns := sess.History[start:]
 	replays := ownTrailReplays(turns, selfAgent, selfName)
 	if !skipOtherAgents {
-		return buildAgentHistoryFull(turns, selfAgent, replays)
+		return buildAgentHistoryFull(turns, selfAgent, selfName, replays)
 	}
 
 	// Lazy mode: walk through turns, emitting own turns immediately and
@@ -1116,20 +1116,67 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 
 // ownTrailReplays decides how each of the agent's earlier tool-using turns is
 // replayed (see local.ReplayTrails). Only turns this very agent made carry a
-// replayable trail: another agent's tool calls would be nonsense to a model
-// that never issued them.
+// first-person replayable trail: tool calls rendered as calls the model never
+// issued would be nonsense. The evidence itself is not dropped — other
+// agents' trails are narrated instead (otherTrailNarrations), under the same
+// retention plan, so the receiving agent still sees what was run and found.
 func ownTrailReplays(turns []session.Turn, selfAgent session.Agent, selfName string) []local.TrailReplay {
 	trails := make([][]session.TrailStep, len(turns))
 	for i, t := range turns {
-		if t.Role == session.RoleAssistant && t.Agent == selfAgent && (t.AgentName == "" || t.AgentName == selfName) {
+		if turnIsOwn(t, selfAgent, selfName) {
 			trails[i] = t.Trail
 		}
 	}
 	return local.ReplayTrails(trails)
 }
 
-// buildAgentHistoryFull includes all turns with labels (non-lazy mode).
-func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, replays []local.TrailReplay) []local.Message {
+// turnIsOwn reports whether a turn was made by the receiving agent itself.
+func turnIsOwn(t session.Turn, selfAgent session.Agent, selfName string) bool {
+	return t.Agent == selfAgent && (t.AgentName == "" || t.AgentName == selfName)
+}
+
+// otherTrailNarrations renders every other agent's tool trails as narrated
+// transcript (local.NarrateTrails) — the cross-agent counterpart of
+// ownTrailReplays. Retention selection runs per agent (keyed by name), so each
+// agent's newest tool-using turns keep exactly the evidence it replays for
+// itself: retention parity with the originating agent, bounded cost.
+func otherTrailNarrations(turns []session.Turn, selfAgent session.Agent, selfName string) []local.TrailReplay {
+	out := make([]local.TrailReplay, len(turns))
+	var order []string
+	byName := map[string][]int{}
+	for i, t := range turns {
+		if t.Role != session.RoleAssistant || len(t.Trail) == 0 || turnIsOwn(t, selfAgent, selfName) {
+			continue
+		}
+		name := t.AgentName
+		if name == "" {
+			name = string(t.Agent)
+		}
+		if _, ok := byName[name]; !ok {
+			order = append(order, name)
+		}
+		byName[name] = append(byName[name], i)
+	}
+	for _, name := range order {
+		idxs := byName[name]
+		trails := make([][]session.TrailStep, len(idxs))
+		for k, i := range idxs {
+			trails[k] = turns[i].Trail
+		}
+		narrations := local.NarrateTrails(trails, name)
+		for k, i := range idxs {
+			out[i] = narrations[k]
+		}
+	}
+	return out
+}
+
+// buildAgentHistoryFull includes all turns with labels (non-lazy mode). Other
+// agents' tool evidence is narrated (local.NarrateTrails) rather than dropped:
+// the receiving agent gets at least the evidence retention the originating
+// agent keeps for itself (docs/internal/analysis/escalation-context-parity.md).
+func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, selfName string, replays []local.TrailReplay) []local.Message {
+	narrations := otherTrailNarrations(turns, selfAgent, selfName)
 	var msgs []local.Message
 	for i, t := range turns {
 		switch t.Role {
@@ -1140,22 +1187,41 @@ func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, replay
 			}
 			msgs = append(msgs, local.Message{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content})
 		case session.RoleAssistant:
-			if t.Content == "" {
-				continue
-			}
 			speaker := string(t.Agent)
-			if t.Agent == selfAgent {
+			if turnIsOwn(t, selfAgent, selfName) {
+				if t.Content == "" && len(replays[i].Messages) == 0 && replays[i].Note == "" {
+					continue
+				}
 				msgs = append(msgs, formatOwnTurn(t, selfAgent, replays[i])...)
 			} else {
 				name := t.AgentName
 				if name == "" {
 					name = speaker
 				}
-				msgs = append(msgs, local.Message{Role: "system", Speaker: speaker, Content: "[" + name + " as " + speaker + "] " + t.Content})
+				narr := narrations[i]
+				if t.Content == "" && len(narr.Messages) == 0 && narr.Note == "" && len(t.ToolCalls) == 0 {
+					continue
+				}
+				msgs = append(msgs, narr.Messages...)
+				// Legacy turns (pre-trail storage): narrate the bare tool calls.
+				for _, tc := range t.ToolCalls {
+					msgs = append(msgs, local.Message{Role: "system", Speaker: speaker, Content: "[" + name + " called " + tc.Name + "(" + tc.Arguments + ")]"})
+				}
+				if t.Content != "" || narr.Note != "" {
+					msgs = append(msgs, local.Message{Role: "system", Speaker: speaker, Content: "[" + name + " as " + speaker + "] " + t.Content + narr.Note})
+				}
 			}
 		case session.RoleToolResult:
-			if t.Agent == selfAgent {
+			if turnIsOwn(t, selfAgent, selfName) {
 				msgs = append(msgs, local.Message{Role: "tool", Speaker: string(t.Agent), Content: t.Content})
+			} else if i == 0 || turns[i-1].Agent != t.Agent || len(turns[i-1].Trail) == 0 {
+				// Legacy tool results (no trail to narrate them via): narrated,
+				// so the evidence survives the hand-off instead of vanishing.
+				name := t.AgentName
+				if name == "" {
+					name = string(t.Agent)
+				}
+				msgs = append(msgs, local.Message{Role: "system", Speaker: string(t.Agent), Content: "[" + name + "’s tool result] " + t.Content})
 			}
 		}
 	}
@@ -1183,6 +1249,9 @@ func formatOwnTurn(t session.Turn, selfAgent session.Agent, replay local.TrailRe
 		return []local.Message{{Role: "user", Speaker: "user", Content: "[user to " + agentName + "] " + t.Content}}
 	case session.RoleAssistant:
 		msgs := append([]local.Message(nil), replay.Messages...)
+		if t.Content == "" && replay.Note == "" {
+			return msgs
+		}
 		return append(msgs, local.Message{Role: "assistant", Speaker: string(t.Agent), Content: t.Content + replay.Note})
 	case session.RoleToolResult:
 		return []local.Message{{Role: "tool", Speaker: string(t.Agent), Content: t.Content}}
@@ -1760,74 +1829,137 @@ func messagesCharCount(msgs []local.Message) int {
 	return n
 }
 
-// trimSplitIndex returns the index at which msgs should be split so that the
-// tail (msgs[idx:]) fits within budgetChars: drop the oldest user+assistant
-// pairs first, and any tool-result messages that follow a dropped assistant
-// turn, so the head is never left with an orphaned assistant turn. Returns 0
-// (no split) when budgetChars is 0/negative or msgs already fits.
-func trimSplitIndex(msgs []local.Message, budgetChars int) int {
-	if budgetChars <= 0 || messagesCharCount(msgs) <= budgetChars {
-		return 0
-	}
-	idx := 0
-	for messagesCharCount(msgs[idx:]) > budgetChars && idx < len(msgs) {
-		idx++
-		for idx < len(msgs) && msgs[idx].Role != "user" {
-			idx++
+// msgSegmentStarts returns the start index of each message segment. A
+// segment groups an assistant turn with the tool results that follow it, so
+// trimming never splits a tool call from its result: new segments start at
+// user and system messages and at assistant messages that do not follow a
+// tool message; tool messages join the preceding segment.
+func msgSegmentStarts(msgs []local.Message) []int {
+	var starts []int
+	for i, m := range msgs {
+		seg := i == 0 || m.Role == "user" || m.Role == "system" ||
+			(m.Role == "assistant" && msgs[i-1].Role != "tool" && msgs[i-1].Role != "assistant")
+		if seg {
+			starts = append(starts, i)
 		}
 	}
-	return idx
+	return starts
 }
 
-// trimLocalMessages drops the oldest user+assistant pairs from msgs until the
-// total character count is within budgetChars. Tool-result messages that follow
-// a dropped assistant turn are also dropped. Returns the trimmed slice and true
-// when any trimming occurred. budgetChars == 0 means no limit.
+// trimSplitSpans returns the [dropStart, dropEnd) middle span of msgs that
+// must go so the head and the tail fit budgetChars together. Head+tail
+// retention replaces the old drop-oldest trim: the head keeps the original
+// request and first plan (up to a third of the budget, always at least the
+// first segment — the task definition must survive), the tail keeps the
+// recent turns (the remaining two thirds, always at least the last segment);
+// the middle is what gets summarized or dropped. A takeover agent needs the
+// task definition more than the middle of the work.
+//
+// Returns (len(msgs), len(msgs)) when nothing needs dropping. When segments
+// alone are larger than the budget the kept span may exceed it — the first
+// and last segments are never sacrificed (per-message content stays bounded
+// by the separate tool-result caps and spill machinery).
+func trimSplitSpans(msgs []local.Message, budgetChars int) (int, int) {
+	if budgetChars <= 0 || messagesCharCount(msgs) <= budgetChars {
+		return len(msgs), len(msgs)
+	}
+	starts := msgSegmentStarts(msgs)
+	ends := make([]int, len(starts))
+	for k := range starts {
+		ends[k] = len(msgs)
+		if k+1 < len(starts) {
+			ends[k] = starts[k+1]
+		}
+	}
+
+	headBudget := budgetChars / 3
+	tailBudget := budgetChars - headBudget
+
+	headEnd := ends[0] // always keep the first segment
+	cum := messagesCharCount(msgs[starts[0]:ends[0]])
+	for k := 1; k < len(starts); k++ {
+		n := messagesCharCount(msgs[starts[k]:ends[k]])
+		if cum+n > headBudget {
+			break
+		}
+		cum += n
+		headEnd = ends[k]
+	}
+
+	tailStart := len(msgs) // always keep the last segment
+	cum = 0
+	for k := len(starts) - 1; k >= 1; k-- {
+		n := messagesCharCount(msgs[starts[k]:ends[k]])
+		if k < len(starts)-1 && (cum+n > tailBudget || starts[k] < headEnd) {
+			break
+		}
+		cum += n
+		tailStart = starts[k]
+	}
+	if headEnd >= tailStart {
+		return len(msgs), len(msgs)
+	}
+	return headEnd, tailStart
+}
+
+// trimLocalMessages keeps the head and tail of msgs within budgetChars and
+// drops the middle (see trimSplitSpans), leaving an explicit marker in its
+// place — never a silent gap. Tool-result messages that follow a dropped
+// assistant turn are dropped with it. Returns the trimmed slice and true when
+// any trimming occurred. budgetChars == 0 means no limit.
 func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, bool) {
-	idx := trimSplitIndex(msgs, budgetChars)
-	if idx == 0 {
+	dropStart, dropEnd := trimSplitSpans(msgs, budgetChars)
+	if dropStart >= dropEnd {
 		return msgs, false
 	}
-	return msgs[idx:], true
+	kept := make([]local.Message, 0, len(msgs)-(dropEnd-dropStart)+1)
+	kept = append(kept, msgs[:dropStart]...)
+	kept = append(kept, local.Message{Role: "system", Content: "[milk] middle of the conversation omitted (" + pluralize(dropEnd-dropStart, "message") + ") to fit the context window"})
+	kept = append(kept, msgs[dropEnd:]...)
+	return kept, true
 }
 
 // trimLocalMessagesWithCompaction is like trimLocalMessages, but instead of
-// silently discarding the messages that would be dropped, it makes one extra
+// silently discarding the middle of the conversation, it makes one extra
 // inference call (via agent.Summarize) to condense exactly that span into a
-// single system message, and splices the summary in ahead of the kept tail.
-// Falls back to a plain hard-drop (trimLocalMessages' behavior) when
-// agent is nil, there is nothing worth summarizing, or the summarization
-// call itself fails (unsupported provider, network error, etc.) — a failed
-// compaction attempt must never block the turn.
+// single system message, spliced between the kept head and tail. Falls back
+// to a plain hard-drop (trimLocalMessages' behavior) when agent is nil, there
+// is nothing worth summarizing, or the summarization call itself fails
+// (unsupported provider, network error, etc.) — a failed compaction attempt
+// must never block the turn.
 // See docs/internal/analysis/prompt-context-management-review.md §8 rec #4.
 func trimLocalMessagesWithCompaction(ctx context.Context, agent *local.Agent, sess *session.Session, msgs []local.Message, budgetChars int) ([]local.Message, bool) {
-	idx := trimSplitIndex(msgs, budgetChars)
-	if idx == 0 {
+	dropStart, dropEnd := trimSplitSpans(msgs, budgetChars)
+	if dropStart >= dropEnd {
 		return msgs, false
 	}
-	dropped, kept := msgs[:idx], msgs[idx:]
+	dropped := msgs[dropStart:dropEnd]
 	if agent == nil {
-		return kept, true
+		return trimLocalMessages(msgs, budgetChars)
 	}
 
 	input := local.RenderForSummary(dropped)
 	if input == "" {
-		return kept, true
+		return trimLocalMessages(msgs, budgetChars)
 	}
 
 	summary, usage, err := agent.Summarize(ctx, input)
 	if err != nil || summary == "" {
-		return kept, true
+		return trimLocalMessages(msgs, budgetChars)
 	}
 	if sess != nil {
 		sess.AddTokens(agent.ModelName(), agent.LogRole()+":compaction", usage.Prompt, usage.Completion)
 	}
-	content := "[Summary of earlier conversation, compacted to save context]\n" + summary
+	content := "[Summary of the omitted middle of the conversation, compacted to save context]\n" + summary
 	if touched := local.FilesTouched(dropped, 8); touched != "" {
 		content += "\n\n" + touched
 	}
 	summaryMsg := local.Message{Role: "system", Content: content}
-	return append([]local.Message{summaryMsg}, kept...), true
+	kept := make([]local.Message, 0, len(msgs)-(dropEnd-dropStart)+1)
+	kept = append(kept, msgs[:dropStart]...)
+	kept = append(kept, summaryMsg)
+	kept = append(kept, msgs[dropEnd:]...)
+	return kept, true
 }
 
 // sessionToUnifiedMessages converts session history to the local agent's Message format,

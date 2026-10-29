@@ -1621,12 +1621,12 @@ func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bo
 		// Escalation role: selfName == escalationName here.
 		if tier == "minimal" {
 			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.`,
+				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
 				selfName,
 			)
 		} else {
 			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history.`+
+				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
 					sharedBlock+`
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
 - You are the escalation target — do not attempt to escalate further.

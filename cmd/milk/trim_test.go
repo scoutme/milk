@@ -20,6 +20,14 @@ func msgs(pairs ...string) []local.Message {
 	return out
 }
 
+func joined(msgs []local.Message) string {
+	var parts []string
+	for _, m := range msgs {
+		parts = append(parts, m.Content)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestTrimLocalMessages_NoBudget(t *testing.T) {
 	in := msgs("user", "hello", "assistant", "world")
 	got, trimmed := trimLocalMessages(in, 0)
@@ -42,8 +50,11 @@ func TestTrimLocalMessages_WithinBudget(t *testing.T) {
 	}
 }
 
-func TestTrimLocalMessages_DropsOldestPair(t *testing.T) {
-	// Two pairs: first is large, second is small. Budget fits only second.
+// TestTrimLocalMessages_KeepsHeadAndTail pins head+tail retention: the
+// original request (head) and the recent turns (tail) survive, the middle is
+// dropped with an explicit marker — never a silent gap, never the task
+// definition first (the old drop-oldest behavior).
+func TestTrimLocalMessages_KeepsHeadAndTail(t *testing.T) {
 	in := msgs(
 		"user", "first long message that pushes over budget",
 		"assistant", "first reply",
@@ -55,17 +66,25 @@ func TestTrimLocalMessages_DropsOldestPair(t *testing.T) {
 	if !trimmed {
 		t.Error("expected trimming to occur")
 	}
-	if len(got) != 2 {
-		t.Errorf("expected 2 messages after trim, got %d", len(got))
+	text := joined(got)
+	if !strings.Contains(text, "first long message that pushes over budget") {
+		t.Errorf("head (the original request) must survive, got %+v", got)
 	}
-	if got[0].Content != "second" {
-		t.Errorf("expected oldest pair dropped, got first msg: %q", got[0].Content)
+	if !strings.Contains(text, "second") || !strings.Contains(text, "ok") {
+		t.Errorf("tail (recent turns) must survive, got %+v", got)
+	}
+	if strings.Contains(text, "first reply") {
+		t.Errorf("middle should be dropped, got %+v", got)
+	}
+	if !strings.Contains(text, "[milk] middle of the conversation omitted (1 message)") {
+		t.Errorf("dropped middle must carry an explicit marker, got %+v", got)
 	}
 }
 
+// TestTrimLocalMessages_DropsToolResults: an assistant turn is dropped
+// together with the tool results that follow it (segment integrity), while
+// head and tail survive.
 func TestTrimLocalMessages_DropsToolResults(t *testing.T) {
-	// user + assistant (tool call) + tool result + user + assistant
-	// First group should be dropped together.
 	big := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 52 chars
 	in := []local.Message{
 		{Role: "user", Content: "q1"},
@@ -79,10 +98,16 @@ func TestTrimLocalMessages_DropsToolResults(t *testing.T) {
 	if !trimmed {
 		t.Error("expected trimming")
 	}
-	// q1 + big assistant + tool result should all be dropped
-	for _, m := range got {
-		if m.Content == big || m.Content == "result" || m.Content == "q1" {
-			t.Errorf("expected dropped content to be gone, still found %q", m.Content)
+	text := joined(got)
+	for _, want := range []string{"q1", "q2", "a2"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q to survive head+tail trim, got %+v", want, got)
+		}
+	}
+	// The middle assistant turn and its tool result go together.
+	for _, gone := range []string{big, "result"} {
+		if strings.Contains(text, gone) {
+			t.Errorf("expected middle content %q to be gone, got %+v", gone, got)
 		}
 	}
 }
@@ -106,8 +131,10 @@ func TestMessagesCharCount(t *testing.T) {
 
 // TestTrimLocalMessages_OverheadExceedsBudget verifies that when system
 // overhead is larger than the full message budget the remaining budget is
-// clamped to 1 (forcing all history dropped) rather than left at the original
-// budget value (the pre-fix bug that caused unbounded context growth).
+// clamped to 1 (forcing an aggressive trim) rather than left at the original
+// budget value (the pre-fix bug that caused unbounded context growth). Under
+// head+tail retention even the aggressive trim keeps the original request and
+// the latest turn — the middle is what gives way.
 func TestTrimLocalMessages_OverheadExceedsBudget(t *testing.T) {
 	in := msgs(
 		"user", "first question",
@@ -126,10 +153,14 @@ func TestTrimLocalMessages_OverheadExceedsBudget(t *testing.T) {
 	}
 	got, trimmed := trimLocalMessages(in, remaining)
 	if !trimmed {
-		t.Error("expected all history trimmed when overhead exceeds budget")
+		t.Error("expected trimming when overhead exceeds budget")
 	}
-	if len(got) != 0 {
-		t.Errorf("expected 0 messages remaining, got %d", len(got))
+	text := joined(got)
+	if !strings.Contains(text, "first question") || !strings.Contains(text, "second answer") {
+		t.Errorf("task definition and latest turn must survive even the aggressive trim, got %+v", got)
+	}
+	if strings.Contains(text, "first answer") || strings.Contains(text, "second question") {
+		t.Errorf("middle should be dropped, got %+v", got)
 	}
 }
 
@@ -147,8 +178,12 @@ func TestTrimLocalMessagesWithCompaction_NilAgentFallsBackToHardDrop(t *testing.
 	if !trimmed {
 		t.Error("expected trimming to occur")
 	}
-	if len(got) != 2 || got[0].Content != "second" {
-		t.Errorf("expected plain hard-drop fallback, got %+v", got)
+	text := joined(got)
+	if !strings.Contains(text, "first long message that pushes over budget") || !strings.Contains(text, "ok") {
+		t.Errorf("expected head+tail kept in hard-drop fallback, got %+v", got)
+	}
+	if strings.Contains(text, "first reply") || !strings.Contains(text, "middle of the conversation omitted") {
+		t.Errorf("expected middle dropped with marker in hard-drop fallback, got %+v", got)
 	}
 }
 
@@ -183,14 +218,17 @@ func TestTrimLocalMessagesWithCompaction_SplicesSummaryInsteadOfDropping(t *test
 	if !trimmed {
 		t.Error("expected trimming to occur")
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 1 summary message + 2 kept messages, got %d: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("expected head + summary + tail = 4 messages, got %d: %+v", len(got), got)
 	}
-	if !strings.Contains(got[0].Content, "condensed summary of the dropped turns") {
-		t.Errorf("expected summary content spliced in as the first message, got %q", got[0].Content)
+	if got[0].Content != "first long message that pushes over budget" {
+		t.Errorf("expected the head (original request) first, got %q", got[0].Content)
 	}
-	if got[1].Content != "second" || got[2].Content != "ok" {
-		t.Errorf("expected kept messages preserved after the summary, got %+v", got[1:])
+	if !strings.Contains(got[1].Content, "condensed summary of the dropped turns") {
+		t.Errorf("expected summary of the middle spliced between head and tail, got %q", got[1].Content)
+	}
+	if got[2].Content != "second" || got[3].Content != "ok" {
+		t.Errorf("expected tail preserved after the summary, got %+v", got[2:])
 	}
 	usage := sess.Tokens["test-model\x00primary:compaction"]
 	if usage == nil || usage.Prompt != 10 || usage.Completion != 5 {
@@ -216,7 +254,11 @@ func TestTrimLocalMessagesWithCompaction_SummarizeFailureFallsBackToHardDrop(t *
 	if !trimmed {
 		t.Error("expected trimming to occur")
 	}
-	if len(got) != 2 || got[0].Content != "second" {
-		t.Errorf("expected plain hard-drop fallback on summarize failure, got %+v", got)
+	text := joined(got)
+	if !strings.Contains(text, "first long message that pushes over budget") || !strings.Contains(text, "second") {
+		t.Errorf("expected head+tail kept on summarize failure, got %+v", got)
+	}
+	if strings.Contains(text, "first reply") {
+		t.Errorf("expected middle dropped on summarize failure, got %+v", got)
 	}
 }

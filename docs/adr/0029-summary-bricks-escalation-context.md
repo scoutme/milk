@@ -4,6 +4,13 @@
 
 Accepted
 
+**Update (2026-10-29):** amended by
+[ADR 0093](0093-escalation-context-parity.md) for the local/inference-server
+hand-off path, where there is no native `--resume` history to protect: the
+brick is now a TL;DR index (default budget 3000, explicit truncation markers)
+while the transcript carries the evidence (cross-agent tool-trail narration,
+head+tail trimming). The claude-cli path described here is unchanged.
+
 ## Context
 
 When milk escalates to Claude Code, it injects the local session history via

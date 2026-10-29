@@ -120,14 +120,24 @@ type TrailReplay struct {
 	Note     string
 }
 
-// ReplayTrails decides, for index-aligned per-turn trails (nil for turns
-// without one), what to replay. The newest trailRecentTurns trails are
-// expanded into assistant tool-call / tool-result messages; within them tool
-// output is kept newest-first up to trailReplayProtectBytes and older results
-// become a placeholder (the call and its short arguments stay, so the agent
-// still knows what it ran). Older turns shrink to a one-line manifest.
-func ReplayTrails(trails [][]session.TrailStep) []TrailReplay {
-	out := make([]TrailReplay, len(trails))
+// trailPlan is the retention decision for one trail: manifest-only for old
+// turns; keep[][] marks which calls keep their result verbatim in expanded
+// turns.
+type trailPlan struct {
+	manifest bool
+	keep     [][]bool
+}
+
+// planTrails applies the shared retention policy — the newest
+// trailRecentTurns tool-using turns expanded, tool output kept newest-first up
+// to trailReplayProtectBytes (older results become a placeholder), older turns
+// shrunk to a one-line manifest — to an index-aligned trail slice (nil for
+// turns without one). Both first-person replay (ReplayTrails) and cross-agent
+// narration (NarrateTrails) consume it, so an agent's tool evidence is
+// retained identically whether it is shown to the agent that ran it or
+// narrated to another agent: retention parity, symmetric cost.
+func planTrails(trails [][]session.TrailStep) []trailPlan {
+	out := make([]trailPlan, len(trails))
 	var withTrail []int
 	for i, t := range trails {
 		if len(t) > 0 {
@@ -136,7 +146,7 @@ func ReplayTrails(trails [][]session.TrailStep) []TrailReplay {
 	}
 	cut := max(len(withTrail)-trailRecentTurns, 0)
 	for _, i := range withTrail[:cut] {
-		out[i].Note = TrailManifest(trails[i])
+		out[i].manifest = true
 	}
 	cum := 0
 	for k := len(withTrail) - 1; k >= cut; k-- {
@@ -152,9 +162,78 @@ func ReplayTrails(trails [][]session.TrailStep) []TrailReplay {
 				}
 			}
 		}
-		out[i].Messages = trailMessages(trails[i], keep)
+		out[i].keep = keep
 	}
 	return out
+}
+
+// ReplayTrails decides, for index-aligned per-turn trails (nil for turns
+// without one), what to replay. The newest trailRecentTurns trails are
+// expanded into assistant tool-call / tool-result messages; within them tool
+// output is kept newest-first up to trailReplayProtectBytes and older results
+// become a placeholder (the call and its short arguments stay, so the agent
+// still knows what it ran). Older turns shrink to a one-line manifest.
+func ReplayTrails(trails [][]session.TrailStep) []TrailReplay {
+	out := make([]TrailReplay, len(trails))
+	plans := planTrails(trails)
+	for i, t := range trails {
+		if len(t) == 0 {
+			continue
+		}
+		if plans[i].manifest {
+			out[i].Note = TrailManifest(t)
+			continue
+		}
+		out[i].Messages = trailMessages(t, plans[i].keep)
+	}
+	return out
+}
+
+// NarrateTrails is ReplayTrails' cross-agent counterpart: the same retention
+// plan (planTrails), rendered as third-person narration instead of
+// first-person tool-call messages. The receiving agent sees the same tool
+// evidence the originating agent replays for itself — calls, arguments and
+// (bounded) results — but narrated as system-role text, never as tool calls it
+// never issued. agentName labels the narration.
+func NarrateTrails(trails [][]session.TrailStep, agentName string) []TrailReplay {
+	out := make([]TrailReplay, len(trails))
+	plans := planTrails(trails)
+	for i, t := range trails {
+		if len(t) == 0 {
+			continue
+		}
+		if plans[i].manifest {
+			out[i].Note = TrailManifest(t)
+			continue
+		}
+		out[i].Messages = narrateTrail(t, plans[i].keep, agentName)
+	}
+	return out
+}
+
+// narrateTrail renders one turn's trail as third-person narration: one system
+// message per step carrying the agent's working-note text (when any) followed
+// by one "[<agent> called <tool>(<args>)] / [result: …]" block per call. Tool
+// output retention matches trailMessages exactly (same keep plan).
+func narrateTrail(steps []session.TrailStep, keep [][]bool, agentName string) []Message {
+	var msgs []Message
+	for si, step := range steps {
+		var b strings.Builder
+		if step.Text != "" {
+			fmt.Fprintf(&b, "[%s]: %s\n", agentName, step.Text)
+		}
+		for ci, c := range step.Calls {
+			args, result := c.Args, c.Result
+			if !keep[si][ci] || result == "" {
+				args, result = compactArgs(args, trailClearedArgs), clearedResultPlaceholder
+			}
+			fmt.Fprintf(&b, "[%s called %s(%s)]\n[result: %s]\n", agentName, c.Name, args, result)
+		}
+		if s := strings.TrimSuffix(b.String(), "\n"); s != "" {
+			msgs = append(msgs, Message{Role: "system", Speaker: agentName, Content: s})
+		}
+	}
+	return msgs
 }
 
 func trailMessages(steps []session.TrailStep, keep [][]bool) []Message {

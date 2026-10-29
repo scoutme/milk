@@ -551,7 +551,7 @@ A static tier is a fixed guess, but context pressure is dynamic — a request th
 | ≥ 65% | tools_compact | Tier forced to `minimal`; the project-instructions (AGENTS.md/CLAUDE.md) block is head+tail-trimmed to `instructions_trim_chars`; tool descriptions are one-lined (first sentence, ≤ 120 chars) |
 | ≥ 75% | tools_prune | The tool set is pruned to the tools observed in use this session plus `protected_tools` |
 
-Layers are cumulative (each includes the ones before it) and ordered by value per token shed: description prose first, then unused tools. History is deliberately not part of the ladder — the existing layers ([Context compaction](#context-compaction-disable_compaction), the `compaction_trigger_tokens` trigger, the `max_payload_bytes` safety net, hard drop-oldest) stay deeper and unchanged, so every reduction here is reversible.
+Layers are cumulative (each includes the ones before it) and ordered by value per token shed: description prose first, then unused tools. History is deliberately not part of the ladder — the existing layers ([Context compaction](#context-compaction-disable_compaction), the `compaction_trigger_tokens` trigger, the `max_payload_bytes` safety net, the head+tail hard drop) stay deeper and unchanged, so every reduction here is reversible.
 
 ```json
 { "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
@@ -593,9 +593,9 @@ On by default. Set `"disable_project_instructions": true` on an agent entry to t
 
 ### Context compaction (`disable_compaction`)
 
-When an agent's message history exceeds its budget (`message_budget_chars`/`local_context_budget_chars` — see [Context budget configuration](#context-budget-configuration)), the oldest turns are normally dropped outright. With compaction enabled (the default), milk instead makes one extra inference call to summarize exactly the span that would be dropped, splicing the summary in as a single message instead of discarding that context — so a fact or decision from early in a long session survives as a summary rather than vanishing outright. Falls back to a plain drop when there's nothing to summarize, the call fails, or the provider doesn't support it yet (Bedrock, the Responses API).
+When an agent's message history exceeds its budget (`message_budget_chars`/`local_context_budget_chars` — see [Context budget configuration](#context-budget-configuration)), the middle of the conversation is normally dropped outright (head+tail retention: the original request and first plan and the recent turns always survive, with a `[milk] middle of the conversation omitted …` marker). With compaction enabled (the default), milk instead makes one extra inference call to summarize exactly the span that would be dropped, splicing the summary in between the kept head and tail instead of discarding that context — so a fact or decision from early in a long session survives as a summary rather than vanishing outright. Falls back to the plain head+tail drop when there's nothing to summarize, the call fails, or the provider doesn't support it yet (Bedrock, the Responses API).
 
-Set `"disable_compaction": true` on an agent entry to skip the extra call's latency/cost and go back to a plain drop-oldest-first trim — e.g. for a model that summarizes poorly.
+Set `"disable_compaction": true` on an agent entry to skip the extra call's latency/cost and go back to the plain head+tail hard-drop — e.g. for a model that summarizes poorly.
 
 ```json
 { "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
@@ -804,8 +804,8 @@ All keys go in `~/.milk/config.json`; sensible defaults apply when omitted. See 
 
 | Key | Default | Description |
 |---|---|---|
-| `context_budget_chars` | 12000 | Max characters per summary brick injected into the escalation system prompt; oldest turns dropped first. |
-| `local_context_budget_chars` | 24000 | Max total characters in the primary agent's `messages` array per turn. When over budget, the oldest turns that would be dropped are summarized into one message instead (see [Context compaction](#context-compaction-disable_compaction)) unless `disable_compaction` is set, in which case they're dropped outright as before. `0` = no limit. |
+| `context_budget_chars` | 3000 | Max characters per summary brick injected into the escalation system prompt; oldest turns dropped first (with an explicit omission marker). The brick is a TL;DR index into the transcript — which carries the tool evidence — not the evidence itself; the escalation transcript budget is the same as the primary's (orientation never eats it). |
+| `local_context_budget_chars` | 24000 | Max total characters in the primary agent's `messages` array per turn. When over budget, the middle span that would be dropped is summarized into one message between the kept head and tail (see [Context compaction](#context-compaction-disable_compaction)) unless `disable_compaction` is set, in which case it's dropped outright (with a marker) as before. `0` = no limit. |
 
 ---
 
@@ -833,7 +833,7 @@ All fields optional; omitted → global value applies.
 
 | Field | Global key | Built-in default | Description |
 |---|---|---|---|
-| `context_budget_chars` | `context_budget_chars` | 12000 | Max chars per summary brick |
+| `context_budget_chars` | `context_budget_chars` | 3000 | Max chars per summary brick |
 | `message_budget_chars` | `local_context_budget_chars` | 24000 | Max chars in message history per turn |
 | `percept_inject_max` | `percept_inject_max` | 25 | Max percepts injected per turn |
 | `percept_inject_max_bytes` | `percept_inject_max_bytes` | 2048 | Max total bytes of injected percept content |
