@@ -84,6 +84,13 @@ type milkStreamRun struct {
 	Warnings        []string // system/init.warnings + system/warning messages
 	State           string   // last system/state session state (running|idle|requires_action)
 	StateStopReason string   // stop_reason from the last system/state on idle
+
+	// CostUSD is the computed dollar cost of this turn: the pricing table
+	// (builtin + experiment `pricing:`) over the result's per-model usage
+	// buckets, falling back to the init-reported primary model over the total
+	// tokens. 0 when no price is known — never a fabricated figure
+	// (see ComputeCost).
+	CostUSD float64
 }
 
 // parseMilkStream consumes a complete stream-json run (init … result) and
@@ -226,6 +233,18 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 					run.Tokens.CacheRead += bucket.CacheRead
 					run.Tokens.CacheCreate += bucket.CacheCreate
 				}
+			}
+			// Price the turn: prefer the per-model buckets (an escalation hop
+			// may be priced by a different model than the session's primary),
+			// falling back to the init-reported primary model over the total
+			// tokens. Unknown models contribute 0 (never a fake dollar figure).
+			if len(ev.ModelUsage) > 0 {
+				for m, u := range ev.ModelUsage {
+					run.CostUSD += ComputeCost(m, usageToTokens(u))
+				}
+			}
+			if run.CostUSD == 0 && run.Model != "" {
+				run.CostUSD = ComputeCost(run.Model, run.Tokens)
 			}
 		}
 	}
@@ -493,6 +512,7 @@ func milkRunResult(run *milkStreamRun, start time.Time, beforeFiles, afterFiles 
 	res := RunResult{
 		Response:              run.Response,
 		Tokens:                run.Tokens,
+		CostUSD:               run.CostUSD,
 		Duration:              time.Since(start),
 		ToolCalls:             run.ToolCalls,
 		FileChanges:           diffSnapshots(beforeFiles, afterFiles),

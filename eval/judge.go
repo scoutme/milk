@@ -38,7 +38,7 @@ var JudgePrompt = template.Must(template.New("judge").Parse(`You are evaluating 
 ## Scoring Criteria
 {{range .Criteria}}- **{{.Criterion}}** ({{.Scoring}}, weight {{.Weight}}): {{.Description}}
 {{end}}
-Score each criterion. Output a JSON array: [{"criterion":"...","score":0.0,"reasoning":"..."}]
+Score each criterion — all {{len .Criteria}} of them, exactly one entry per criterion, no extras. Output a JSON array: [{"criterion":"...","score":0.0,"reasoning":"..."}]
 For "binary" scoring: score is 0.0 or 1.0.
 For "scale_1_5" scoring: score is 1.0 to 5.0.
 Consider both the text response AND the file changes when scoring correctness.
@@ -124,8 +124,17 @@ type chatResponse struct {
 // Score sends each turn's response to the LLM and parses the returned scores.
 // For single-turn scenarios (len(results)==1), the scenario-level Rubric is used.
 // For multi-turn scenarios, each result[i] is scored against turns[i].Rubric.
-func (j *Judge) Score(ctx context.Context, scenario Scenario, results []RunResult) ([]JudgeScore, error) {
+//
+// The second return value is the deduplicated list of rubric criteria the judge
+// never returned a score for across all turns. Non-empty means WeightedScore
+// would silently renormalize over a partial rubric, so callers must record it
+// (AgentResult.MissingCriteria) for the report to render the gap instead of a
+// fabricated 0.0. On error, the scores/missing collected so far are returned
+// alongside it, mirroring the documented partial-prefix behavior.
+func (j *Judge) Score(ctx context.Context, scenario Scenario, results []RunResult) ([]JudgeScore, []string, error) {
 	var allScores []JudgeScore
+	var allMissing []string
+	seenMissing := map[string]bool{}
 
 	for i, result := range results {
 		// Determine the rubric for this turn.
@@ -145,21 +154,35 @@ func (j *Judge) Score(ctx context.Context, scenario Scenario, results []RunResul
 			prompt = scenario.Turns[i].Prompt
 		}
 
-		scores, err := j.scoreTurn(ctx, scenario.Description, prompt, result.Response, result.FileChanges, rubric)
+		scores, missing, err := j.scoreTurn(ctx, scenario.Description, prompt, result.Response, result.FileChanges, rubric)
 		if err != nil {
-			return allScores, fmt.Errorf("scoring turn %d: %w", i, err)
+			return allScores, allMissing, fmt.Errorf("scoring turn %d: %w", i, err)
 		}
 		allScores = append(allScores, scores...)
+		for _, m := range missing {
+			if !seenMissing[strings.ToLower(m)] {
+				seenMissing[strings.ToLower(m)] = true
+				allMissing = append(allMissing, m)
+			}
+		}
 	}
 
-	return allScores, nil
+	return allScores, allMissing, nil
 }
 
 // scoreTurn renders the judge prompt, calls the LLM, and parses the JSON response.
 // Unparseable judge output is re-asked up to judgeAttempts times with an explicit
 // correction before the turn is failed — a single flaky judgement should not
 // cost a run its score.
-func (j *Judge) scoreTurn(ctx context.Context, description, prompt, response string, fileChanges []FileChange, rubric []RubricCriterion) ([]JudgeScore, error) {
+//
+// A parseable reply that skips rubric criteria gets the same treatment: the
+// judge is corrected with the missing criterion names and re-asked. If it is
+// still partial after the attempts, the scores it did return are accepted and
+// the remaining criteria come back as the second return value — a coverage gap
+// is data to surface, not a lost judgment. Unparseable output after all
+// attempts remains a hard error (the caller turns that into JudgeError so it is
+// never counted as a genuine 0).
+func (j *Judge) scoreTurn(ctx context.Context, description, prompt, response string, fileChanges []FileChange, rubric []RubricCriterion) ([]JudgeScore, []string, error) {
 	// Render prompt.
 	var buf bytes.Buffer
 	if err := JudgePrompt.Execute(&buf, judgeInput{
@@ -169,37 +192,57 @@ func (j *Judge) scoreTurn(ctx context.Context, description, prompt, response str
 		FileChanges: fileChanges,
 		Criteria:    rubric,
 	}); err != nil {
-		return nil, fmt.Errorf("rendering judge prompt: %w", err)
+		return nil, nil, fmt.Errorf("rendering judge prompt: %w", err)
 	}
 
 	// Attempt the judgement. Judge models routinely emit invalid JSON on the
-	// first try, so a parse failure re-asks with an explicit correction up to
-	// judgeAttempts times before the turn is failed.
+	// first try (re-asked with a parse correction) and just as routinely drop
+	// criteria from an otherwise valid reply (re-asked with a coverage
+	// correction) — either way, up to judgeAttempts attempts before deciding.
 	messages := []chatMessage{{Role: "user", Content: buf.String()}}
 	var scores []JudgeScore
-	var lastErr error
+	var missing []string
+	var parseErr error
+	var correction string
 	for attempt := 0; attempt < judgeAttempts; attempt++ {
 		if attempt > 0 {
-			messages = append(messages, chatMessage{
-				Role:    "user",
-				Content: fmt.Sprintf(judgeCorrectionPrompt, lastErr),
-			})
+			messages = append(messages, chatMessage{Role: "user", Content: correction})
 		}
 		content, err := j.callLLM(ctx, messages)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		parsed, err := parseJudgeScores(content)
-		if err == nil {
-			scores = parsed
-			lastErr = nil
+		if err != nil {
+			parseErr = err
+			correction = fmt.Sprintf(judgeCorrectionPrompt, err)
+			messages = append(messages, chatMessage{Role: "assistant", Content: content})
+			continue
+		}
+		// Canonicalize BEFORE the coverage check: judges routinely echo the
+		// rubric line verbatim as the criterion name (observed in the
+		// routing-reps study: "proportional (binary, weight 2): <full
+		// description>"). An exact match reads that as a missing criterion —
+		// burning correction retries the judge keeps failing (it re-echoes
+		// the same line) — while WeightedScore/findCriterion silently drop
+		// the returned score as unknown, excluding its weight from the
+		// average exactly like the coverage gap this check exists to catch.
+		parsed = snapScores(parsed, rubric)
+		scores = parsed
+		parseErr = nil
+		missing = missingCriteria(parsed, rubric)
+		if len(missing) == 0 {
 			break
 		}
-		lastErr = err
+		// Parseable but incomplete: WeightedScore renormalizes over whatever the
+		// judge returned — missing criteria drop out of both numerator and
+		// denominator, silently inflating the score — so correct it like a parse
+		// failure rather than accepting the gap quietly.
+		correction = fmt.Sprintf(judgeCoveragePrompt, strings.Join(missing, ", "))
 		messages = append(messages, chatMessage{Role: "assistant", Content: content})
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("parsing judge scores from LLM output after %d attempts: %w", judgeAttempts, lastErr)
+	if parseErr != nil {
+		return nil, nil, fmt.Errorf("parsing judge scores from LLM output after %d attempts: %w", judgeAttempts, parseErr)
 	}
 
 	// Clamp scores to valid ranges based on the rubric.
@@ -226,7 +269,7 @@ func (j *Judge) scoreTurn(ctx context.Context, description, prompt, response str
 		}
 	}
 
-	return scores, nil
+	return scores, missing, nil
 }
 
 // judgeAttempts is how many times a turn's judgement is attempted: the first
@@ -237,6 +280,17 @@ const judgeAttempts = 3
 // could not be parsed (%v is the parse error).
 const judgeCorrectionPrompt = `Your previous reply could not be parsed as JSON: %v.
 Reply again with ONLY the JSON array, no other text:
+[{"criterion":"...","score":0.0,"reasoning":"..."}]
+Escape every double quote inside a string value as \" — use single quotes or
+backticks when quoting code, identifiers, or messages. No code fences.`
+
+// judgeCoveragePrompt is appended to the conversation after a parseable judge
+// reply that scored only some of the rubric criteria (%s is the comma-separated
+// missing criterion names, in rubric order).
+const judgeCoveragePrompt = `Your previous reply did not score every criterion — missing: %s.
+Score ALL criteria from the Scoring Criteria section: exactly one entry per
+criterion, no extras, no omissions.
+Reply with ONLY the JSON array, no other text:
 [{"criterion":"...","score":0.0,"reasoning":"..."}]
 Escape every double quote inside a string value as \" — use single quotes or
 backticks when quoting code, identifiers, or messages. No code fences.`
@@ -459,6 +513,73 @@ func findCriterion(name string, rubric []RubricCriterion) *RubricCriterion {
 		}
 	}
 	return nil
+}
+
+// snapCriterion maps a judge-echoed criterion name back to the canonical
+// rubric criterion it names. Judges often echo the rubric line verbatim —
+// "proportional (binary, weight 2): <full description>" instead of
+// "proportional" — which breaks every exact-match consumer downstream
+// (missingCriteria reports a phantom gap, WeightedScore skips the score as
+// unknown, findCriterion skips the clamp). Matching: exact (case-insensitive)
+// first, then a rubric-name prefix ending at a word boundary (space, tab,
+// "(", ":", ";", em dash), longest rubric name winning. "-" is not a
+// boundary, so "design" never claims "design-quality". Names that match no
+// rubric criterion are returned trimmed but otherwise unchanged (the judge's
+// own extra criteria stay extra).
+func snapCriterion(name string, rubric []RubricCriterion) string {
+	trimmed := strings.TrimSpace(name)
+	lower := strings.ToLower(trimmed)
+	for i := range rubric {
+		if strings.ToLower(rubric[i].Criterion) == lower {
+			return rubric[i].Criterion
+		}
+	}
+	best := ""
+	for i := range rubric {
+		c := rubric[i].Criterion
+		if len(trimmed) <= len(c) || !strings.HasPrefix(lower, strings.ToLower(c)) {
+			continue
+		}
+		rest := trimmed[len(c):]
+		switch {
+		case strings.HasPrefix(rest, " "), strings.HasPrefix(rest, "\t"),
+			strings.HasPrefix(rest, "("), strings.HasPrefix(rest, ":"),
+			strings.HasPrefix(rest, ";"), strings.HasPrefix(rest, "—"):
+			if len(c) > len(best) {
+				best = c
+			}
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return trimmed
+}
+
+// snapScores canonicalizes every score's criterion name in place (see
+// snapCriterion) and returns the slice.
+func snapScores(scores []JudgeScore, rubric []RubricCriterion) []JudgeScore {
+	for i := range scores {
+		scores[i].Criterion = snapCriterion(scores[i].Criterion, rubric)
+	}
+	return scores
+}
+
+// missingCriteria returns the rubric criteria (in rubric order, original
+// spelling) that scores does not contain. Matching is case-insensitive, like
+// findCriterion. An empty return means full rubric coverage.
+func missingCriteria(scores []JudgeScore, rubric []RubricCriterion) []string {
+	got := make(map[string]bool, len(scores))
+	for _, s := range scores {
+		got[strings.ToLower(s.Criterion)] = true
+	}
+	var missing []string
+	for _, r := range rubric {
+		if !got[strings.ToLower(r.Criterion)] {
+			missing = append(missing, r.Criterion)
+		}
+	}
+	return missing
 }
 
 // truncate returns the first n characters of s, appending "..." if truncated.

@@ -60,6 +60,16 @@ type Experiment struct {
 	// Budget is the default metric budget asserted against every run; a
 	// scenario's own `budget:` block refines it field-by-field.
 	Budget *Budget `yaml:"budget"`
+	// Pricing overrides the built-in model price table ($ per 1M tokens) for
+	// this experiment's runs: model name → prices, e.g.
+	//
+	//	pricing:
+	//	  mimo-v2.6-pro: {input: 0.435, output: 0.87, cache_read: 0.0036}
+	//
+	// Keys match run model names (exact, or path-qualified like
+	// xiaomi/mimo-v2.6-pro). Feeds eval's computed-cost adapter (milk);
+	// claude-code and mimo-code report their own cost and ignore it.
+	Pricing map[string]ModelPricing `yaml:"pricing,omitempty"`
 	// Versions is the milk version matrix: one labeled milk-tui adapter per
 	// entry, all running the same suite side by side (see ResolveAdapterSpecs).
 	// Combines with Agents (e.g. a claude-code baseline alongside versions).
@@ -302,6 +312,10 @@ func FilterScenarios(scenarios []Scenario, category string, names []string, mult
 func (h *Harness) RunExperiment(ctx context.Context, exp *Experiment) ([]ScenarioResult, error) {
 	h.progress = newProgressReporter(os.Stderr)
 	defer h.progress.Stop()
+
+	// Model prices: the experiment's `pricing:` block overrides the built-in
+	// table before any adapter runs, so milk's computed costs use it.
+	SetPricing(exp.Pricing)
 
 	scenarios, err := LoadScenarios(exp.Scenarios)
 	if err != nil {

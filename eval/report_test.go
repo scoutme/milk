@@ -659,3 +659,127 @@ func TestColumnLabel_Alignment(t *testing.T) {
 		t.Errorf("center-align: got %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Partial rubric rendering (missing judge criteria)
+// ---------------------------------------------------------------------------
+
+// partialRubricScenarioResults reproduces the missing-criteria episode: milk-tui
+// was judged on all three routing criteria, mimo-code's judge never returned
+// confirmed-depth (weight 3) and WeightedScore renormalized to (5+5)/(1+1).
+// legacy=true drops MissingCriteria to model results.json written before the
+// field existed — the score table must still not fabricate a 0.0 for the gap.
+func partialRubricScenarioResults(legacy bool) []ScenarioResult {
+	var missing []string
+	if !legacy {
+		missing = []string{"confirmed-depth"}
+	}
+	return []ScenarioResult{{
+		ScenarioName: "proceed-on-hard-design-task",
+		Category:     "routing",
+		Difficulty:   "hard",
+		AgentResults: map[string]AgentResult{
+			"milk-tui": {
+				RunResults: []RunResult{{Response: "done"}},
+				Scores: []JudgeScore{
+					{Criterion: "design-sketch", Score: 5.0},
+					{Criterion: "confirmed-depth", Score: 5.0},
+					{Criterion: "continuity", Score: 5.0},
+				},
+				WeightedScore: 5.0,
+			},
+			"mimo-code": {
+				RunResults: []RunResult{{Response: "grind"}},
+				Scores: []JudgeScore{
+					{Criterion: "design-sketch", Score: 5.0},
+					{Criterion: "continuity", Score: 5.0},
+				},
+				MissingCriteria: missing,
+				WeightedScore:   5.0,
+			},
+		},
+	}}
+}
+
+// reportRowWith returns the first table row line whose first field equals
+// firstField (trimmed), or "" when absent.
+func reportRowWith(report, firstField string) string {
+	for _, line := range strings.Split(report, "\n") {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == firstField || strings.HasPrefix(trimmed, firstField+" ") {
+			return line
+		}
+		// criterion label padded by columnLabel: match the padded form too.
+		if len(line) > 20 && strings.TrimRight(line[:20], " ") == firstField {
+			return line
+		}
+	}
+	return ""
+}
+
+func TestGenerateReport_MissingCriteriaRendersDashAndWarning(t *testing.T) {
+	report := GenerateReport(partialRubricScenarioResults(false))
+
+	row := reportRowWith(report, "confirmed-depth")
+	if row == "" {
+		t.Fatal("confirmed-depth row missing from score table")
+	}
+	if !strings.Contains(row, "—") {
+		t.Errorf("mimo-code's unjudged cell must render —, got row %q", row)
+	}
+	if strings.Contains(row, "0.0") {
+		t.Errorf("missing criterion must not render as a fake 0.0: %q", row)
+	}
+	if !strings.Contains(row, "5.0") {
+		t.Errorf("milk-tui's genuine score should still render: %q", row)
+	}
+	if !strings.Contains(report, "partial rubric for mimo-code") {
+		t.Error("report should warn about the partial rubric")
+	}
+	if !strings.Contains(report, "judge returned no score for confirmed-depth") {
+		t.Error("warning should name the missing criterion")
+	}
+	if !strings.Contains(report, "5.0*") {
+		t.Error("partial weighted score should carry the * marker")
+	}
+}
+
+func TestGenerateReport_UnscoredCellRendersDashWithoutMissingField(t *testing.T) {
+	// Legacy results.json (no missing_criteria) has the same visible gap in
+	// Scores: the presence check alone must stop it rendering as 0.0.
+	report := GenerateReport(partialRubricScenarioResults(true))
+
+	row := reportRowWith(report, "confirmed-depth")
+	if row == "" {
+		t.Fatal("confirmed-depth row missing from score table")
+	}
+	if !strings.Contains(row, "—") {
+		t.Errorf("legacy unscored cell must render —, got row %q", row)
+	}
+	if strings.Contains(row, "0.0") {
+		t.Errorf("legacy unscored cell must not render as a fake 0.0: %q", row)
+	}
+	// Nothing was recorded, so no partial-rubric claim should appear either.
+	if strings.Contains(report, "partial rubric") {
+		t.Error("legacy results carry no missing_criteria — no warning should be invented")
+	}
+}
+
+func TestGenerateJSON_MissingCriteriaField(t *testing.T) {
+	data := GenerateJSON(partialRubricScenarioResults(false))
+	var report JSONReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(report.Scenarios) != 1 {
+		t.Fatalf("got %d scenarios, want 1", len(report.Scenarios))
+	}
+	agents := report.Scenarios[0].Agents
+	got := agents["mimo-code"].MissingCriteria
+	if len(got) != 1 || got[0] != "confirmed-depth" {
+		t.Errorf("mimo-code missing_criteria = %v, want [confirmed-depth]", got)
+	}
+	if len(agents["milk-tui"].MissingCriteria) != 0 {
+		t.Errorf("milk-tui missing_criteria = %v, want none", agents["milk-tui"].MissingCriteria)
+	}
+}
