@@ -95,3 +95,26 @@ being lossy for cross-agent work.
 - claude-cli escalation keeps ADR 0029's bounded bricks (its double-injection
   constraint is real); it inherits C's honest markers and D's framing through
   the shared builders.
+
+## Addendum (2026-10-29) — framing is keyed to session shape, not role alone
+
+The recap-pro-primary attribution run showed the hand-off narrative leaking
+into sessions that never had a hand-off: pinned from the first turn
+(`--escalate`), every turn is the escalation agent's own work, yet the role
+system prompt still asserted "the primary agent has handed off this task"
+and steered unknown-work lookups at `agent: "primary"`. That false framing
+makes the model re-present its own earlier turns as received material — the
+residual "What was implemented (matching the design)" recap the run measured.
+
+Validated by the `esc-owned-parity` eval (milk-esc pinned vs milk-pro
+control, n=3, same judge): proportional 4,4,5 vs 4,5,4 — parity, and the
+score-2 recap signature is gone (judge rep 3: "No re-stating of the prior
+hard task"). Pre-fix baseline on the same cell: 3,4,3 with recaps.
+
+Fix: `buildSystemPromptOpts` takes an `ownedFromStart` flag
+(`session.PrimaryEverActive` == false and no escalation brief) selecting an
+owner framing ("This conversation is yours from the start — every turn in it
+is your own work") with no primary attribution. History rendering is
+unchanged — it was already at parity (pinned by
+`TestPinnedEscalationHistoryParity`). The hand-off narrative stays exactly
+where a hand-off actually occurred.

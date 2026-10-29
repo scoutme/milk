@@ -1031,7 +1031,9 @@ func (a *Agent) SystemOverheadChars(sess *session.Session) int {
 	if sess != nil {
 		cwd = sess.CWD
 	}
-	n := len(buildSystemPrompt(cwd, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier, a.disableProjectInstructions))
+	// Match Run's framing selection so the budget estimate reflects the
+	// prompt actually sent (the owned-conversation variant differs in length).
+	n := len(buildSystemPromptOpts(cwd, a.selfName, a.escalationName, a.workflowRole, a.systemPromptTier, a.disableProjectInstructions, 0, a.ownsConversationFromStart(sess)))
 	// No tag instruction overhead for local HTTP agents — they use injected tools.
 	return n
 }
@@ -1585,15 +1587,31 @@ const memoryToolGuidance = `**MANDATORY — memory tool actions**: The following
 // disableProjectInstructions turns off appending the target repo's
 // AGENTS.md/CLAUDE.md content (see internal/instructions).
 func buildSystemPrompt(cwd, selfName, escalationName string, workflowRole bool, tier string, disableProjectInstructions bool) string {
-	return buildSystemPromptOpts(cwd, selfName, escalationName, workflowRole, tier, disableProjectInstructions, 0)
+	return buildSystemPromptOpts(cwd, selfName, escalationName, workflowRole, tier, disableProjectInstructions, 0, false)
 }
 
-// buildSystemPromptOpts is buildSystemPrompt with one extra knob: when
-// projInstructionsTrim > 0, the project-instructions (AGENTS.md/CLAUDE.md)
-// block is head+tail-trimmed to that many characters instead of being
-// appended whole — the instruction-layer reduction of issue #236's ladder
-// (contextreduce.TrimBlock). 0 keeps the block unchanged.
-func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bool, tier string, disableProjectInstructions bool, projInstructionsTrim int) string {
+// ownsConversationFromStart reports whether this agent is the escalation
+// target in a session that contains no primary-agent work at all — a
+// conversation pinned to the escalation agent from the first turn. There is
+// no hand-off to narrate in such a session: the whole history is this agent's
+// own work, and the hand-off framing must not claim otherwise (see the
+// escalation case in buildSystemPromptOpts).
+func (a *Agent) ownsConversationFromStart(sess *session.Session) bool {
+	if a.escalationName == "" || sess == nil {
+		return false
+	}
+	return !session.PrimaryEverActive(sess) && sess.EscalationBrief == ""
+}
+
+// buildSystemPromptOpts is buildSystemPrompt with two extra knobs:
+// projInstructionsTrim > 0 head+tail-trims the project-instructions
+// (AGENTS.md/CLAUDE.md) block instead of appending it whole — the
+// instruction-layer reduction of issue #236's ladder (contextreduce.TrimBlock);
+// 0 keeps the block unchanged. ownedFromStart selects the escalation role's
+// owned-conversation framing: when the session holds no primary-agent work
+// there is no hand-off to narrate, and asserting one primes the model to
+// re-present its own earlier turns as received material.
+func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bool, tier string, disableProjectInstructions bool, projInstructionsTrim int, ownedFromStart bool) string {
 	// Normalise tier.
 	switch tier {
 	case "minimal", "full":
@@ -1619,7 +1637,30 @@ func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bo
 		}
 	case escalationName != "":
 		// Escalation role: selfName == escalationName here.
-		if tier == "minimal" {
+		//
+		// Two framings, keyed to what actually happened in the session rather
+		// than to the role alone. The hand-off narrative is only true when the
+		// primary agent produced work (or handed off with a brief): narrating it
+		// in a session that started pinned to the escalation agent frames the
+		// agent's own earlier turns as received material — the recap
+		// amplification ("What was implemented…") the context-parity work chased.
+		if ownedFromStart {
+			if tier == "minimal" {
+				base = fmt.Sprintf(
+					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+					selfName,
+				)
+			} else {
+				base = fmt.Sprintf(
+					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
+						sharedBlock+`
+- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+					selfName,
+				)
+			}
+		} else if tier == "minimal" {
 			base = fmt.Sprintf(
 				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
 				selfName,
@@ -1877,6 +1918,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		tier:                       a.systemPromptTier,
 		disableProjectInstructions: a.disableProjectInstructions,
 		custom:                     a.customPrompt,
+		ownedFromStart:             a.ownsConversationFromStart(sess),
 	}
 	if a.backgroundManager != nil {
 		spb.guidance = append(spb.guidance, backgroundAgentGuidance)

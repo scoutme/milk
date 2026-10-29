@@ -695,6 +695,21 @@ func EscalationEverActive(s *Session) bool {
 	return false
 }
 
+// PrimaryEverActive reports whether the primary (local) agent has ever
+// produced or received a turn in this session — the mirror of
+// EscalationEverActive. A session where it returns false is one that started
+// pinned to the escalation agent: the conversation is entirely the escalation
+// agent's own work, and hand-off framing ("the primary agent has handed off
+// this task") must not be asserted over it.
+func PrimaryEverActive(s *Session) bool {
+	for _, t := range s.History {
+		if t.Agent == AgentLocal {
+			return true
+		}
+	}
+	return false
+}
+
 // LastEscalationBoundary returns the history index of the first turn after the
 // most recent escalation assistant turn. Returns 0 when there are no escalation
 // turns. Exported for use by non-CLI escalation paths that need to scope history
