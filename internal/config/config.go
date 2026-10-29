@@ -1519,9 +1519,9 @@ func defaults() Config {
 		Memory: &MemoryConfig{
 			SessionHalfLifeDays:    3,
 			GlobalHalfLifeDays:     60,
-			ReconfirmBoost:         0.05,
 			ReconfirmCap:           0.90,
 			PromoteThreshold:       0.80,
+			PromoteStableDays:      1,
 			PruneThreshold:         0.20,
 			RecencyBoost:           0.10,
 			RecencyHalfLifeDays:    30,
@@ -1841,15 +1841,17 @@ type MemoryConfig struct {
 	// a non-core (promoted) global percept's weight sinks toward
 	// PruneThreshold. Default 60.
 	GlobalHalfLifeDays float64 `json:"global_half_life_days,omitempty"`
-	// ReconfirmBoost is added to a percept's weight when a near-duplicate
-	// fact is re-stated (reinforcement). Default 0.05.
-	ReconfirmBoost float64 `json:"reconfirm_boost,omitempty"`
-	// ReconfirmCap caps reinforcement-driven weight. Default 0.90.
+	// ReconfirmCap caps corroboration-driven weight (non-core). Default 0.90.
 	ReconfirmCap float64 `json:"reconfirm_cap,omitempty"`
 	// PromoteThreshold is the weight at which session percepts graduate to
 	// the global store (evidence-gated off the user/core fast path).
 	// Default 0.80.
 	PromoteThreshold float64 `json:"promote_threshold,omitempty"`
+	// PromoteStableDays is how long, in milk running time, a non-fast-path
+	// percept must have sat at/above PromoteThreshold before it graduates —
+	// the durability gate: a boost burst cannot mint a fact. Default 1;
+	// negative disables the gate.
+	PromoteStableDays float64 `json:"promote_stable_days,omitempty"`
 	// PruneThreshold is the weight at or below which session percepts are
 	// culled (and below which global decay stops). Default 0.20.
 	PruneThreshold float64 `json:"prune_threshold,omitempty"`

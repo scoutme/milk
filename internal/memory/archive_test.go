@@ -35,6 +35,7 @@ func seedGlobal(t *testing.T, s *Store, content string) string {
 		if s.global.Percepts[i].ID == out.ID {
 			s.global.Percepts[i].Core = false
 			s.global.Percepts[i].W = s.params.PruneThreshold
+			s.global.Percepts[i].Prior = s.params.PruneThreshold // decayed to the floor all the way down
 		}
 	}
 	s.mu.Unlock()

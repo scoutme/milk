@@ -88,4 +88,6 @@
 * [87. Panel auto-open master switch](0087-panel-auto-open-master-switch.md)
 * [88. TUI render-loop performance: viewport fork + render caches](0088-tui-render-loop-performance.md)
 * [89. Side-panel width budget: recency-ranked panels over a 40-col floor](0089-side-panel-width-budget.md)
-* [90. Memory consolidation v3: running-time decay and evidence-gated promotion](0090-memory-consolidation-v3.md)
+* [90. Memory consolidation v3: running-time decay and evidence-gated promotion](0090-memory-consolidation-v3.md) *(weighing/reinforcement superseded by 91)*
+* [91. Memory consolidation v4: derived weights, echo-proof corroboration, supersession and durability](0091-memory-consolidation-v4.md)
+* [92. Memory consolidation v5: confidence × activation, producer-aware forgetting, engram stability, contradiction resolution](0092-memory-consolidation-v5.md) *(proposed — not implemented; v4 still governs)*

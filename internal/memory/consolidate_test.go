@@ -131,11 +131,12 @@ func TestConsolidate_PromotesUserFastPath(t *testing.T) {
 func TestConsolidate_PromotesCorroboratedInference(t *testing.T) {
 	s := newTestStore(t, true)
 	p := Percept{
-		ID:       "corr-1",
-		Content:  "corroborated inference",
-		Producer: ProducerLocal,
-		W:        0.85,
-		Evidence: evidencePromote, // corroborated in two distinct runs
+		ID:                  "corr-1",
+		Content:             "corroborated inference",
+		Producer:            ProducerLocal,
+		W:                   0.85,
+		Evidence:            evidencePromote,              // corroborated in two distinct runs
+		AboveThresholdSince: s.now().Add(-48 * time.Hour), // durable: 2 running days above the gate
 	}
 	s.mu.Lock()
 	s.session.Percepts = append(s.session.Percepts, p)
@@ -149,7 +150,7 @@ func TestConsolidate_PromotesCorroboratedInference(t *testing.T) {
 			return // promoted
 		}
 	}
-	t.Error("inference percept with Evidence 2 at W 0.85 should be promoted")
+	t.Error("inference percept with Evidence 2 at derivedW 0.85, durable, should be promoted")
 }
 
 func TestConsolidate_DefersUnCorroboratedInference(t *testing.T) {
@@ -221,7 +222,8 @@ func TestConsolidate_PromotesAfterSecondRunCorroboration(t *testing.T) {
 	ctx := context.Background()
 	content := "the deploy target is a k3s cluster"
 
-	// Run 1: stated and re-stated — Evidence 1 at most, W 0.7 → 0.75.
+	// Run 1: stated and re-stated — one corroboration event at most (echo in
+	// the same run adds nothing), W 0.7 → derivedW 0.7 + corrobBoost(1).
 	s1, err := NewStoreParams(dir, "sess", Params{})
 	if err != nil {
 		t.Fatalf("run 1 open: %v", err)
@@ -242,7 +244,9 @@ func TestConsolidate_PromotesAfterSecondRunCorroboration(t *testing.T) {
 	}
 
 	// Run 2: a new Store lifetime over the same files — one more restatement
-	// is the second distinct run: W 0.80, Evidence 2 → graduates.
+	// is the second distinct run: derivedW = 0.7 + corrobBoost(2) = 0.825,
+	// Evidence 2. First pass over the threshold just starts the durability
+	// clock — a boost burst cannot graduate on momentum.
 	s2, err := NewStoreParams(dir, "sess", Params{})
 	if err != nil {
 		t.Fatalf("run 2 open: %v", err)
@@ -254,6 +258,20 @@ func TestConsolidate_PromotesAfterSecondRunCorroboration(t *testing.T) {
 	if err := s2.Consolidate(); err != nil {
 		t.Fatalf("run 2 Consolidate: %v", err)
 	}
+	if len(s2.global.Percepts) != 0 {
+		t.Fatalf("a freshly-thresholded fact must wait out the durability window, got %v", s2.global.Percepts)
+	}
+	if s2.session.Percepts[0].AboveThresholdSince.IsZero() {
+		t.Error("the durability clock should have started at this pass")
+	}
+
+	// One running day later the fact has held the gate unchallenged: it is
+	// durable and graduates. (Decay of W meanwhile is forgetting, not
+	// falsifying — the gate reads derivedW.)
+	advanceClock(s2, 25*time.Hour)
+	if err := s2.Consolidate(); err != nil {
+		t.Fatalf("run 2 second Consolidate: %v", err)
+	}
 	for _, rp := range s2.global.Percepts {
 		if rp.ID == first.ID {
 			if rp.Evidence != 2 {
@@ -262,7 +280,7 @@ func TestConsolidate_PromotesAfterSecondRunCorroboration(t *testing.T) {
 			return // promoted
 		}
 	}
-	t.Error("percept corroborated in two runs (W 0.80, Evidence 2) should promote")
+	t.Error("percept corroborated in two runs and durable (derivedW 0.825) should promote")
 }
 
 func TestDecayPercepts_SessionHalving(t *testing.T) {
@@ -375,41 +393,164 @@ func TestClampW(t *testing.T) {
 	}
 }
 
-func TestEdgePropagation_Extends(t *testing.T) {
+func TestEdgeEvents_Extends(t *testing.T) {
+	s := newTestStore(t, true)
 	percepts := []Percept{
-		{ID: "a", W: 0.5},
-		{ID: "b", W: 0.5},
+		{ID: "a", W: 0.5, Producer: ProducerLocal},
+		{ID: "b", W: 0.5, Producer: ProducerLocal},
 	}
 	edges := []Edge{{From: "a", To: "b", Relation: RelationExtends}}
-	result := applyEdges(percepts, edges)
-	if result[1].W != 0.5+edgeBoost {
-		t.Errorf("extends edge should raise target W, got %v", result[1].W)
+	normalizePriors(percepts)
+	s.applyEdgeEvents(percepts, edges)
+	if !closeTo(percepts[1].W, 0.5+corrobBoost(1)) {
+		t.Errorf("extends edge should raise target W by the corroboration marginal, got %v", percepts[1].W)
+	}
+	if percepts[1].Evidence != 1 {
+		t.Errorf("extends target Evidence = %d, want 1", percepts[1].Evidence)
+	}
+	if !closeTo(percepts[0].W, 0.5) {
+		t.Errorf("extends source W should be untouched, got %v", percepts[0].W)
+	}
+	// Per-run cap: a second pass over the same edge changes nothing.
+	s.applyEdgeEvents(percepts, edges)
+	if !closeTo(percepts[1].W, 0.5+corrobBoost(1)) || percepts[1].Evidence != 1 {
+		t.Errorf("edge events must apply exactly once per Store lifetime: W=%v Evidence=%d", percepts[1].W, percepts[1].Evidence)
 	}
 }
 
-func TestEdgePropagation_Contradicts(t *testing.T) {
+func TestEdgeEvents_Contradicts(t *testing.T) {
+	s := newTestStore(t, true)
 	percepts := []Percept{
-		{ID: "a", W: 0.5},
-		{ID: "b", W: 0.5},
+		{ID: "a", W: 0.5, Producer: ProducerLocal},
+		{ID: "b", W: 0.5, Producer: ProducerLocal},
 	}
 	edges := []Edge{{From: "a", To: "b", Relation: RelationContradicts}}
-	result := applyEdges(percepts, edges)
-	if result[0].W != 0.5-edgeNegativeDelta {
-		t.Errorf("contradicts edge should lower From W, got %v", result[0].W)
+	normalizePriors(percepts)
+	s.applyEdgeEvents(percepts, edges)
+	if !closeTo(percepts[0].W, 0.5-contraDelta) {
+		t.Errorf("contradicts edge should lower From W, got %v", percepts[0].W)
 	}
-	if result[1].W != 0.5-edgeNegativeDelta {
-		t.Errorf("contradicts edge should lower To W, got %v", result[1].W)
+	if !closeTo(percepts[1].W, 0.5-contraDelta) {
+		t.Errorf("contradicts edge should lower To W, got %v", percepts[1].W)
+	}
+	if percepts[0].Contradictions != 1 || percepts[1].Contradictions != 1 {
+		t.Errorf("contradicts endpoints should each count one conflict event, got %d/%d",
+			percepts[0].Contradictions, percepts[1].Contradictions)
+	}
+	if percepts[0].Evidence != 0 || percepts[1].Evidence != 0 {
+		t.Error("a conflict is not corroboration — no Evidence either side")
+	}
+	// Per-run cap: the second pass does not bite again.
+	s.applyEdgeEvents(percepts, edges)
+	if !closeTo(percepts[0].W, 0.5-contraDelta) || percepts[0].Contradictions != 1 {
+		t.Errorf("conflict events must apply exactly once per Store lifetime: W=%v K=%d",
+			percepts[0].W, percepts[0].Contradictions)
+	}
+}
+
+func TestEdgeEvents_UpdatesSupersedes(t *testing.T) {
+	s := newTestStore(t, true)
+	percepts := []Percept{
+		{ID: "old", W: 0.7, Producer: ProducerLocal},
+		{ID: "new", W: 0.7, Producer: ProducerLocal},
+	}
+	// updates: From = the newer claim, To = the superseded one.
+	edges := []Edge{{From: "new", To: "old", Relation: RelationUpdates}}
+	normalizePriors(percepts)
+	s.applyEdgeEvents(percepts, edges)
+
+	if !closeTo(percepts[1].W, 0.7+corrobBoost(1)) || percepts[1].Evidence != 1 {
+		t.Errorf("updates should corroborate its source (the newer claim): W=%v Evidence=%d", percepts[1].W, percepts[1].Evidence)
+	}
+	if !closeTo(percepts[0].W, 0.7-supersedPenalty) || percepts[0].Superseded != 1 {
+		t.Errorf("updates should supersede its target: W=%v Superseded=%d", percepts[0].W, percepts[0].Superseded)
+	}
+
+	// Idempotent: a second pass changes nothing...
+	s.applyEdgeEvents(percepts, edges)
+	if !closeTo(percepts[0].W, 0.7-supersedPenalty) || percepts[0].Superseded != 1 {
+		t.Errorf("supersession must not stack: W=%v Superseded=%d", percepts[0].W, percepts[0].Superseded)
+	}
+
+	// ...and removing the edge lifts the supersession again.
+	s.applyEdgeEvents(percepts, nil)
+	if percepts[0].Superseded != 0 {
+		t.Errorf("a removed updates edge should lift the supersession, got Superseded=%d", percepts[0].Superseded)
+	}
+	if !closeTo(percepts[0].W, 0.7) {
+		t.Errorf("lifting the supersession should restore its marginal, got W=%v", percepts[0].W)
+	}
+}
+
+func TestDerivedW(t *testing.T) {
+	p := Percept{Producer: ProducerLocal, Prior: 0.7}
+	if w := derivedW(p); !closeTo(w, 0.7) {
+		t.Errorf("derivedW(prior 0.7) = %v, want 0.7", w)
+	}
+	p.Evidence = 2
+	if w := derivedW(p); !closeTo(w, 0.7+corrobBoost(2)) {
+		t.Errorf("derivedW with Evidence 2 = %v, want %v", w, 0.7+corrobBoost(2))
+	}
+	p.Contradictions = 1
+	if w := derivedW(p); !closeTo(w, 0.7+corrobBoost(2)-contraDelta) {
+		t.Errorf("derivedW with one conflict = %v, want %v", w, 0.7+corrobBoost(2)-contraDelta)
+	}
+	// Corroboration saturates at corrobMax and non-core W never passes the
+	// reconfirm cap: repetition cannot mint perfect confidence.
+	p.Contradictions = 0
+	p.Evidence = 1000
+	if w := derivedW(p); w > reconfirmCap || w != reconfirmCap {
+		t.Errorf("derivedW with huge Evidence = %v, want the cap %v", w, reconfirmCap)
+	}
+	// Contradiction penalties saturate at contraMax.
+	p.Evidence = 0
+	p.Contradictions = 1000
+	if w := derivedW(p); !closeTo(w, 0.7-contraMax) {
+		t.Errorf("derivedW with huge Contradictions = %v, want %v", w, 0.7-contraMax)
+	}
+	// Core is exempt from the cap.
+	c := Percept{Core: true, Prior: 1.0, Evidence: 3}
+	if w := derivedW(c); w != 1.0 {
+		t.Errorf("derivedW(core) = %v, want 1.0", w)
+	}
+}
+
+func TestNormalizePriors_Migration(t *testing.T) {
+	// A pre-v4 percept: W carries the count-derived boosts already.
+	percepts := []Percept{
+		{ID: "legacy", W: 0.80, Evidence: 2, Producer: ProducerLocal},
+	}
+	normalizePriors(percepts)
+	// The corroboration backing is removed from the prior...
+	if !closeTo(percepts[0].Prior, 0.80-corrobBoost(2)) {
+		t.Errorf("migrated Prior = %v, want %v (boosts backed out once)", percepts[0].Prior, 0.80-corrobBoost(2))
+	}
+	// ...so re-derivation reproduces the stored W exactly — no double count.
+	if !closeTo(derivedW(percepts[0]), 0.80) {
+		t.Errorf("derivedW after migration = %v, want the stored 0.80", derivedW(percepts[0]))
+	}
+	// Idempotent: running again does not move the prior.
+	normalizePriors(percepts)
+	if !closeTo(percepts[0].Prior, 0.80-corrobBoost(2)) {
+		t.Errorf("migration must be idempotent, Prior = %v", percepts[0].Prior)
+	}
+	// And a v4 percept is never touched.
+	v4 := []Percept{{ID: "v4", W: 0.7, Prior: 0.7, Evidence: 1}}
+	normalizePriors(v4)
+	if v4[0].Prior != 0.7 {
+		t.Errorf("v4 Prior must not be re-migrated, got %v", v4[0].Prior)
 	}
 }
 
 func TestConsolidate_PromotesAtThreshold(t *testing.T) {
 	s := newTestStore(t, true)
 	p := Percept{
-		ID:       "promote-1",
-		Content:  "high confidence fact",
-		Producer: ProducerLocal,
-		W:        promoteThreshold,
-		Evidence: evidencePromote,
+		ID:                  "promote-1",
+		Content:             "high confidence fact",
+		Producer:            ProducerLocal,
+		W:                   promoteThreshold,
+		Evidence:            evidencePromote,
+		AboveThresholdSince: s.now().Add(-48 * time.Hour), // durable
 	}
 	s.mu.Lock()
 	s.session.Percepts = append(s.session.Percepts, p)
@@ -480,5 +621,118 @@ func TestConsolidate_PrunesWeakPercept(t *testing.T) {
 		if rp.ID == "weak-1" {
 			t.Error("weak percept should not have been promoted")
 		}
+	}
+}
+
+func TestConsolidate_DefersUndurableFact(t *testing.T) {
+	s := newTestStore(t, true)
+	// Corroborated in two runs and over the threshold — but the first pass
+	// above the gate only starts the durability clock (ADR-0091): a boost
+	// burst cannot graduate on momentum.
+	p := Percept{
+		ID:       "burst-1",
+		Content:  "burst-corroborated inference",
+		Producer: ProducerLocal,
+		W:        0.85,
+		Evidence: evidencePromote,
+	}
+	s.mu.Lock()
+	s.session.Percepts = append(s.session.Percepts, p)
+	s.mu.Unlock()
+
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if len(s.global.Percepts) != 0 {
+		t.Fatalf("a just-thresholded fact must not promote on the same pass, got %v", s.global.Percepts)
+	}
+	stamp := s.session.Percepts[0].AboveThresholdSince
+	if stamp.IsZero() {
+		t.Fatal("the durability clock should have started")
+	}
+
+	// Half a running day is not durable yet.
+	advanceClock(s, 12*time.Hour)
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if len(s.global.Percepts) != 0 {
+		t.Fatalf("half a day above the gate is not durable, got %v", s.global.Percepts)
+	}
+
+	// A full running day above the gate, unchallenged: durable, graduates.
+	advanceClock(s, 13*time.Hour)
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	found := false
+	for _, rp := range s.global.Percepts {
+		if rp.ID == "burst-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a durable, twice-corroborated fact should promote after the window")
+	}
+}
+
+func TestConsolidate_DefersSupersededFact(t *testing.T) {
+	s := newTestStore(t, true)
+	a, err := s.Record(context.Background(), "the config lives in the old toml file", ProducerUser, ConsumerAll, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	b, err := s.Record(context.Background(), "the config moved to the new yaml file", ProducerUser, ConsumerAll, Roles{}, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := s.AddEdge(b.ID, a.ID, RelationUpdates); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+
+	if err := s.Consolidate(); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	// The newer claim (fast path) graduates; the superseded one is held back
+	// even though it is a user fact — an updates edge means it is outdated.
+	for _, rp := range s.global.Percepts {
+		if rp.ID == a.ID {
+			t.Error("a superseded percept must not promote while the updates edge is live")
+		}
+		if rp.ID != b.ID {
+			t.Errorf("unexpected promoted percept %s", rp.ID[:8])
+		}
+	}
+}
+
+func TestDecayPercepts_UseSlowsForgetting(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-72 * time.Hour) // one bare session half-life
+	percepts := []Percept{
+		{ID: "unused", W: 0.8, UpdatedAt: since.Add(-time.Hour)},
+		{ID: "used", W: 0.8, UpdatedAt: since.Add(-time.Hour), UseCount: useDecaySlowingCap},
+	}
+	decayPercepts(percepts, now, since, sessionHalfLifeDays, 0)
+	// The used fact forgets slower (up to 2x half-life) — repetition buys
+	// persistence, never truth: W only, nothing else moved.
+	if !(percepts[1].W > percepts[0].W) {
+		t.Errorf("a used fact must decay slower: used %v, unused %v", percepts[1].W, percepts[0].W)
+	}
+	want := 0.8 * math.Pow(0.5, 72.0/((sessionHalfLifeDays*useFactor(useDecaySlowingCap))*24))
+	if !closeTo(percepts[1].W, want) {
+		t.Errorf("used W = %v, want %v", percepts[1].W, want)
+	}
+}
+
+func TestDecayPercepts_SupersededForgetsFaster(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-72 * time.Hour)
+	percepts := []Percept{
+		{ID: "current", W: 0.8, UpdatedAt: since.Add(-time.Hour)},
+		{ID: "superseded", W: 0.8, UpdatedAt: since.Add(-time.Hour), Superseded: 1},
+	}
+	decayPercepts(percepts, now, since, sessionHalfLifeDays, 0)
+	if !(percepts[1].W < percepts[0].W) {
+		t.Errorf("a superseded fact must forget faster: superseded %v, current %v", percepts[1].W, percepts[0].W)
 	}
 }

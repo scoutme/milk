@@ -19,7 +19,7 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "record_memory",
-				"description": "Persist a fact, preference, or decision across sessions. Re-stating a similar fact reinforces the existing percept (strengthens its weight) instead of duplicating it. Use relation/related_to to link the fact to an existing percept: extends/updates/derives corroborate it, contradicts marks a conflict (both are weighed at memory consolidation).",
+				"description": "Persist a fact, preference, or decision across sessions. Re-stating a similar fact re-affirms the existing percept (one corroboration per run; repetition within a run adds nothing) instead of duplicating it. Use relation/related_to to link the fact to an existing percept: extends/derives corroborate the related one, updates corroborates this fact and supersedes the related one (it fades faster and cannot be promoted), contradicts marks a conflict (both are weighed at memory consolidation).",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -237,9 +237,10 @@ func looksLikeIDPrefix(s string) bool {
 
 // DispatchRecordMemory handles a record_memory tool call. Optional
 // relation + related_to declare a typed edge between the recorded (or
-// reinforced) percept and an existing one (ADR-0053): extends/updates/derives
-// corroborate the target, contradicts weakens both — all weighed at
-// consolidation.
+// reinforced) percept and an existing one (ADR-0053, relation semantics
+// ADR-0091): extends/derives corroborate the target, updates corroborates the
+// source (the newly recorded fact) and supersedes the target, contradicts
+// weakens both — all weighed at consolidation.
 func DispatchRecordMemory(ctx context.Context, store *Store, argsJSON string) string {
 	var args struct {
 		Content   string `json:"content"`

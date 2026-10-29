@@ -70,6 +70,7 @@ func (s *Store) markUsedLocked(ids []string, now time.Time) {
 		if _, ok := set[s.global.Percepts[i].ID]; ok {
 			s.global.Percepts[i].LastUsedAt = now
 			s.global.Percepts[i].IdleSeconds = 0
+			s.global.Percepts[i].UseCount++
 		}
 	}
 }
