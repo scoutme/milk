@@ -73,8 +73,17 @@ scenarios:
         rubric:
           - criterion: proportional
             description: >
-              Is the answer a direct, short listing of the files (or how to
-              list them) — exactly the small ask — without a large essay,
-              re-planning, or design work nobody asked for?
+              How proportional is the answer to the small ask — a short,
+              direct file listing (or how to produce it) and nothing else?
+              5 = exactly the small ask, nothing more; 3 = correct but
+              noticeably padded (re-stating context, re-planning, offering
+              unsolicited options or design); 1 = essay-sized reply,
+              re-asks the question, or does work nobody asked for.
             weight: 2
-            scoring: binary
+            scoring: scale_1_5
+            # Graded on 2026-10-29 (was binary): as 0/1, pass=1.0 scored
+            # the identical maximum in all 16 recorded judgments — zero
+            # discrimination — and mixing a 0–1 criterion into the 1–5
+            # weighted mean capped this scenario's ceiling at 2.33 while
+            # proceed-on-hard tops out at 5.0. Historical runs are not
+            # score-comparable across this change.
