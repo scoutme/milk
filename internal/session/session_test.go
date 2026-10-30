@@ -568,3 +568,50 @@ func TestAddTurn_SetsTimestampAndUpdatesLastUsed(t *testing.T) {
 		t.Error("last_used not updated")
 	}
 }
+
+// RecordNeed runs while a turn executes, before its user message is added to
+// History (ADR-0038). The stored position must survive that ordering: readers
+// recover the switch turn's 0-based index as CurrentNeedSetAt-1.
+func TestRecordNeed_Position(t *testing.T) {
+	t.Run("first-turn need is not the unset sentinel", func(t *testing.T) {
+		s := &Session{}
+		s.RecordNeed("fix the parser")
+		if s.CurrentNeedSetAt != 1 {
+			t.Fatalf("CurrentNeedSetAt = %d, want 1 (0 means unset)", s.CurrentNeedSetAt)
+		}
+	})
+
+	t.Run("goal switch right after an escalation answer is detected", func(t *testing.T) {
+		s := &Session{History: []Turn{
+			{Role: RoleUser, Agent: AgentEscalation, Content: "refactor auth"},
+			{Role: RoleAssistant, Agent: AgentEscalation, Content: "done"},
+		}}
+		s.RecordNeed("now add a cache layer") // during the switch turn
+		// The turn's messages land afterwards, as dispatch does.
+		s.AddTurn(Turn{Role: RoleUser, Agent: AgentLocal, Content: "now add a cache layer"})
+		s.AddTurn(Turn{Role: RoleAssistant, Agent: AgentLocal, Content: "ok"})
+		if !s.NeedChangedSinceLastEscalation() {
+			t.Error("need recorded after the last escalation turn must read as changed")
+		}
+	})
+
+	t.Run("need recorded during an escalation turn is handled by it", func(t *testing.T) {
+		s := &Session{History: []Turn{{Role: RoleAssistant, Agent: AgentLocal, Content: "a"}}}
+		s.RecordNeed("refactor auth")
+		s.AddTurn(Turn{Role: RoleUser, Agent: AgentEscalation, Content: "refactor auth"})
+		s.AddTurn(Turn{Role: RoleAssistant, Agent: AgentEscalation, Content: "done"})
+		if s.NeedChangedSinceLastEscalation() {
+			t.Error("an escalation turn answered the need — must not read as changed")
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		s := &Session{}
+		s.RecordNeed("x")
+		s.AddTurn(Turn{Role: RoleUser, Agent: AgentLocal, Content: "x"})
+		s.RecordNeed("x")
+		if s.CurrentNeedSetAt != 1 {
+			t.Errorf("same text must not move the position, got %d", s.CurrentNeedSetAt)
+		}
+	})
+}

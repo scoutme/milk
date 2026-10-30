@@ -674,12 +674,20 @@ func (s *Session) NeedChangedSinceLastEscalation() bool {
 }
 
 // RecordNeed sets CurrentNeed. Idempotent: calling with the same text as the current need is a no-op.
+//
+// CurrentNeedSetAt is stored 1-based as len(History)+1: the need is recorded
+// while a turn executes, before that turn's user message reaches History
+// (ADR-0038), so len(History) is the 0-based index the switch turn will
+// occupy and readers recover it as CurrentNeedSetAt-1. Storing len(History)
+// instead read one turn too early — a first-turn need collided with the
+// 0 = unset sentinel, and a need recorded right after an escalation answer
+// scanned that answer as "after the need".
 func (s *Session) RecordNeed(body string) {
 	if body == "" || body == s.CurrentNeed {
 		return
 	}
 	s.CurrentNeed = body
-	s.CurrentNeedSetAt = len(s.History)
+	s.CurrentNeedSetAt = len(s.History) + 1
 	s.CurrentNeedUpdatedAt = time.Now()
 }
 
