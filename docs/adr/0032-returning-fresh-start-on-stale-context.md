@@ -130,3 +130,21 @@ allow direct percept injection without routing through `BuildStaticContext`.
 - Default of 8 local turns is intentionally conservative: most topic switches emit a
   `<milk:need:NONCE>` tag within one or two turns, so the turn-gap check is a backstop for cases
   where the need tag was not emitted.
+
+## Update — 2026-10-29
+
+The staleness downgrade is now **claude-cli-only**. Local and subprocess runners have no external
+session behind them: scoping their history to the interlude demoted the agent's *own* prior turns
+to a summary brick — for them milk's history is the only memory, so ADR-0029's `--resume` rationale
+never applied, and the brick's "someone else's document" shape was measured to cause recap-style
+responses (evals behind PRs #359/#360). Dispatch now keeps `ContextModeReturning` for non-CLI
+runners on a stale return: full history (bounded by the message-budget head+tail trim) plus the
+Returning orientation (summary brick + current goal). Reorientation is preserved; only the memory
+loss is removed.
+
+- Explicit `/escalate fresh` still scopes history to post-escalation turns — that request is
+  deliberate.
+- The CLI path is unchanged: it still drops `--resume` and re-orients from scratch; its raw
+  conversation lives in the Claude session, not in milk's history.
+- `returning_fresh_start_local_turns` still controls the CLI downgrade, and the memory-panel
+  staleness display is now gated to claude-cli escalation agents.

@@ -480,9 +480,22 @@ func runEscalationWithSession(
 		freshThreshold := cfg.AgentReturningFreshStartLocalTurns(escAC)
 		needStale := sess.NeedChangedSinceLastEscalation()
 		turnGap := freshThreshold > 0 && sess.LocalTurnsSinceLastEscalation() >= freshThreshold
-		if needStale || turnGap {
+		// The stale-return downgrade is an ADR-0032 optimization for runners with
+		// external session memory (claude-cli --resume): re-orienting from scratch
+		// costs nothing because the session still holds the raw conversation.
+		// Local/subprocess runners have no such session — milk's history IS their
+		// context — so for them a stale return keeps ContextModeReturning (full
+		// history, message-budget bounded) instead of demoting their own prior
+		// turns to a summary brick. Reorientation still happens: Returning carries
+		// the escalation summary brick and the current goal. ADR-0032 update,
+		// 2026-10-29; explicit /escalate fresh still scopes.
+		stale := needStale || turnGap
+		switch {
+		case stale && runner.IsCLI():
 			ctxMode = escalation.ContextModeFirst
 			obs.Debug(agentName+" returning-fresh-start", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
+		case stale:
+			obs.Debug(agentName+" returning-fresh-kept", "reason_need_stale", needStale, "reason_turn_gap", turnGap)
 		}
 	}
 

@@ -20,7 +20,7 @@ type sessionBricks struct {
 	primaryName           string // configured name of the primary agent (used as brick label)
 	escalationName        string // configured name of the escalation agent (used as brick label)
 	needStale             bool   // unused in panel — kept for future use
-	contextStale          bool   // local turn gap exceeded threshold → will trigger fresh-start
+	contextStale          bool   // claude-cli only: turn gap exceeded threshold → will trigger fresh-start (non-CLI runners keep history — ADR-0032 update 2026-10-29)
 	localTurnsSince       int    // local assistant turns since last escalation (0 if never escalated)
 	freshThreshold        int    // threshold at which contextStale fires
 }
@@ -61,7 +61,7 @@ func (m *model) currentSessionBricks() sessionBricks {
 		primaryName:           m.st.cfg.ActiveAgent().Name,
 		escalationName:        escAC.Name,
 		needStale:             m.st.sess.NeedChangedSinceLastEscalation(),
-		contextStale:          threshold > 0 && turnsSince >= threshold,
+		contextStale:          escAC.IsCLI() && threshold > 0 && turnsSince >= threshold,
 		localTurnsSince:       turnsSince,
 		freshThreshold:        threshold,
 	}

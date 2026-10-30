@@ -48,7 +48,9 @@ func contextModeName(m escalation.ContextMode) string {
 }
 
 // applyStalenessDowngrade applies the fresh-start downgrade to a
-// ContextModeReturning mode using the same logic as runCLIEscalationWith.
+// ContextModeReturning mode using the same logic as the claude-cli path in
+// runEscalationWithSession (non-CLI runners skip the downgrade — ADR-0032
+// update 2026-10-29; the local side is pinned in eval_escalation_local_test).
 // threshold is the returning_fresh_start_local_turns value (default 8).
 func applyStalenessDowngrade(mode escalation.ContextMode, sess *session.Session, threshold int) (escalation.ContextMode, bool, bool) {
 	if mode != escalation.ContextModeReturning {

@@ -323,7 +323,14 @@ func (r *localRunner) Execute(
 					label = "[Last known user goal — may already be fulfilled; verify from conversation history before acting]\n"
 				}
 			}
-			history = append([]local.Message{{Role: "system", Content: label + sess.CurrentNeed}}, history...)
+			content := label + sess.CurrentNeed
+			// Goal-switch supersession (same marker as escalation.BuildDynamicContext,
+			// PR #361): on a switched goal the head+tail trim keeps the stale
+			// original ask at the top — mark it superseded right below the goal.
+			if sess.NeedChangedSinceLastEscalation() {
+				content += "\n\n[Goal changed — earlier requests in this transcript are superseded by the goal above]"
+			}
+			history = append([]local.Message{{Role: "system", Content: content}}, history...)
 		}
 
 		msgBudget := cfg.AgentMessageBudget(ac)
