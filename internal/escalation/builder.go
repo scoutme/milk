@@ -182,6 +182,15 @@ func BuildDynamicContext(sess *session.Session, mode ContextMode, percepts []str
 		b.WriteString("\n\n")
 	}
 
+	// Goal-switch supersession: the head+tail trim (trimLocalMessages) keeps
+	// the original request verbatim at the top of the transcript — without
+	// this line, a switched goal leaves the stale ask unopposed while the new
+	// one may even carry the "verify before acting" label. Trim-proof: this is
+	// part of the orientation, in the always-kept first segment. PR #361.
+	if sess.CurrentNeed != "" && sess.NeedChangedSinceLastEscalation() {
+		b.WriteString("[Goal changed — earlier requests in this transcript are superseded by the goal above]\n\n")
+	}
+
 	if mode == ContextModeFirst && sess.LastEscalationSummary != "" {
 		b.WriteString("[Prior escalation session summary — you previously worked with this user; this is what you last did together]\n")
 		b.WriteString(sess.LastEscalationSummary)
@@ -228,6 +237,11 @@ func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string 
 		}
 		b.WriteString(sess.CurrentNeed)
 		b.WriteString("\n\n")
+	}
+
+	// Same goal-switch supersession marker as BuildDynamicContext (PR #361).
+	if sess.CurrentNeed != "" && sess.NeedChangedSinceLastEscalation() {
+		b.WriteString("[Goal changed — earlier requests in this transcript are superseded by the goal above]\n\n")
 	}
 
 	if mode == ContextModeReturning && sess.LastEscalationSummary != "" {

@@ -489,3 +489,59 @@ func TestBuildDynamicContext_ContinuationEmptyWhenNoSummary(t *testing.T) {
 		t.Errorf("dynamic context on continuation with no summary should be empty, got %q", got)
 	}
 }
+
+// ── goal-switch supersession marker (PR #361) ───────────────────────────────
+
+const goalChangedMarker = "[Goal changed — earlier requests in this transcript are superseded by the goal above]"
+
+func TestBuildContext_GoalChangedSupersession(t *testing.T) {
+	// Need set AFTER the last escalation turn → goal switched mid-interlude.
+	sess := &session.Session{
+		CurrentNeed:      "switch to the cache layer",
+		CurrentNeedSetAt: 3, // 0-based pos 2 == len(History) → no escalation turn after → changed
+		History: []session.Turn{
+			{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: "did escalation work"},
+			{Role: session.RoleUser, Agent: session.AgentLocal, Content: "switch topic"},
+		},
+	}
+	got := BuildDynamicContext(sess, ContextModeReturning, nil)
+	if !strings.Contains(got, goalChangedMarker) {
+		t.Errorf("need changed after escalation → supersession marker must appear; got:\n%s", got)
+	}
+	if !strings.Contains(got, "[Current user goal]") {
+		t.Errorf("expected goal block; got:\n%s", got)
+	}
+	if strings.Index(got, goalChangedMarker) < strings.Index(got, "[Current user goal]") {
+		t.Errorf("marker says 'the goal above' — it must render after the goal block; got:\n%s", got)
+	}
+}
+
+func TestBuildContext_GoalChangedAbsentWhenNeedPredatesEscalation(t *testing.T) {
+	// Need set before the escalation turn → escalation answered that need →
+	// nothing is superseded.
+	sess := &session.Session{
+		CurrentNeed:      "implement JWT auth",
+		CurrentNeedSetAt: 1, // 0-based pos 0 → escalation turn at/after need → not changed
+		History: []session.Turn{
+			{Role: session.RoleAssistant, Agent: session.AgentEscalation, Content: "done"},
+		},
+	}
+	got := BuildDynamicContext(sess, ContextModeReturning, nil)
+	if strings.Contains(got, goalChangedMarker) {
+		t.Errorf("need predates escalation → no supersession marker; got:\n%s", got)
+	}
+}
+
+func TestBuildContext_GoalChangedAbsentWithoutEscalation(t *testing.T) {
+	sess := &session.Session{
+		CurrentNeed:      "implement JWT auth",
+		CurrentNeedSetAt: 2,
+		History:          []session.Turn{{Role: session.RoleUser, Agent: session.AgentLocal, Content: "hi"}},
+	}
+	for _, mode := range []ContextMode{ContextModeFirst, ContextModeReturning} {
+		got := BuildDynamicContext(sess, mode, nil)
+		if strings.Contains(got, goalChangedMarker) {
+			t.Errorf("mode %v: no escalation ever → no supersession marker; got:\n%s", mode, got)
+		}
+	}
+}
