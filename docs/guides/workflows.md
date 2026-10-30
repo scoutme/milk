@@ -135,7 +135,7 @@ For Claude CLI, a new session gets this across two `--append-system-prompt-file`
 
 ### Returning to a stale escalation
 
-If the topic has switched, or `returning_fresh_start_local_turns` local turns (default 8) have passed since the last escalation, milk treats the next escalation as a fresh start rather than a resume: Claude CLI drops `--resume`, and inference-server escalation agents scope history to post-escalation turns only.
+If the topic has switched, or `returning_fresh_start_local_turns` local turns (default 8) have passed since the last escalation, milk treats the next escalation as a fresh start rather than a resume: Claude CLI drops `--resume` and re-orients from scratch (its session still holds the raw conversation). Inference-server escalation agents keep their full history on such stale returns — they have no session behind them, so milk's history is their only memory (ADR-0032 update, 2026-10-29); an explicit `/escalate fresh` still scopes history to post-escalation turns.
 
 ### Session storage
 

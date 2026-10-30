@@ -140,9 +140,9 @@ func buildBaselineAgent(escURL string) *local.Agent {
 }
 
 // scenariosForEval builds session fixtures for the four key routing cases.
-// The escalation reply is intentionally large (realistic tool-use response)
-// so that excluding it on stale-returning turns saves more chars than the
-// orientation overhead adds.
+// The escalation reply is intentionally large (realistic tool-use response):
+// if stale-returning history ever gets re-scoped, the char report and the
+// escalation-turn presence assertions below make it obvious.
 func scenariosForEval() (map[string]*session.Session, string) {
 	// A realistic escalation response: refactoring work with code diffs.
 	escalationReply := strings.Repeat(
@@ -321,25 +321,25 @@ func TestEval_EscalationLocal(t *testing.T) {
 
 	// ── Assertions ────────────────────────────────────────────────────────
 
-	// Stale-returning: the prior escalation block must be absent from the new
-	// request (it was scoped out by escalationLocalHistoryFresh).
+	// Stale-returning on a local runner: the returning-fresh downgrade is
+	// claude-cli-only (ADR-0032 update, 2026-10-29) — prior escalation turns
+	// must stay in the request, because milk's history is this agent's only
+	// memory. Scoping them out demoted the agent's own prior turns to a summary
+	// brick (the recap-shaped failure class of PRs #359/#360).
 	for _, name := range []string{"returning-stale-need", "returning-stale-gap"} {
-		if r := results[name]; r.newHasEscBlock {
-			t.Errorf("scenario %q: prior escalation turns must be excluded from new request but were found", name)
+		if r := results[name]; !r.newHasEscBlock {
+			t.Errorf("scenario %q: prior escalation turns must stay in the new request but were scoped out", name)
 		}
 		if r := results[name]; !r.baselineHasEscBlock {
 			t.Errorf("scenario %q: baseline should include prior escalation turns but they were absent", name)
 		}
-	}
-
-	// Stale-returning: net char count must be lower with the new path.
-	// This holds when the excluded escalation history is larger than the
-	// added orientation overhead — which is the case with a realistic session.
-	for _, name := range []string{"returning-stale-need", "returning-stale-gap"} {
-		r := results[name]
-		if r.newChars >= r.baseChars {
-			t.Errorf("scenario %q: new path should send fewer chars; baseline=%d new=%d delta=%+d",
-				name, r.baseChars, r.newChars, r.newChars-r.baseChars)
+		// Orientation must stay bounded (same guard as returning-fresh).
+		if r := results[name]; r.baseChars > 0 {
+			ratio := float64(r.newChars) / float64(r.baseChars)
+			if ratio > 1.5 {
+				t.Errorf("scenario %q: orientation overhead too large (%.1f×); baseline=%d new=%d",
+					name, ratio, r.baseChars, r.newChars)
+			}
 		}
 	}
 
