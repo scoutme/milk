@@ -84,6 +84,9 @@ type sysPromptBuilder struct {
 	disableProjectInstructions bool
 	custom                     string
 	guidance                   []string
+	// ownedFromStart selects the escalation role's owned-conversation framing
+	// (no hand-off narrative) — see buildSystemPromptOpts.
+	ownedFromStart bool
 }
 
 // render assembles the system prompt for the given reduction level.
@@ -96,7 +99,7 @@ func (b *sysPromptBuilder) render(level contextreduce.Level, p contextreduce.Pol
 	case level >= contextreduce.LevelInstructions:
 		tier = contextreduce.StepDownTier(b.tier)
 	}
-	s := buildSystemPromptOpts(b.cwd, b.selfName, b.escalationName, b.workflowRole, tier, b.disableProjectInstructions, trim)
+	s := buildSystemPromptOpts(b.cwd, b.selfName, b.escalationName, b.workflowRole, tier, b.disableProjectInstructions, trim, b.ownedFromStart)
 	if level < contextreduce.LevelInstructions {
 		for _, g := range b.guidance {
 			s += "\n\n" + g
