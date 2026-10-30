@@ -239,8 +239,10 @@ func BuildPrimaryDynamicContext(sess *session.Session, mode ContextMode) string 
 		b.WriteString("\n\n")
 	}
 
-	// Same goal-switch supersession marker as BuildDynamicContext (PR #361).
-	if sess.CurrentNeed != "" && sess.NeedChangedSinceLastEscalation() {
+	// Same goal-switch supersession marker as BuildDynamicContext (PR #361),
+	// but not gated on escalation history: a primary-only session switches
+	// goals too (#362).
+	if sess.CurrentNeed != "" && (sess.NeedChangedSinceLastEscalation() || sess.NeedSupersedesEarlier()) {
 		b.WriteString("[Goal changed — earlier requests in this transcript are superseded by the goal above]\n\n")
 	}
 

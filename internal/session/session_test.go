@@ -615,3 +615,24 @@ func TestRecordNeed_Position(t *testing.T) {
 		}
 	})
 }
+
+func TestNeedSupersedesEarlier(t *testing.T) {
+	u := func() Turn { return Turn{Role: RoleUser, Agent: AgentLocal, Content: "q"} }
+	a := func() Turn { return Turn{Role: RoleAssistant, Agent: AgentLocal, Content: "a"} }
+	cases := []struct {
+		name string
+		s    Session
+		want bool
+	}{
+		{"no need", Session{History: []Turn{u(), a()}}, false},
+		{"need on the first turn", Session{CurrentNeed: "x", CurrentNeedSetAt: 1}, false},
+		{"need declared mid-conversation", Session{CurrentNeed: "x", CurrentNeedSetAt: 3, History: []Turn{u(), a(), u(), a()}}, true},
+		{"only assistant turns before it", Session{CurrentNeed: "x", CurrentNeedSetAt: 2, History: []Turn{a(), u()}}, false},
+		{"position beyond history is clamped", Session{CurrentNeed: "x", CurrentNeedSetAt: 9, History: []Turn{u(), a()}}, true},
+	}
+	for _, c := range cases {
+		if got := c.s.NeedSupersedesEarlier(); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -673,6 +673,25 @@ func (s *Session) NeedChangedSinceLastEscalation() bool {
 	return true
 }
 
+// NeedSupersedesEarlier reports whether CurrentNeed was recorded on a turn that
+// had earlier user requests before it — i.e. the goal was (re)declared
+// mid-conversation, so those earlier asks are no longer the live one. Unlike
+// NeedChangedSinceLastEscalation it needs no escalation history, so it also
+// covers primary-only sessions. False for a need declared on the very first
+// turn (nothing precedes it) or when no need is set.
+func (s *Session) NeedSupersedesEarlier() bool {
+	if s.CurrentNeed == "" || s.CurrentNeedSetAt <= 1 {
+		return false
+	}
+	pos := min(s.CurrentNeedSetAt-1, len(s.History)) // CurrentNeedSetAt is 1-based
+	for i := 0; i < pos; i++ {
+		if s.History[i].Role == RoleUser {
+			return true
+		}
+	}
+	return false
+}
+
 // RecordNeed sets CurrentNeed. Idempotent: calling with the same text as the current need is a no-op.
 //
 // CurrentNeedSetAt is stored 1-based as len(History)+1: the need is recorded

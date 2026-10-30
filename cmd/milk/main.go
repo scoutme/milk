@@ -1074,11 +1074,44 @@ func (r *stdinInputReader) readLine(prompt string) (string, error) {
 // omitted)"). Only the current agent's own turns and user turns targeted at it
 // are included verbatim.
 func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent, selfName string, skipOtherAgents bool) []local.Message {
+	msgs, _ := buildAgentHistoryWithBoundary(sess, start, selfAgent, selfName, skipOtherAgents)
+	return msgs
+}
+
+// buildAgentHistoryWithBoundary is buildAgentHistory plus the message index at
+// which the turn that set the session's current need begins (-1 when there is
+// none to speak of: no need, or nothing precedes it in the projected history).
+// One turn expands to a variable number of messages (trail replays, narration)
+// or none, so the index can only be read off while building; the trim uses it
+// to stop spending head budget on requests the need superseded (#362).
+func buildAgentHistoryWithBoundary(sess *session.Session, start int, selfAgent session.Agent, selfName string, skipOtherAgents bool) ([]local.Message, int) {
 	turns := sess.History[start:]
 	replays := ownTrailReplays(turns, selfAgent, selfName)
+	offs := make([]int, len(turns))
+	var msgs []local.Message
 	if !skipOtherAgents {
-		return buildAgentHistoryFull(turns, selfAgent, selfName, replays)
+		msgs = buildAgentHistoryFull(turns, selfAgent, selfName, replays, offs)
+	} else {
+		msgs = buildAgentHistoryLazy(turns, selfAgent, selfName, replays, offs)
 	}
+	return msgs, needBoundary(sess, start, offs)
+}
+
+// needBoundary maps the current need's history position to a message index,
+// given each turn's message offset. -1 when the need is unset, predates the
+// projected history, lies beyond it, or has nothing before it.
+func needBoundary(sess *session.Session, start int, offs []int) int {
+	if sess.CurrentNeed == "" || sess.CurrentNeedSetAt <= 0 {
+		return -1
+	}
+	idx := sess.CurrentNeedSetAt - 1 - start // 0-based position among the projected turns
+	if idx <= 0 || idx >= len(offs) || offs[idx] <= 0 {
+		return -1
+	}
+	return offs[idx]
+}
+
+func buildAgentHistoryLazy(turns []session.Turn, selfAgent session.Agent, selfName string, replays []local.TrailReplay, offs []int) []local.Message {
 
 	// Lazy mode: walk through turns, emitting own turns immediately and
 	// collapsing contiguous blocks of other-agent turns into placeholders.
@@ -1094,12 +1127,14 @@ func buildAgentHistory(sess *session.Session, start int, selfAgent session.Agent
 				skipped = 0
 				skippedAgents = nil
 			}
+			offs[i] = len(msgs)
 			// Skip empty assistant turns — inference servers reject them.
 			if t.Role == session.RoleAssistant && t.Content == "" {
 				continue
 			}
 			msgs = append(msgs, formatOwnTurn(t, selfAgent, replays[i])...)
 		} else {
+			offs[i] = len(msgs)
 			skipped++
 			if skippedAgents == nil {
 				skippedAgents = make(map[string]bool)
@@ -1175,10 +1210,11 @@ func otherTrailNarrations(turns []session.Turn, selfAgent session.Agent, selfNam
 // agents' tool evidence is narrated (local.NarrateTrails) rather than dropped:
 // the receiving agent gets at least the evidence retention the originating
 // agent keeps for itself (docs/internal/analysis/escalation-context-parity.md).
-func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, selfName string, replays []local.TrailReplay) []local.Message {
+func buildAgentHistoryFull(turns []session.Turn, selfAgent session.Agent, selfName string, replays []local.TrailReplay, offs []int) []local.Message {
 	narrations := otherTrailNarrations(turns, selfAgent, selfName)
 	var msgs []local.Message
 	for i, t := range turns {
+		offs[i] = len(msgs)
 		switch t.Role {
 		case session.RoleUser:
 			agentName := t.AgentName
@@ -1281,13 +1317,25 @@ func pluralize(n int, word string) string {
 
 // escalationLocalHistory returns the full session history for a local escalation agent.
 func escalationLocalHistory(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
-	return buildAgentHistory(sess, 0, session.AgentEscalation, selfName, skipOtherAgents)
+	msgs, _ := escalationLocalHistoryWithBoundary(sess, selfName, skipOtherAgents)
+	return msgs
+}
+
+// escalationLocalHistoryWithBoundary also reports where the current need's turn
+// begins (-1 when none) so the trim can stop pinning superseded requests.
+func escalationLocalHistoryWithBoundary(sess *session.Session, selfName string, skipOtherAgents bool) ([]local.Message, int) {
+	return buildAgentHistoryWithBoundary(sess, 0, session.AgentEscalation, selfName, skipOtherAgents)
 }
 
 // escalationLocalHistoryFresh returns only turns since the last escalation
 // boundary, scoped to avoid sending redundant prior-escalation context.
 func escalationLocalHistoryFresh(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
-	return buildAgentHistory(sess, session.LastEscalationBoundary(sess), session.AgentEscalation, selfName, skipOtherAgents)
+	msgs, _ := escalationLocalHistoryFreshWithBoundary(sess, selfName, skipOtherAgents)
+	return msgs
+}
+
+func escalationLocalHistoryFreshWithBoundary(sess *session.Session, selfName string, skipOtherAgents bool) ([]local.Message, int) {
+	return buildAgentHistoryWithBoundary(sess, session.LastEscalationBoundary(sess), session.AgentEscalation, selfName, skipOtherAgents)
 }
 
 // applyPersistedGrants loads previously-approved tools and directories from
@@ -1902,21 +1950,148 @@ func trimSplitSpans(msgs []local.Message, budgetChars int) (int, int) {
 	return headEnd, tailStart
 }
 
+// trimHint tells the trim where the live goal begins. The zero value means
+// "no goal boundary": plain head+tail retention.
+type trimHint struct {
+	// lead is the number of leading orientation messages (percepts, goal
+	// block, …) the caller prepended; they are never trimmed.
+	lead int
+	// boundary is the message index at which the turn that set the current
+	// need begins (buildAgentHistoryWithBoundary, shifted by lead). <= lead
+	// means none.
+	boundary int
+}
+
+// shiftBoundary turns a boundary measured on the bare history into one on the
+// slice with lead orientation messages prepended (no boundary stays none).
+func (h *trimHint) shiftBoundary() {
+	if h.boundary > 0 {
+		h.boundary += h.lead
+	} else {
+		h.boundary = 0
+	}
+}
+
+// dropSpan is a [start, end) message range the trim removes.
+type dropSpan struct {
+	start, end int
+	// superseded marks a span made of requests the live goal replaced, rather
+	// than the middle of the current one.
+	superseded bool
+}
+
+// trimPlan decides what to remove so msgs fit budgetChars.
+//
+// Without a goal boundary this is trimSplitSpans' single middle span. With one
+// (#362), head retention pins the transcript's first request — but after a
+// goal switch that is exactly the superseded ask, so the pin is dropped and
+// the goal's own turns win instead:
+//
+//  1. Requests before the boundary compete oldest-first: if removing just
+//     enough of them (the stale ask goes first) makes msgs fit, that is the
+//     whole plan — everything from the switch on stays verbatim.
+//  2. Otherwise all pre-boundary content goes, and the post-boundary turns
+//     get the usual head+tail retention (so the switch turn and the first
+//     plan after it stay pinned) in what the orientation leaves of the budget.
+//
+// The orientation prefix (lead) is never trimmed.
+func trimPlan(msgs []local.Message, budgetChars int, h trimHint) []dropSpan {
+	if budgetChars <= 0 || messagesCharCount(msgs) <= budgetChars {
+		return nil
+	}
+	standard := func() []dropSpan {
+		if s, e := trimSplitSpans(msgs, budgetChars); s < e {
+			return []dropSpan{{start: s, end: e}}
+		}
+		return nil
+	}
+	if h.boundary <= h.lead || h.boundary >= len(msgs) {
+		return standard()
+	}
+	starts := msgSegmentStarts(msgs)
+	boundary := -1 // the boundary snapped forward to a segment start
+	for _, st := range starts {
+		if st >= h.boundary {
+			boundary = st
+			break
+		}
+	}
+	if boundary <= h.lead {
+		return standard()
+	}
+
+	over := messagesCharCount(msgs) - budgetChars
+	freed := 0
+	for k, st := range starts {
+		if st < h.lead {
+			continue
+		}
+		if st >= boundary {
+			break
+		}
+		end := len(msgs)
+		if k+1 < len(starts) {
+			end = starts[k+1]
+		}
+		freed += messagesCharCount(msgs[st:end])
+		if freed >= over {
+			return []dropSpan{{start: h.lead, end: end, superseded: true}}
+		}
+	}
+
+	spans := []dropSpan{{start: h.lead, end: boundary, superseded: true}}
+	subBudget := max(1, budgetChars-messagesCharCount(msgs[:h.lead]))
+	if s, e := trimSplitSpans(msgs[boundary:], subBudget); s < e {
+		spans = append(spans, dropSpan{start: boundary + s, end: boundary + e})
+	}
+	return spans
+}
+
+// spliceSpans returns msgs with each span replaced by repl[i] (a zero-Role
+// replacement removes the span without a stand-in).
+func spliceSpans(msgs []local.Message, spans []dropSpan, repl []local.Message) []local.Message {
+	out := make([]local.Message, 0, len(msgs))
+	pos := 0
+	for i, sp := range spans {
+		out = append(out, msgs[pos:sp.start]...)
+		if repl[i].Role != "" {
+			out = append(out, repl[i])
+		}
+		pos = sp.end
+	}
+	return append(out, msgs[pos:]...)
+}
+
+// omittedMarker is the hard-drop stand-in for a span.
+func omittedMarker(sp dropSpan) local.Message {
+	n := pluralize(sp.end-sp.start, "message")
+	if sp.superseded {
+		return local.Message{Role: "system", Content: "[milk] earlier conversation omitted (" + n + ") to fit the context window — superseded by a change of goal"}
+	}
+	return local.Message{Role: "system", Content: "[milk] middle of the conversation omitted (" + n + ") to fit the context window"}
+}
+
 // trimLocalMessages keeps the head and tail of msgs within budgetChars and
 // drops the middle (see trimSplitSpans), leaving an explicit marker in its
 // place — never a silent gap. Tool-result messages that follow a dropped
 // assistant turn are dropped with it. Returns the trimmed slice and true when
 // any trimming occurred. budgetChars == 0 means no limit.
 func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, bool) {
-	dropStart, dropEnd := trimSplitSpans(msgs, budgetChars)
-	if dropStart >= dropEnd {
+	return trimLocalMessagesHint(msgs, budgetChars, trimHint{})
+}
+
+// trimLocalMessagesHint is trimLocalMessages aware of where the live goal
+// began (see trimPlan).
+func trimLocalMessagesHint(msgs []local.Message, budgetChars int, h trimHint) ([]local.Message, bool) {
+	spans := trimPlan(msgs, budgetChars, h)
+	if len(spans) == 0 {
 		return msgs, false
 	}
-	kept := make([]local.Message, 0, len(msgs)-(dropEnd-dropStart)+1)
-	kept = append(kept, msgs[:dropStart]...)
-	kept = append(kept, local.Message{Role: "system", Content: "[milk] middle of the conversation omitted (" + pluralize(dropEnd-dropStart, "message") + ") to fit the context window"})
-	kept = append(kept, msgs[dropEnd:]...)
-	return kept, true
+	repl := make([]local.Message, len(spans))
+	for i, sp := range spans {
+		repl[i] = omittedMarker(sp)
+	}
+	return spliceSpans(msgs, spans, repl), true
 }
 
 // trimLocalMessagesWithCompaction is like trimLocalMessages, but instead of
@@ -1929,37 +2104,48 @@ func trimLocalMessages(msgs []local.Message, budgetChars int) ([]local.Message, 
 // must never block the turn.
 // See docs/internal/analysis/prompt-context-management-review.md §8 rec #4.
 func trimLocalMessagesWithCompaction(ctx context.Context, agent *local.Agent, sess *session.Session, msgs []local.Message, budgetChars int) ([]local.Message, bool) {
-	dropStart, dropEnd := trimSplitSpans(msgs, budgetChars)
-	if dropStart >= dropEnd {
+	return trimLocalMessagesWithCompactionHint(ctx, agent, sess, msgs, budgetChars, trimHint{})
+}
+
+// trimLocalMessagesWithCompactionHint is the goal-boundary-aware form. With
+// two spans (superseded requests and a trimmed middle) one summary covers
+// both, placed where the first span was; the second span is removed outright.
+func trimLocalMessagesWithCompactionHint(ctx context.Context, agent *local.Agent, sess *session.Session, msgs []local.Message, budgetChars int, h trimHint) ([]local.Message, bool) {
+	spans := trimPlan(msgs, budgetChars, h)
+	if len(spans) == 0 {
 		return msgs, false
 	}
-	dropped := msgs[dropStart:dropEnd]
+	hardDrop := func() ([]local.Message, bool) { return trimLocalMessagesHint(msgs, budgetChars, h) }
 	if agent == nil {
-		return trimLocalMessages(msgs, budgetChars)
+		return hardDrop()
+	}
+	var dropped []local.Message
+	for _, sp := range spans {
+		dropped = append(dropped, msgs[sp.start:sp.end]...)
 	}
 
 	input := local.RenderForSummary(dropped)
 	if input == "" {
-		return trimLocalMessages(msgs, budgetChars)
+		return hardDrop()
 	}
 
 	summary, usage, err := agent.Summarize(ctx, input)
 	if err != nil || summary == "" {
-		return trimLocalMessages(msgs, budgetChars)
+		return hardDrop()
 	}
 	if sess != nil {
 		sess.AddTokens(agent.ModelName(), agent.LogRole()+":compaction", usage.Prompt, usage.Completion)
 	}
 	content := "[Summary of the omitted middle of the conversation, compacted to save context]\n" + summary
+	if spans[0].superseded {
+		content = "[Summary of omitted parts of the conversation, compacted to save context — includes requests the user's latest goal superseded]\n" + summary
+	}
 	if touched := local.FilesTouched(dropped, 8); touched != "" {
 		content += "\n\n" + touched
 	}
-	summaryMsg := local.Message{Role: "system", Content: content}
-	kept := make([]local.Message, 0, len(msgs)-(dropEnd-dropStart)+1)
-	kept = append(kept, msgs[:dropStart]...)
-	kept = append(kept, summaryMsg)
-	kept = append(kept, msgs[dropEnd:]...)
-	return kept, true
+	repl := make([]local.Message, len(spans))
+	repl[0] = local.Message{Role: "system", Content: content}
+	return spliceSpans(msgs, spans, repl), true
 }
 
 // sessionToUnifiedMessages converts session history to the local agent's Message format,
@@ -1967,6 +2153,12 @@ func trimLocalMessagesWithCompaction(ctx context.Context, agent *local.Agent, se
 // Context size is managed by trimLocalMessages using the agent's message_budget_chars.
 func sessionToUnifiedMessages(sess *session.Session, selfName string, skipOtherAgents bool) []local.Message {
 	return buildAgentHistory(sess, 0, session.AgentLocal, selfName, skipOtherAgents)
+}
+
+// sessionToUnifiedMessagesWithBoundary is sessionToUnifiedMessages plus the
+// message index where the current need's turn begins (-1 when none).
+func sessionToUnifiedMessagesWithBoundary(sess *session.Session, selfName string, skipOtherAgents bool) ([]local.Message, int) {
+	return buildAgentHistoryWithBoundary(sess, 0, session.AgentLocal, selfName, skipOtherAgents)
 }
 
 func runList(all bool) error {
