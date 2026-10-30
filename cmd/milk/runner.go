@@ -276,17 +276,22 @@ func (r *localRunner) Execute(
 		skipOther := cfg.ExperimentalLazyHistoryManagement
 
 		isFirst := !session.EscalationEverActive(sess) || ctxMode == escalation.ContextModeFirst
+		var needAt int
 		if isFirst && session.EscalationEverActive(sess) {
-			history = escalationLocalHistoryFresh(sess, ac.Name, skipOther)
+			history, needAt = escalationLocalHistoryFreshWithBoundary(sess, ac.Name, skipOther)
 		} else {
-			history = escalationLocalHistory(sess, ac.Name, skipOther)
+			history, needAt = escalationLocalHistoryWithBoundary(sess, ac.Name, skipOther)
 		}
+		hint := trimHint{boundary: needAt}
 		if perceptsText != "" {
 			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
+			hint.lead++
 		}
 		if orientationText != "" {
 			history = append([]local.Message{{Role: "system", Content: orientationText}}, history...)
+			hint.lead++
 		}
+		hint.shiftBoundary()
 
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
@@ -300,20 +305,23 @@ func (r *localRunner) Execute(
 			msgBudget = max(1, msgBudget-overhead)
 		}
 		if ac.DisableCompaction {
-			if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
+			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
 				history = trimmed
 			}
-		} else if trimmed, ok := trimLocalMessagesWithCompaction(ctx, agent, sess, history, msgBudget); ok {
+		} else if trimmed, ok := trimLocalMessagesWithCompactionHint(ctx, agent, sess, history, msgBudget, hint); ok {
 			history = trimmed
 		}
 
 	default: // RolePrimary
-		history = sessionToUnifiedMessages(sess, ac.Name, cfg.ExperimentalLazyHistoryManagement)
+		var needAt int
+		history, needAt = sessionToUnifiedMessagesWithBoundary(sess, ac.Name, cfg.ExperimentalLazyHistoryManagement)
+		hint := trimHint{boundary: needAt}
 
 		// Prepend orientation: percepts and current need as system messages,
 		// mirroring the context the escalation agent always receives.
 		if perceptsText := escalation.FormatPercepts(percepts); perceptsText != "" {
 			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
+			hint.lead++
 		}
 		if sess.CurrentNeed != "" {
 			label := "[Current user goal]\n"
@@ -327,11 +335,13 @@ func (r *localRunner) Execute(
 			// Goal-switch supersession (same marker as escalation.BuildDynamicContext,
 			// PR #361): on a switched goal the head+tail trim keeps the stale
 			// original ask at the top — mark it superseded right below the goal.
-			if sess.NeedChangedSinceLastEscalation() {
+			if sess.NeedChangedSinceLastEscalation() || sess.NeedSupersedesEarlier() {
 				content += "\n\n[Goal changed — earlier requests in this transcript are superseded by the goal above]"
 			}
 			history = append([]local.Message{{Role: "system", Content: content}}, history...)
+			hint.lead++
 		}
+		hint.shiftBoundary()
 
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
@@ -339,10 +349,10 @@ func (r *localRunner) Execute(
 			msgBudget = max(1, msgBudget-overhead)
 		}
 		if ac.DisableCompaction {
-			if trimmed, ok := trimLocalMessages(history, msgBudget); ok {
+			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
 				history = trimmed
 			}
-		} else if trimmed, ok := trimLocalMessagesWithCompaction(ctx, agent, sess, history, msgBudget); ok {
+		} else if trimmed, ok := trimLocalMessagesWithCompactionHint(ctx, agent, sess, history, msgBudget, hint); ok {
 			history = trimmed
 		}
 	}
