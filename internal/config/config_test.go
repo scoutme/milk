@@ -2276,3 +2276,36 @@ func TestDeepMerge_PanelAutoOpen(t *testing.T) {
 		t.Error("DeepMerge must not touch panel_auto_open when the source leaves it unset")
 	}
 }
+
+func TestPerceptInjectMinWeight_Accessor(t *testing.T) {
+	if got := (Config{}).PerceptInjectMinWeight(); got != 0.30 {
+		t.Errorf("unset floor = %v, want default 0.30", got)
+	}
+	if got := (Config{PerceptInjectMinW: 0.5}).PerceptInjectMinWeight(); got != 0.5 {
+		t.Errorf("configured floor = %v, want 0.5", got)
+	}
+	if got := (Config{PerceptInjectMinW: -1}).PerceptInjectMinWeight(); got != 0 {
+		t.Errorf("negative floor = %v, want 0 (disabled)", got)
+	}
+	// The floor must keep live session percepts injectable: a fresh primary
+	// fact starts at 0.7 and must still pass well above the default floor.
+	if d := (Config{}).PerceptInjectMinWeight(); !(d < 0.7) {
+		t.Errorf("default floor %v must stay below a fresh primary prior (0.7)", d)
+	}
+}
+
+func TestDeepMerge_PerceptInjectMinW(t *testing.T) {
+	merged := DeepMerge(Config{PerceptInjectMinW: 0.45}, Config{PerceptInjectMinW: 0.35})
+	if merged.PerceptInjectMinW != 0.35 {
+		t.Errorf("merge overwrote to %v, want 0.35", merged.PerceptInjectMinW)
+	}
+	merged = DeepMerge(Config{PerceptInjectMinW: 0.45}, Config{})
+	if merged.PerceptInjectMinW != 0.45 {
+		t.Errorf("merge must not touch the floor when the source leaves it unset, got %v", merged.PerceptInjectMinW)
+	}
+	// A negative (explicitly disabled) floor must survive a merge too.
+	merged = DeepMerge(Config{PerceptInjectMinW: 0.45}, Config{PerceptInjectMinW: -1})
+	if merged.PerceptInjectMinWeight() != 0 {
+		t.Errorf("merge lost the explicit disable, got %v", merged.PerceptInjectMinWeight())
+	}
+}

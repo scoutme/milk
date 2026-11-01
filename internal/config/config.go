@@ -114,6 +114,9 @@ func DeepMerge(dst, src Config) Config {
 	if src.PerceptInjectMaxBytes != 0 {
 		dst.PerceptInjectMaxBytes = src.PerceptInjectMaxBytes
 	}
+	if src.PerceptInjectMinW != 0 {
+		dst.PerceptInjectMinW = src.PerceptInjectMinW
+	}
 	if src.PerceptStoreMax != 0 {
 		dst.PerceptStoreMax = src.PerceptStoreMax
 	}
@@ -1243,6 +1246,18 @@ type Config struct {
 	// Default: 2048. Set to 0 for no limit.
 	PerceptInjectMaxBytes int `json:"percept_inject_max_bytes,omitempty"`
 
+	// PerceptInjectMinW is the injection weight floor: percepts with W below
+	// it are never injected. They stay in the store for /memory and
+	// archiving, but injection marks percepts used — without a floor a
+	// prune-floor percept that keeps keyword-overlapping the prompt gets its
+	// archive clock reset on every turn and can never become stale (issue
+	// #375, verdict item 1). Recall already hides the same band via
+	// get_memory's min_confidence (0.4), so this only brings injection in
+	// line with recall.
+	// Default: 0.30 (see PerceptInjectMinWeight — unset means 0.30 here).
+	// Set a negative value to disable the floor.
+	PerceptInjectMinW float64 `json:"percept_inject_min_weight,omitempty"`
+
 	// PerceptStoreMax caps the total number of percepts in the global store.
 	// After consolidation, lowest-weight non-core percepts are pruned to this limit.
 	// Default: 0 (no limit).
@@ -1690,6 +1705,21 @@ func (c Config) PerceptRelevanceGateEnabled() bool {
 		return true
 	}
 	return *c.PerceptRelevanceGate
+}
+
+// PerceptInjectMinWeight returns the injection weight floor (PerceptInjectMinW):
+// the configured value when set (negative clamps to 0 = no floor), 0.30 when
+// unset — high enough to keep live session percepts injectable (a fresh
+// primary fact sits at 0.7 and crosses 0.30 only after ~2 running days), low
+// enough that nothing at the 0.20 prune floor passes.
+func (c Config) PerceptInjectMinWeight() float64 {
+	if c.PerceptInjectMinW == 0 {
+		return 0.30
+	}
+	if c.PerceptInjectMinW < 0 {
+		return 0
+	}
+	return c.PerceptInjectMinW
 }
 
 // LocalMemoryResultMaxByteCount returns the max byte size of memory tool results

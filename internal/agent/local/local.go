@@ -1575,8 +1575,9 @@ const taskToolGuidance = `create_task/update_task/list_tasks/complete_task track
 // contract described here must stay in sync with internal/memory.Schemas.
 const memoryToolGuidance = `**MANDATORY — memory tool actions**: The following require immediate tool calls with NO preamble or confirmation:
   - User asks about past context or preferences → call get_memory NOW before responding.
-  - User states a preference, decision, or fact → call record_memory NOW. Omit "consumer" to share the fact with both agents (default); set consumer: "primary" or "escalation" only when it's relevant to just that agent.
-  - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. It accepts id (an ID, "#"-prefixed ID, or a one-match description), ids (several such targets in one call), or pattern (deletes every matching percept) — the same matching as the /forget command. Never say "done" or confirm the action without actually calling the tool.`
+  - User states a durable preference, decision, or fact → call record_memory NOW. Omit "consumer" to share the fact with both agents (default); set consumer: "primary" or "escalation" only when it's relevant to just that agent.
+  - User says "forget", "remove", "delete" about a percept (by ID, #ID, or description) → call forget_memory NOW. It accepts id (an ID, "#"-prefixed ID, or a one-match description), ids (several such targets in one call), or pattern (deletes every matching percept) — the same matching as the /forget command. Never say "done" or confirm the action without actually calling the tool.
+Percepts hold only durable knowledge — user preferences and decisions, project constraints, environment facts — things a future session must know and cannot re-derive. Never record transient information: task progress, run results, issue/PR status, "done/fixed/merged" milestones, or anything mid-flight. Task state belongs to update_task/complete_task; outcomes live in the transcript, GitHub, or the code. When in doubt, don't record.`
 
 // buildSystemPrompt constructs the role-aware system prompt.
 // selfName is this agent's configured name (e.g. "gemma-local", "claude").
@@ -2613,6 +2614,7 @@ func backgroundSystemPrompt(cwd string, hasMemoryTools bool) string {
 		base += "\n\n" +
 			"Memory tools (record_memory, get_memory, list_memory, forget_memory) are available: query memory before re-deriving already-known facts, " +
 			"and record_memory any durable fact this task establishes that future sessions would need. " +
+			"Record knowledge, not outcomes: this task's progress, results, and milestones are your answer, not percepts — never record transient state. " +
 			"You see only percepts targeted at your role or shared with everyone. " +
 			"Never edit the memory store's files directly — always use the tools."
 	}
