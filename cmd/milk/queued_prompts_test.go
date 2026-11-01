@@ -196,6 +196,108 @@ func TestQueueDroppedOnSessionSwitch(t *testing.T) {
 	}
 }
 
+// TestQueuePrompt_RecordsHistoryAtQueueTime (issue #368): queueing enters
+// both histories immediately — the typed text must be retrievable (Up /
+// Ctrl+R) even if the queued request is cancelled before it ever runs.
+func TestQueuePrompt_RecordsHistoryAtQueueTime(t *testing.T) {
+	m := busyQueueModel(t, true)
+	m.queuePrompt("dig into the physics module")
+
+	if got := m.sessionHistory; len(got) != 1 || got[0] != "dig into the physics module" {
+		t.Errorf("session history after queue = %#v, want the queued text", got)
+	}
+	if got := m.globalHistory; len(got) != 1 || got[0] != "dig into the physics module" {
+		t.Errorf("global history after queue = %#v, want the queued text", got)
+	}
+	// Consecutive duplicates still dedupe, like submitInput's own append.
+	m.queuePrompt("dig into the physics module")
+	if len(m.sessionHistory) != 1 {
+		t.Errorf("identical back-to-back queues = %#v, want one entry", m.sessionHistory)
+	}
+}
+
+// TestQueuePrompt_CancelKeepsHistory (issue #368): the cancel paths drop the
+// queue but must leave the text in history — the exact loss the bug reported.
+func TestQueuePrompt_CancelKeepsHistory(t *testing.T) {
+	m := busyQueueModel(t, true)
+	m.queuePrompt("recover me from history")
+	m.queuePrompt("second queued text")
+
+	// Path 1: Ctrl+C stage 0 (undo the most recent queueing).
+	next, _ := m.handleCtrlC()
+	out := next.(model)
+	if len(out.st.queuedPrompts) != 1 {
+		t.Fatalf("press must drop the last entry, queue = %#v", out.st.queuedPrompts)
+	}
+	// Path 2: /queue clear (the remaining entry).
+	out = out.handleQueueCmd("clear")
+	if len(out.st.queuedPrompts) != 0 {
+		t.Fatalf("clear must empty the queue, got %#v", out.st.queuedPrompts)
+	}
+	for _, want := range []string{"recover me from history", "second queued text"} {
+		found := false
+		for _, h := range out.sessionHistory {
+			if h == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("cancelled queued text %q missing from session history: %#v", want, out.sessionHistory)
+		}
+	}
+}
+
+// TestDrainQueuedPrompt_NoDoubleHistoryAppend (issue #368): the flush must
+// not append what queue time already recorded — consecutive-dedup alone is
+// not enough (queue A, queue B, flush A would re-append A after B).
+func TestDrainQueuedPrompt_NoDoubleHistoryAppend(t *testing.T) {
+	m := busyQueueModel(t, true)
+	m.queuePrompt("first")
+	m.queuePrompt("second")
+
+	next, _, ok := m.drainQueuedPrompt()
+	if !ok {
+		t.Fatal("expected a drain")
+	}
+	out := next.(model)
+	if out.queuedHistoryRecorded {
+		t.Error("queued flush marker must be consumed by submitInput")
+	}
+	next2, _, ok2 := out.drainQueuedPrompt()
+	if !ok2 {
+		t.Fatal("expected a second drain")
+	}
+	out2 := next2.(model)
+
+	want := []string{"first", "second"}
+	if len(out2.sessionHistory) != len(want) || out2.sessionHistory[0] != want[0] || out2.sessionHistory[1] != want[1] {
+		t.Errorf("session history after both flushes = %#v, want exactly %#v (once each, in order)", out2.sessionHistory, want)
+	}
+	if len(out2.globalHistory) != len(want) {
+		t.Errorf("global history after both flushes = %#v, want exactly %#v", out2.globalHistory, want)
+	}
+}
+
+// TestSubmitInput_ConsumesQueuedFlushMarkerOnEmpty: the marker is consumed
+// at submitInput's top even when the input is empty, so it can never leak
+// forward and suppress a later, unrelated history append.
+func TestSubmitInput_ConsumesQueuedFlushMarkerOnEmpty(t *testing.T) {
+	m := busyQueueModel(t, true)
+	m.queuedHistoryRecorded = true
+
+	next, _ := m.submitInput("", "")
+	out := next.(model)
+	if out.queuedHistoryRecorded {
+		t.Error("marker survived an empty submit — a later append would be wrongly skipped")
+	}
+	// And a subsequent normal submit still appends.
+	next2, _ := out.submitInput("typed after the flush", "")
+	out2 := next2.(model)
+	if got := out2.sessionHistory; len(got) != 1 || got[0] != "typed after the flush" {
+		t.Errorf("normal submit history = %#v, want one entry", got)
+	}
+}
+
 // TestHandleQueueCmd_Review: /queue list|show|drop|clear round-trips the
 // queue, and /queue is busy-safe.
 func TestHandleQueueCmd_Review(t *testing.T) {
