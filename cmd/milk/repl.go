@@ -1053,10 +1053,19 @@ type model struct {
 	// (queue / fork), the second press on the same gesture queues. Any
 	// non-Enter key disarms (handleBusyKey top).
 	busyEnterArmed bool
-	credRefreshing bool   // true while any background credential refresh is running
-	credLabel      string // which credential is being refreshed (e.g. "AWS", "token")
-	credStatus     string // non-empty after refresh completes: last result message
-	credOK         bool   // true if last refresh succeeded, false if failed
+	// queuedHistoryRecorded marks that the submitInput flush about to run
+	// is a queued prompt whose text was already appended to the histories
+	// at queue time (issue #368) — so the flush must not append it a
+	// second time (appendDeduped only dedupes consecutive entries, so
+	// "queue A, queue B, flush A" would otherwise duplicate both).
+	// Set immediately before the flush and consumed at submitInput's very
+	// top, before any early return, so a stale flag can never suppress a
+	// later, unrelated append.
+	queuedHistoryRecorded bool
+	credRefreshing        bool   // true while any background credential refresh is running
+	credLabel             string // which credential is being refreshed (e.g. "AWS", "token")
+	credStatus            string // non-empty after refresh completes: last result message
+	credOK                bool   // true if last refresh succeeded, false if failed
 
 	// Notification toasts (issue #162): turn-unrelated informational events
 	// render as a floating overlay instead of entering the transcript.
@@ -1441,6 +1450,14 @@ func (m *model) queuePrompt(input string) {
 	m.leadingPasted = false
 	m.st.queuedPrompts = append(m.st.queuedPrompts, q)
 
+	// Enter both histories at queue time (issue #368): the typed text must
+	// stay retrievable (Up / Ctrl+R) if the queued request never runs —
+	// Ctrl+C undo, /queue drop|clear, or a session switch dropping the
+	// queue. The later flush through submitInput skips its own append via
+	// queuedHistoryRecorded, so a queued prompt lands exactly once.
+	m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
+	m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
+
 	m.ta.Reset()
 	m.tabMatches = nil
 	m.tabIdx = -1
@@ -1483,6 +1500,7 @@ func (m model) drainQueuedPrompt() (tea.Model, tea.Cmd, bool) {
 	m.st.queuedPrompts = m.st.queuedPrompts[1:]
 	m.pendingBackgroundFollowup = false
 	m.pendingUserBackgroundFollowup = false
+	m.queuedHistoryRecorded = true // history was written at queue time (#368)
 	m.leadingPasted = q.leadingPasted
 	m.pendingAttachments = append(q.attachments, m.pendingAttachments...)
 	next, cmd := m.submitInput(q.text, dim("[queued]")+" ")
@@ -4231,6 +4249,12 @@ func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model
 // submitInput handles a finalised user input string from any source (keyboard,
 // Telegram, etc.). label is the transcript echo prefix.
 func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
+	// Consume the queued-flush marker before any early return (issue #368):
+	// a queued prompt's history entry was recorded when it was queued, so
+	// this flush must skip the append below — and the marker must never
+	// survive to suppress an unrelated later append.
+	queuedFlush := m.queuedHistoryRecorded
+	m.queuedHistoryRecorded = false
 	if input == "" {
 		return m, nil
 	}
@@ -4256,9 +4280,12 @@ func (m model) submitInput(input, label string) (tea.Model, tea.Cmd) {
 
 	m.appendTranscript(userEcho(label, colorizeTokens(input)))
 
-	// Append to both histories (deduped)
-	m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
-	m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
+	// Append to both histories (deduped) — except a queued prompt's flush,
+	// whose text entered history when it was queued (queuedFlush above).
+	if !queuedFlush {
+		m.sessionHistory = appendDeduped(m.sessionHistory, input, maxPersistedHistory)
+		m.globalHistory = appendDeduped(m.globalHistory, input, maxPersistedHistory)
+	}
 
 	// All command/bang/direct-bash triggers below are gated on !leadingPasted:
 	// if the leading content of this input arrived via a real paste event
