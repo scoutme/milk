@@ -29,7 +29,8 @@ cmd/milk/sessionmgmt_core.go  # host-neutral session-management core: /sessions 
 cmd/milk/ansi.go              # ANSI color helpers and spinner
 cmd/milk/panel_memory.go      # right-side memory panel (content-driven open, toggle /panel memory; state persistence ADR-0078)
 cmd/milk/panel_project.go     # project tree panel (/panel project, F5): fileindex-backed tree, click dir=expand / file=preview / double-click=@-mention (ADR-0066) + session changeset styling (#331, ADR-0084)
-cmd/milk/changeset.go         # files-panel changeset: session trace (internal/session) merged with `git status --porcelain`, off-UI-goroutine on the 3s panel poll (ADR-0084)
+cmd/milk/changeset.go         # files-panel changeset: session trace (internal/session) merged with `git status --porcelain -b`, off-UI-goroutine on the always-on 3s poll (ADR-0084; branch/dirty feed the panel event state, #347)
+cmd/milk/panel_events.go      # panel content events (#347, ADR-0095): per-event toasts for every panel + edge-based auto-open and domain-specific manual-override release (git=clean tree, project=empty changeset)
 cmd/milk/panel_git.go         # git graph panel (/panel git, F6): branch+dirty header, click commit → git show preview (ADR-0066)
 cmd/milk/gitgraph.go           # git log plumbing + code-laid commit-graph lanes (pure layoutGraph, unit-tested) + gitShow preview
 cmd/milk/tips.go              # idle tip line below the input: curated + registry-derived tips, contextual hints, rotation + browsing (ADR-0061, /tips on|off|next|prev|pick|search, Alt+Up/Down)

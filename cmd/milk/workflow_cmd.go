@@ -550,6 +550,9 @@ func (m model) launchGenericWorkflow(w *workflowWizardState) (tea.Model, tea.Cmd
 	}
 
 	m.autoOpenPanel(regionWorkflow)
+	// Per-event notification (issue #347): a run starting is a workflow
+	// panel event, toasted even when the auto-open was vetoed.
+	m.workflowEventToast("started", w.def.Name)
 	m.workflowRunning = true
 	m.workflowCancelled = false
 	m.workflowGen++

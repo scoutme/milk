@@ -103,10 +103,24 @@ func (c *ChangeSet) snapshot() map[string]ChangeKind {
 }
 
 var (
-	fileChangesMu    sync.Mutex
-	fileChanges      = map[string]*ChangeSet{}
-	fileChangesOrder []string // session IDs, oldest first
+	fileChangesMu      sync.Mutex
+	fileChanges        = map[string]*ChangeSet{}
+	fileChangesOrder   []string // session IDs, oldest first
+	fileChangeListener func(id string)
 )
+
+// SetFileChangeListener registers fn to be called after every trace
+// mutation (RecordFileChange and RemoveFileChange alike), with the session
+// ID, outside the registry lock. It is how a host learns that a tool
+// touched a file without polling — the TUI uses it to poke the session
+// changeset awake (issue #347). One listener per process; pass nil to
+// unset. Called-back code runs on the tool dispatch goroutine and must not
+// block.
+func SetFileChangeListener(fn func(id string)) {
+	fileChangesMu.Lock()
+	defer fileChangesMu.Unlock()
+	fileChangeListener = fn
+}
 
 // fileChangesFor returns the set for id, creating it and evicting the oldest
 // session when the registry is full. Callers must hold fileChangesMu; ids
@@ -133,8 +147,12 @@ func RecordFileChange(id, path string, kind ChangeKind) {
 		return
 	}
 	fileChangesMu.Lock()
-	defer fileChangesMu.Unlock()
 	fileChangesFor(id).set(path, kind)
+	fn := fileChangeListener
+	fileChangesMu.Unlock()
+	if fn != nil {
+		fn(id)
+	}
 }
 
 // RemoveFileChange drops a path from the trace (net-zero bookkeeping, e.g. a
@@ -144,9 +162,13 @@ func RemoveFileChange(id, path string) {
 		return
 	}
 	fileChangesMu.Lock()
-	defer fileChangesMu.Unlock()
 	if c, ok := fileChanges[id]; ok {
 		c.delete(path)
+	}
+	fn := fileChangeListener
+	fileChangesMu.Unlock()
+	if fn != nil {
+		fn(id)
 	}
 }
 

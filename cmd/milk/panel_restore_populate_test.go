@@ -3,8 +3,9 @@ package main
 // Regression pins for session-start panel restore (folder-bound state,
 // ADR-0078): a panel restored open must never show empty space — the
 // renderer shows a loading row before the first data msg, and Init arms the
-// same population the /panel toggle fires (first refresh + 3s poll). The
-// population normally rides commands.go's toggle path, which loadPanelState
+// same population the /panel toggle fires (first refresh; the 3s poll and
+// the git status probe are armed for every session since issue #347). The
+// refresh normally rides commands.go's toggle path, which loadPanelState
 // never goes through; before this fix a restored git/project panel stayed
 // blank until an unrelated focus cycle.
 
@@ -62,8 +63,9 @@ func TestRestoredDataPanelRendersLoadingNotBlank(t *testing.T) {
 
 // TestRestoreThenInitArmsPopulation: the real path — loadPanelState from a
 // state file, then Init — must add exactly the git/project population cmds
-// (first refresh + poll tick per open data panel) beyond the baseline init
-// batch.
+// (first refresh per open data panel) beyond the baseline init batch. The
+// 3s poll ticks and the git status probe are baseline now (issue #347:
+// the probe is the panel-event source and runs for every session).
 func TestRestoreThenInitArmsPopulation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "panel-state.json")
@@ -81,12 +83,13 @@ func TestRestoreThenInitArmsPopulation(t *testing.T) {
 		t.Fatalf("restore did not open panels: git=%v project=%v", restored.panelGit, restored.panelProject)
 	}
 	got := initBatchLen(t, restored)
-	if want := baseLen + 5; got != want { // git: tick+refresh; project: tick+refresh+changeset status
+	if want := baseLen + 2; got != want { // git: refresh; project: refresh
 		t.Errorf("Init batch = %d cmds, want %d (population for restored git+project)", got, want)
 	}
 
 	// Closed panels add nothing: the same restore with both panels closed
-	// must match the baseline exactly (no stray ticks in closed sessions).
+	// must match the baseline exactly (no extra refreshes in closed
+	// sessions — the always-on ticks are part of the baseline either way).
 	closed := newTestModelForPanels(t)
 	closed.loadPanelState(writePanelState(t, `{"version":1,"panels":{"git":false,"project":false}}`))
 	if n := initBatchLen(t, closed); n != baseLen {

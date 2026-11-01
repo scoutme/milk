@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"os/exec"
 	"path/filepath"
@@ -35,9 +36,13 @@ const (
 	changesetMaxStatusLines = 4096
 )
 
-// changesetMsg carries one porcelain snapshot for the files panel.
+// changesetMsg carries one porcelain snapshot for the files panel plus the
+// status header — branch and whole-repo dirty count are the git panel's
+// content-event source even while the panel is closed (issue #347).
 type changesetMsg struct {
 	files  map[string]session.ChangeKind // cwd-relative; empty non-nil when clean
+	branch string                        // "##" header branch (whole repo)
+	dirty  int                           // porcelain entry count (whole repo)
 	gitOK  bool                          // status ran successfully — files is authoritative
 	noRepo bool                          // definitively no repo / no git: stop refreshing this cwd
 }
@@ -81,15 +86,18 @@ func refreshChangesetCmd(cwd string) tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), changesetGitTimeout)
 		defer cancel()
+		// -b adds the "##" branch header: one probe feeds both the file
+		// changeset and the git panel's branch/dirty event state (#347).
 		out, err := exec.CommandContext(ctx, "git", "--no-optional-locks", "-C", cwd,
-			"status", "--porcelain", "-uall").Output()
+			"status", "--porcelain", "-uall", "-b").Output()
 		if err != nil {
 			// The toplevel probe proved this is a repo, so this is a
 			// transient failure (timeout, contention): keep the last
 			// snapshot instead of disabling enrichment.
 			return changesetMsg{}
 		}
-		return changesetMsg{files: parseStatusFiles(string(out), root, cwd), gitOK: true}
+		branch, dirty := parseStatusBranch(string(out))
+		return changesetMsg{files: parseStatusFiles(string(out), root, cwd), branch: branch, dirty: dirty, gitOK: true}
 	}
 }
 
@@ -128,6 +136,9 @@ func parseStatusFiles(out, root, cwd string) map[string]session.ChangeKind {
 		res[filepath.ToSlash(rel)] = k
 	}
 	for _, ln := range lines {
+		if strings.HasPrefix(ln, "## ") {
+			continue // status header (the probe runs with -b), not a file entry
+		}
 		if len(ln) < 4 || ln[2] != ' ' {
 			continue
 		}
@@ -205,22 +216,35 @@ func (m *model) changesetRefreshCmd() tea.Cmd {
 }
 
 // resetChangesetForCwd clears every snapshot when the session cwd changes
-// (repo membership, porcelain and trace keys are all cwd-scoped).
+// (repo membership, porcelain and trace keys are all cwd-scoped). The git
+// status event state (issue #347) resets with it: the first probe in the
+// new cwd re-establishes the baseline there.
 func (m *model) resetChangesetForCwd() {
 	m.changesetCwd = m.st.cwd
 	m.changesetNoGit = false
 	m.changesetGitOK = false
 	m.changesetGit = nil
 	m.changesetFiles = nil
+	m.changesetSeen = false
+	m.gitStatusSeen = false
+	m.gitStatusOK = false
+	m.gitStatusDirty = 0
+	m.gitStatusBranch = ""
 }
 
 // syncChangeset merges the last porcelain snapshot with the current session
 // trace and rebuilds the cached tree when the merged set changed. Called from
 // Update only (data messages) — never from View; the tree rebuild consults
 // the changeset, the render path does not.
-func (m *model) syncChangeset() {
+//
+// It is also the project panel's content-event source (issue #347): every
+// detected change after the first (baseline) observation is a domain event
+// — toasted per occurrence whether or not the panel is open — while only
+// the empty→non-empty *edge* may auto-open the panel. Returns the data
+// refresh for a panel the edge just opened, if any.
+func (m *model) syncChangeset() tea.Cmd {
 	if m.st == nil || m.st.cwd == "" {
-		return
+		return nil
 	}
 	if m.changesetCwd != m.st.cwd {
 		m.resetChangesetForCwd()
@@ -233,15 +257,72 @@ func (m *model) syncChangeset() {
 	if len(next) == 0 {
 		next = nil // canonical: an empty set and no set render and compare alike
 	}
+	// The first *observation* is the baseline (pre-existing state at
+	// startup is not news, issue #347) — set before the change check so a
+	// clean startup followed by the first change still counts as an event.
+	baseline := !m.changesetSeen
+	m.changesetSeen = true
 	if maps.Equal(m.changesetFiles, next) {
-		return
+		return nil
 	}
-	// Recency stamp (ADR-0089): a change after the first load means the
-	// project tree's rendered content actually changed; the first load only
-	// establishes the baseline so startup panels stay tied (render order).
-	if m.changesetFiles != nil {
+	prev := m.changesetFiles
+	// Recency stamp (ADR-0089): a change after the first observation
+	// means the project tree's rendered content actually changed; the
+	// baseline only establishes it so startup panels stay tied (render
+	// order).
+	if !baseline {
 		m.stampPanelActivity(regionProject)
 	}
 	m.changesetFiles = next
 	m.rebuildProjectTree()
+	if baseline {
+		return nil
+	}
+	return m.changesetEvent(prev, next)
+}
+
+// changesetEvent is the project panel's per-event notification layer
+// (issue #347): every observed change of the session changeset is a domain
+// event and gets its own toast — granular like the background panel's
+// spawn/done/fail notices, never edge-deduplicated — whether the panel is
+// open or closed. Layout is the edge-only layer: only new changes from a
+// clean previous state may auto-open the panel, and the empty state is
+// project-world "no contents", releasing a manual close's veto (see
+// panelContentFinalized).
+func (m *model) changesetEvent(prev, next map[string]session.ChangeKind) tea.Cmd {
+	if len(next) == 0 {
+		m.notify("project: session changeset clean", "/panel project")
+	} else {
+		m.notify("project: "+changesetEventSummary(next)+" changed this session", "/panel project")
+	}
+	var cmd tea.Cmd
+	if len(prev) == 0 && len(next) > 0 {
+		// The layout edge: content arriving from a clean previous state.
+		wasOpen := m.panelProject
+		m.autoOpenPanel(regionProject)
+		if !wasOpen && m.panelProject && m.st != nil {
+			cmd = refreshProjectCmd(m.st.cwd)
+		}
+	}
+	// Auto-open first, then the veto release (ADR-0059's ordering).
+	m.resetManualOverrideIfFinalized(regionProject)
+	return cmd
+}
+
+// changesetEventSummary renders the compact tally for a changeset toast
+// ("3 file(s) (2M 1A)") — the counts-only sibling of the panel's
+// changesSummaryLine, without ANSI styling.
+func changesetEventSummary(changes map[string]session.ChangeKind) string {
+	counts := map[session.ChangeKind]int{}
+	for _, k := range changes {
+		counts[k]++
+	}
+	var parts []string
+	for _, k := range []session.ChangeKind{session.ChangeCreated, session.ChangeModified, session.ChangeDeleted, session.ChangeRenamed} {
+		if counts[k] == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d%s", counts[k], changeLetter(k)))
+	}
+	return fmt.Sprintf("%d file(s) (%s)", len(changes), strings.Join(parts, " "))
 }

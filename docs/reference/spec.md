@@ -63,6 +63,8 @@ cmd/milk/
   panel_workflow.go workflow progress panel (/panel workflow)
   panel_project.go  project tree panel (/panel project)
   panel_git.go      git graph panel (/panel git)
+  panel_events.go   panel content events: per-event toasts + edge-based auto-open/veto release (#347, ADR-0095)
+  changeset.go      session changeset (trace + `git status --porcelain -b`) and the always-on status probe
   gitgraph.go       git data fetch + code-laid commit-graph lanes
   workflow_cmd.go   /workflow slash command + interactive wizard
   workflow_runner.go workflowTurnRunner adapter (wraps TurnRunner with per-role session tracking)

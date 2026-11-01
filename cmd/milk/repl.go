@@ -902,6 +902,10 @@ type model struct {
 	// memorySig is the last content fingerprint the periodic memory refresh
 	// saw, so only real store changes stamp panelActivity[regionMemory].
 	memorySig string
+	// memoryPerceptN is the percept count behind the last memory event
+	// toast (issue #347) — a fingerprint change without a count change is
+	// a brick redraw, not a content event.
+	memoryPerceptN int
 
 	// memory panel (in-place expansion mirrors into the tasks panel)
 	panelMemory        bool
@@ -916,6 +920,10 @@ type model struct {
 	tasksOffset  int
 	taskStore    *tasks.Store
 	taskExpanded string
+	// taskEventPrev is the id → task snapshot the per-event toast diff
+	// runs against (issue #347); nil until the first observation (that
+	// one is the baseline — restored startup tasks are state, not news).
+	taskEventPrev map[string]tasks.Task
 
 	// background-agents panel (ADR-0043)
 	panelBackground  bool
@@ -932,11 +940,14 @@ type model struct {
 	// Session changeset for the files panel (issue #331): last porcelain
 	// snapshot (git), the merged map the tree renders, and its cwd/repo
 	// bookkeeping — see changeset.go.
-	changesetFiles    map[string]session.ChangeKind
-	changesetGit      map[string]session.ChangeKind
-	changesetGitOK    bool
-	changesetNoGit    bool
-	changesetCwd      string
+	changesetFiles map[string]session.ChangeKind
+	changesetGit   map[string]session.ChangeKind
+	changesetGitOK bool
+	changesetNoGit bool
+	changesetCwd   string
+	// changesetSeen marks that a baseline sync has landed — only later
+	// changes are content events (issue #347).
+	changesetSeen     bool
 	lastTreeClickPath string
 	lastTreeClickTime time.Time
 	panelGit          bool
@@ -947,6 +958,18 @@ type model struct {
 	gitErr            string
 	gitLines          []string
 	gitIDs            []string
+	// git status event state (issue #347): what the always-on status
+	// probe last saw — the domain truth behind the git panel's event
+	// toasts, its clean→dirty/branch edges, and panelContentFinalized's
+	// "clean tree". Separate from the display fields above, which only
+	// refresh while the panel is open.
+	gitStatusSeen   bool
+	gitStatusOK     bool
+	gitStatusDirty  int
+	gitStatusBranch string
+	// fileTracePokePending marks a coalescing window already armed for a
+	// burst of session file-trace mutations (issue #347, see panel_events.go).
+	fileTracePokePending bool
 
 	// pending /forget confirmation
 	pendingForget *forgetState
@@ -2339,17 +2362,29 @@ func (m model) Init() tea.Cmd {
 	// unconditionally (the panel starts closed and the tick is what notices
 	// content arriving); cheap next to the 80ms spinner.
 	cmds = append(cmds, memoryPollTick())
+	// Panel event source (issue #347): the 3s data polls run for everyone
+	// now — the git status probe they carry is what notices git/project
+	// content edges (and fires their event toasts) while both panels are
+	// closed. The timer ticks themselves are cheap; the expensive fetches
+	// stay gated on the panel being open (see the projectRefreshMsg and
+	// gitRefreshMsg handlers). Same cost class as memoryPollTick above:
+	// one bounded `git status` per tick, off the UI goroutine, none at all
+	// outside a repo.
+	cmds = append(cmds, projectPollTick(), gitPollTick())
 	// Restored-open data panels (folder-bound state, ADR-0078) populate as
-	// if toggled: the /panel toggle is what normally fires the first refresh
-	// and arms the 3s poll (commands.go), and loadPanelState never goes
-	// through it — without this a restored git/project panel would show its
-	// loading row until a focus cycle refreshed it, with no poll behind it.
+	// if toggled: the /panel toggle is what normally fires the first
+	// refresh (commands.go), and loadPanelState never goes through it —
+	// without this a restored git/project panel would show its loading row
+	// until a focus cycle refreshed it.
 	if m.st != nil {
+		if cmd := m.changesetRefreshCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if m.panelProject {
-			cmds = append(cmds, projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
+			cmds = append(cmds, refreshProjectCmd(m.st.cwd))
 		}
 		if m.panelGit {
-			cmds = append(cmds, gitPollTick(), refreshGitCmd(m.st.cwd))
+			cmds = append(cmds, refreshGitCmd(m.st.cwd))
 		}
 	}
 	// Idle tip rotation (ADR-0061) — armed unconditionally, cheap at 20s.
@@ -2886,6 +2921,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendTranscript("\n" + milkTag() + " Designer has questions:\n")
 		m.appendTranscript(msg.Questions + "\n\n")
 		m.appendTranscript(milkTag() + " Please provide your answers (or press Enter to use defaults):\n")
+		// Per-event notification (issue #347): a workflow waiting on the
+		// user is a panel event even while the panel stays closed.
+		m.workflowEventToast("is waiting for your answers", workflowName(m.workflowState))
 		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
@@ -2974,6 +3012,18 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.appendTranscript(milkTag() + " workflow complete\n")
+		}
+		// Per-event notification (issue #347): every run outcome is a
+		// workflow panel event — toast it whether or not the panel is open.
+		switch name := workflowName(m.workflowState); {
+		case cancelled || isContextCanceled(msg.Err):
+			m.workflowEventToast("interrupted", name)
+		case m.pendingGenericWorkflowExtend != nil:
+			m.workflowEventToast("paused at its iteration limit", name)
+		case msg.Err != nil:
+			m.workflowEventToast("failed", name)
+		default:
+			m.workflowEventToast("finished", name)
 		}
 		m.colorizeForce = true
 		m.refreshPrompt()
@@ -3163,8 +3213,12 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if sig := m.memoryContentSig(); sig != "" && m.memorySig != "" && sig != m.memorySig {
 			m.stampPanelActivity(regionMemory)
 			m.memorySig = sig
+			// Per-event notification (issue #347): a store change is a
+			// memory event — count changes toast, brick-only redraws don't.
+			m.memoryPerceptToast(m.memoryPerceptCount())
 		} else if m.memorySig == "" {
-			m.memorySig = sig // first read: baseline only, never a stamp
+			m.memorySig = sig                         // first read: baseline only, never a stamp
+			m.memoryPerceptN = m.memoryPerceptCount() // …nor an event
 		}
 		if !m.panelMemory && !m.panelContentFinalized(regionMemory) {
 			m.autoOpenPanel(regionMemory)
@@ -3172,11 +3226,15 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, memoryPollTick()
 
 	case projectRefreshMsg:
-		if !m.panelProject {
-			return m, nil
-		}
 		if m.blurred {
 			return m, projectPollTick() // keep the timer alive, skip the work
+		}
+		// The tick chain is permanent now (issue #347): the git status
+		// probe it carries is the panel-event source even while the
+		// project panel is closed — that is what notices content edges
+		// without an open panel. Only the file listing is display work.
+		if !m.panelProject {
+			return m, tea.Batch(projectPollTick(), m.changesetRefreshCmd())
 		}
 		// The changeset's git enrichment rides the same 3s tick: a burst of
 		// tool calls between ticks schedules exactly one status refresh
@@ -3184,10 +3242,11 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 
 	case gitRefreshMsg:
-		if !m.panelGit {
-			return m, nil
-		}
-		if m.blurred {
+		// Also permanent (issue #347): while the panel is closed the cheap
+		// timer keeps itself alive but skips the graph fetch — status
+		// edges/toasts come from the changeset probe either way, and an
+		// auto-opened panel gets a fresh graph from that event.
+		if m.blurred || !m.panelGit {
 			return m, gitPollTick()
 		}
 		return m, tea.Batch(gitPollTick(), refreshGitCmd(m.st.cwd))
@@ -3198,14 +3257,24 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildProjectTree()
 		// The session trace may have moved since the last snapshot (tool
 		// writes between polls) — resync the changeset with this refresh.
-		m.syncChangeset()
-		return m, nil
+		return m, m.syncChangeset()
 	case changesetMsg:
+		// A cwd change drops stale state first — the reset must never wipe
+		// the fresh snapshot below (probes always run for the cwd current
+		// at schedule time; issue #347's git event state included).
+		if m.st != nil && m.changesetCwd != m.st.cwd {
+			m.resetChangesetForCwd()
+		}
 		switch {
 		case msg.noRepo:
 			m.changesetNoGit = true
 			m.changesetGitOK = false
 			m.changesetGit = nil
+			// The probe's final word on the git domain: no repo means no
+			// live changes — git-world "clean" (issue #347).
+			m.gitStatusSeen, m.gitStatusOK = true, false
+			m.gitStatusDirty, m.gitStatusBranch = 0, ""
+			m.resetManualOverrideIfFinalized(regionGit)
 		case msg.gitOK:
 			m.changesetNoGit = false
 			m.changesetGitOK = true
@@ -3213,8 +3282,16 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default: // transient git failure: keep the last snapshot
 			return m, nil
 		}
-		m.syncChangeset()
-		return m, nil
+		var cmds []tea.Cmd
+		if cmd := m.syncChangeset(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if msg.gitOK {
+			if cmd := m.applyGitStatus(msg.branch, msg.dirty); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case gitDataMsg:
 		newLines, newIDs := buildGitPanelLines(msg.rows, msg.branch, msg.dirty, msg.err, gitPanelInner)
@@ -3241,12 +3318,39 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskStoreChangedMsg:
 		m.autoOpenPanel(regionTasks)
+		// Per-event notification (issue #347): each store mutation is a
+		// task event — created/status/removed toasts, panel state
+		// irrelevant.
+		m.taskEventsToast()
 		// Auto-open first (a "last task completed" change must not force
 		// a user-closed panel back open), then the finalization reset so
 		// the *next* task change auto-opens again (ADR-0059).
 		m.resetManualOverrideIfFinalized(regionTasks)
 		m.syncLayout()
 		return m, nil
+
+	case fileTraceChangedMsg:
+		// Session file-trace wakeup (issue #347): a tool just recorded a
+		// path change — the instant event source for agent-caused writes,
+		// especially in non-git workspaces where there is no probe. Coalesce
+		// the burst: one changeset sync (and one event) per quiet moment.
+		if m.st == nil || m.st.sess == nil || msg.sessID != m.st.sess.ID {
+			return m, nil
+		}
+		if m.fileTracePokePending {
+			return m, nil
+		}
+		m.fileTracePokePending = true
+		return m, tea.Tick(fileTracePokeDelay, func(time.Time) tea.Msg {
+			return fileTracePokeMsg{}
+		})
+
+	case fileTracePokeMsg:
+		m.fileTracePokePending = false
+		// The merged changeset is trace-aware already; the immediate probe
+		// also keeps porcelain truth (and the git event state) fresh ahead
+		// of the next poll tick.
+		return m, tea.Batch(m.syncChangeset(), m.changesetRefreshCmd())
 
 	case backgroundJobStartedMsg:
 		m.autoOpenPanel(regionBackground)
@@ -3438,8 +3542,13 @@ func (m model) refreshOpenPanelsCmd() tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
+	// The status probe runs even while both panels are closed (issue #347)
+	// — a focus regain must not leave the event source stale.
+	if cmd := m.changesetRefreshCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	if m.panelProject {
-		cmds = append(cmds, refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
+		cmds = append(cmds, refreshProjectCmd(m.st.cwd))
 	}
 	if m.panelGit {
 		cmds = append(cmds, refreshGitCmd(m.st.cwd))
@@ -5286,7 +5395,15 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		taskStore.SetOnChange(func() {
 			p.Send(taskStoreChangedMsg{})
 		})
+		m.taskEventPrev = taskEventSnapshot(taskStore)
 	}
+
+	// Wire the session file-trace wakeup (issue #347): every traced tool
+	// write pokes the TUI so the session changeset — and the panel events
+	// derived from it — update without waiting for the next poll tick.
+	session.SetFileChangeListener(func(id string) {
+		p.Send(fileTraceChangedMsg{sessID: id})
+	})
 
 	// Start a config watcher so the TUI updates automatically when config.json
 	// changes on disk (e.g. the user edits it in another terminal). The dual
