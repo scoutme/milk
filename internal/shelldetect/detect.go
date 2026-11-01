@@ -140,6 +140,30 @@ var nlConnectors = map[string]bool{
 	"your":  true,
 }
 
+// goCommands is the go tool's top-level command set (`go help`) plus help —
+// the only second tokens that make "go …" a shell command.
+var goCommands = map[string]bool{
+	"build": true, "install": true, "test": true, "run": true,
+	"vet": true, "fmt": true, "generate": true, "get": true,
+	"list": true, "mod": true, "work": true, "tool": true,
+	"clean": true, "doc": true, "env": true, "version": true,
+	"fix": true, "bug": true, "help": true,
+}
+
+// subcommandGated maps first tokens that are valid binaries but too
+// ambiguous to count as a command on their own to the set of main
+// subcommands the next token must belong to. "go" alone (or "go ahead",
+// "go check the logs") is ordinary English, not the Go toolchain — bare
+// "go" has no meaningful effect anyway — so "go" only routes to direct
+// bash with a real top-level subcommand (go mod, go run, go test, …).
+// The gate applies regardless of whether the name came from knownBinaries
+// or was user-registered via shell_binaries, and it runs before the
+// DirectBashAllow check: an allow entry cannot resurrect a bare "go",
+// while every actual go command still reaches the allow-list normally.
+var subcommandGated = map[string]map[string]bool{
+	"go": goCommands,
+}
+
 // nlStarters are common natural-language question/sentence openers.
 // A prompt whose first token matches one of these is never a shell command.
 var nlStarters = map[string]bool{
@@ -179,7 +203,10 @@ var nlStarters = map[string]bool{
 //  3. Input must not contain more than 100 characters (long sentences aren't commands).
 //  4. The first whitespace-token of input must be in knownBinaries.
 //  5. The first token must not be in nlStarters.
-//  6. None of the tokens (excluding flags starting with '-' and path-like tokens)
+//  6. A subcommand-gated first token (subcommandGated, e.g. "go") must be
+//     followed by one of its main subcommands — "go mod …" is a command,
+//     bare "go" or "go ahead" is not.
+//  7. None of the tokens (excluding flags starting with '-' and path-like tokens)
 //     must be a natural-language word longer than 8 alphabetic chars.
 //
 // Pipes (|) and redirects (>, <, >>) are allowed — the full input is passed to
@@ -214,6 +241,16 @@ func IsShellCommand(input string) (cmd string, ok bool) {
 	// First token must be a known or user-registered binary.
 	if !knownBinaries[first] && !userBinaries[first] {
 		return "", false
+	}
+
+	// Subcommand-gated binaries: a valid first token still isn't enough
+	// when the name doubles as ordinary English ("go"). The next token
+	// must be one of the tool's main subcommands, or the input is not a
+	// shell command at all.
+	if gated, ok := subcommandGated[first]; ok {
+		if len(tokens) < 2 || !gated[strings.ToLower(tokens[1])] {
+			return "", false
+		}
 	}
 
 	// Scan remaining tokens for natural-language indicators.

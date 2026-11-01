@@ -16,6 +16,11 @@ func TestIsShellCommand(t *testing.T) {
 		{"docker ps"},
 		{"kubectl get pods"},
 		{"go build ./..."},
+		{"go test ./..."},
+		{"go mod tidy"},
+		{"go run ./cmd/milk"},
+		{"go vet ./..."},
+		{"GO RUN main.go"},
 		{"npm install"},
 		{"make test"},
 		{"curl http://example.com"},
@@ -72,6 +77,12 @@ func TestIsShellCommand(t *testing.T) {
 		{"git push to origin"},
 		{"cd into the project"},
 		{"make a new branch"},
+		// Subcommand-gated binary ("go") without a main subcommand:
+		// bare "go" and English "go …" are not the Go toolchain.
+		{"go"},
+		{"go ahead"},
+		{"go check the logs"},
+		{"go help me with this"},
 		// Empty / question mark
 		{""},
 		{"git status?"},
@@ -112,6 +123,34 @@ func TestIsShellCommand_AllowListBypasses(t *testing.T) {
 	allowList := []string{"ls", "git"}
 	if !HasAllowedPrefix("ls -la", allowList) {
 		t.Error("HasAllowedPrefix: expected match for single-token entry 'ls'")
+	}
+}
+
+// TestIsShellCommand_GoSubcommandGate pins the subcommand gate: "go" is a
+// valid binary but also an ordinary English word, so only real top-level go
+// commands (go mod, go run, go test, …) route to direct bash — bare "go" or
+// "go <non-subcommand>" falls through to the agent (user report, 2026-11-01).
+func TestIsShellCommand_GoSubcommandGate(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"go", false},       // bare — meaningless as a command, reads as "go ahead"
+		{"go ahead", false}, // English, "ahead" is not a go command
+		{"go check the logs", false},
+		{"go do ./task", false}, // "do" is not a go command
+		{"go test ./...", true},
+		{"go mod tidy", true},
+		{"go run .", true},
+		{"go version", true},
+		{"go help", true},
+		{"Go Test ./...", true}, // case-insensitive
+	}
+	for _, c := range cases {
+		_, ok := IsShellCommand(c.input)
+		if ok != c.want {
+			t.Errorf("IsShellCommand(%q) = %v, want %v", c.input, ok, c.want)
+		}
 	}
 }
 
