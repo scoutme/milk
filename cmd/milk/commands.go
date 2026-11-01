@@ -249,6 +249,9 @@ func (m *model) refreshSessionScopedState(oldSessionID string) error {
 			taskStore.SetOnChange(func() { m.st.program.Send(taskStoreChangedMsg{}) })
 		}
 		m.taskStore = taskStore
+		// New session, new task-event baseline (issue #347): its restored
+		// tasks are state, not events.
+		m.taskEventPrev = taskEventSnapshot(taskStore)
 		adapter := tasks.NewAdapter(taskStore)
 		if m.agents.local != nil {
 			m.agents.local = m.agents.local.WithTaskStore(adapter)
@@ -1855,12 +1858,13 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		if m.panelProject {
 			m.notify("project panel: on", "/panel project")
-			// First refresh immediately; the poll keeps it live-ish afterwards.
-			// The explicit toggle also re-probes git status (the skip flag for
-			// "no repo here" lives until the cwd changes or the panel is
-			// re-opened — e.g. after a mid-session `git init`).
+			// First refresh immediately (the permanent 3s poll chain keeps
+			// it live-ish afterwards — issue #347). The explicit toggle
+			// also re-probes git status (the skip flag for "no repo here"
+			// lives until the cwd changes or the panel is re-opened — e.g.
+			// after a mid-session `git init`).
 			m.changesetNoGit = false
-			return m, tea.Batch(projectPollTick(), refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
+			return m, tea.Batch(refreshProjectCmd(m.st.cwd), m.changesetRefreshCmd())
 		}
 		m.notify("project panel: off", "/panel project")
 		return m, nil
@@ -1875,7 +1879,9 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		if m.panelGit {
 			m.notify("git panel: on", "/panel git")
-			return m, tea.Batch(gitPollTick(), refreshGitCmd(m.st.cwd))
+			// First refresh immediately; the permanent poll chain (issue
+			// #347) keeps it live-ish afterwards.
+			return m, refreshGitCmd(m.st.cwd)
 		}
 		m.notify("git panel: off", "/panel git")
 		return m, nil

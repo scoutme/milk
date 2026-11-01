@@ -177,6 +177,14 @@ func (m *model) autoOpenPanel(region panelRegion) {
 //   - workflow: no run in flight and the loaded state is nil, nameless
 //     (panel shows "no active workflow"), or already at Role "done".
 //     "interrupted"/"waiting for your answers" states stay active.
+//   - git: a clean working tree — git-world "no contents" (issue #347).
+//     Dirt is the panel's live content, so a manual close sticks exactly
+//     while dirt is live and is released by a clean state; the next
+//     clean→dirty transition auto-opens the panel again. Unknown (no
+//     probe yet) and "not a repo" count as clean — nothing in flight.
+//   - project: an empty session changeset — project-world "no contents"
+//     (issue #347). The file listing itself is static state (like git's
+//     commit graph); the changeset is what content events arrive in.
 func (m *model) panelContentFinalized(region panelRegion) bool {
 	switch region {
 	case regionMemory:
@@ -222,10 +230,10 @@ func (m *model) panelContentFinalized(region panelRegion) bool {
 		}
 		st := m.workflowState
 		return st == nil || st.WorkflowName == "" || st.Role == "done"
-	case regionProject, regionGit:
-		// No live content lifecycle — always finalized, so a manual close
-		// never blocks the next open (see resetManualOverrideIfFinalized).
-		return true
+	case regionGit:
+		return m.gitStatusDirty == 0
+	case regionProject:
+		return len(m.changesetFiles) == 0
 	}
 	return true
 }
@@ -251,8 +259,10 @@ func (m *model) panelContentFinalized(region panelRegion) bool {
 //     mutations (taskStoreChangedMsg), the last background job finishing
 //     (backgroundJobDoneMsg), the last background shell exiting
 //     (backgroundShellDoneMsg), a workflow ending or being cleared
-//     (workflow.WorkflowDoneMsg, /workflow clear), and /forget emptying
-//     the percept store (resolveForget).
+//     (workflow.WorkflowDoneMsg, /workflow clear), /forget emptying the
+//     percept store (resolveForget), and every git status probe / session
+//     changeset sync for the git and project panels (issue #347 — a
+//     clean tree or empty changeset is those panels' "no contents").
 //
 // No-op when there is no override for the region or the content is still
 // active. Order matters at the event sites: call autoOpenPanel *first*
