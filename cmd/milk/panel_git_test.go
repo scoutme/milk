@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -180,6 +181,15 @@ func TestRefreshGitCmd_EmptyRepo(t *testing.T) {
 	if msg.rows == nil || len(msg.rows) != 0 {
 		t.Errorf("rows = %v, want non-nil empty", msg.rows)
 	}
+	// The "## No commits yet on <branch>" header must parse to the real
+	// branch, not to its first word "No".
+	out, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("symbolic-ref: %v", err)
+	}
+	if want := strings.TrimSpace(string(out)); msg.branch != want {
+		t.Errorf("branch = %q, want %q", msg.branch, want)
+	}
 }
 
 // TestGitDataMsg_TransientKeepsLastSnapshot: a transient probe failure is
@@ -218,16 +228,61 @@ func TestGitLog_ScratchRepo(t *testing.T) {
 	if len(commits) != 1 || commits[0].Subject != "first commit" {
 		t.Errorf("commits = %+v", commits)
 	}
-	if branch == "" {
-		t.Error("branch should be set")
+	// The header must carry the real branch name. A plain "branch != \"\""
+	// pin once let a broken status probe slip through rendering "HEAD"
+	// instead of the branch (the --no-optional-locks placement bug).
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if want := strings.TrimSpace(string(out)); branch != want {
+		t.Errorf("branch = %q, want %q", branch, want)
 	}
 	if dirty != 0 {
 		t.Errorf("dirty = %d, want 0", dirty)
+	}
+	// Dirty count comes from the same probe as the branch.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, dirty, err := gitLog(dir); err != nil || dirty != 1 {
+		t.Errorf("after modify: dirty = %d err = %v, want 1, nil", dirty, err)
 	}
 	// The layout must produce exactly one clickable row with the hash.
 	rows := layoutGraph(commits)
 	if len(rows) != 1 || rows[0].Commit.Hash != commits[0].Hash {
 		t.Errorf("layout rows = %+v", rows)
+	}
+}
+
+// TestGitLog_StatusProbeFailureIsTransient: when the status probe fails but
+// the log probe worked, gitLog must surface the failure as a transient error
+// — never swallow it into a fabricated "HEAD"/0 header (that is exactly how
+// the git panel came to say "⎇ HEAD" instead of the branch).
+func TestGitLog_StatusProbeFailureIsTransient(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git binary is a POSIX shell script")
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = status ]; then\n" +
+		"    echo 'fatal: unable to write index.lock' >&2\n" +
+		"    exit 1\n" +
+		"  fi\n" +
+		"done\n" +
+		"printf 'abc1234\\037abc1234\\037\\037subj\\037\\0372 hours ago\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	commits, branch, dirty, err := gitLog(t.TempDir())
+	if err == nil || !transientGitErr(err) {
+		t.Fatalf("err = %v, want transient (the repo is real; only status failed)", err)
+	}
+	if commits != nil || branch != "" || dirty != 0 {
+		t.Errorf("commits=%v branch=%q dirty=%d, want no fabricated data on failure", commits, branch, dirty)
 	}
 }
 

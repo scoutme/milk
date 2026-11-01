@@ -101,6 +101,7 @@ func TestParseStatusBranch(t *testing.T) {
 		{"## main...origin/main [ahead 1]\n M file.go\n?? new.go\n", "main", 2},
 		{"## main\n", "main", 0},
 		{"## HEAD (no branch)\n", "HEAD", 0},
+		{"## No commits yet on master\n", "master", 0},
 		{"", "HEAD", 0},
 	} {
 		branch, dirty := parseStatusBranch(tc.out)
