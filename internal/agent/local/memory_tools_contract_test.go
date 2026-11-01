@@ -130,6 +130,41 @@ func TestMemoryCaller_BackgroundCloneInherits(t *testing.T) {
 	}
 }
 
+// TestMemoryToolContract_TransientBoundary pins the percept-content contract
+// (2026-11-02): percepts hold durable knowledge only. The schema description,
+// the system-prompt mandate and the background paragraph describe one
+// contract (see Schemas' doc comment) and must all tell the model not to
+// record transient state — task progress, run results, status milestones —
+// which belongs to the task tools or the artifacts themselves.
+func TestMemoryToolContract_TransientBoundary(t *testing.T) {
+	desc := ""
+	for _, s := range memory.Schemas() {
+		fn, _ := s["function"].(map[string]any)
+		if fn["name"] == "record_memory" {
+			desc, _ = fn["description"].(string)
+		}
+	}
+	if desc == "" {
+		t.Fatal("record_memory schema not found")
+	}
+	for name, text := range map[string]string{
+		"schema description":   desc,
+		"memoryToolGuidance":   memoryToolGuidance,
+		"background paragraph": backgroundSystemPrompt("/tmp", true),
+	} {
+		if !strings.Contains(text, "transient") {
+			t.Errorf("%s: expected the transient-state boundary wording", name)
+		}
+	}
+	// The memory-vs-tasks boundary must be stated where the tools are named.
+	if !strings.Contains(desc, "task tools") {
+		t.Error("record_memory description must route task state to the task tools")
+	}
+	if !strings.Contains(memoryToolGuidance, "update_task/complete_task") {
+		t.Error("memoryToolGuidance must route task state to the task tools")
+	}
+}
+
 // TestHasToolNamed exercises the helper that keeps prompt mandates in
 // lockstep with the real tool list.
 func TestHasToolNamed(t *testing.T) {

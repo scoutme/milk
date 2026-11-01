@@ -2212,8 +2212,20 @@ func perceptsForAgent(cfg config.Config, mem *memory.Store, prompt string, forEs
 	// List returns percepts sorted by weight descending; the injection
 	// budget drops by rank score, so re-sort before LimitInjection.
 	all := mem.List(memory.ListOpts{})
+	// belowW is the injection weight floor (issue #375, verdict item 1):
+	// percepts at the prune floor are invisible to recall (get_memory's
+	// min_confidence) but used to be injected anyway — and injection marks
+	// them used, so their staleness-archiving idle clock reset every turn
+	// and they lived forever while never being queryable. Filtering here,
+	// before relevance gating and budgeting, fixes both: floor percepts stop
+	// burning the 25/2048 injection budget, and once they stop being marked
+	// used the 14-day archive rule can actually fire.
+	belowW := cfg.PerceptInjectMinWeight()
 	var candidates []memory.Percept
 	for _, p := range all {
+		if p.W < belowW {
+			continue
+		}
 		if forEscalation {
 			if p.Producer == memory.ProducerEscalation {
 				continue // Claude wrote it; no need to echo it back

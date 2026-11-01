@@ -19,7 +19,7 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "record_memory",
-				"description": "Persist a fact, preference, or decision across sessions. Re-stating a similar fact re-affirms the existing percept (one corroboration per run; repetition within a run adds nothing) instead of duplicating it. Use relation/related_to to link the fact to an existing percept: extends/derives corroborate the related one, updates corroborates this fact and supersedes the related one (it fades faster and cannot be promoted), contradicts marks a conflict (both are weighed at memory consolidation).",
+				"description": "Persist a durable fact, preference, or decision across sessions — knowledge future sessions must have that is not derivable from the transcript, the code, or issue trackers. Never record transient information: task progress, run results, status updates, or \"X was done/fixed/merged\" milestones — task state belongs to the task tools, and outcomes live in their artifacts. Re-stating a similar fact re-affirms the existing percept (one corroboration per run; repetition within a run adds nothing) instead of duplicating it. Use relation/related_to to link the fact to an existing percept: extends/derives corroborate the related one, updates corroborates this fact and supersedes the related one (it fades faster and cannot be promoted), contradicts marks a conflict (both are weighed at memory consolidation).",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{

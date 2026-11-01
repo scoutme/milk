@@ -388,6 +388,54 @@ func normalizePriors(percepts []Percept) {
 func (s *Store) normalizeLocked() {
 	normalizePriors(s.global.Percepts)
 	normalizePriors(s.session.Percepts)
+	// …and repair what that migration got wrong for user-asserted facts
+	// (issue #375, verdict proposal 2) — see repairMigratedUserPriors.
+	repairMigratedUserPriors(s.global.Percepts, s.params.PruneThreshold)
+	repairMigratedUserPriors(s.session.Percepts, s.params.PruneThreshold)
+}
+
+// repairMigratedUserPriors undoes the pre-v4 Prior migration's floor pinning
+// for user-asserted Percepts (issue #375, verdict proposal 2).
+//
+// normalizePriors seeds Prior := W for Percepts created before Prior existed.
+// That is monotone-safe in general, but the old linear model had already
+// decayed long-lived user facts to the prune floor, so their prior was seeded
+// AT the floor — and Prior is what every v4 pass derives strength from: such
+// facts stay pinned at 0.20 forever, below recall's min_confidence (0.4) and
+// below the injection weight floor, while being the store's most trusted
+// class (user decisions and instructions).
+//
+// The provenance is known, so restore it: a user assertion's prior is
+// initialWeight(user) no matter how far decay dragged W before v4 shipped.
+// Any non-core user Percept with Prior at or below the prune floor (snap band
+// included) can only be a migration artifact — post-migration records start
+// at 0.9 and Prior never decreases afterwards — which makes this idempotent
+// (0.9 can never re-trigger it). W is refreshed to derivedW so recall and
+// injection see the repair immediately; decay then re-ages it from the
+// Percept's own UpdatedAt on the next pass, so an old fact lands at its
+// age-appropriate weight rather than sitting at 0.9.
+//
+// Non-user Percepts are untouched: session percepts are meant to prune at
+// the floor, and migrated primary/escalation/system facts keep the
+// monotone-safe approximation normalizePriors gave them.
+func repairMigratedUserPriors(percepts []Percept, threshold float64) int {
+	if threshold <= 0 {
+		threshold = pruneThreshold
+	}
+	n := 0
+	for i := range percepts {
+		p := &percepts[i]
+		if p.Core || p.Producer != ProducerUser {
+			continue
+		}
+		if p.Prior == 0 || p.Prior > threshold+floorSnapBand {
+			continue // unmigrated (normalizePriors' job) or a healthy prior
+		}
+		p.Prior = initialWeight(ProducerUser, false)
+		p.W = derivedW(*p)
+		n++
+	}
+	return n
 }
 
 // trackDurability maintains AboveThresholdSince: set at the first pass that
