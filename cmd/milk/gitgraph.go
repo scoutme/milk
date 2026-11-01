@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"slices"
 	"strings"
@@ -205,8 +207,38 @@ func parseStatusBranch(out string) (branch string, dirty int) {
 	return branch, dirty
 }
 
+// gitErrDefinitive reports whether a git process failure is a permanent
+// statement about the environment — git is not installed, or cwd is not
+// inside a work tree — as opposed to a retryable hiccup: the 3s timeout
+// under load or mid-checkout (killed process, empty stderr), lock
+// contention, a vanished cwd. Only the definitive class may be rendered as
+// "not a git repository" or cached as "no repo here"; a transient one must
+// keep the last good snapshot and retry on the next poll (the git panel
+// used to flash "not a git repository" exactly this way).
+func gitErrDefinitive(err error) bool {
+	if err == nil {
+		return false
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return true // LookPath failed — the git binary itself is missing
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return bytes.Contains(ee.Stderr, []byte("not a git repository"))
+	}
+	return false // context deadline, signal kill, I/O error — all retryable
+}
+
+// transientGitErr is the complement: a failure worth retrying next tick.
+func transientGitErr(err error) bool { return err != nil && !gitErrDefinitive(err) }
+
 // gitLog runs the graph's data fetch in cwd. Returns the parsed commits and
-// the status info; err is non-nil when git is missing or cwd is not a repo.
+// the status info; err is non-nil when git is missing, cwd is not a repo,
+// or the repo has no commits yet (the last is not an error — commits comes
+// back as an empty, non-nil slice so the panel can say "(no commits)").
+// A transient failure (timeout/lock) is returned as err too — classify it
+// with transientGitErr before rendering.
 func gitLog(cwd string) (commits []gitCommit, branch string, dirty int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
 	defer cancel()
@@ -216,12 +248,24 @@ func gitLog(cwd string) (commits []gitCommit, branch string, dirty int, err erro
 		"--pretty=format:%h\x1f%H\x1f%P\x1f%s\x1f%D\x1f%ar")
 	out, err := log.Output()
 	if err != nil {
-		return nil, "", 0, err
+		// A freshly-inited repo with no commits: git log refuses with a
+		// fatal on stderr, but the repo is real — fall through to the
+		// status probe with an empty (non-nil) commit list.
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || !bytes.Contains(ee.Stderr, []byte("does not have any commits yet")) {
+			return nil, "", 0, err
+		}
+		commits = []gitCommit{}
+	} else {
+		commits = parseGitLog(string(out))
 	}
-	commits = parseGitLog(string(out))
 
 	branch = "HEAD"
-	status := exec.CommandContext(ctx, "git", "-C", cwd, "status", "--porcelain", "-b")
+	// --no-optional-locks, same as the changeset probe: a panel refresh must
+	// never wait on (or fail against) the index.lock of a checkout or commit
+	// running concurrently — status errors are swallowed below, but a lock
+	// hit would otherwise reset the header to "HEAD/0" every poll.
+	status := exec.CommandContext(ctx, "git", "-C", cwd, "status", "--porcelain", "-b", "--no-optional-locks")
 	if sOut, sErr := status.Output(); sErr == nil {
 		branch, dirty = parseStatusBranch(string(sOut))
 	}

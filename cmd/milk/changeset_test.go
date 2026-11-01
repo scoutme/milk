@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -228,9 +230,43 @@ func TestBuildProjectTreeLines_NoChangesRenderingUnchanged(t *testing.T) {
 // --- refresh + model wiring ---
 
 func TestRefreshChangesetCmd_NonRepoReportsNoRepo(t *testing.T) {
-	msg := refreshChangesetCmd(t.TempDir())().(changesetMsg)
+	dir := t.TempDir()
+	msg := refreshChangesetCmd(dir)().(changesetMsg)
 	if !msg.noRepo || msg.gitOK || msg.files != nil {
 		t.Fatalf("non-repo msg = %+v, want noRepo", msg)
+	}
+	// A *definitive* no-repo outcome is exactly what the process-wide
+	// toplevel cache may hold ("stop probing this cwd until it changes").
+	if root, cached := changesetTop[dir]; !cached || root != "" {
+		t.Errorf("definitive no-repo must be cached as (\"\", true), got root=%q cached=%v", root, cached)
+	}
+}
+
+// TestRefreshChangesetCmd_TransientFailureNotCached: the probe falling in
+// between a checkout (3s timeout, lock contention, any non-definitive git
+// failure) must not be recorded as "no repo here" — neither the
+// process-wide toplevel cache nor the noRepo message may flip on a hiccup,
+// or git enrichment and the panel event source die until a cwd change or
+// panel toggle. The failure classifies as transient and nothing is cached:
+// the next poll re-probes.
+func TestRefreshChangesetCmd_TransientFailureNotCached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git binary is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho 'resource temporarily unavailable' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	msg := refreshChangesetCmd(dir)().(changesetMsg)
+	if msg.noRepo || msg.gitOK || msg.files != nil {
+		t.Fatalf("transient msg = %+v, want keep-last (changesetMsg{})", msg)
+	}
+	if _, cached := changesetTop[dir]; cached {
+		t.Error("transient failure must not poison the toplevel cache")
 	}
 }
 

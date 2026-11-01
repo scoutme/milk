@@ -47,26 +47,35 @@ type changesetMsg struct {
 	noRepo bool                          // definitively no repo / no git: stop refreshing this cwd
 }
 
-// gitTopLevel caches cwd's repository toplevel (positive cache only — the
-// model's changesetNoGit flag is what skips further probes in non-repos).
-func gitTopLevel(cwd string) (string, bool) {
+// gitTopLevel caches cwd's repository toplevel (positive cache plus the
+// definitive-negative "no repo here" entry the model's changesetNoGit flag
+// consumes). Only *definitive* probe outcomes are cached (gitErrDefinitive):
+// a transient failure — the 3s timeout mid-checkout, lock contention — must
+// not be mistaken for "not a repo" and poison either the cache or the
+// noRepo skip, so it returns ok=false, definitive=false and caches nothing;
+// the next poll re-probes. Returns toplevel, ok, definitive.
+func gitTopLevel(cwd string) (string, bool, bool) {
 	changesetTopMu.Lock()
 	if root, ok := changesetTop[cwd]; ok {
 		changesetTopMu.Unlock()
-		return root, root != ""
+		return root, root != "", true // only definitive results ever reach the cache
 	}
 	changesetTopMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), changesetGitTimeout)
 	defer cancel()
 	root := ""
-	if out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	switch {
+	case err == nil:
 		root = strings.TrimSpace(string(out))
+	case !gitErrDefinitive(err):
+		return "", false, false // transient: cache nothing, retry next tick
 	}
 	changesetTopMu.Lock()
 	changesetTop[cwd] = root
 	changesetTopMu.Unlock()
-	return root, root != ""
+	return root, root != "", true
 }
 
 var (
@@ -80,9 +89,14 @@ var (
 // per file (the tree styles files, not collapsed folders).
 func refreshChangesetCmd(cwd string) tea.Cmd {
 	return func() tea.Msg {
-		root, ok := gitTopLevel(cwd)
+		root, ok, definitive := gitTopLevel(cwd)
 		if !ok {
-			return changesetMsg{noRepo: true}
+			if definitive {
+				return changesetMsg{noRepo: true}
+			}
+			// Transient probe failure: keep the last snapshot (the same rule a
+			// failed status below applies) and let the next tick retry.
+			return changesetMsg{}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), changesetGitTimeout)
 		defer cancel()

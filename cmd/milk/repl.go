@@ -3312,6 +3312,14 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case gitDataMsg:
+		if msg.transient {
+			// Retryable probe failure (3s timeout mid-checkout/under load,
+			// lock contention, killed process): not a statement about the
+			// repo — keep the last good snapshot, or the loading row before
+			// the first success, and let the next poll re-probe. Rendering
+			// it would flash "not a git repository" at random moments.
+			return m, nil
+		}
 		newLines, newIDs := buildGitPanelLines(msg.rows, msg.branch, msg.dirty, msg.err, gitPanelInner)
 		// Recency (ADR-0089): only a change in what the panel would draw
 		// counts — the first load is the baseline (tied panels keep their

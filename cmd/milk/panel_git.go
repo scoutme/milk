@@ -136,6 +136,11 @@ type gitDataMsg struct {
 	branch string
 	dirty  int
 	err    string
+	// transient marks a retryable probe failure (timeout mid-checkout,
+	// lock contention, killed process): not a statement about the repo, so
+	// the handler keeps the last good snapshot instead of rendering it —
+	// never as "not a git repository" (gitErrDefinitive defines the split).
+	transient bool
 }
 
 // panelDataPollInterval is how often the project/git panels refresh their
@@ -182,19 +187,29 @@ func refreshProjectCmd(cwd string) tea.Cmd {
 }
 
 // refreshGitCmd fetches the graph off the UI goroutine (git runs a few
-// processes per refresh).
+// processes per refresh). A transient failure never becomes panel content:
+// the handler keeps the last good snapshot (or the loading row before the
+// first success) and the next 3s poll re-probes.
 func refreshGitCmd(cwd string) tea.Cmd {
 	return func() tea.Msg {
 		commits, branch, dirty, err := gitLog(cwd)
+		if err != nil && transientGitErr(err) {
+			return gitDataMsg{transient: true}
+		}
 		msg := gitDataMsg{rows: layoutGraph(commits), branch: branch, dirty: dirty}
 		if err != nil {
 			msg.err = gitErrText(err)
+			return msg
+		}
+		if commits != nil && len(commits) == 0 {
+			msg.rows = []gitGraphLine{} // fresh repo: "(no commits)" — layoutGraph(nil) would read as "loading…"
 		}
 		return msg
 	}
 }
 
-// gitErrText maps a git failure to a stable panel line.
+// gitErrText maps a *definitive* git failure (gitErrDefinitive) to a stable
+// panel line; transient failures never reach it.
 func gitErrText(err error) string {
 	var execErr *exec.Error
 	if errors.As(err, &execErr) {

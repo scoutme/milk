@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -111,6 +113,100 @@ func scratchRepo(t *testing.T) string {
 	run("add", "a.txt")
 	run("commit", "-m", "first commit")
 	return dir
+}
+
+// --- transient vs definitive git failures ---
+//
+// The git panel used to render *every* git failure as "not a
+// repository" — including the 3s timeout under load or mid-checkout (a
+// killed process leaves an ExitError with empty stderr), which made the
+// panel flash "not a git repository" at apparently random moments. The
+// classification below is the line between "render/keep as fact" and
+// "keep the last good snapshot, retry next poll".
+
+func TestGitErrDefinitive_Classification(t *testing.T) {
+	missingGit := &exec.Error{Name: "git", Err: exec.ErrNotFound}
+	killed := &exec.ExitError{} // timeout kill: process gone, no stderr
+	notRepo := &exec.ExitError{Stderr: []byte("fatal: not a git repository (or any of the parent directories): .git\n")}
+	badObject := &exec.ExitError{Stderr: []byte("fatal: bad object HEAD\n")}
+
+	for _, tc := range []struct {
+		name       string
+		err        error
+		definitive bool
+	}{
+		{"nil", nil, false},
+		{"git binary missing", missingGit, true},
+		{"not a repo", notRepo, true},
+		{"timeout kill", killed, false},
+		{"other git fatal", badObject, false},
+		{"context deadline", context.DeadlineExceeded, false},
+	} {
+		if got := gitErrDefinitive(tc.err); got != tc.definitive {
+			t.Errorf("%s: gitErrDefinitive = %v, want %v", tc.name, got, tc.definitive)
+		}
+		wantTransient := tc.err != nil && !tc.definitive
+		if got := transientGitErr(tc.err); got != wantTransient {
+			t.Errorf("%s: transientGitErr = %v, want %v", tc.name, got, wantTransient)
+		}
+	}
+}
+
+func TestRefreshGitCmd_NotARepoDefinitive(t *testing.T) {
+	gitAvailable(t)
+	msg := refreshGitCmd(t.TempDir())().(gitDataMsg)
+	if msg.transient {
+		t.Error("a non-repo is definitive — must not classify as transient")
+	}
+	if msg.err != "not a git repository" {
+		t.Errorf("err = %q, want %q", msg.err, "not a git repository")
+	}
+}
+
+// TestRefreshGitCmd_EmptyRepo: right after `git init` (no commits yet)
+// git log refuses with a fatal — that used to surface as "not a git
+// repository". The repo is real: err must stay empty and rows must be an
+// empty, non-nil set so the panel renders "(no commits)", not "(loading…)".
+func TestRefreshGitCmd_EmptyRepo(t *testing.T) {
+	gitAvailable(t)
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	msg := refreshGitCmd(dir)().(gitDataMsg)
+	if msg.err != "" || msg.transient {
+		t.Errorf("empty repo: err = %q transient = %v, want neither", msg.err, msg.transient)
+	}
+	if msg.rows == nil || len(msg.rows) != 0 {
+		t.Errorf("rows = %v, want non-nil empty", msg.rows)
+	}
+}
+
+// TestGitDataMsg_TransientKeepsLastSnapshot: a transient probe failure is
+// never rendered — the panel keeps the graph it already had, and the
+// loading row before the first success.
+func TestGitDataMsg_TransientKeepsLastSnapshot(t *testing.T) {
+	m := newTestModelForPanels(t)
+
+	updated, _ := m.Update(gitDataMsg{transient: true, err: "not a git repository"})
+	m2 := updated.(model)
+	if m2.gitLines != nil {
+		t.Fatalf("transient first load wrote lines: %q", m2.gitLines)
+	}
+
+	updated, _ = m2.Update(gitDataMsg{rows: gitRowsFixture(), branch: "main", dirty: 1})
+	m3 := updated.(model)
+	wantLines, wantErr := m3.gitLines, m3.gitErr
+
+	updated, _ = m3.Update(gitDataMsg{transient: true, err: "not a git repository"})
+	m4 := updated.(model)
+	if !slices.Equal(m4.gitLines, wantLines) {
+		t.Errorf("transient msg replaced lines:\n%q\nwant\n%q", m4.gitLines, wantLines)
+	}
+	if m4.gitErr != wantErr || m4.gitDirty != 1 || m4.gitBranch != "main" {
+		t.Errorf("transient msg mutated the snapshot: err=%q dirty=%d branch=%q",
+			m4.gitErr, m4.gitDirty, m4.gitBranch)
+	}
 }
 
 func TestGitLog_ScratchRepo(t *testing.T) {
