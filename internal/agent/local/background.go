@@ -536,6 +536,12 @@ func (m *Manager) finish(job *Job, result string, tokens session.TokenUsage, err
 	if onDone != nil {
 		onDone(job)
 	}
+	// Deliberate order: the per-job onDone before the batch signal, so the
+	// last job's transcript line (cmd/milk sends it to the TUI as it
+	// happens) always reaches the program before the batch follow-up turn
+	// trigger. That ordering also means onDone-return is NOT an observation
+	// point for the batch callback: it fires strictly after — tests must
+	// wait for it explicitly (see background_manager_test.go's flake note).
 	if fireBatchDone != nil {
 		fireBatchDone()
 	}
