@@ -261,6 +261,14 @@ func TestManager_JobTimeout_TerminatesAndFreesSlot(t *testing.T) {
 // turn happens to be dispatched. onBatchDone is the signal cmd/milk uses to
 // actually trigger a follow-up turn. Must fire exactly once for the whole
 // wave, not once per job.
+//
+// Synchronization note (CI flake, 2026-11-01): finish() calls onDone
+// *before* fireBatchDone (deliberate — see the comment at that call site),
+// so wg.Wait() only orders this test up to the last onDone; the batch
+// callback can still be nanoseconds away when the assertion below would
+// run — under -race on a loaded runner the finishing goroutine occasionally
+// loses that window and the test read "0 calls". Wait for the batch
+// callback itself (waitBatchCalls), not just the per-job one.
 func TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes(t *testing.T) {
 	mgr := NewManager(context.Background(), 3)
 	var batchCalls atomic.Int32
@@ -282,6 +290,7 @@ func TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes(t *testing.T) {
 	}
 	close(release)
 	wg.Wait()
+	waitBatchCalls(t, &batchCalls, 1)
 
 	if got := batchCalls.Load(); got != 1 {
 		t.Errorf("expected onBatchDone to fire exactly once for the whole wave, got %d calls", got)
@@ -302,6 +311,7 @@ func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
 		return "ok", session.TokenUsage{}, nil
 	})
 	wg.Wait()
+	waitBatchCalls(t, &batchCalls, 1)
 	if got := batchCalls.Load(); got != 1 {
 		t.Fatalf("expected 1 call after first wave, got %d", got)
 	}
@@ -313,6 +323,7 @@ func TestManager_OnBatchDone_FiresAgainAfterDrainForNextWave(t *testing.T) {
 		return "ok", session.TokenUsage{}, nil
 	})
 	wg.Wait()
+	waitBatchCalls(t, &batchCalls, 2)
 	if got := batchCalls.Load(); got != 2 {
 		t.Errorf("expected onBatchDone to fire again for the second wave after Drain, got %d total calls", got)
 	}
@@ -357,6 +368,23 @@ func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 		close(ch)
 	}()
 	return ch
+}
+
+// waitBatchCalls blocks until the onBatchDone counter reaches at least want,
+// failing the test after a deadline. Needed because finish() sequences
+// fireBatchDone strictly *after* onDone (the per-job message must reach the
+// TUI first), so a WaitGroup synchronized on onDone cannot order the batch
+// callback in — see the CI flake note on
+// TestManager_OnBatchDone_FiresOnceWhenLastJobFinishes.
+func waitBatchCalls(t *testing.T, calls *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("onBatchDone never reached %d call(s): got %d", want, calls.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // TestManager_Cancel_TerminatesRunningJob verifies Cancel() stops a running
