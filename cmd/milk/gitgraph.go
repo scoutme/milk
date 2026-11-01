@@ -194,7 +194,8 @@ func parseStatusBranch(out string) (branch string, dirty int) {
 		}
 		if strings.HasPrefix(line, "## ") {
 			b := strings.TrimPrefix(line, "## ")
-			if i := strings.IndexAny(b, ". "); i >= 0 { // "main...origin/main [ahead 1]" → "main"
+			b = strings.TrimPrefix(b, "No commits yet on ") // empty repo: "## No commits yet on <branch>"
+			if i := strings.IndexAny(b, ". "); i >= 0 {     // "main...origin/main [ahead 1]" → "main"
 				b = b[:i]
 			}
 			if b != "" {
@@ -260,15 +261,26 @@ func gitLog(cwd string) (commits []gitCommit, branch string, dirty int, err erro
 		commits = parseGitLog(string(out))
 	}
 
-	branch = "HEAD"
 	// --no-optional-locks, same as the changeset probe: a panel refresh must
 	// never wait on (or fail against) the index.lock of a checkout or commit
-	// running concurrently — status errors are swallowed below, but a lock
-	// hit would otherwise reset the header to "HEAD/0" every poll.
-	status := exec.CommandContext(ctx, "git", "-C", cwd, "status", "--porcelain", "-b", "--no-optional-locks")
-	if sOut, sErr := status.Output(); sErr == nil {
-		branch, dirty = parseStatusBranch(string(sOut))
+	// running concurrently. It is a git(1) *global* option and must precede
+	// the subcommand — `git status` rejects it after "status" (exit 129,
+	// "unknown option"), and that rejection is exactly how the header came
+	// to render "⎇ HEAD 0" instead of the real branch. The probe also gets
+	// its own timeout: a slow `git log` (cold checkout) must not starve it.
+	sctx, scancel := context.WithTimeout(context.Background(), gitGraphTimeout)
+	defer scancel()
+	status := exec.CommandContext(sctx, "git", "--no-optional-locks", "-C", cwd,
+		"status", "--porcelain", "-b")
+	sOut, sErr := status.Output()
+	if sErr != nil {
+		// The log probe proved this is a real work tree, so a status
+		// failure is transient (timeout, contention, kill). Never swallow
+		// it into a fabricated "HEAD"/0 header — surface it so the caller
+		// keeps the last good snapshot and re-probes next poll.
+		return nil, "", 0, sErr
 	}
+	branch, dirty = parseStatusBranch(string(sOut))
 	return commits, branch, dirty, nil
 }
 
