@@ -1260,7 +1260,9 @@ type Config struct {
 
 	// PerceptStoreMax caps the total number of percepts in the global store.
 	// After consolidation, lowest-weight non-core percepts are pruned to this limit.
-	// Default: 0 (no limit).
+	// Default: 0/unset → 200 (DefaultPerceptStoreMax, the size-cap backstop
+	// from issue #375 — the store previously had no bound at all). Set a
+	// negative value to disable the cap.
 	PerceptStoreMax int `json:"percept_store_max,omitempty"`
 
 	// PerceptRelevanceGate enables keyword-intersection filtering before injection:
@@ -1689,11 +1691,23 @@ func (c Config) PerceptInjectMaxByteCount() int {
 	return c.PerceptInjectMaxBytes
 }
 
+// DefaultPerceptStoreMax is the global-store size cap applied when
+// percept_store_max is unset (0): the backstop from issue #375 so a long-lived
+// store can never grow without bound (staleness-archiving removes stale
+// percepts, but nothing capped a healthy, actively-used store). Far above any
+// realistic store (the audited store held 74 percepts), so it only ever binds
+// on runaway growth. Set percept_store_max to a negative value to disable.
+const DefaultPerceptStoreMax = 200
+
 // PerceptStoreSizeLimit returns the configured global store size cap.
-// Returns 0 when not set (no limit).
+// Unset (0) falls back to DefaultPerceptStoreMax; a negative value disables
+// the cap (returns 0, which PruneGlobal treats as "no limit").
 func (c Config) PerceptStoreSizeLimit() int {
 	if c.PerceptStoreMax < 0 {
 		return 0
+	}
+	if c.PerceptStoreMax == 0 {
+		return DefaultPerceptStoreMax
 	}
 	return c.PerceptStoreMax
 }

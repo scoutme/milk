@@ -11,6 +11,24 @@ import "strings"
 // assertions through.
 const DuplicateSimilarityThreshold = 0.60
 
+// DuplicateContainmentThreshold is the secondary dedup trigger (issue #375,
+// verdict proposal 5): token containment |A ∩ B| / min(|A|, |B|) between a
+// new record and an existing Percept. Sentence-level Jaccard is structurally
+// weak for long, verbose records — the two "full-3way eval run" percepts of
+// 2026-10-29 scored only 0.460 because their per-run detail fields (times,
+// judge, arm names) dominated the union — while containment reads 0.68 for
+// the same pair: the shared event wording clearly dominates the smaller set.
+// Jaccard stays the primary signal; containment only *adds* matches.
+const DuplicateContainmentThreshold = 0.65
+
+// containmentMinTokens is the minimum size of the smaller token set for the
+// containment trigger to apply. Containment is meant for long verbose
+// records; on small sets it would swallow genuinely new short facts whose
+// every word happens to appear inside an existing longer record (subset
+// phrasing through Jaccard is unchanged below this size — "keep Jaccard as
+// is for short facts", #375 proposal 5).
+const containmentMinTokens = 20
+
 // tokenize lower-cases s, strips punctuation, and returns the unique word set.
 // Common stop-words are excluded so content-bearing words dominate the overlap.
 func tokenize(s string) map[string]struct{} {
@@ -61,9 +79,31 @@ func jaccardSimilarity(a, b map[string]struct{}) float64 {
 	return float64(intersection) / float64(union)
 }
 
-// FindSimilar returns the most similar existing Percept whose Jaccard token
-// overlap with content exceeds threshold, or nil if none qualifies.
-// Searches both global and session stores. The caller must not hold s.mu.
+// containmentSimilarity returns |A ∩ B| / min(|A|, |B|) for two token sets —
+// how much of the *smaller* set the larger one contains. Returns 0 when either
+// set is empty.
+func containmentSimilarity(a, b map[string]struct{}) float64 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n == 0 {
+		return 0
+	}
+	var intersection int
+	for t := range a {
+		if _, ok := b[t]; ok {
+			intersection++
+		}
+	}
+	return float64(intersection) / float64(n)
+}
+
+// FindSimilar returns the most similar existing Percept whose overlap with
+// content qualifies — Jaccard ≥ threshold, or (for long verbose records,
+// see containmentMinTokens) containment ≥ DuplicateContainmentThreshold —
+// or nil if none qualifies. Candidates are ranked by their best qualifying
+// score. Searches both global and session stores. The caller must not hold s.mu.
 func (s *Store) FindSimilar(content string, threshold float64) *Percept {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,8 +122,26 @@ func (s *Store) findSimilarLocked(content string, threshold float64) *Percept {
 	var bestScore float64
 
 	check := func(p Percept) {
-		score := jaccardSimilarity(newTokens, tokenize(p.Content))
-		if score >= threshold && score > bestScore {
+		pTokens := tokenize(p.Content)
+		// Primary: Jaccard against the caller's threshold.
+		score := jaccardSimilarity(newTokens, pTokens)
+		qualified := score >= threshold
+		// Secondary containment trigger (#375): long verbose records with a
+		// small shared core score poorly on Jaccard but clearly on
+		// containment — qualifies on its own threshold, not the Jaccard one.
+		n := len(newTokens)
+		if len(pTokens) < n {
+			n = len(pTokens)
+		}
+		if n >= containmentMinTokens {
+			if c := containmentSimilarity(newTokens, pTokens); c >= DuplicateContainmentThreshold {
+				if c > score {
+					score = c
+				}
+				qualified = true
+			}
+		}
+		if qualified && score > bestScore {
 			bestScore = score
 			cp := p
 			best = &cp

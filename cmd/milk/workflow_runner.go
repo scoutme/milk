@@ -73,6 +73,11 @@ func (r *workflowTurnRunner) CloneTurnRunner() workflow.TurnRunner {
 }
 
 func (r *workflowTurnRunner) Run(ctx context.Context, prompt string, out io.Writer) (string, error) {
+	// Every role turn consolidates against the host's store (#375 proposal 3):
+	// workflow runs had no memory hook at all, so an all-workflow session
+	// never decayed, pruned or promoted. No-op when mem is nil (fixtures).
+	defer consolidateAfterTurn(r.mem, r.cfg)
+
 	var ctxMode escalation.ContextMode
 	if r.sessionID != "" {
 		ctxMode = escalation.ContextModeResume

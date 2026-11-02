@@ -84,6 +84,12 @@ func NewStoreParams(baseDir, sessionID string, p Params) (*Store, error) {
 			return nil, err
 		}
 	}
+
+	// Session-file housekeeping (#375 proposal 4): drop sibling session files
+	// that hold no state at all (empty files piled up since July — 178 of 199
+	// at audit time). Best-effort: a failed sweep must never fail a store
+	// open, and this session's own file (keepSessionID) is never touched.
+	_, _ = GCSessionFiles(baseDir, sessionID)
 	return s, nil
 }
 

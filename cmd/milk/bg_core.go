@@ -187,9 +187,12 @@ func parseBgStartArgs(arg string) (agent, task string, err error) {
 // userJobRunner builds the spawn body both hosts pass to Manager.Spawn for a
 // user-started job: fork the planned agent on the task text, persisting
 // through the session's memory store. mgr supplies the job's follow-up-input
-// channel (send_background_agent — issue #250); it may be nil.
-func userJobRunner(agent *local.Agent, mgr *local.Manager, cwd, task string, mem *memory.Store, images []local.ContentPart) func(context.Context, string, io.Writer) (string, session.TokenUsage, error) {
+// channel (send_background_agent — issue #250); it may be nil. The job body
+// consolidates memory when it finishes (#375 proposal 3) — background runs
+// used to write percepts without ever running a pass of their own.
+func userJobRunner(agent *local.Agent, mgr *local.Manager, cfg config.Config, cwd, task string, mem *memory.Store, images []local.ContentPart) func(context.Context, string, io.Writer) (string, session.TokenUsage, error) {
 	return func(ctx context.Context, jobID string, out io.Writer) (string, session.TokenUsage, error) {
+		defer consolidateAfterTurn(mem, cfg)
 		var inbox chan string
 		if mgr != nil {
 			inbox = mgr.Inbox(jobID)
