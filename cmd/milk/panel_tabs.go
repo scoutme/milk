@@ -1,5 +1,11 @@
 package main
 
+import (
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+)
+
 // Tabbed panel docking (ADR-0079): a theme whose panel title row is a tab
 // strip (theme_chrome.go's panelTabStrip — exactly the "modern" skins) means
 // the panels to be tabs of *one* shared slot, not six sibling columns each
@@ -64,14 +70,20 @@ func panelWidth(region panelRegion) int {
 }
 
 // activatePanelTab brings region's tab to the front of the shared slot by
-// pushing it onto the most-recently-viewed stack. The stack is rebuilt into
-// a fresh slice every time: the model travels by value copy through Update,
-// and sharing a backing array with the previous copy would let two renders
-// reorder each other's history.
+// pushing it onto the most-recently-viewed stack. Moving a panel to the top
+// is attention on par with opening it (ADR-0089 — an open toggle stamps):
+// it stamps the panel's recency too — the same attention record an open
+// toggle leaves, and where recency decides something (the budget group's
+// top, ADR-0096) that is this stamp. The stack is rebuilt into a fresh slice
+// every
+// time: the model travels by value copy through Update, and sharing a backing
+// array with the previous copy would let two renders reorder each other's
+// history.
 func (m *model) activatePanelTab(region panelRegion) {
 	if region == regionNone {
 		return
 	}
+	m.stampPanelActivity(region)
 	mru := make([]panelRegion, 0, len(m.panelTabMRU)+1)
 	mru = append(mru, region)
 	for _, r := range m.panelTabMRU {
@@ -174,4 +186,147 @@ func (m *model) enforceTabbedPanelExclusivity() {
 	if m.closeAllButPanelTabs(m.panelActive()) {
 		m.savePanelStateReport()
 	}
+}
+
+//
+// Sibling layout only (theme "off"): the open panels split into two sets —
+// the *free* ones (opened and visible, one per column) and the *grouped* ones
+// (tabbed together in the last column). The split is purely positional:
+// "the grouped ones are always the rightmost ones between the opened ones" —
+// the leftmost open panels in panelRenderOrder fill the columns, and the
+// ones past the free slots group in the rightmost column. While no more
+// panels are open than columns fit there is no group at all. Recency plays
+// exactly one role: between the grouped ones, the fresher one is on top —
+// its content fills the group column and its label is the one styled active.
+//
+// The group column's title row becomes the strip — labels in fixed f1–f6
+// order (panelRenderOrder): selecting a new top moves only the styling and
+// the content, never the labels ("keep tab titles order unchanged — even on
+// selection"). The builder's title line is replaced, never shown beside it
+// (the top's name would otherwise print twice). Same row treatment and
+// visual language as the tabbed theme's bar (ADR-0079): labels from column
+// 0, the top's label in the panel-title style underlined, the rest dim.
+//
+// A tab click only ever moves a panel to the top of its group — a grouped
+// label brings that panel to the top (recency stamp, never toggled closed —
+// ADR-0089's rule); the two sets themselves never change (the grouped ones
+// stay the rightmost open ones). The top's own label is a no-op: clicking
+// the panel you are pointing at must not move or close it — closing stays
+// with the F-key / /panel press. When everything fits there is no group and
+// the title rows are byte-for-byte today's; a tabbed theme never reaches
+// this code (panelTabsActive gate — its exclusive slot cannot hold
+// grouped peers).
+
+// budgetGroup returns the width budget's grouped set (issue #373): the
+// rightmost open panels — the ones past the free slots — in
+// panelRenderOrder. Empty while no more panels are open than columns fit
+// (no group at all then), below the one-panel floor (nothing shows), and on
+// a tabbed theme.
+func (m *model) budgetGroup() (group [regionGit + 1]panelRegion, n int) {
+	if panelTabsActive() {
+		return group, 0
+	}
+	open, no := m.panelOpenOrder()
+	slots := budgetSlotCount(open, no, m.width)
+	if slots < 1 || no <= slots {
+		return group, 0
+	}
+	start := slots - 1 // the group column takes the last slot
+	copy(group[:], open[start:no])
+	return group, no - start
+}
+
+// budgetTop is the group column's panel: the freshest grouped one ("between
+// the grouped ones, the fresher one is on top") — its content fills the last
+// column and its label is the one styled active in the strip (label
+// positions never change). Ties keep panelRenderOrder (the
+// leftmost grouped panel), so a fresh session — every timestamp zero —
+// shows the leftmost grouped panel. regionNone when nothing is grouped.
+func (m *model) budgetTop() panelRegion {
+	group, n := m.budgetGroup()
+	top := regionNone
+	for i := 0; i < n; i++ {
+		r := group[i]
+		if top == regionNone || m.panelActivity[r].After(m.panelActivity[top]) {
+			top = r
+		}
+	}
+	return top
+}
+
+// budgetTabGroupFor returns the strip labels for region's title row: the
+// grouped set in panelRenderOrder — labels keep their fixed f1–f6 order and
+// never move on selection (budgetTabStrip styles the top active in place) —
+// but only when region is that top: only the group column carries the
+// strip. nil otherwise, when nothing is grouped, or on a tabbed theme.
+func (m *model) budgetTabGroupFor(region panelRegion) []panelRegion {
+	if panelTabsActive() || region == regionNone {
+		return nil
+	}
+	group, n := m.budgetGroup()
+	if n < 2 || region != m.budgetTop() {
+		return nil
+	}
+	return append([]panelRegion(nil), group[:n]...)
+}
+
+// budgetTabGroupWidth is the plain-text width of a group's labels joined by
+// one space each (styling never changes a label's cells).
+func budgetTabGroupWidth(group []panelRegion) int {
+	w := 0
+	for i, r := range group {
+		if i > 0 {
+			w++
+		}
+		w += len([]rune(panelTabName(r)))
+	}
+	return w
+}
+
+// budgetStripWidth is the strip's rendered width on an inner-wide row — the
+// single source shared by the strip's render (its truncate bound) and its
+// click hit-test (its right edge), so what is drawn and what is clicked can
+// never drift.
+func budgetStripWidth(group []panelRegion, inner int) int {
+	return min(budgetTabGroupWidth(group), inner)
+}
+
+// budgetTabStrip renders a group's labels — one space join, exactly like
+// panelTabStrip walks its own table — with host styled as the active tab.
+// Vocab is the sibling theme's own: the host label wears the panel-title
+// style underlined (tab-ness must read even where colour doesn't — theme
+// "off" has no accent token, and panelTabStrip's accent code would panic on
+// it), the hidden peers dim, like the F-key hint they replace.
+func budgetTabStrip(group []panelRegion, host panelRegion, inner int) string {
+	var b strings.Builder
+	for i, r := range group {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		name := panelTabName(r)
+		if r == host {
+			b.WriteString(colorize(stylePanelTitle.Render(name), "\033[4m"))
+		} else {
+			b.WriteString(dim(name))
+		}
+	}
+	return ansi.Truncate(b.String(), budgetStripWidth(group, inner), "")
+}
+
+// budgetTabAt maps a content column on the host's title row to the tab label
+// covering it (regionNone on a gap or past the strip) — walking the same
+// single-space join from column 0 that budgetTabStrip renders with.
+func budgetTabAt(group []panelRegion, inner, col int) panelRegion {
+	if col < 0 || col >= budgetStripWidth(group, inner) {
+		return regionNone
+	}
+	x := 0
+	for _, r := range group {
+		w := len([]rune(panelTabName(r)))
+		if x <= col && col < x+w {
+			return r
+		}
+		x += w + 1
+	}
+	return regionNone
 }

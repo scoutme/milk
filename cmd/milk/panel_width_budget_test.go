@@ -190,8 +190,13 @@ func TestPanelWidthBudget_PrefixAndMainAreaFloor(t *testing.T) {
 // changed claims one, evicting the least recently relevant panel; below the
 // one-panel floor there is no slot to swap into, so nothing renders or
 // toasts (the raw open is still recorded).
-func TestAutoOpenPanel_SwapsIntoTheBudget(t *testing.T) {
-	m := layoutTestModel(t, 120, 40) // budget: 2 slots (106 <= 120 < 139)
+// TestAutoOpenPanel_BecomesTheGroupTop: auto-open arms the raw flag and its
+// stamp lifts the panel to the top of its group — fresh content shows its
+// panel even when every column is taken. At width 120 (2 columns) with
+// memory+tasks open (both free), background's arrival groups tasks with it
+// and shows the freshly stamped one.
+func TestAutoOpenPanel_BecomesTheGroupTop(t *testing.T) {
+	m := layoutTestModel(t, 120, 40) // budget: 2 columns (106 <= 120 < 139)
 	m.panelMemory = true
 	m.panelTasks = true // both never-updated → tie → fill order (memory, tasks)
 
@@ -200,13 +205,13 @@ func TestAutoOpenPanel_SwapsIntoTheBudget(t *testing.T) {
 		t.Fatal("auto-open must arm the panel's raw flag")
 	}
 	if !m.panelVisible(regionBackground) {
-		t.Error("fresh content must swap its panel into the budget even when every slot is taken")
+		t.Error("fresh content must show its panel even when every column is taken")
 	}
 	if !m.panelVisible(regionMemory) {
-		t.Error("memory (rank 2: behind background, ahead of tied tasks by render order) must keep its slot")
+		t.Error("memory is free (the leftmost open panel) and keeps its column")
 	}
 	if m.panelVisible(regionTasks) {
-		t.Error("the stalest panel (no event yet, last in render order) must be the one evicted")
+		t.Error("tasks — grouped with background, not the top — must wait behind its tab")
 	}
 	if !toastMentions(m, "background panel opened") {
 		t.Errorf("a panel that just became visible should toast its open, got %#v", m.toastVisible)
@@ -226,28 +231,29 @@ func TestAutoOpenPanel_SwapsIntoTheBudget(t *testing.T) {
 	}
 }
 
-// TestPanelActivity_RecencySwapsPanels: the visible set is the budget's
-// most-recently-updated panels (ties keep panelRenderOrder = the startup
-// baseline), and every stamp switches panels on its event — the stalest one
-// leaves. This is the "show the more relevant info" behaviour the recency
-// basis exists for.
-func TestPanelActivity_RecencySwapsPanels(t *testing.T) {
-	m := &model{width: 130, panelMemory: true, panelProject: true, panelGit: true} // 2 slots
+// TestPanelActivity_PicksTheGroupTop: the two panel sets are positional
+// (issue #373: "the grouped ones are always the rightmost ones between the
+// opened ones") — a free panel never leaves its column — and recency has
+// exactly one job: between the grouped ones, the fresher one is on top. At
+// width 130 (2 columns) with memory/project/git open, memory is free and
+// project/git grouped: every stamp moves the top between the grouped pair.
+func TestPanelActivity_PicksTheGroupTop(t *testing.T) {
+	m := &model{width: 130, panelMemory: true, panelProject: true, panelGit: true} // 2 columns
 	if !m.panelVisible(regionMemory) || !m.panelVisible(regionProject) || m.panelVisible(regionGit) {
-		t.Fatalf("tie baseline: memory+project fill the budget, git waits; got %v", visiblePanels(m))
+		t.Fatalf("tie baseline: free memory + the leftmost grouped panel (project) on top, git waits; got %v", visiblePanels(m))
 	}
 
 	m.stampPanelActivity(regionGit) // git's content changed
 	if !m.panelVisible(regionGit) || !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
-		t.Errorf("after git update: git (newest) + memory (beats tied project) must show; got %v", visiblePanels(m))
+		t.Errorf("after git update: git (freshest grouped) + free memory show; got %v", visiblePanels(m))
 	}
 
 	m.stampPanelActivity(regionProject) // project's content changed next
-	if !m.panelVisible(regionProject) || !m.panelVisible(regionGit) || m.panelVisible(regionMemory) {
-		t.Errorf("after project update: project+git show, the stalest (memory) leaves; got %v", visiblePanels(m))
+	if !m.panelVisible(regionProject) || !m.panelVisible(regionMemory) || m.panelVisible(regionGit) {
+		t.Errorf("after project update: project is the top again — the free panel (memory) never leaves; got %v", visiblePanels(m))
 	}
 
-	// Widening the terminal grows the budget — nothing stays hidden.
+	// Widening the terminal grows the budget — nothing stays grouped.
 	m.width = 139
 	if len(visiblePanels(m)) != 3 {
 		t.Errorf("at 139 cols all three panels fit regardless of recency; got %v", visiblePanels(m))
@@ -255,10 +261,10 @@ func TestPanelActivity_RecencySwapsPanels(t *testing.T) {
 }
 
 // TestPanelToggle_StampedAsMostRelevant: opening a panel by hand is an
-// attention event — the panel the user just asked for wins a slot
-// immediately, evicting the stalest, even though the budget was full.
+// attention event — the panel the user just asked for goes on top of its
+// group (and shows) right away even though every column was taken.
 func TestPanelToggle_StampedAsMostRelevant(t *testing.T) {
-	m := layoutTestModel(t, 130, 40) // 2 slots
+	m := layoutTestModel(t, 130, 40) // 2 columns
 	m.panelMemory = true
 	m.panelProject = true
 
@@ -268,10 +274,10 @@ func TestPanelToggle_StampedAsMostRelevant(t *testing.T) {
 		t.Fatal("toggle must open the git panel")
 	}
 	if !m.panelVisible(regionGit) {
-		t.Error("the panel the user just opened must claim a slot right away")
+		t.Error("the panel the user just opened must show right away")
 	}
 	if !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
-		t.Errorf("eviction takes the stalest (project, no event yet); got %v", visiblePanels(&m))
+		t.Errorf("the stamp makes git the group's top; project (the previous top) waits; got %v", visiblePanels(&m))
 	}
 }
 
@@ -341,21 +347,22 @@ func TestGitDataMsg_StampsOnlyOnGraphChange(t *testing.T) {
 }
 
 // TestPanelShortcut_BringsHiddenPanelToFront: pressing /panel <name> or its
-// F1-F6 shortcut for a panel the width budget hid is explicit user interest
-// — the strongest relevance signal there is (ADR-0089). The press must bring
-// that panel into the layout, evicting the stalest one, and must NOT toggle
-// it closed: the user pressed the key to *see* it. Only once it is on screen
-// does the next press close it (the plain toggle). Below the one-panel floor
-// no stamp can reveal anything, so there the press falls back to the plain
-// toggle — the shortcut always does something.
+// F1-F6 shortcut for a panel the width budget grouped out of sight is
+// explicit user interest — the strongest relevance signal there is
+// (ADR-0089). The press must bring that panel to the top of its group (its
+// content takes the group column), and must NOT toggle it closed: the user
+// pressed the key to *see* it. Only once it is on screen does the next press
+// close it (the plain toggle). Below the one-panel floor no stamp can reveal
+// anything, so there the press falls back to the plain toggle — the
+// shortcut always does something.
 func TestPanelShortcut_BringsHiddenPanelToFront(t *testing.T) {
-	m := layoutTestModel(t, 130, 40) // budget: 2 slots (106 <= 130 < 139)
+	m := layoutTestModel(t, 130, 40) // budget: 2 columns (106 <= 130 < 139)
 	m.panelMemory = true
 	m.panelProject = true
-	m.panelGit = true // tie baseline → memory+project show, git hidden
+	m.panelGit = true // tie baseline → free memory + grouped top project, git grouped
 
 	if m.panelVisible(regionGit) {
-		t.Fatal("baseline: git must start hidden (budget of 2, render-order tie)")
+		t.Fatal("baseline: git must start behind its tab (grouped with project, not the top)")
 	}
 
 	next, _ := m.handlePanelCmd("git")
@@ -364,10 +371,10 @@ func TestPanelShortcut_BringsHiddenPanelToFront(t *testing.T) {
 		t.Fatal("the press must not close a panel the user just asked to see")
 	}
 	if !m.panelVisible(regionGit) {
-		t.Error("the pressed panel must take a slot back — user interest outranks content recency")
+		t.Error("the pressed panel must come to the top of its group — user interest outranks content recency")
 	}
 	if !m.panelVisible(regionMemory) || m.panelVisible(regionProject) {
-		t.Errorf("eviction takes the stalest (project, no event yet); got %v", visiblePanels(&m))
+		t.Errorf("the previous group top (project) steps back behind its tab; got %v", visiblePanels(&m))
 	}
 	if !toastMentions(m, "git panel: brought to front") {
 		t.Errorf("bring-to-front should explain itself, got %#v", m.toastVisible)

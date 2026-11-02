@@ -148,10 +148,10 @@ func (m *model) mainWidth() int {
 const panelMinMainWidth = 40
 
 // panelFits reports whether region occupies layout columns right now — the
-// one visibility rule shared by all six side panels (ADR-0089), in two
-// halves:
+// one visibility rule shared by all six side panels (ADR-0089's count,
+// issue #373's split), in three steps:
 //
-//  1. Budget — how many panels fit at all. Side panels fill the row
+//  1. Budget — how many columns fit at all. Side panels fill the row
 //     left-to-right in panelRenderOrder, each claiming its width while every
 //     panel before it also fits, stopping before the next panel would push
 //     the main area below panelMinMainWidth (40). With uniform 33-col slots
@@ -161,35 +161,64 @@ const panelMinMainWidth = 40
 //     tasks/background had no guard while project/git/workflow demanded 40
 //     free cols, so one combination could show three panels where another
 //     showed one).
-//  2. Selection — which panels fill those slots: panelRankByActivity sorts
-//     the in-layout panels by last content/attention event and the top
-//     `budget` entries are the visible ones. A content event therefore swaps
-//     its panel into view and evicts the least recently relevant one (the
-//     panel that no longer fits is always the tail of the *relevance* rank);
-//     with every timestamp tied — startup, restored state, panels that never
-//     saw an event — the rank degenerates to panelRenderOrder and the layout
-//     is exactly the left-to-right fill.
+//  2. Split — the open panels divide into two sets by *position*, never by
+//     recency ("the grouped ones are always the rightmost ones between the
+//     opened ones"): the free ones — the leftmost open panels in
+//     panelRenderOrder, one per column — and the grouped ones — the
+//     rightmost open panels, tabbed together in the last column. While no
+//     more panels are open than columns fit there is no group and every
+//     open panel is free; once they overflow, the group column takes the
+//     last slot and the free ones fill the slots before it.
+//  3. Top — the group column shows its freshest member ("between the
+//     grouped ones, the fresher one is on top"). So the visible set is the
+//     free ones plus the group's top — which is always the rightmost
+//     visible panel (every grouped panel sits after every free one in
+//     panelRenderOrder), so the row's join order stays plain render order.
 //
 // The tabbed front-tab filter (ADR-0079) falls out naturally: only the front
 // tab is in layout, so it is the only candidate and fits unless the terminal
 // is under panelMinMainWidth+panelWidth.
 func (m *model) panelFits(region panelRegion) bool {
-	ranked, n := m.panelRankByActivity()
-	used, slots := 0, 0
-	for i := 0; i < n; i++ {
-		r := ranked[i]
-		if used+panelWidth(r)+panelMinMainWidth > m.width {
+	open, no := m.panelOpenOrder()
+	idx := -1
+	for i := 0; i < no; i++ {
+		if open[i] == region {
+			idx = i
 			break
 		}
-		used += panelWidth(r)
+	}
+	if idx < 0 {
+		return false // not open (or filtered out by the tabbed front-tab rule)
+	}
+	slots := budgetSlotCount(open, no, m.width)
+	if slots < 1 {
+		return false // below the one-panel floor: nothing shows
+	}
+	if no <= slots {
+		return true // everything fits: all free, no group
+	}
+	if idx < slots-1 {
+		return true // free: the leftmost slots-1 open panels
+	}
+	return region == m.budgetTop() // grouped: shown only while on top
+}
+
+// budgetSlotCount is the width budget's column count (ADR-0089): panel
+// widths accumulate over the open panels in panelRenderOrder until the next
+// panel would push the main area below panelMinMainWidth. One function
+// behind panelFits (membership) and the grouped set (issue #373) so "how
+// much fits" can never disagree between them. With uniform 33-col slots
+// this is floor((width-40)/33).
+func budgetSlotCount(open [regionGit + 1]panelRegion, n, width int) int {
+	used, slots := 0, 0
+	for i := 0; i < n; i++ {
+		if used+panelWidth(open[i])+panelMinMainWidth > width {
+			break
+		}
+		used += panelWidth(open[i])
 		slots++
 	}
-	for i := 0; i < n; i++ {
-		if ranked[i] == region {
-			return i < slots
-		}
-	}
-	return false
+	return slots
 }
 
 // vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.

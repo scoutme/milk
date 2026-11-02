@@ -45,8 +45,8 @@ func TestBuildProjectTreeLines_Structure(t *testing.T) {
 			t.Errorf("row %d = %q, want contains %q", i, body[i], want[2:][i])
 		}
 	}
-	if !strings.Contains(plain[0], "project") {
-		t.Errorf("title row = %q, want 'project'", plain[0])
+	if !strings.Contains(plain[0], "files") {
+		t.Errorf("title row = %q, want 'files'", plain[0])
 	}
 
 	wantIDs := []string{"", "", "d:cmd/", "d:cmd/milk/", "go.mod", "README.md"}

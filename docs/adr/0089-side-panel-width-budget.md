@@ -3,6 +3,13 @@
 - **Status:** accepted
 - **Date:** 2026-10-27
 
+> **Note (issue #373, [ADR-0096](0096-width-budget-overflow-tabs.md)):**
+> this ADR's *selection* rule — the visible set being the most recently
+> active panels — is superseded: the open panels now split by position into
+> the free ones (leftmost, one per column) and the grouped ones (rightmost,
+> tabbed in the last column, the freshest of them on top). The slot count
+> and width math of this ADR stand unchanged.
+
 ## Context
 
 All six side panels are 33-col slots (`panelSlotWidth`), but visibility was

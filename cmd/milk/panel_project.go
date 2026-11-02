@@ -70,7 +70,7 @@ func (n *treeNode) child(key, name string, dir bool) *treeNode {
 // non-interactive rows, "d:<dir>/" for directories and the relative path for
 // files.
 func buildProjectTreeLines(files []string, truncated bool, expanded map[string]bool, inner int, changes map[string]session.ChangeKind) (lines, ids []string) {
-	lines = append(lines, panelTitleLine("project", regionProject, inner))
+	lines = append(lines, panelTitleLine("files", regionProject, inner))
 	ids = append(ids, "")
 	lines = append(lines, "")
 	ids = append(ids, "")
