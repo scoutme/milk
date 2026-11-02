@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func withTTY(t *testing.T) {
@@ -12,6 +13,41 @@ func withTTY(t *testing.T) {
 	old := isTTY
 	isTTY = true
 	t.Cleanup(func() { isTTY = old })
+}
+
+// TestDimBlurredInput_StripsCursorAndDimsLines pins the blurred-input
+// transform (issue #367): while the window is unfocused the input renders
+// inactive — no reverse-video cursor cell (nothing blinks in a backgrounded
+// tab), no leftover color runs, every non-empty line self-containedly
+// dimmed — while visible text and row structure stay untouched, so the
+// scroll position survives the toggle. Stripping is not isTTY-gated.
+func TestDimBlurredInput_StripsCursorAndDimsLines(t *testing.T) {
+	withTTY(t)
+
+	in := "❯ \x1b[7;37mH\x1b[mello \x1b[32mgreen\x1b[m\n\n  \x1b[7;37mW\x1b[mork"
+	wantPlain := "❯ Hello green\n\n  Work"
+
+	got := dimBlurredInput(in)
+	if _, _, ok := findReverseCell(got); ok {
+		t.Errorf("cursor cell must not survive the blur transform: %q", got)
+	}
+	if plain := ansi.Strip(got); plain != wantPlain {
+		t.Errorf("visible text/rows changed:\ngot  %q\nwant %q", plain, wantPlain)
+	}
+	for i, line := range strings.Split(got, "\n") {
+		if line == "" {
+			continue // paintLines leaves blank rows unwrapped
+		}
+		if !strings.HasPrefix(line, dimCode()) || !strings.HasSuffix(line, ansiReset) {
+			t.Errorf("line %d must be self-contained dim: %q", i, line)
+		}
+	}
+
+	// Non-TTY: no SGR at all, still cursorless.
+	isTTY = false
+	if got := dimBlurredInput(in); got != wantPlain {
+		t.Errorf("non-TTY blurred input = %q, want plain stripped %q", got, wantPlain)
+	}
 }
 
 // TestColorizeInput_V2ReverseCursorSurvives pins the cursor fix: Bubble Tea

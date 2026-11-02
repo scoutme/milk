@@ -3522,10 +3522,22 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.FocusMsg:
 		m.blurred = false
+		// The blurred rendering of the input tail differs (dim, no cursor)
+		// and focus arrives with no keystroke to refresh the viewport
+		// otherwise — rebuild it now so the area snaps back instantly
+		// (issue #367).
+		if m.ready {
+			m.viewportDirty = true
+			m.flushViewportIfDirty()
+		}
 		return m, m.refreshOpenPanelsCmd()
 
 	case tea.BlurMsg:
 		m.blurred = true
+		if m.ready {
+			m.viewportDirty = true
+			m.flushViewportIfDirty()
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
