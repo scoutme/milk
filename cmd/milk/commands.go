@@ -1723,13 +1723,16 @@ func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 	region := panelRegionForSubName(sub)
 	if panelTabsActive() && region != regionNone {
 		if m.panelRawOpen(region) && region != m.panelActive() {
-			// Moving to the panel is user interest — the same recency
-			// stamp as the width-budget bring-to-front below (ADR-0089).
-			m.stampPanelActivity(region)
+			// Moving to the panel is user interest (ADR-0089):
+			// activatePanelTab stamps the recency (it is what picks
+			// the budget group's top, ADR-0096) and the move
+			// announces itself like opening does — same event class,
+			// same feedback.
 			m.activatePanelTab(region)
 			m.closeAllButPanelTabs(region)
 			m.savePanelStateReport()
 			m.syncLayout()
+			m.notify(panelDisplayName(region)+" panel: brought to front", "/panel "+panelSubName(region))
 			return m, nil
 		}
 		m.activatePanelTab(region)

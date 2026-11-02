@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Tabbed panel docking (ADR-0079): a theme that renders the tab strip docks
@@ -177,7 +178,7 @@ func TestTabbedTheme_TabBarClickSwitches(t *testing.T) {
 		t.Fatal("moving to the git tab must close the memory panel")
 	}
 
-	clickTab(0) // "memory"
+	clickTab(4) // "memory" sits at cols 0-5 of the fixed-order strip
 	if m.panelActive() != regionMemory {
 		t.Fatalf("front tab = %v, want regionMemory after clicking its tab", m.panelActive())
 	}
@@ -206,6 +207,97 @@ func TestPanelTabAt_CoversEveryTabLabel(t *testing.T) {
 	}
 	if got := panelTabAt(x); got != regionNone {
 		t.Errorf("column %d (past the strip): got %v, want regionNone", x, got)
+	}
+}
+
+// TestTabbedStrip_FixedOrderInRenderAndHit drives the live funnel: the
+// strip row keeps the fixed f1–f6 table order in render AND hit-test even
+// after a selection change (git shown) and a content event (memory stamped)
+// — labels never reorder on selection; only the active label's styling
+// moves. Draw/click parity on that one order.
+func TestTabbedStrip_FixedOrderInRenderAndHit(t *testing.T) {
+	withPanelTabs(t)
+	oldTTY := isTTY
+	isTTY = true // renderSidePanel renders blank rows without a TTY
+	t.Cleanup(func() { isTTY = oldTTY })
+
+	m := layoutTestModel(t, 200, 40)
+	m.panelGit = true
+	m.activatePanelTab(regionGit)      // selection: git is the shown tab
+	m.stampPanelActivity(regionMemory) // content event while git is shown
+
+	plain := strings.TrimRight(ansi.Strip(strings.Split(m.renderSidePanel(regionGit, 8), "\n")[0]), " ")
+	if want := "memory tasks bg flow files git"; plain != want {
+		t.Errorf("strip row = %q, want %q (fixed f1–f6 labels, even on selection)", plain, want)
+	}
+
+	// The hit-test walks the same fixed table: memory at 0, git at 29.
+	if tab := panelTabAt(0); tab != regionMemory {
+		t.Errorf("hit at col 0 = %v, want regionMemory (labels don't move)", tab)
+	}
+	if tab := panelTabAt(6); tab != regionNone {
+		t.Errorf("hit at the join space = %v, want regionNone", tab)
+	}
+	if tab := panelTabAt(29); tab != regionGit {
+		t.Errorf("hit at col 29 = %v, want regionGit (fixed position)", tab)
+	}
+}
+
+// TestTabbedTheme_MoveToTopIsOnParWithOpening: moving a panel to the front is
+// the same event class as opening it (ADR-0089) — the move stamps the same
+// attention record an open toggle does (it is what picks the budget group's
+// top), and both tabbed move paths announce it with the same "brought to
+// front" toast the sibling bring-to-front uses.
+func TestTabbedTheme_MoveToTopIsOnParWithOpening(t *testing.T) {
+	withPanelTabs(t)
+	hasToast := func(mm model, text string) bool {
+		for _, ev := range mm.toastVisible {
+			if ev.text == text {
+				return true
+			}
+		}
+		return false
+	}
+
+	// activatePanelTab is the primitive every move goes through — it stamps.
+	m := layoutTestModel(t, 200, 40)
+	m.activatePanelTab(regionMemory)
+	if m.panelActivity[regionMemory].IsZero() {
+		t.Fatal("moving a panel to the top must stamp its recency, like opening does")
+	}
+
+	// Seeded residue (two open, memory in front): the F-key / /panel switch
+	// to the open panel moves it on top — stamped and announced.
+	m2 := layoutTestModel(t, 200, 40)
+	m2.panelMemory = true
+	m2.panelTasks = true
+	m2.activatePanelTab(regionMemory)
+	updated, _ := m2.handlePanelCmd("tasks")
+	m2 = updated.(model)
+	if m2.panelActive() != regionTasks || m2.panelRawOpen(regionMemory) {
+		t.Fatalf("switch: front=%v memoryOpen=%v, want tasks front, memory closed",
+			m2.panelActive(), m2.panelRawOpen(regionMemory))
+	}
+	if m2.panelActivity[regionTasks].IsZero() {
+		t.Fatal("the F-key move must stamp the panel it moved to")
+	}
+	if !hasToast(m2, "tasks panel: brought to front") {
+		t.Errorf("the move must announce itself like opening, toasts=%v", m2.toastVisible)
+	}
+
+	// The tab-bar click onto an open tab: same move, same stamp, same toast.
+	m2.panelMemory = true // re-seed residue with tasks still in front
+	before := m2.panelActivity[regionMemory]
+	time.Sleep(2 * time.Millisecond)
+	m2.handlePanelTabClick(regionMemory) // pointer receiver: mutates in place
+	if m2.panelActive() != regionMemory {
+		t.Fatalf("click front=%v, want regionMemory", m2.panelActive())
+	}
+	if !m2.panelActivity[regionMemory].After(before) {
+		t.Error("the tab click must advance the recency stamp")
+	}
+	if !hasToast(m2, "memory panel: brought to front") {
+		t.Errorf("the tab-click move must announce itself, toasts=%v", m2.toastVisible)
 	}
 }
 

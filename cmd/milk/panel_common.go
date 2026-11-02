@@ -84,7 +84,10 @@ func panelShortcut(region panelRegion) string {
 // (styled via stylePanelTitle) and its F1-F6 shortcut right-aligned within
 // inner columns, dimmed — so the toggle key is visible without opening
 // /panel or memorizing it. Title is truncated, not the hint, if both
-// together would overflow inner.
+// together would overflow inner. On a tabbed theme this is the strip in
+// fixed f1–f6 table order — the one order it ever renders in (labels never
+// reorder on selection; previews and tests get the same row the live
+// render uses).
 func panelTitleLine(title string, region panelRegion, inner int) string {
 	if th.modern {
 		return panelTabStrip(region, inner)
@@ -327,29 +330,19 @@ func (m *model) stampPanelActivity(region panelRegion) {
 	m.panelActivity[region] = time.Now()
 }
 
-// panelRankByActivity returns the in-layout panels ordered by relevance for
-// the width budget: most recently stamped first, ties keeping
-// panelRenderOrder (so a fresh session — every timestamp zero — lays out
-// exactly left-to-right, the deterministic startup baseline). Insertion
-// sort into a stack array: at most six elements, no allocation on the
-// per-render panelVisible path (see ADR-0088's render-loop budget).
-func (m *model) panelRankByActivity() (ranked [regionGit + 1]panelRegion, n int) {
+// panelOpenOrder fills out with the in-layout panels (raw open, and the
+// front tab on a tabbed theme — panelInLayout) in panelRenderOrder and
+// returns the count: the one order the width budget splits the two panel
+// sets along (issue #373). Stack array, no allocation — the per-render
+// panelVisible path (see ADR-0088's render-loop budget).
+func (m *model) panelOpenOrder() (out [regionGit + 1]panelRegion, n int) {
 	for _, r := range panelRenderOrder {
-		if !m.panelInLayout(r) {
-			continue
+		if m.panelInLayout(r) {
+			out[n] = r
+			n++
 		}
-		pos := n // strictly-newer wins the slot; equal timestamps keep order
-		for i := 0; i < n; i++ {
-			if m.panelActivity[r].After(m.panelActivity[ranked[i]]) {
-				pos = i
-				break
-			}
-		}
-		copy(ranked[pos+1:n+1], ranked[pos:n])
-		ranked[pos] = r
-		n++
 	}
-	return ranked, n
+	return out, n
 }
 
 // memoryContentSig fingerprints what the memory panel would render for the
@@ -468,6 +461,19 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 		return strings.Repeat("\n", h)
 	}
 	all, inner := m.sidePanelLines(region)
+	// Tabbed bar (ADR-0079): the builder's first row already is the strip in
+	// fixed f1–f6 table order — labels never reorder on selection, so there
+	// is nothing to rewrite here (selection is the active label's styling).
+	// Width-budget overflow tabs (issue #373): the group column — the
+	// rightmost one — has its title row *become* the grouped set's tab
+	// strip: fixed f1–f6 labels, with the top's own name as the underlined
+	// one — so the builder's title line beside it would print it twice
+	// (compose on a copy: sidePanelLines hands out cached slices for
+	// project/git).
+	if group := m.budgetTabGroupFor(region); len(group) > 0 && len(all) > 0 && !m.anim.isMoving(region) {
+		all = append([]string(nil), all...)
+		all[0] = budgetTabStrip(group, region, inner)
+	}
 	total := len(all)
 
 	offset := m.panelOffsetPtr(region)
