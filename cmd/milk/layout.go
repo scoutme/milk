@@ -445,6 +445,7 @@ func (m model) viewBody() string {
 	// main area — pure render-time overlay, no layout rows consumed.
 	mainArea = m.overlayToasts(mainArea)
 	mainArea = m.overlayPalette(mainArea)
+	mainArea = m.overlayAgentPicker(mainArea)
 	if hints := m.hintRegion(); len(hints) > 0 {
 		return m.headerBar() + "\n" + mainArea + "\n" + strings.Join(hints, "\n") + "\n" + m.statusBar()
 	}
