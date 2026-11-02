@@ -43,6 +43,13 @@ type milkAdapter struct {
 	sandbox    SandboxConfig
 	sandboxDir string // created per Start, removed per Stop
 
+	// iso is the resolved filesystem isolation (issue #355; nil = off).
+	// Inside the sandbox the live ~/.milk is read-only, so isolate without
+	// the state sandbox leaves milk no writable state root — warned once
+	// at Start (see isoWarned).
+	iso       *isolateRuntime
+	isoWarned bool
+
 	// label renames this adapter in reports and results.json (Name()) — for
 	// side-by-side version matrices where several milk-tui adapters run the
 	// same suite against different milk binaries. Empty = "milk-tui".
@@ -351,6 +358,11 @@ func (a *milkAdapter) SetArgs(args []string) {
 // SetSandbox applies an experiment's sandbox section. Explicit adapter-spec
 // pseudo-flags (parsed first in SetArgs) win over experiment values: the
 // more specific setting is the one that survives.
+// SetIsolate applies the command's resolved filesystem isolation (issue
+// #355). The milk state root (sandboxDir) is added to the rw allowlist at
+// launch time — it only exists once Start has run.
+func (a *milkAdapter) SetIsolate(r *isolateRuntime) { a.iso = r }
+
 func (a *milkAdapter) SetSandbox(c SandboxConfig) {
 	if c.Enabled && !a.sandbox.Enabled {
 		a.sandbox.Enabled = true
@@ -368,6 +380,10 @@ func (a *milkAdapter) SetSandbox(c SandboxConfig) {
 
 func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	a.workdir = workdir
+	if a.iso.active() && !a.sandbox.Enabled && !a.isoWarned {
+		a.isoWarned = true
+		fmt.Fprintf(os.Stderr, "note: milk-tui isolate without sandbox: the live state root stays read-only — enable sandbox.mode=fresh so runs get a writable one\n")
+	}
 	if a.milkBin == "" {
 		bin := expandHome(a.sandbox.MilkBinary)
 		if bin == "" {
@@ -466,7 +482,16 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	args = append(args, a.extraArgs...)
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, a.milkBin, args...)
+	// Filesystem isolation (issue #355): the fresh state root must be rw
+	// inside the sandbox — same-path bind, it lives under /tmp otherwise
+	// buried by the tmpfs (wrap orders it after).
+	var binds []isoBind
+	if a.sandboxDir != "" {
+		binds = append(binds, isoBind{a.sandboxDir, a.sandboxDir})
+	}
+	argv := a.iso.wrap(a.workdir, binds, append([]string{a.milkBin}, args...))
+
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = a.workdir
 	cmd.Stderr = os.Stderr
 	if a.sandboxDir != "" {

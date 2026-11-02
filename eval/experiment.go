@@ -57,6 +57,13 @@ type Experiment struct {
 	Repetitions int `yaml:"repetitions"`
 	// Sandbox configures isolated agent state roots for the run (milk-tui).
 	Sandbox ExperimentSandbox `yaml:"sandbox"`
+	// Isolate requests OS-level filesystem isolation for agent runs
+	// (issue #355): the whole filesystem read-only outside an rw allowlist,
+	// so an agent cannot write to other checkouts, HOME or system state —
+	// the temp workdir was the only isolation and agents did escape it.
+	// mode: "off" (default) | "auto" (bwrap when available, loud warning
+	// and unsandboxed otherwise) | "bwrap" (required — errors without it).
+	Isolate IsolateConfig `yaml:"isolate"`
 	// Budget is the default metric budget asserted against every run; a
 	// scenario's own `budget:` block refines it field-by-field.
 	Budget *Budget `yaml:"budget"`
@@ -192,6 +199,11 @@ func (e *Experiment) Validate() error {
 	case "", "config", "none":
 	default:
 		return fmt.Errorf("sandbox.seed must be \"config\" or \"none\", got %q", e.Sandbox.Seed)
+	}
+	switch e.Isolate.Mode {
+	case "", IsolateOff, IsolateAuto, IsolateBwrap:
+	default:
+		return fmt.Errorf("isolate.mode must be %q, %q or %q, got %q", IsolateOff, IsolateAuto, IsolateBwrap, e.Isolate.Mode)
 	}
 	seen := map[string]bool{}
 	for i, v := range e.Versions {
@@ -352,6 +364,36 @@ func (h *Harness) RunExperiment(ctx context.Context, exp *Experiment) ([]Scenari
 		nameOr(exp.Name, "(unnamed)"), len(scenarios), exp.Repetitions, len(h.Adapters))
 
 	return h.runScenarios(ctx, scenarios), nil
+}
+
+// applyIsolate resolves the command's filesystem-isolation request (issue
+// #355) once — bwrap probed a single time — and hands the runtime to every
+// adapter that supports it. Called from the CLI right after the harness is
+// built, so experiment runs and plain flag runs take the same path.
+// Degradation of `auto` is one loud stderr warning, never a silent
+// downgrade; a non-Isolatable adapter gets a note and runs unsandboxed,
+// mirroring the sandbox note in RunExperiment.
+func (h *Harness) applyIsolate(cfg IsolateConfig) error {
+	runtime, err := ResolveIsolate(cfg)
+	if err != nil {
+		return err
+	}
+	switch {
+	case runtime == nil:
+		return nil
+	case runtime.warn != "":
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", runtime.warn)
+	default:
+		fmt.Fprintf(os.Stderr, "isolate: bwrap active — agent writes limited to the workdir and configured rw paths\n")
+	}
+	for _, a := range h.Adapters {
+		if ia, ok := a.(Isolatable); ok {
+			ia.SetIsolate(runtime)
+		} else if runtime.active() {
+			fmt.Fprintf(os.Stderr, "note: %s has no isolation support — running unsandboxed\n", a.Name())
+		}
+	}
+	return nil
 }
 
 func nameOr(name, fallback string) string {

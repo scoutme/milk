@@ -63,6 +63,7 @@ func evalRunCmd() *cobra.Command {
 		judgeAgent  string
 		repetitions int
 		experiment  string
+		isolateMode string
 	)
 
 	cmd := &cobra.Command{
@@ -109,6 +110,9 @@ func evalRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("repetitions") {
 					exp.Repetitions = repetitions
 				}
+				if cmd.Flags().Changed("isolate") {
+					exp.Isolate.Mode = isolateMode
+				}
 			}
 
 			// Parse agent names. With an experiment, the specs are the
@@ -136,6 +140,21 @@ func evalRunCmd() *cobra.Command {
 			h, err := NewHarness(agentSpecs, judge)
 			if err != nil {
 				return fmt.Errorf("creating harness: %w", err)
+			}
+
+			// Filesystem isolation (issue #355): the experiment's isolate:
+			// section, overridden by --isolate when set — resolved once and
+			// applied to every adapter before any run starts, covering both
+			// the experiment path and plain flag runs.
+			isoCfg := IsolateConfig{}
+			if exp != nil {
+				isoCfg = exp.Isolate
+			}
+			if cmd.Flags().Changed("isolate") {
+				isoCfg.Mode = isolateMode
+			}
+			if err := h.applyIsolate(isoCfg); err != nil {
+				return err
 			}
 
 			// Run scenarios.
@@ -175,6 +194,7 @@ func evalRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 	cmd.Flags().IntVar(&repetitions, "repetitions", 1, "run every scenario N times, fully isolated (fresh workdir, fresh sandbox) — for nth-run variance")
 	cmd.Flags().StringVar(&experiment, "experiment", "", "experiment YAML file defining the full suite (adapters, scenarios, repetitions, judge, sandbox, budgets); explicit flags override its fields")
+	cmd.Flags().StringVar(&isolateMode, "isolate", "", "filesystem isolation for agent runs: off|auto|bwrap (auto = bwrap when available, loud warning + unsandboxed otherwise; overrides the experiment's isolate.mode; issue #355)")
 
 	return cmd
 }

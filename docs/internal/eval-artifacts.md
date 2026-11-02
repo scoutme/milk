@@ -78,6 +78,29 @@ Outputs made for humans to read, not for the tree to carry.
 - **Examples must stay pristine** — docs link at them; an example that someone
   "swapped the prompt" in stops teaching the format and starts confusing it.
 
+## Containment guarantee
+
+What eval does and does not promise about the machine during a run
+(the guarantee state per issue [#355](https://github.com/scoutme/milk/issues/355),
+[ADR-0098](../adr/0098-eval-filesystem-isolation.md)):
+
+- **With `isolate.mode: auto` / `bwrap` (or `--isolate`)**: writes outside the
+  allowlist — scenario workdir, `isolate.rw`, the fresh state root, the
+  per-run HOME seed copies — **fail at the OS level** (bubblewrap read-only
+  root): no other checkout, no `$HOME` file, no system path can be modified
+  by an agent run, and nothing of the run survives outside its workdir,
+  seeds and results dir. Enforced, not assumed; proven by the LLM-free
+  escape-matrix test in `eval/isolate_test.go`.
+- **By default (isolation off)**: there is **no guarantee** — the temp
+  workdir and fresh state roots scope what a scenario *invites*, not what an
+  agent *can* touch; `file_changes` is a lower bound (workdir only), and
+  escapes have happened (the routing-reps incident). `auto` degrades to this
+  mode with a loud warning where bwrap is unavailable, so check the run's
+  stderr line before trusting the containment claim.
+- **Unaffected either way**: run outputs still live under the eval artifact
+  home (never the repo), and the judge/scoring path runs unsandboxed —
+  isolation wraps the agent processes only.
+
 ## Quick reference
 
 | artifact | home |

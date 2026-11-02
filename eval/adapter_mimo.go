@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -47,6 +48,14 @@ type mimoAdapter struct {
 
 	// binArg pins the binary to launch (--mimo-bin pseudo-flag).
 	binArg string
+
+	// iso / isoBinds: resolved filesystem isolation (issue #355; nil = off)
+	// and the per-run HOME seed copies bound over ~/.mimocode and
+	// ~/.config/mimocode — mimo writes its state there, so the copies give
+	// it a writable home without touching the live one. Seeded at Start,
+	// removed at Stop.
+	iso      *isolateRuntime
+	isoBinds []isoBind
 }
 
 // mimoBinary resolves the mimocode CLI to launch. A variable so tests can
@@ -339,6 +348,20 @@ func (a *mimoAdapter) Start(ctx context.Context, workdir string) error {
 	if _, err := os.Stat(a.mimoBin); err != nil {
 		return fmt.Errorf("mimo binary %s: %w", a.mimoBin, err)
 	}
+	// Filesystem isolation (issue #355): mimo reads and writes its state
+	// under HOME — seed fresh copies per run and bind them over the live
+	// paths (see isoBinds), so runs stay identical to unsandboxed ones
+	// while the live ~/.mimocode never sees a write. Defensive cleanup
+	// mirrors milk's sandboxDir handling: Start without Stop must not leak.
+	cleanupSeeds(a.isoBinds)
+	a.isoBinds = nil
+	if a.iso.active() {
+		binds, err := seedBinds(".mimocode", filepath.Join(".config", "mimocode"))
+		if err != nil {
+			return fmt.Errorf("seeding mimo home: %w", err)
+		}
+		a.isoBinds = binds
+	}
 	return nil
 }
 
@@ -362,7 +385,8 @@ func (a *mimoAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	args = append(args, a.extraArgs...)
 	args = append(args, "--", prompt) // `--` guards prompts starting with "-"
 
-	cmd := exec.CommandContext(ctx, a.mimoBin, args...)
+	argv := a.iso.wrap(a.workdir, a.isoBinds, append([]string{a.mimoBin}, args...))
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = a.workdir
 	stderr := &tailBuffer{max: 8192}
 	cmd.Stderr = stderr
@@ -421,5 +445,11 @@ func (a *mimoAdapter) Stop() error {
 	if a.cmd != nil && a.cmd.Process != nil {
 		_ = a.cmd.Process.Kill()
 	}
+	cleanupSeeds(a.isoBinds)
+	a.isoBinds = nil
 	return nil
 }
+
+// SetIsolate applies the command's resolved filesystem isolation (issue
+// #355); the HOME seeds are created per Start, once the run actually begins.
+func (a *mimoAdapter) SetIsolate(r *isolateRuntime) { a.iso = r }

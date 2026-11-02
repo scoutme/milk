@@ -51,6 +51,13 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # issue #355: eval's live escape-matrix test (eval/isolate_test.go)
+      # runs where bwrap works and skips elsewhere (macOS) — install it on
+      # Linux so CI actually exercises the isolation backend.
+      - name: install bubblewrap
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
       - name: go test
         run: go test ./...
 

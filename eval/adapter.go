@@ -58,6 +58,18 @@ type Sandboxable interface {
 	SetSandbox(SandboxConfig)
 }
 
+// Isolatable is implemented by adapters that can wrap their agent's process
+// in the filesystem sandbox (issue #355 — eval's real isolation: the temp
+// workdir alone never stopped an agent writing anywhere on the machine). The
+// harness resolves the command's isolate: section / --isolate flag once and
+// applies it through this interface, exactly like Sandboxable; a
+// non-Isolatable adapter gets a note and runs unsandboxed. The runtime is
+// nil when isolation is off — adapters carry it unconditionally, every
+// method is the identity.
+type Isolatable interface {
+	SetIsolate(*isolateRuntime)
+}
+
 // AdapterFactory creates a new adapter instance.
 type AdapterFactory func() AgentAdapter
 

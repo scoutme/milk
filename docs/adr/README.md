@@ -95,3 +95,4 @@
 * [94. Goal-aware history trim: the superseded ask is not pinned](0094-goal-aware-history-trim.md) *(amends 32's 2026-10-29 update)*
 * [95. Panel content events: per-event notifications, edge-based layout](0095-panel-content-events.md) *(amends 59's finalization rule for state panels)*
 * [96. Width-budget overflow tabs: hidden panels surface on the rightmost panel](0096-width-budget-overflow-tabs.md) *(completes 89's discovery gap)*
+* [98. Eval filesystem isolation: bwrap read-only root with an rw allowlist](0098-eval-filesystem-isolation.md) *(closes issue #355 — the workdir was the only isolation)*

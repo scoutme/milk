@@ -38,6 +38,15 @@ type claudeAdapter struct {
 	// result lines carry the session-cumulative cost, so a turn's cost is the
 	// delta (see turnCostUSD).
 	lastCostUSD float64
+
+	// iso / isoBinds: resolved filesystem isolation (issue #355; nil = off)
+	// and the per-run HOME seed copies bound over ~/.claude and
+	// ~/.claude.json. Claude reads AND writes those (transcripts, project
+	// state), so the copies give it a byte-identical home whose writes never
+	// reach the live one — seeded at Start, removed at Stop. Harness-side
+	// transcript/settings paths resolve through isoView to the same copies.
+	iso      *isolateRuntime
+	isoBinds []isoBind
 }
 
 // claudeActivityStatePath returns the file used to persist when a claude-code
@@ -197,6 +206,22 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 	a.sessionName = "claude-eval-" + a.sessionID[:8]
 	a.lastCostUSD = 0 // fresh scenario: cumulative cost counter restarts
 
+	// Filesystem isolation (issue #355): claude reads and writes ~/.claude
+	// and ~/.claude.json — seed fresh copies per run, bound over the live
+	// paths (seedBinds), so the agent sees identical bytes while every write
+	// lands in the copy. Must run before setupProjectSettings/transcriptPath
+	// — both resolve through isoView to what the sandbox serves. Defensive
+	// cleanup mirrors milk's sandboxDir: Start without Stop must not leak.
+	cleanupSeeds(a.isoBinds)
+	a.isoBinds = nil
+	if a.iso.active() {
+		seeded, seedErr := seedBinds(".claude", ".claude.json")
+		if seedErr != nil {
+			return fmt.Errorf("seeding claude home: %w", seedErr)
+		}
+		a.isoBinds = seeded
+	}
+
 	// Init a git repo so Claude Code treats this as its own project and writes
 	// a transcript under this workdir's project directory rather than an
 	// enclosing repo's.
@@ -217,7 +242,11 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 		return fmt.Errorf("getting home dir: %w", err)
 	}
 	encodedCwd := strings.ReplaceAll(workdir, "/", "-")
-	a.transcriptPath = filepath.Join(home, ".claude", "projects", encodedCwd, a.sessionID+".jsonl")
+	// isoView (issue #355): when the ~/.claude seed is bound, the sandbox
+	// serves the copy — the harness must read the file the agent writes
+	// through the bind, not the live path behind it.
+	claudeProjects := isoView(a.isoBinds, filepath.Join(home, ".claude", "projects", encodedCwd))
+	a.transcriptPath = filepath.Join(claudeProjects, a.sessionID+".jsonl")
 
 	// Create tmux session.
 	if err := tmuxNewSession(a.sessionName, 200, 50); err != nil {
@@ -231,12 +260,9 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 		}
 	}()
 
-	// Launch Claude Code.
-	cmd := fmt.Sprintf("cd %s && claude --session-id %s --dangerously-skip-permissions", workdir, a.sessionID)
-	if len(a.extraArgs) > 0 {
-		cmd += " " + strings.Join(a.extraArgs, " ")
-	}
-	if err := tmuxSendKeys(a.sessionName, cmd); err != nil {
+	// Launch Claude Code — wrapped in the filesystem sandbox when isolation
+	// is active (issue #355). See launchLine.
+	if err := tmuxSendKeys(a.sessionName, a.launchLine()); err != nil {
 		return fmt.Errorf("tmux send-keys: %w", err)
 	}
 	if err := tmuxSendEnter(a.sessionName); err != nil {
@@ -320,7 +346,10 @@ func (a *claudeAdapter) setupProjectSettings(workdir string) error {
 		return err
 	}
 	encodedCwd := strings.ReplaceAll(workdir, "/", "-")
-	settingsDir := filepath.Join(home, ".claude", "projects", encodedCwd)
+	// isoView (issue #355): write through the isolation seed when active —
+	// the agent reads its project settings from the bound copy, so the
+	// pre-write must land there or the settings would be invisible to it.
+	settingsDir := isoView(a.isoBinds, filepath.Join(home, ".claude", "projects", encodedCwd))
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
 		return fmt.Errorf("creating settings dir: %w", err)
 	}
@@ -399,9 +428,26 @@ func (a *claudeAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult
 	}, nil
 }
 
+// launchLine is the shell line typed into the tmux pane: cd into the
+// workdir, then the agent argv — wrapped in the filesystem sandbox when
+// isolation is active (issue #355; bwrap argv, shell-quoted for the pane's
+// shell). Quoting each token also preserves extraArgs exactly, where the old
+// raw join let the shell re-split them.
+func (a *claudeAdapter) launchLine() string {
+	argv := append([]string{"claude", "--session-id", a.sessionID, "--dangerously-skip-permissions"}, a.extraArgs...)
+	argv = a.iso.wrap(a.workdir, a.isoBinds, argv)
+	return "cd " + shq(a.workdir) + " && " + shqJoin(argv)
+}
+
 func (a *claudeAdapter) Stop() error {
+	cleanupSeeds(a.isoBinds)
+	a.isoBinds = nil
 	return tmuxKillSession(a.sessionName)
 }
+
+// SetIsolate applies the command's resolved filesystem isolation (issue
+// #355); the HOME seeds are created per Start, once the run actually begins.
+func (a *claudeAdapter) SetIsolate(r *isolateRuntime) { a.iso = r }
 
 // sendPromptUntilAccepted sends prompt via tmux and verifies Claude Code
 // actually submitted it, i.e. a user message holding the prompt appears in the
