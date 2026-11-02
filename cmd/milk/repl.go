@@ -3079,6 +3079,22 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case bgAgentPickerTickMsg:
+		w := m.pendingBgAgent
+		if w == nil || w.disarmed {
+			// Answered, cancelled, or taken over: the timed default is dead.
+			return m, nil
+		}
+		if d := time.Until(w.deadline); d > 0 {
+			// Early fire / clock adjust — wait out the rest.
+			return m, bgAgentPickerTick(w.deadline)
+		}
+		m.pendingBgAgent = nil
+		m.appendTranscript("\n" + milkTag() + fmt.Sprintf(" no answer within %s — background agent: %s (default)\n", bgAgentPickerTimeout, w.def))
+		m.refreshPrompt()
+		m.syncLayout()
+		return m.spawnUserBackgroundAgent(w.task, "")
+
 	case tipsTickMsg:
 		// A tick scheduled before a manual browse restarted the cycling
 		// timer (restartTipsTick) carries an older gen — dropped without

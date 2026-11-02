@@ -34,6 +34,7 @@ type workflowWizardState struct {
 	roleValues   map[string]string   // answers collected so far this wizard pass, role -> agent specifier
 	roleDefaults map[string]string   // current agent per role when reconfiguring (shown as the "blank = keep X" default); nil for a fresh launch
 	roleIdx      int                 // index into roles for the role currently being asked
+	roleSel      int                 // agent-picker flyover cursor for the current role step (#335/#369)
 	// maxIterOverrideStageID/N: when set, launchGenericWorkflow applies
 	// interp.Runner.WithMaxIterationsOverride — used by the "continue with
 	// doubled passes?" recovery flow after a genericWorkflowExtendState.
@@ -143,6 +144,7 @@ func (m model) advanceToNextGenericRoleOrLaunch(w *workflowWizardState) (tea.Mod
 		}
 		w.roleIdx = i
 		w.step = wizardStepGenericRole
+		w.roleSel = pickerDefaultIndex(m.rolePickerEntries(w)) // blank-equivalent row preselected
 		m.pendingWorkflowWizard = w
 		if w.reconfiguring {
 			m.appendTranscript(milkTag() + genericWorkflowAgentReconfigurePrompt(w.name, role, w.roleDefaults[role]))
@@ -592,24 +594,74 @@ func formatGenericAgentNames(roles []string, agentNames map[string]string) strin
 	return strings.Join(parts, "  ")
 }
 
+// roleBlankEquiv is the row whose selection answers blank: the current agent
+// when reconfiguring (blank = keep), else the escalation alias — exactly
+// what workflowAgentInputWithDefault maps blank to, so the picker's
+// preselection and its answer follow the wizard's own blank semantics.
+func (w *workflowWizardState) roleBlankEquiv() string {
+	if w.reconfiguring && w.roleIdx < len(w.roles) {
+		if cur := w.roleDefaults[w.roles[w.roleIdx]]; cur != "" {
+			return cur
+		}
+	}
+	return workflow.AliasEscalation
+}
+
 // handleWorkflowWizardKey handles keypresses while the workflow wizard is active.
-// Ctrl+C and Esc cancel; Enter advances to the next step.
+// Ctrl+C and Esc cancel; Enter advances to the next step. The
+// role-assignment step renders through the agent-choice flyover (#335):
+// arrows move the preselected cursor and typed text filters the options; the
+// task and clear-confirm steps stay typed (descriptions and dangerous
+// confirmations must not be arrow-selectable).
 func (m model) handleWorkflowWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	w := m.pendingWorkflowWizard
+	roleStep := w.step == wizardStepGenericRole
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.pendingWorkflowWizard = nil
 		m.appendTranscript("\n" + milkTag() + " workflow wizard cancelled\n")
 		m.refreshPrompt()
 		return m, nil
+	case "up", "ctrl+p", "shift+tab", "down", "ctrl+n", "tab":
+		if roleStep {
+			filtered := pickerFilter(m.rolePickerEntries(w), m.ta.Value())
+			delta := 1
+			if msg.String() == "up" || msg.String() == "ctrl+p" || msg.String() == "shift+tab" {
+				delta = -1
+			}
+			w.roleSel = movePickerSel(w.roleSel, delta, len(filtered))
+			return m, nil
+		}
 	case "enter", "ctrl+m":
 		input := strings.TrimSpace(m.ta.Value())
+		answer := input
+		display := input
+		if roleStep {
+			entries := m.rolePickerEntries(w)
+			answer = agentPickerAnswer(entries, input, w.roleSel)
+			display = answer
+			if display == "" {
+				// Record the row, not an empty echo: blank means
+				// keep-current/escalation — show which one.
+				if h := agentPickerHighlight(entries, input, w.roleSel); h != "" {
+					display = h
+				} else {
+					display = w.roleBlankEquiv()
+				}
+			}
+		}
 		m.ta.Reset()
 		m.syncLayout()
-		m.appendTranscript(promptLabel(m.st) + input + "\n")
-		return m.advanceWorkflowWizard(input)
+		m.appendTranscript(promptLabel(m.st) + display + "\n")
+		return m.advanceWorkflowWizard(answer)
 	}
 	// All other keys: normal textarea editing.
 	cmd := m.updateTA(msg)
+	// Typed text narrows the flyover rows (role step): palette semantics —
+	// the cursor starts at the top of what it filtered.
+	if roleStep && (msg.Text != "" || msg.String() == "backspace") {
+		w.roleSel = 0
+	}
 	m.syncLayout()
 	return m, cmd
 }
