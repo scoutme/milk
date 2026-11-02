@@ -255,7 +255,16 @@ func (m *model) setViewportContent() {
 		// would — SetLines (the per-keystroke path) trusts its lines.
 		m.txLinesCache = viewport.NormalizeLines(strings.Split(transcript+"\n"+sep, "\n"))
 	}
-	inputLines := viewport.NormalizeLines(strings.Split(m.colorizeInput(m.ta.View()), "\n"))
+	inputView := m.colorizeInput(m.ta.View())
+	if m.blurred {
+		// Issue #367: an unfocused window renders the input area as
+		// inactive — no colors, no reverse-video cursor (nothing blinks
+		// in a backgrounded tab), fully dim. Rebuilt identically on
+		// FocusMsg, and re-applied by every streaming rebuild, so a turn
+		// running while the window is unfocused keeps it dim.
+		inputView = dimBlurredInput(inputView)
+	}
+	inputLines := viewport.NormalizeLines(strings.Split(inputView, "\n"))
 	lines := make([]string, 0, len(m.txLinesCache)+len(inputLines))
 	lines = append(lines, m.txLinesCache...)
 	lines = append(lines, inputLines...)

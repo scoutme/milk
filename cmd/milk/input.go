@@ -20,6 +20,19 @@ type cursorSave struct {
 	escape    string
 }
 
+// dimBlurredInput renders the input area while the terminal window is
+// unfocused (issue #367): every SGR run is stripped — including the
+// textarea's reverse-video cursor cell, so nothing keeps blinking in a
+// backgrounded tab — and each non-empty line is re-wrapped in the dim
+// attribute (paintLines leaves blank rows unwrapped, so every line stays
+// self-contained for the viewport). Visible text and row structure are
+// untouched, so the scroll position survives a blur/focus toggle; colors
+// and cursor come back with the FocusMsg rebuild. Stripping is not
+// isTTY-gated: even a non-TTY render must not show a cursor while blurred.
+func dimBlurredInput(view string) string {
+	return dim(ansi.Strip(view))
+}
+
 func (m *model) colorizeInput(view string) string {
 	if !isTTY {
 		return view
