@@ -202,7 +202,7 @@ func (as *acpSession) spawnUserJob(task, spec string) string {
 		}
 		return userJobUnavailableMsg
 	}
-	job := as.mgr.Spawn(label, task, "user", modelName, userJobRunner(agent, as.mgr, as.st.cwd, task, as.mem, nil))
+	job := as.mgr.Spawn(label, task, "user", modelName, userJobRunner(agent, as.mgr, as.cfg, as.st.cwd, task, as.mem, nil))
 	return fmt.Sprintf("background agent %s started on %s: %s", job.ID, modelName, label)
 }
 

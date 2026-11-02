@@ -4212,7 +4212,7 @@ func (m model) spawnUserBackgroundAgent(task, spec string) (tea.Model, tea.Cmd) 
 	// Update deadlocks because the event loop goroutine is the only reader
 	// of that channel and it is blocked waiting for Update to return.
 	return m, func() tea.Msg {
-		job := mgr.Spawn(label, task, "user", modelName, userJobRunner(agent, mgr, cwd, task, m.mem, jobImages))
+		job := mgr.Spawn(label, task, "user", modelName, userJobRunner(agent, mgr, m.st.cfg, cwd, task, m.mem, jobImages))
 		return backgroundSpawnedMsg{jobID: job.ID, label: label, model: modelName}
 	}
 }
@@ -4849,14 +4849,14 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		}
 	}
 
+	// Both routing targets now consolidate (#375 proposal 3): the defer used
+	// to live inside the TargetLocal case, so TUI escalation turns never ran
+	// a pass at all.
+	if st.mem != nil {
+		defer consolidateAfterTurn(st.mem, st.cfg)
+	}
 	switch target {
 	case router.TargetLocal:
-		if mem := st.mem; mem != nil {
-			defer func() {
-				_ = mem.Consolidate()
-				_ = mem.PruneGlobal(st.cfg.PerceptStoreSizeLimit())
-			}()
-		}
 		turnErr = runPrimaryWithSession(turnCtx, st.cfg, st.sess, agents.primary, agents.escalation, st.mem, input, sessionContent, out, agents, onResponse, onSegment, onWorkflowStart, pw)
 	case router.TargetEscalation:
 		turnErr = runEscalationWithSession(turnCtx, st.cfg, st.sess, agents.escalation, "", st.mem, input, sessionContent, out, agents, onResponse, onSegment, onWorkflowStart, pw)
@@ -5496,10 +5496,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			writeHistoryFile(sp, fm.sessionHistory)
 		}
 	}
-	if mem != nil {
-		_ = mem.Consolidate()
-		_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
-	}
+	consolidateAfterTurn(mem, cfg) // TUI exit pass (#375): the helper no-ops on a nil store
 	// /restart (issue #258): the TUI quit with a relaunch plan armed. The
 	// terminal is restored above (p.Run teardown + mouse-mode reset), so the
 	// exec happens here — on Unix it never returns on success; on Windows

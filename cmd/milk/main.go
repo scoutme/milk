@@ -338,14 +338,14 @@ func run(cmd *cobra.Command, args []string) error {
 	startHistory := len(sess.History)
 	turnStart := time.Now()
 	var turnErr error
+	// Both routing targets now consolidate (#375 proposal 3): the defer used
+	// to live inside the TargetLocal case, so CLI escalation turns never ran
+	// a pass at all.
+	if mem != nil {
+		defer consolidateAfterTurn(mem, cfg)
+	}
 	switch target {
 	case router.TargetLocal:
-		if mem != nil {
-			defer func() {
-				_ = mem.Consolidate()
-				_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
-			}()
-		}
 		turnErr = runPrimary(ctx, cfg, sess, primaryRunner, escalationRunner, mem, prompt, out, nil, onResponse, onSegment, nil)
 	case router.TargetEscalation:
 		// onWorkflowStart is nil: single-prompt CLI mode has no bubbletea

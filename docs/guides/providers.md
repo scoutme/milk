@@ -789,7 +789,7 @@ All keys go in `~/.milk/config.json`; sensible defaults apply when omitted. See 
 | `percept_inject_max` | 25 | Max percepts injected into the escalation agent context per turn. `0` = no limit. |
 | `percept_inject_max_bytes` | 2048 | Max byte size of injected percept content per turn. `0` = no limit. |
 | `percept_inject_min_weight` | 0.30 | Injection weight floor: percepts with `w` below this are skipped before relevance gating and budgeting. They stay in the store (still visible to `/memory`) but stop being injected — which matters because injection marks a percept *used*, so a prune-floor percept that keeps keyword-overlapping your prompts had its 14-day staleness-archiving clock reset every turn and could never be archived (issue #375). Recall already hides the same band (`get_memory`'s `min_confidence`, 0.4). `0.30` keeps live session percepts injectable (a fresh `primary` fact starts at 0.7). A negative value disables the floor. |
-| `percept_store_max` | 0 (unlimited) | Max percepts kept in the global store; lowest-weight non-core percepts are pruned after NREM consolidation. |
+| `percept_store_max` | 0 → 200 | Max percepts kept in the global store; lowest-weight non-core percepts are pruned after NREM consolidation. Unset/0 uses the 200-percept backstop (issue #375); set a negative value to disable the cap. |
 | `percept_relevance_gate` | `true` | Skip percepts with zero keyword overlap with the current prompt before injection. |
 | `memory_reinjection_turns` | 20 | Re-inject memory/need instructions into escalation context after this many escalation turns. `0` disables. |
 | `memory_reinjection_bytes` | 40000 | Re-inject after this many bytes of escalation output. `0` disables. |

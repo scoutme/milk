@@ -162,6 +162,25 @@ func retryToolCall(ctx context.Context, fn func() (string, error)) (string, erro
 	}
 }
 
+// consolidateAfterTurn runs the NREM consolidation pass and the global
+// size-cap prune after a turn that ran against a memory store (issue #375,
+// verdict proposal 3). Every turn path must call it — TUI, CLI, ACP (either
+// routing target), workflow role turns and background-agent runs. It used to
+// be inlined only in the TUI/CLI *primary* cases, so escalation turns, ACP
+// sessions, workflows and background jobs never consolidated at all (an
+// ACP-only session never ran a pass).
+//
+// The pass is idempotent and the store serializes concurrent calls, so hooks
+// may overlap (a background job finishing while a turn ends). No-op when mem
+// is nil.
+func consolidateAfterTurn(mem *memory.Store, cfg config.Config) {
+	if mem == nil {
+		return
+	}
+	_ = mem.Consolidate()
+	_ = mem.PruneGlobal(cfg.PerceptStoreSizeLimit())
+}
+
 // runPrimary executes one primary-agent turn using runner.
 // It handles all session bookkeeping: context-mode resolution, nonce management,
 // state transitions, turn recording, token accounting, summary rebuild, and

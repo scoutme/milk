@@ -911,6 +911,11 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string, media *acpProm
 	// Session history records the compact prompt (placeholders only — never
 	// payloads or temp paths).
 
+	// Both routing targets now consolidate (#375 proposal 3): the ACP turn
+	// path had no memory hook at all — an ACP-only session never ran a pass.
+	if as.mem != nil {
+		defer consolidateAfterTurn(as.mem, as.cfg)
+	}
 	var turnErr error
 	switch target {
 	case router.TargetLocal:
