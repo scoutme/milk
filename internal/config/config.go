@@ -532,7 +532,7 @@ type OtelConfig struct {
 	Metrics             bool   `json:"metrics"`
 	WarnMB              int    `json:"warn_mb"`                        // warn when any otel file exceeds this (0 = off)
 	MaxMB               int    `json:"max_mb"`                         // hard cap, disable otel when exceeded (0 = off)
-	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`          // periodic flush interval (0 = session-end only)
+	MetricsFlushMinutes int    `json:"metrics_flush_minutes"`          // periodic flush interval (0 = 24h periodic; a final export always runs at session end)
 	PreDebugLogLevel    string `json:"pre_debug_log_level,omitempty"`  // saved by debug enable; restored by debug disable
 	PreDebugLogFormat   string `json:"pre_debug_log_format,omitempty"` // saved by debug enable (which switches to "pretty"); restored by debug disable
 	DebugLogMaxBytes    int64  `json:"debug_log_max_bytes"`            // per-file cap, default 104857600 (100 MB)
@@ -1551,7 +1551,7 @@ func defaults() Config {
 			Traces:              true,
 			Metrics:             true,
 			WarnMB:              50,
-			MaxMB:               0,
+			MaxMB:               256,
 			MetricsFlushMinutes: 5,
 			DebugLogMaxBytes:    104857600,
 			DebugLogMaxFiles:    5,

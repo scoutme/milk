@@ -144,7 +144,7 @@ var commandRegistry = []cmdSpec{
 	{name: cmdOtel, hosts: hostTUI, desc: "show or manage OTel observability files", hint: "[on|off|trim|debug enable|disable]", help: `  /otel                  show OTel file sizes and record counts
   /otel on               enable OTel for this session
   /otel off              disable OTel for this session
-  /otel trim             archive current OTel files and start fresh
+  /otel trim             archive current OTel files and start fresh (keeps 3 newest archives per file)
   /otel debug enable     enable full debug logging (log_context, debug_*, log_level=DEBUG)
   /otel debug disable    disable debug logging (restores defaults)`},
 	{name: cmdMetrics, hosts: hostBoth, desc: "show recent metric values", help: `  /metrics               show latest metric values`},

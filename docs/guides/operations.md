@@ -72,7 +72,7 @@ milk exports OpenTelemetry-shaped signals to JSONL files under `~/.milk/otel/` �
 |---|---|
 | `/metrics` | Latest value for each metric+label combination |
 | `/otel` | File sizes, record counts, timestamp bounds |
-| `/otel trim` | Archive current files, recreate empty ones |
+| `/otel trim` | Archive current files, recreate empty ones, keep only the 3 newest archives per file (old archives are pruned at startup too) |
 | `search_signals` (tool) | Case-insensitive search over the raw JSONL |
 | `/usage` | Token usage report — cumulative, this session, since start — broken down by agent role and model, with a `tok/s` throughput column |
 
@@ -98,13 +98,33 @@ Where it shows: the TUI status bar (live `tok/s` estimate while streaming; `(las
     "traces": true,
     "metrics": true,
     "warn_mb": 50,
-    "max_mb": 0,
+    "max_mb": 256,
     "metrics_flush_minutes": 5
   }
 }
 ```
 
 `otel.log_context: true` logs the full content of every request payload at DEBUG level to `~/.milk/otel/logs.jsonl` (requires `log_level: "DEBUG"`) — covers the claude-cli static/dynamic context files and prompt, the full local/Bedrock inference request body, and subprocess agents' context/prompt temp files.
+
+### Reading memory metrics
+
+Memory counters are OTel **cumulative** counters with per-process semantics — read them with these rules or you will draw wrong conclusions (issue #375 was filed on exactly such a misreading):
+
+- **Never sum raw data-point values.** Each exported point repeats the running total; summing a series of them produces a number that means nothing (this is how "1537 consolidate increments" was counted when the true figure was ~135 — the sum of cumulative values, not increments).
+- **Never read a single point as a rate.** The last point of `percept_events{event=consolidate}` is just how many passes *that process* ran; `4` in an idle session is a complete lifetime total, not a stall.
+- **Differences within one process are real increments.** Each milk process restarts its counters at 0 (value drops in the file = process restart); delta a series only between points of the same process.
+- **The logs are the complete record.** `consolidation_run` lines in `logs.jsonl` are emitted and batch-flushed within ~1s, while metric points land only on `metrics_flush_minutes` (default 5) and at session end — a hard kill (SIGKILL) can lose up to one flush interval of metric points, never of logs. Parity between the two is enforced by a test (`TestObsParity_MemoryEvents`).
+
+| Instrument | Kind | Log counterpart |
+|---|---|---|
+| `percept_events{event=record,recall,consolidate,reinforce}` | counter | `percept_recorded` / `percept_recalled` / `consolidation_run` — **reinforce is metric-only** |
+| `percepts_recorded` / `percepts_recalled` | counter (by producer/scope) | as above |
+| `consolidation.decayed/pruned/promoted/promotion_deferred/global_decayed` | counter | sums of the `consolidation_run` attributes of the same name |
+| `global_size` | gauge | `consolidation_run.global_total` |
+| `global_archived` | counter | archive file lines (metric-only otherwise) |
+| `session.duration_ms` | gauge | — |
+
+Until the parity checklist in issue #378 is fully closed, treat dashboards on these numbers as verification aids, not tuning inputs — the store state and the `consolidation_run` log already prove cadence.
 
 ### Colored structured log (`log_format: "pretty"`)
 
