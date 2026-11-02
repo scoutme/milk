@@ -959,6 +959,14 @@ func initObs(cfg config.Config) (shutdown func(context.Context) error) {
 		return func(context.Context) error { return nil }
 	}
 
+	// Archive retention (#378): /otel trim archives but never prunes, so
+	// ~/.milk/otel accreted 3.7 GB of old datestamped logs nothing removed.
+	// Sweep at every startup — even while OTel is disabled — before any
+	// size check reads the directory. Best-effort, never fails init.
+	if removed, freed := obs.PruneArchives(otelDir); removed > 0 {
+		fmt.Fprintln(os.Stderr, milkTag()+" "+obs.PruneSummary(removed, freed))
+	}
+
 	if warn, exceeded := obs.CheckFileSizes(cfg.Otel, otelDir); exceeded {
 		fmt.Fprintln(os.Stderr, milkTag()+" "+warn)
 		// Hard cap exceeded — skip OTel for this session.

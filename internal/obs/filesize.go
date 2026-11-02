@@ -149,6 +149,10 @@ func Trim(otelDir string) error {
 			return fmt.Errorf("trim %s: %w", name, err)
 		}
 	}
+	// Retention (#378): archiving without pruning is what grew
+	// ~/.milk/otel to 3.7 GB — sweep old datestamped archives right
+	// after archiving so the directory stays self-limiting.
+	PruneArchives(otelDir)
 	return nil
 }
 

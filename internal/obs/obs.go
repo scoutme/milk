@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	otelmetric "go.opentelemetry.io/otel/metric"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/scoutme/milk/internal/config"
@@ -153,14 +154,22 @@ func RecordScore(ctx context.Context, score float64) {
 	h.Record(ctx, score)
 }
 
-// SetGauge sets an observable gauge via a callback. Registers a new observable
-// gauge each call — intended for low-frequency gauges (e.g. session end).
+// SetGauge records the current value of a gauge: the last recorded value is
+// exported on every collection from then until shutdown. Deliberately a
+// *synchronous* gauge — the previous implementation registered a fresh
+// observable callback per call, which stacked one registration per call
+// (unbounded over a session's consolidation passes), exported the value
+// captured at registration rather than the current one, and — because the
+// OTel global delegate re-applies held observable callbacks when a real
+// provider is set later — could emit *other sessions' values* for the same
+// series (observed as milk.memory.global_size = 1 while every Record said 0,
+// issue #378).
 func SetGauge(ctx context.Context, meterName, instrument string, value int64, attrs ...attribute.KeyValue) {
 	m := Meter(meterName)
-	_, err := m.Int64ObservableGauge(instrument,
-		withInt64Callback(ctx, value, attrs...),
-	)
+	g, err := m.Int64Gauge(instrument)
 	if err != nil {
 		Warn("obs: gauge init failed", "instrument", instrument, "err", err)
+		return
 	}
+	g.Record(ctx, value, otelmetric.WithAttributes(attrs...))
 }

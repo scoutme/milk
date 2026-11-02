@@ -17,14 +17,6 @@ func withAttrs(attrs ...attribute.KeyValue) otelmetric.MeasurementOption {
 	return otelmetric.WithAttributes(attrs...)
 }
 
-// withInt64Callback returns an Int64ObservableOption that reports value on each collection.
-func withInt64Callback(ctx context.Context, value int64, attrs ...attribute.KeyValue) otelmetric.Int64ObservableOption {
-	return otelmetric.WithInt64Callback(func(_ context.Context, o otelmetric.Int64Observer) error {
-		o.Observe(value, otelmetric.WithAttributes(attrs...))
-		return nil
-	})
-}
-
 // contextKey is unexported to avoid collisions.
 type contextKey struct{ name string }
 
