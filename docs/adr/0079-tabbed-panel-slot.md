@@ -3,6 +3,14 @@
 - **Status:** accepted
 - **Date:** 2026-10-25
 
+> **Superseded by [ADR-0098](0098-one-panel-layout-every-theme.md)
+> (2026-11-03):** the hybrid budget port (#373 / ADR-0096) runs on every
+> theme. The shared slot, exclusive navigation, the front-tab layout
+> filter, the exclusivity enforcer and the six-tab bar are retired;
+> supermilk is a skin again. What remains of this ADR's machinery is the
+> view stack (`panelTabMRU` / `activatePanelTab` / `panelActive`) feeding
+> the persisted active panel — visibility itself is the budget's.
+
 ## Context
 
 The supermilk skin (ADR-0077) gives every side panel the same title row: the

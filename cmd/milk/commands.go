@@ -1705,46 +1705,27 @@ func (m model) handleHistoryCmd(sub string) model {
 	return m
 }
 
-// handlePanelCmd runs /panel <name> and the F1-F6 shortcut. On a tabbed
-// theme (ADR-0079) the six panels are tabs of one shared slot and tabs are
-// exclusive: moving to a panel CLOSES the one you moved away from, so at
-// most one panel is ever open. The one state the invariant does not cover
-// itself is multi-open residue (flags set outside the activation paths,
-// e.g. sibling-session state restored before the theme was known): a press
-// on an open-but-not-front panel brings it to the front and closes the rest
-// — it must not close the panel the user is pointing at, and it must not
-// leave invisible siblings behind. On the front panel the toggle still
-// closes it (the slot empties — nothing waits behind), and on a closed one
-// it opens it after the others are out of the way.
+// handlePanelCmd runs /panel <name> and the F1-F6 shortcut. One rule for
+// every theme (ADR-0098): the plain toggle behind it — open stamps (the
+// panel claims attention), a press on a width-hidden panel brings it to the
+// front instead of closing it, a press on a visible one closes it. The
+// exclusive-slot branch ADR-0079 once owned here (moving closed the previous
+// panel) is gone with the port: on every theme, hidden-open siblings are
+// the budget's grouped set, not residue.
 func (m model) handlePanelCmd(sub string) (tea.Model, tea.Cmd) {
 	if name, arg, _ := strings.Cut(sub, " "); name == "autoopen" {
 		return m.handlePanelAutoOpenCmd(strings.TrimSpace(arg))
 	}
-	region := panelRegionForSubName(sub)
-	if panelTabsActive() && region != regionNone {
-		if m.panelRawOpen(region) && region != m.panelActive() {
-			// Moving to the panel is user interest (ADR-0089):
-			// activatePanelTab stamps the recency (it is what picks
-			// the budget group's top, ADR-0096) and the move
-			// announces itself like opening does — same event class,
-			// same feedback.
-			m.activatePanelTab(region)
-			m.closeAllButPanelTabs(region)
-			m.savePanelStateReport()
-			m.syncLayout()
-			m.notify(panelDisplayName(region)+" panel: brought to front", "/panel "+panelSubName(region))
-			return m, nil
-		}
-		m.activatePanelTab(region)
-		m.closeAllButPanelTabs(region)
-	}
 	return m.handlePanelCmdToggle(sub)
 }
 
-// handlePanelCmdToggle is the plain show/hide toggle behind /panel <name>
-// and F1-F6 (the tab-aware entry point is handlePanelCmd) — plus one rule
-// it owns: a press on a panel the width budget *hid* brings it to the
-// front instead of toggling it closed (see the bring-to-front block below).
+// handlePanelCmdToggle is the show/hide toggle behind /panel <name> and
+// F1-F6 (handlePanelCmd routes both here on every theme — ADR-0098) — plus
+// two rules it owns: a press on a panel the width budget *hid* brings it to
+// the front instead of toggling it closed (see the bring-to-front block
+// below), and opening/bringing a panel pushes it onto the view stack
+// (activatePanelTab: panelActive — the state file's persisted active panel
+// and the preferences display — follows the user, not content).
 func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	r := regionForPanelSub(sub)
 	if r != regionNone && !m.panelRawOpen(r) {
@@ -1772,7 +1753,7 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 	// press falls through to the plain toggle so the shortcut still does
 	// something.
 	if r != regionNone && m.panelRawOpen(r) && !m.panelVisible(r) {
-		m.stampPanelActivity(r)
+		m.activatePanelTab(r) // stamps the recency and the view stack (ADR-0089)
 		if m.panelVisible(r) {
 			m.panelManualOverride[r] = true
 			m.panelPrefs[r] = true
@@ -1781,6 +1762,12 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 			m.notify(panelDisplayName(r)+" panel: brought to front", "/panel "+panelSubName(r))
 			return m, nil
 		}
+	}
+	// Opening by hand: the panel joins the view stack (panelActive) so the
+	// state file's persisted active panel follows the user's own choice.
+	// Runs before the flag flips — panelActive re-reads the flags on access.
+	if r != regionNone && !m.panelRawOpen(r) {
+		m.activatePanelTab(r)
 	}
 	// Every toggle records the manual override; a toggle that *closes* a
 	// panel whose content has already finalized drops it again right away
@@ -1897,8 +1884,8 @@ func (m model) handlePanelCmdToggle(sub string) (tea.Model, tea.Cmd) {
 // handlePanelAutoOpenCmd handles /panel autoopen [on|off] — the master
 // switch for content-driven panel auto-open (ADR-0087): with it on (the
 // default) a panel opens itself when its content becomes active, subject
-// to the per-panel manual override (ADR-0059/0078) and the tabbed-theme
-// gate (ADR-0079); with it off, panels open only on an explicit
+// to the per-panel manual override (ADR-0059/0078); with it off, panels
+// open only on an explicit
 // /panel <name> toggle (or F1-F6). Persisted like /tips (config key
 // panel_auto_open), so the choice survives restarts.
 //

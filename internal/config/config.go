@@ -204,6 +204,9 @@ func DeepMerge(dst, src Config) Config {
 	if src.RememberPanelState != nil {
 		dst.RememberPanelState = src.RememberPanelState
 	}
+	if src.MaxShownPanels != 0 {
+		dst.MaxShownPanels = src.MaxShownPanels
+	}
 	if src.PanelAutoOpen != nil {
 		dst.PanelAutoOpen = src.PanelAutoOpen
 	}
@@ -1196,12 +1199,20 @@ type Config struct {
 	// session-only.
 	RememberPanelState *bool `json:"remember_panel_state,omitempty"`
 
+	// MaxShownPanels caps how many side-panel columns the width budget
+	// may show at once (ADR-0098): 0/absent = the width decides alone
+	// (floor((width-40)/33)); "max_shown_panels": 1 keeps the one-column
+	// experience — every open panel behind the rightmost column's tab
+	// strip — while higher values narrow an ultrawide layout. Applies to
+	// every theme (the supermilk port shares the same budget) and
+	// hot-reloads like every other scalar (configReloadMsg).
+	MaxShownPanels int `json:"max_shown_panels,omitempty"`
+
 	// PanelAutoOpen is the master switch for content-driven panel
 	// auto-open (ADR-0087): with it on (the default) a side panel opens
 	// itself when its content becomes active — a task is created, a
 	// background job spawns, a workflow starts, percepts arrive — subject
-	// to the per-panel manual override (ADR-0059/0078) and the tabbed-theme
-	// gate (ADR-0079). "panel_auto_open": false makes panels open only on
+	// to the per-panel manual override (ADR-0059/0078). "panel_auto_open": false makes panels open only on
 	// an explicit /panel <name> toggle (or F1-F6); the TUI's
 	// "/panel autoopen on|off" writes this key.
 	PanelAutoOpen *bool `json:"panel_auto_open,omitempty"`

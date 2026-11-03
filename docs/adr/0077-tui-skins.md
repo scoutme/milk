@@ -47,7 +47,7 @@ Two named skins, selected with `/theme` and persisted as `theme` in
 
 Rules that keep the two skins from forking behaviour:
 
-- A skin restyles chrome only — header, status bar, turn labels, panel tabs,
+- A skin restyles chrome only — header, status bar, turn labels, panel titles,
   scrollbars, staleness ramp, tool rows, reasoning surface. Transcript
   content, slash commands, config keys and session files are unchanged.
 - `rebuildStyles()` is the only place that builds chrome styles, so a

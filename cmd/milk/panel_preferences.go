@@ -32,8 +32,9 @@ import (
 
 // panelStateFile is the on-disk shape of a panel-state file. Version
 // guards future shape changes; Panels maps panelSubName → the panel's raw
-// open flag at the time of the last manual toggle; Active names the tab
-// in front of the shared panel slot on tabbed themes (ADR-0079) — which of
+// open flag at the time of the last manual toggle; Active names the
+// front of the view stack (ADR-0098 — the panel the user last looked at,
+// on every theme) — which of
 // the open panels the user last looked at. Active is empty in files written
 // before it, and harmless if the named panel is not open after restore
 // (panelActive falls back to the first open panel). Folder records the
@@ -177,7 +178,7 @@ func (m *model) savePanelState() error {
 			f.Panels[panelSubName(region)] = *ptr
 		}
 	}
-	// The front tab of the shared slot (ADR-0079) is persisted only when
+	// The view stack's front panel (ADR-0098) is persisted only when
 	// the user themselves chose that panel — the same rule as the open
 	// flags above: auto-opened state is not a preference. An auto-opened
 	// front panel is transient anyway (it will not be open after restore),

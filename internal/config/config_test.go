@@ -2309,3 +2309,14 @@ func TestDeepMerge_PerceptInjectMinW(t *testing.T) {
 		t.Errorf("merge lost the explicit disable, got %v", merged.PerceptInjectMinWeight())
 	}
 }
+
+// TestDeepMerge_MaxShownPanels: the panel-column cap is a plain scalar —
+// a configured value overrides, an unset source (0) leaves the base alone.
+func TestDeepMerge_MaxShownPanels(t *testing.T) {
+	if got := DeepMerge(Config{MaxShownPanels: 4}, Config{MaxShownPanels: 1}).MaxShownPanels; got != 1 {
+		t.Errorf("merge overwrote to %d, want 1", got)
+	}
+	if got := DeepMerge(Config{MaxShownPanels: 4}, Config{}).MaxShownPanels; got != 4 {
+		t.Errorf("unset source changed the cap to %d, want 4", got)
+	}
+}

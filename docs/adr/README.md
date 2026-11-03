@@ -95,3 +95,4 @@
 * [94. Goal-aware history trim: the superseded ask is not pinned](0094-goal-aware-history-trim.md) *(amends 32's 2026-10-29 update)*
 * [95. Panel content events: per-event notifications, edge-based layout](0095-panel-content-events.md) *(amends 59's finalization rule for state panels)*
 * [96. Width-budget overflow tabs: hidden panels surface on the rightmost panel](0096-width-budget-overflow-tabs.md) *(completes 89's discovery gap)*
+* [98. One Panel Layout for Every Theme: the hybrid budget everywhere](0098-one-panel-layout-every-theme.md) *(supersedes 79's docking; extends 96 to every theme + `max_shown_panels`)*

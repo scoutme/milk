@@ -125,9 +125,9 @@ func (m *model) viewportRows() (top, bottom int) {
 
 // mainWidth returns the width available for the transcript+input area.
 // When side panels are in the layout it is reduced accordingly, but only when
-// the panel would actually be rendered (i.e. terminal is wide enough). On a
-// tabbed theme (ADR-0079) at most one panel — the front tab — is in the
-// layout, so the shared slot costs one panel width however many are open.
+// the panel would actually be rendered (i.e. terminal is wide enough) — one
+// width per *visible* panel (free columns and the group top alike, ADR-0096),
+// however many are open behind the group's strip.
 func (m *model) mainWidth() int {
 	w := m.width
 	for _, r := range panelRenderOrder {
@@ -156,11 +156,12 @@ const panelMinMainWidth = 40
 //     panel before it also fits, stopping before the next panel would push
 //     the main area below panelMinMainWidth (40). With uniform 33-col slots
 //     that count is a pure function of the width budget — floor((width-40)/33),
-//     capped by however many panels are open — so the *number* of visible
-//     panels never depends on which panels are open (pre-ADR-0089 memory/
-//     tasks/background had no guard while project/git/workflow demanded 40
-//     free cols, so one combination could show three panels where another
-//     showed one).
+//     capped by however many panels are open and by the config knob
+//     max_shown_panels (0/absent = the width-derived count) — so the *number*
+//     of visible panels never depends on which panels are open (pre-ADR-0089
+//     memory/tasks/background had no guard while project/git/workflow
+//     demanded 40 free cols, so one combination could show three panels where
+//     another showed one).
 //  2. Split — the open panels divide into two sets by *position*, never by
 //     recency ("the grouped ones are always the rightmost ones between the
 //     opened ones"): the free ones — the leftmost open panels in
@@ -175,9 +176,9 @@ const panelMinMainWidth = 40
 //     visible panel (every grouped panel sits after every free one in
 //     panelRenderOrder), so the row's join order stays plain render order.
 //
-// The tabbed front-tab filter (ADR-0079) falls out naturally: only the front
-// tab is in layout, so it is the only candidate and fits unless the terminal
-// is under panelMinMainWidth+panelWidth.
+// Theme-independent (ADR-0098): "off" and supermilk share this rule — the
+// theme picks colours, not columns. max_shown_panels: 1 pins the one-column
+// experience (everything grouped, the strip still switches panels).
 func (m *model) panelFits(region panelRegion) bool {
 	open, no := m.panelOpenOrder()
 	idx := -1
@@ -188,9 +189,9 @@ func (m *model) panelFits(region panelRegion) bool {
 		}
 	}
 	if idx < 0 {
-		return false // not open (or filtered out by the tabbed front-tab rule)
+		return false // not open
 	}
-	slots := budgetSlotCount(open, no, m.width)
+	slots := budgetSlotCount(open, no, m.width, m.maxShownPanels())
 	if slots < 1 {
 		return false // below the one-panel floor: nothing shows
 	}
@@ -208,8 +209,11 @@ func (m *model) panelFits(region panelRegion) bool {
 // panel would push the main area below panelMinMainWidth. One function
 // behind panelFits (membership) and the grouped set (issue #373) so "how
 // much fits" can never disagree between them. With uniform 33-col slots
-// this is floor((width-40)/33).
-func budgetSlotCount(open [regionGit + 1]panelRegion, n, width int) int {
+// this is floor((width-40)/33). maxShown (> 0) is the config knob
+// max_shown_panels capping the count below the width-derived one — the
+// one-column experience is maxShown=1 (everything grouped behind the strip);
+// 0 or negative means the width decides alone.
+func budgetSlotCount(open [regionGit + 1]panelRegion, n, width, maxShown int) int {
 	used, slots := 0, 0
 	for i := 0; i < n; i++ {
 		if used+panelWidth(open[i])+panelMinMainWidth > width {
@@ -218,7 +222,23 @@ func budgetSlotCount(open [regionGit + 1]panelRegion, n, width int) int {
 		used += panelWidth(open[i])
 		slots++
 	}
+	if maxShown > 0 && slots > maxShown {
+		slots = maxShown
+	}
 	return slots
+}
+
+// maxShownPanels is the configured cap on visible panel columns
+// (config max_shown_panels): > 0 caps budgetSlotCount, 0/absent leaves the
+// width budget in charge. Read from the live session config on every layout
+// pass so a hot-reload (configReloadMsg / /reload) applies immediately, with
+// no restart — the standing config rule. Nil-state (bare test models) reads
+// as 0.
+func (m *model) maxShownPanels() int {
+	if m.st == nil {
+		return 0
+	}
+	return m.st.cfg.MaxShownPanels
 }
 
 // vpWidth is the viewport content width: mainWidth minus 1 column reserved for the scrollbar.

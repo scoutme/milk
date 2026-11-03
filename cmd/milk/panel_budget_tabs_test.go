@@ -119,11 +119,12 @@ func TestBudgetTabGroup_HiddenPeersAndGates(t *testing.T) {
 	}
 	m.width = 100
 
-	// Tabbed themes are out of scope by design (issue #373's scope note).
+	// Every theme grows the strip after the port (ADR-0098): supermilk
+	// renders the same group, at the same place.
 	setTheme("supermilk")
 	t.Cleanup(func() { setTheme("off") })
-	if g := m.budgetTabGroupFor(regionGit); g != nil {
-		t.Errorf("tabbed theme must never grow budget tabs, got %v", g)
+	if g := m.budgetTabGroupFor(regionGit); len(g) != 2 || g[0] != regionMemory || g[1] != regionGit {
+		t.Errorf("supermilk must grow the same budget tabs, got %v", g)
 	}
 }
 

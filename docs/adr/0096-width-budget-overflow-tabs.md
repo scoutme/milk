@@ -3,6 +3,13 @@
 - **Status:** accepted
 - **Date:** 2026-11-02
 
+> **Scope extended by [ADR-0098](0098-one-panel-layout-every-theme.md)
+> (2026-11-03):** the split applies to **every theme** — supermilk lost its
+> exclusive shared slot and renders this same model (its six-tab bar and
+> the `!panelTabsActive()` gate below are gone), so "sibling layout only"
+> below reads as "both layouts". The column count may additionally be
+> capped by the config `max_shown_panels` (0 = the width decides).
+
 ## Context
 
 ADR-0089's width budget shows only the panels that fit (and of those, the
@@ -27,14 +34,15 @@ column). The split is purely positional: *"the grouped ones are always the
 rightmost ones between the opened ones"* — the leftmost open panels in
 `panelRenderOrder` fill the columns, and the ones past the free slots group
 in the rightmost column. While no more panels are open than columns fit
-(ADR-0089's count, unchanged) there is no group at all. Recency has exactly
+(ADR-0089's count, unchanged — possibly capped lower by the config
+`max_shown_panels`, ADR-0098) there is no group at all. Recency has exactly
 one role: **between the grouped ones, the fresher one is on top** — its
 content fills the group column and its label is the strip's active one. The
 group column's title row **becomes the strip** — **labels keep the fixed
 f1–f6 order (`panelRenderOrder`) and never reorder on selection**: picking a
-new top moves only the styling and the content, never the labels (the
-tabbed theme's bar, ADR-0079, follows the same rule — its strip has always
-been the fixed table). The builder's title line is *replaced*,
+new top moves only the styling and the content, never the labels (this
+is also the rule the retired ADR-0079 bar followed — the fixed table is
+now this strip's alone, per ADR-0098). The builder's title line is *replaced*,
 never shown beside it: the top's name already appears as its own
 (underlined) tab, and a title next to it would print it twice.
 
@@ -67,11 +75,12 @@ columns reshuffling). ADR-0089's slot count and width math stand unchanged.
   panel sits after every free one in `panelRenderOrder` — so the row's
   plain render-order join (`viewBody`, `regionAt`, `panelX`) already places
   it last.
-- **Gates**: sibling layout only (`!panelTabsActive()` — a tabbed slot cannot
-  hold grouped peers), a non-empty group (when everything fits the title row
-  is byte-for-byte today's), top not mid-slide, and the click — like the
-  tabbed bar's — only on the top row while the panel is scrolled home
-  (`ev.Y == panelRowStart && lineIdx == 0`).
+- **Gates**: a non-empty group (when everything fits the title rows are
+  plain everywhere), top not mid-slide, and the click — only on the top
+  row while the panel is scrolled home
+  (`ev.Y == panelRowStart && lineIdx == 0`). The theme gate this ADR once
+  carried (`!panelTabsActive()` — sibling layouts only) is gone with the
+  ADR-0098 port.
 
 ## Consequences
 

@@ -16,9 +16,10 @@ import (
 // Switchable TUI themes. "off" (the default) is the original look, byte for
 // byte; "supermilk" is the opt-in skin (/theme supermilk or config "theme"):
 // milk-white ground, soft ink text, muted olive accent. A skin restyles only
-// the chrome (header, status bar, turn labels, panel tabs, scrollbars),
+// the chrome (header, status bar, turn labels, panel titles, scrollbars),
 // paints the whole screen and, on exit, hands the terminal's own colours
-// back.
+// back. Panel *layout* is theme-independent since ADR-0098 — the two skins
+// share the same free/grouped width budget.
 
 type themeColor struct{ dark, light string }
 

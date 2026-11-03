@@ -15,7 +15,7 @@ The design below extracts the RFC's **cognitive model** and maps it onto milk's 
 | Hippocampus | `internal/memory` package — sole memory store |
 | Percept | `memory.Percept` — atomic memory unit |
 | Engram | `memory.Engram` — Percepts grouped by subject |
-| NREM Overnight Cycle | lightweight consolidation run after every primary turn and at exit |
+| NREM Overnight Cycle | lightweight consolidation run after every turn (any host/role — TUI, ACP, escalation, workflow, background) and at exit |
 | REM / NeoCortex | deferred (no UKB equivalent in milk today) |
 | Memory API Gateway | `get_memory` and `record_memory` local agent tools |
 | Confidence Weight | `w float64` on each Percept, decays with milk running time (ADR-0090) |

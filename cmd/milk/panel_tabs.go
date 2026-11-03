@@ -6,39 +6,21 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Tabbed panel docking (ADR-0079): a theme whose panel title row is a tab
-// strip (theme_chrome.go's panelTabStrip — exactly the "modern" skins) means
-// the panels to be tabs of *one* shared slot, not six sibling columns each
-// wearing the same six tabs. Six tab labels over six stacked panels is what a
-// tab bar means; six copies of the strip over six side-by-side panels is not.
+// Panel layout for every theme (ADR-0098 — the port of ADR-0079's
+// docking into the hybrid budget): theme "off" and "supermilk" share one
+// model — the open panels split positionally into the free ones (leftmost,
+// one column each, up to the width budget) and the grouped ones (tabbed in
+// the rightmost column, freshest on top, see budgetGroup below). The
+// supermilk skin stays a *skin*: colours, chrome and the status bar — it no
+// longer docks panels into an exclusive shared slot. What remains of
+// ADR-0079's vocabulary is the view stack (panelTabMRU / activatePanelTab:
+// which panel the user looked at last), feeding panelActive — the state
+// file's persisted "active" panel and the preferences display.
 //
-//   - one slot, one panel: exactly one panel occupies layout columns — the
-//     front tab (panelActive). Tabs are exclusive (the user's rule):
-//     moving to a panel CLOSES the one you moved away from, so a tabbed
-//     theme never runs hidden-open siblings. The activation paths below
-//     keep that invariant; the layout predicates still filter to the front
-//     tab, and enforceTabbedPanelExclusivity collapses multi-open states
-//     set outside them (sibling-session state restored before the theme is
-//     known, /theme switching from siblings to tabs).
-//   - switching: F1-F6 / /panel <name> and a click on a tab label open the
-//     target panel — whatever was in the slot is closed — and on the front
-//     panel the F-key still closes it, leaving the slot empty. Content-
-//     driven auto-open only fires while the slot is free, so live content
-//     never moves the user off the panel they are looking at.
-//   - closing the front tab leaves the slot empty: with exclusivity there
-//     is no other open panel to hand it back to. panelTabMRU still picks
-//     the front among the open panels a restored multi-open state hands
-//     the loader — its only remaining job.
-//
-// Without tabs (theme "off") nothing here applies: panels stay siblings,
-// joined left-to-right in panelRenderOrder, and every predicate below
-// degenerates to the plain open flag.
-
-// panelTabsActive reports whether the active theme renders the panel tab
-// strip and therefore docks panels into one shared slot. Tied to th.modern
-// because that is exactly the condition panelTitleLine renders the strip
-// under — the tab bar and the shared slot can never disagree.
-func panelTabsActive() bool { return th.modern }
+// The strip a reader still sees — the group column's title row — is the
+// overflow strip (#373 / ADR-0096), rendered by theme-independent
+// budgetTabStrip on both themes; supermilk's old six-tab bar over every
+// panel title is gone with the port.
 
 // panelRawOpen reports a panel's raw open flag: no width guards, no tab
 // filter. This is the persisted state (ADR-0078) and what notifications and
@@ -69,9 +51,10 @@ func panelWidth(region panelRegion) int {
 	return 0
 }
 
-// activatePanelTab brings region's tab to the front of the shared slot by
-// pushing it onto the most-recently-viewed stack. Moving a panel to the top
-// is attention on par with opening it (ADR-0089 — an open toggle stamps):
+// activatePanelTab pushes region onto the view stack
+// (most-recently-viewed — what panelActive reads, ADR-0098). Moving a panel
+// to the top is attention on par with opening it (ADR-0089 — an open toggle
+// stamps):
 // it stamps the panel's recency too — the same attention record an open
 // toggle leaves, and where recency decides something (the budget group's
 // top, ADR-0096) that is this stamp. The stack is rebuilt into a fresh slice
@@ -94,11 +77,14 @@ func (m *model) activatePanelTab(region panelRegion) {
 	m.panelTabMRU = mru
 }
 
-// panelActive is the panel in front of the shared slot: the most recently
-// viewed tab whose panel is actually open (raw flag — every layout predicate
-// derives from this, so it must not consult the width guards, which derive
-// from it in turn), falling back to panelRenderOrder for state restored or
-// seeded without tab history. regionNone when no panel is open at all.
+// panelActive is the most recently viewed panel whose panel is actually
+// open (raw flag — every layout predicate derives from this, so it must not
+// consult the width guards, which derive from it in turn), falling back to
+// panelRenderOrder for state restored or seeded without view history. This
+// is "which panel did I look at last" — the state file's persisted active
+// panel and the preferences display — NOT a visibility predicate: what
+// occupies columns is the budget's free/grouped split (ADR-0096/0098).
+// regionNone when no panel is open at all.
 func (m *model) panelActive() panelRegion {
 	for _, r := range m.panelTabMRU {
 		if m.panelRawOpen(r) {
@@ -114,19 +100,19 @@ func (m *model) panelActive() panelRegion {
 }
 
 // panelInLayout is the layout membership test the width sums derive from:
-// raw open flag plus the tabbed front-tab filter, with no width guards —
-// those derive from this, so asking them here would recurse.
+// the raw open flag on every theme (the port dissolved ADR-0079's front-tab
+// filter — hidden-open panels are the budget's grouped set, not residue),
+// with no width guards — those derive from this, so asking them here would
+// recurse.
 func (m *model) panelInLayout(region panelRegion) bool {
-	if !m.panelRawOpen(region) {
-		return false
-	}
-	return !panelTabsActive() || region == m.panelActive()
+	return m.panelRawOpen(region)
 }
 
 // panelVisible reports whether a panel occupies layout columns right now:
-// in layout (raw open, and the front tab on a tabbed theme — panelInLayout)
-// and within the width budget (panelFits, ADR-0089: count from the width,
-// membership from content recency). Everything that measures or joins the
+// in layout (raw open — panelInLayout) and within the width budget
+// (panelFits: the width-derived count — optionally capped by
+// max_shown_panels — the positional free/grouped split, and the group's top
+// on top, ADR-0089/0096/0098). Everything that measures or joins the
 // layout (mainWidth, regionAt, viewBody, panelX, panelAltBackground, the
 // animation tracker) asks this — the single visibility predicate; it
 // replaced a per-panel mix of guarded and unguarded checks that made the
@@ -136,10 +122,9 @@ func (m *model) panelVisible(region panelRegion) bool {
 	return m.panelFits(region)
 }
 
-// anyPanelVisible reports whether the panel slot is occupied at all — the
-// animation tracker uses it to tell a slot appearing/disappearing (slide in,
-// shrink out) apart from a tab swap inside an occupied slot (instant), and
-// autoOpenPanel uses it to keep content from moving the user.
+// anyPanelVisible reports whether any panel occupies layout columns right
+// now — autoOpenPanel uses it to keep content from moving the user (the
+// stamp still lands, the open may wait for a free column).
 func (m *model) anyPanelVisible() bool {
 	for _, r := range panelRenderOrder {
 		if m.panelVisible(r) {
@@ -149,51 +134,11 @@ func (m *model) anyPanelVisible() bool {
 	return false
 }
 
-// closeAllButPanelTabs closes every open panel except keep — the
-// exclusivity rule of the tabbed slot (ADR-0079): moving to a panel closes
-// the ones you moved away from, so a tabbed theme never runs hidden-open
-// siblings. This is a navigation close, not a dismissal: the manual
-// override (the user's own preference, ADR-0059/0078) is left untouched,
-// so panels the user opened themselves still stick and auto-open behaviour
-// is unchanged. Reports whether it actually closed anything. No-op on a
-// sibling (theme "off") layout.
-func (m *model) closeAllButPanelTabs(keep panelRegion) bool {
-	if !panelTabsActive() {
-		return false
-	}
-	closed := false
-	for _, r := range panelRenderOrder {
-		if r == keep || !m.panelRawOpen(r) {
-			continue
-		}
-		if ptr := m.panelOpenPtr(r); ptr != nil {
-			*ptr = false
-			closed = true
-		}
-	}
-	return closed
-}
-
-// enforceTabbedPanelExclusivity collapses a multi-open panel state — state
-// restored from a theme-"off" session, or /theme switching from siblings to
-// tabs — to the single front panel. The activation paths keep the invariant
-// themselves; this covers the two moments where panel flags are set outside
-// them: right after the theme is known at startup, and on /theme. No-op
-// while tabs are inactive; when it does collapse something, the new state is
-// persisted right away — the collapse must not wait for the user's next
-// panel action to reach the state file.
-func (m *model) enforceTabbedPanelExclusivity() {
-	if m.closeAllButPanelTabs(m.panelActive()) {
-		m.savePanelStateReport()
-	}
-}
-
-//
-// Sibling layout only (theme "off"): the open panels split into two sets —
-// the *free* ones (opened and visible, one per column) and the *grouped* ones
-// (tabbed together in the last column). The split is purely positional:
-// "the grouped ones are always the rightmost ones between the opened ones" —
-// the leftmost open panels in panelRenderOrder fill the columns, and the
+// The open panels split into two sets — the *free* ones (opened and
+// visible, one per column) and the *grouped* ones (tabbed together in the
+// last column). The split is purely positional:
+// "the grouped ones are always the rightmost ones between the opened ones"
+// — the leftmost open panels in panelRenderOrder fill the columns, and the
 // ones past the free slots group in the rightmost column. While no more
 // panels are open than columns fit there is no group at all. Recency plays
 // exactly one role: between the grouped ones, the fresher one is on top —
@@ -203,9 +148,9 @@ func (m *model) enforceTabbedPanelExclusivity() {
 // order (panelRenderOrder): selecting a new top moves only the styling and
 // the content, never the labels ("keep tab titles order unchanged — even on
 // selection"). The builder's title line is replaced, never shown beside it
-// (the top's name would otherwise print twice). Same row treatment and
-// visual language as the tabbed theme's bar (ADR-0079): labels from column
-// 0, the top's label in the panel-title style underlined, the rest dim.
+// (the top's name would otherwise print twice). On both themes (the port —
+// ADR-0098): theme "off" renders plain title rows beside it, and supermilk's
+// titles are plain too since its six-tab bar retired.
 //
 // A tab click only ever moves a panel to the top of its group — a grouped
 // label brings that panel to the top (recency stamp, never toggled closed —
@@ -213,21 +158,16 @@ func (m *model) enforceTabbedPanelExclusivity() {
 // stay the rightmost open ones). The top's own label is a no-op: clicking
 // the panel you are pointing at must not move or close it — closing stays
 // with the F-key / /panel press. When everything fits there is no group and
-// the title rows are byte-for-byte today's; a tabbed theme never reaches
-// this code (panelTabsActive gate — its exclusive slot cannot hold
-// grouped peers).
+// the title rows are plain everywhere.
 
-// budgetGroup returns the width budget's grouped set (issue #373): the
-// rightmost open panels — the ones past the free slots — in
-// panelRenderOrder. Empty while no more panels are open than columns fit
-// (no group at all then), below the one-panel floor (nothing shows), and on
-// a tabbed theme.
+// budgetGroup returns the width budget's grouped set (issue #373, ported
+// to every theme by ADR-0098): the rightmost open panels — the ones past
+// the free slots, capped by max_shown_panels — in panelRenderOrder. Empty
+// while no more panels are open than columns fit (no group at all then),
+// below the one-panel floor (nothing shows).
 func (m *model) budgetGroup() (group [regionGit + 1]panelRegion, n int) {
-	if panelTabsActive() {
-		return group, 0
-	}
 	open, no := m.panelOpenOrder()
-	slots := budgetSlotCount(open, no, m.width)
+	slots := budgetSlotCount(open, no, m.width, m.maxShownPanels())
 	if slots < 1 || no <= slots {
 		return group, 0
 	}
@@ -258,9 +198,9 @@ func (m *model) budgetTop() panelRegion {
 // grouped set in panelRenderOrder — labels keep their fixed f1–f6 order and
 // never move on selection (budgetTabStrip styles the top active in place) —
 // but only when region is that top: only the group column carries the
-// strip. nil otherwise, when nothing is grouped, or on a tabbed theme.
+// strip. nil otherwise or when nothing is grouped.
 func (m *model) budgetTabGroupFor(region panelRegion) []panelRegion {
-	if panelTabsActive() || region == regionNone {
+	if region == regionNone {
 		return nil
 	}
 	group, n := m.budgetGroup()
@@ -292,11 +232,11 @@ func budgetStripWidth(group []panelRegion, inner int) int {
 }
 
 // budgetTabStrip renders a group's labels — one space join, exactly like
-// panelTabStrip walks its own table — with host styled as the active tab.
-// Vocab is the sibling theme's own: the host label wears the panel-title
+// the retired tab bar walked its own table — with host styled as the active
+// tab. Vocab that works on every theme: the host label wears the panel-title
 // style underlined (tab-ness must read even where colour doesn't — theme
-// "off" has no accent token, and panelTabStrip's accent code would panic on
-// it), the hidden peers dim, like the F-key hint they replace.
+// "off" has no accent token and an accent-coloured code would panic on it),
+// the peers dim, like the F-key hint they replace.
 func budgetTabStrip(group []panelRegion, host panelRegion, inner int) string {
 	var b strings.Builder
 	for i, r := range group {

@@ -84,14 +84,10 @@ func panelShortcut(region panelRegion) string {
 // (styled via stylePanelTitle) and its F1-F6 shortcut right-aligned within
 // inner columns, dimmed — so the toggle key is visible without opening
 // /panel or memorizing it. Title is truncated, not the hint, if both
-// together would overflow inner. On a tabbed theme this is the strip in
-// fixed f1–f6 table order — the one order it ever renders in (labels never
-// reorder on selection; previews and tests get the same row the live
-// render uses).
+// together would overflow inner. One row on every theme (ADR-0098): the
+// group column's strip replaces this row where one applies (see
+// renderSidePanel), never beside it.
 func panelTitleLine(title string, region panelRegion, inner int) string {
-	if th.modern {
-		return panelTabStrip(region, inner)
-	}
 	hint := panelShortcut(region)
 	if hint == "" {
 		return stylePanelTitle.Render(truncate(title, inner))
@@ -122,9 +118,11 @@ func panelTitleLine(title string, region panelRegion, inner int) string {
 // command that closes it again. Repeated calls while already open — e.g.
 // every workflow chunk — stay silent.
 //
-// On a tabbed theme (ADR-0079) content never moves the user: an auto-open
-// only fires while the shared slot is free (see the gate below), so live
-// content can never yank the view off the panel the user is looking at.
+// On every theme, content never moves the user: an auto-open that would
+// open a new panel only lands while a column is free (see the gate below),
+// so live content can never yank the view off the panel the user is
+// looking at — the stamp always lands so the panel tops the group and
+// shows at the next layout where the budget allows.
 func (m *model) autoOpenPanel(region panelRegion) {
 	// Content event → recency stamp (ADR-0089), ahead of every gate: the
 	// panel's content changed whether or not the panel is allowed to open
@@ -141,21 +139,15 @@ func (m *model) autoOpenPanel(region panelRegion) {
 		return
 	}
 	wasOpen := m.panelVisible(region)
-	// Tabbed themes (ADR-0079): while another panel occupies the shared
-	// slot, content for a closed panel stays a notification instead of
-	// switching the user's tab — auto-open takes a free slot or none.
-	if panelTabsActive() && !wasOpen && m.anyPanelVisible() {
-		return
-	}
 	if ptr := m.panelOpenPtr(region); ptr != nil {
 		*ptr = true
 	}
 	if !wasOpen && m.panelVisible(region) {
-		// Tabbed themes (ADR-0079): the panel that just opened takes the
-		// shared slot (the gate above means the slot was free) — once.
-		// Later content for the same already-open panel (every workflow
-		// chunk, every task update) never yanks the tab back from wherever
-		// the user has moved on to.
+		// The panel that just opened joins the view stack — it is the
+		// panel the user is now looking at (panelActive), once. Later
+		// content for the same already-open panel (every workflow chunk,
+		// every task update) never yanks it back from wherever the user
+		// has moved on to.
 		m.activatePanelTab(region)
 		m.notify(panelDisplayName(region)+" panel opened", "/panel "+panelSubName(region))
 	}
@@ -330,8 +322,8 @@ func (m *model) stampPanelActivity(region panelRegion) {
 	m.panelActivity[region] = time.Now()
 }
 
-// panelOpenOrder fills out with the in-layout panels (raw open, and the
-// front tab on a tabbed theme — panelInLayout) in panelRenderOrder and
+// panelOpenOrder fills out with the in-layout panels (raw open —
+// panelInLayout) in panelRenderOrder and
 // returns the count: the one order the width budget splits the two panel
 // sets along (issue #373). Stack array, no allocation — the per-render
 // panelVisible path (see ADR-0088's render-loop budget).
@@ -388,8 +380,7 @@ var panelRenderOrder = []panelRegion{regionMemory, regionTasks, regionBackground
 // always a tint change (the first panel must differ from the chat).
 // Counting only visible panels means two panels that end up visually adjacent
 // because something between them is closed never land on the same
-// background by coincidence — and on a tabbed theme (ADR-0079) the one panel
-// in the shared slot is always the first, so it always differs from the chat.
+// background by coincidence.
 func (m *model) panelAltBackground(region panelRegion) bool {
 	idx := 0
 	for _, r := range panelRenderOrder {
@@ -461,15 +452,13 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 		return strings.Repeat("\n", h)
 	}
 	all, inner := m.sidePanelLines(region)
-	// Tabbed bar (ADR-0079): the builder's first row already is the strip in
-	// fixed f1–f6 table order — labels never reorder on selection, so there
-	// is nothing to rewrite here (selection is the active label's styling).
-	// Width-budget overflow tabs (issue #373): the group column — the
-	// rightmost one — has its title row *become* the grouped set's tab
-	// strip: fixed f1–f6 labels, with the top's own name as the underlined
-	// one — so the builder's title line beside it would print it twice
-	// (compose on a copy: sidePanelLines hands out cached slices for
-	// project/git).
+	// Width-budget overflow tabs (issue #373, every theme per ADR-0098):
+	// the group column — the rightmost one — has its title row *become*
+	// the grouped set's tab strip: fixed f1–f6 labels, with the top's own
+	// name as the underlined one — so the builder's title line beside it
+	// would print it twice (compose on a copy: sidePanelLines hands out
+	// cached slices for project/git). Free columns keep their plain title
+	// row on both themes; when nothing overflows, every row is plain.
 	if group := m.budgetTabGroupFor(region); len(group) > 0 && len(all) > 0 && !m.anim.isMoving(region) {
 		all = append([]string(nil), all...)
 		all[0] = budgetTabStrip(group, region, inner)
