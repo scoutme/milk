@@ -240,3 +240,80 @@ func TestWriteCleanConfig(t *testing.T) {
 		t.Error("missing source config must error (a configured milk is required)")
 	}
 }
+
+// TestRenderTape_WaitsSleepWhereTheyHappened pins the fix for the flaw the
+// maintainer spotted in the recorded GIF: waits used to fold into ONE sleep
+// at the beat's end, so every keypress replayed back-to-back at typing
+// speed — /tasks typed 0ms after the Enter starting a model turn, the
+// flyover-accept Enter landing before the picker rendered. Now each wait
+// sleeps at its own step, and the trailing sleep covers only what wasn't
+// emitted: the grand total is unchanged (margin*elapsed+base — relocated,
+// not added), so the narration rhythm calibration measured is preserved.
+func TestRenderTape_WaitsSleepWhereTheyHappened(t *testing.T) {
+	m, err := Load(writeManifest(t, `
+name: t
+output: docs/x.gif
+tape: demo.tape
+launch: "--new"
+margin: 1.5
+base: 0.4
+terminal: {cols: 120, rows: 40, width: 1200, height: 700}
+beats:
+  - id: task
+    steps:
+      - type: "/tasks"
+      - key: Enter
+      - wait: "pending"
+      - type: "/task done {{task_id}}"
+      - key: Enter
+      - wait: "marked done"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// wait "pending" took 5s, wait "marked done" 2s, the keys ~ms each;
+	// elapsed = steps + the loop's 150ms settle.
+	res := Result{
+		LaunchElapsed: time.Second,
+		Timings: []BeatTiming{{
+			ID:      "task",
+			Elapsed: 7200 * time.Millisecond,
+			Steps: []time.Duration{
+				10 * time.Millisecond, 5 * time.Millisecond, 5 * time.Second,
+				10 * time.Millisecond, 5 * time.Millisecond, 2 * time.Second,
+			},
+		}},
+		Vars: map[string]string{"task_id": "abcd1234"},
+	}
+	tape := RenderTape(m, res, RenderOpts{
+		MilkPath: "/bin/milk", ConfigRoot: "/tmp/r", Workdir: "/w",
+	})
+
+	// Each wait sleeps AT ITS STEP: 5s*1.5=7.5 after "# wait: pending",
+	// 2s*1.5=3.0 after "# wait: marked done" — never both after the beat.
+	waitA := strings.Index(tape, "# wait: pending")
+	waitB := strings.Index(tape, "# wait: marked done")
+	if waitA < 0 || waitB < 0 {
+		t.Fatalf("wait comments missing:\n%s", tape)
+	}
+	if got := strings.Index(tape[waitA:], "Sleep 7.5s"); got <= 0 {
+		t.Errorf("no inline Sleep 7.5s at the first wait:\n%s", tape)
+	}
+	if got := strings.Index(tape[waitB:], "Sleep 3.0s"); got <= 0 {
+		t.Errorf("no inline Sleep 3.0s at the second wait:\n%s", tape)
+	}
+	// The second Type comes AFTER the first wait's sleep — the sub-wait gap
+	// exists where calibration had it.
+	if iType2 := strings.Index(tape, `Type "/task done abcd1234"`); iType2 < waitA {
+		t.Errorf("second command before the first wait — narration not sequenced:\n%s", tape)
+	} else if iSleep := strings.Index(tape, "Sleep 7.5s"); iSleep > iType2 {
+		t.Errorf("first wait's sleep landed after the next command:\n%s", tape)
+	}
+
+	// Accounting identity: emitted sleeps + trailing sleep == the old
+	// formula for the whole beat — relocated, not added.
+	// trailing = (7.2s - 7.0s slow)*1.5 + 0.4 = 0.7s
+	if !strings.Contains(tape, "Sleep 0.7s") {
+		t.Errorf("trailing sleep must cover only unemitted time (want Sleep 0.7s):\n%s", tape)
+	}
+}

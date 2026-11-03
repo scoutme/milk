@@ -37,6 +37,14 @@ type BeatTiming struct {
 	ID      string
 	Elapsed time.Duration
 	Skipped bool
+	// Steps is each step's own measured duration, in manifest order —
+	// which for a wait step IS the wait. The tape emits these as inline
+	// Sleeps at the step where they happened instead of one lump at the
+	// beat's end: keypresses must replay in the gaps they had in
+	// calibration (type /tasks 0ms after Enter that starts a model turn
+	// — or the flyover-accept Enter before the picker opened — replays
+	// narration that never happened in reality).
+	Steps []time.Duration
 }
 
 // Result is a full calibration pass.
@@ -142,10 +150,13 @@ func driveBeats(ctx context.Context, m *Manifest, opts *Options, res *Result) (f
 		}
 
 		start := time.Now()
+		timing.Steps = make([]time.Duration, len(beat.Steps))
 		for si := range beat.Steps {
+			stepStart := time.Now()
 			if err := runStep(ctx, opts, beat, &beat.Steps[si], res.Vars); err != nil {
 				return beat.ID, fmt.Errorf("beat %q step %d: %w\npane:\n%s", beat.ID, si, err, paneExcerpt(opts.Session))
 			}
+			timing.Steps[si] = time.Since(stepStart)
 		}
 		// A human never types the next beat on the same frame the previous
 		// state landed; the settle keeps the recording from looking like a
