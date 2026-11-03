@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-03
-- **Closes:** #387 (analysis half; the headless verifier remains the planned second runner)
+- **Closes:** #387 (both halves: the calibrated recorder shipped first, the verifier second)
 
 ## Context
 
@@ -21,7 +21,8 @@ converge, or are they separate paths?
 ## Decision
 
 **Converge at the definition, separate at the runners — and ship the
-visual artifact first** (recording runner now, headless verifier next).
+visual artifact first** (recording runner first, verifier second — both
+now built).
 
 1. **One manifest** — `demo/showcase.yaml`: an ordered beat list where each
    beat is *keys to send* plus *the pane state that must appear* (`wait`,
@@ -61,9 +62,18 @@ visual artifact first** (recording runner now, headless verifier next).
 - Timing headroom is explicit: `margin: 1.5` + `base: 0.4` on measured
   durations covers typing speed and second-run latency variance; the next
   backend hiccup eats into headroom instead of desyncing the narration.
-- The planned **verifier runner** (same manifest, asserts beats against a
-  batch run, CI-runnable) is the remaining half of #387 — waits translate
-  1:1 from pane substrings to state assertions, which is the whole point of
-  the convergence choice.
+- The **verifier runner** (`task showcase:run`, `cmd/showcase -verify`)
+  asserts the same manifest through the same tmux driver: every
+  `wait`/`wait_absent`/`extract` must hold within the timeout, the report
+  is one PASS/FAIL line per beat, and the first broken wait exits non-zero
+  (`-beats` narrows to named beats; unknown ids are an error). One
+  correction to this ADR's first sketch: the verifier drives the **TUI in
+  tmux, not a batch run** — the beats' actions are interactive slash
+  commands single-prompt milk never executes, and some waits are
+  inherently UI claims (the picker's `↑↓ choose`, a panel's rendered
+  header) with no state-file twin. Pane state is the state both runners
+  share — which is what makes the waits translate 1:1 *between the
+  runners*, exactly the convergence this ADR chose; the shared
+  `driveBeats`/`runStep` loop keeps them from drifting.
 - `internal/tmux` moved out of `eval/` (was unexported helpers): one
   state-synchronized terminal-driver, two consumers.
