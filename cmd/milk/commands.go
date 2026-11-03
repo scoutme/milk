@@ -246,7 +246,7 @@ func (m *model) refreshSessionScopedState(oldSessionID string) error {
 			return taskErr
 		}
 		if m.st.program != nil {
-			taskStore.SetOnChange(func() { m.st.program.Send(taskStoreChangedMsg{}) })
+			wireTaskStoreRedraw(m.st.program, taskStore)
 		}
 		m.taskStore = taskStore
 		// New session, new task-event baseline (issue #347): its restored
@@ -312,6 +312,28 @@ func execTasks(store *tasks.Store) string {
 		}
 	}
 	return sb.String()
+}
+
+// wireTaskStoreRedraw subscribes the TUI to task-store mutations (redraw +
+// auto-open the tasks panel unless manually closed).
+//
+// The Send must be asynchronous: bubbletea v2's Program.Send is an
+// *unbuffered channel send* (tea.go: select on p.msgs), so calling it
+// synchronously from inside Update deadlocks the event loop against
+// itself — handler mutates the store (e.g. `/task done` →
+// execTask → Complete → notify) and notify then waits for the very loop
+// that is waiting for notify. Observed as a frozen TUI hours after #347
+// wired the callback; the goroutine trace ends
+// Update → handleTaskCmd → Complete → notify → p.Send [select] forever.
+// A Send from any other goroutine is bubbletea's supported pattern, and a
+// redraw tick carries no ordering the loop could violate.
+func wireTaskStoreRedraw(p *tea.Program, store *tasks.Store) {
+	if p == nil || store == nil {
+		return
+	}
+	store.SetOnChange(func() {
+		go p.Send(taskStoreChangedMsg{})
+	})
 }
 
 // handleTaskCmd handles `/task done <id>` shortcut.
