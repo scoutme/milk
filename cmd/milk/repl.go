@@ -424,6 +424,16 @@ type credRefreshReadyMsg struct {
 // remoteInputMsg carries a prompt injected from the remote oversight interface.
 type remoteInputMsg struct{ text string }
 
+// oversightFailedMsg reports that a background verification ping failed for
+// notifier n (issue #388). The Update handler swaps in oversight.Noop — the
+// same fail-closed verdict the old synchronous startup ping produced — but
+// only when n is still the active notifier, so a failure from a replaced
+// notifier can never disable a newer one.
+type oversightFailedMsg struct {
+	n   oversight.Notifier
+	err error
+}
+
 // configReloadMsg is sent when the config file changes on disk (via Watcher)
 // or when the user runs /reload. cfg is the freshly parsed config; err is
 // non-nil when the file could not be parsed (cfg is then the zero value and
@@ -2620,6 +2630,16 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.submitInput(msg.text, dim("[telegram]")+" ")
+
+	case oversightFailedMsg:
+		// Verification failed in the background (issue #388): fail closed
+		// exactly like the old synchronous startup ping did, but in the
+		// transcript instead of stderr (invisible under the alt-screen).
+		if m.st.notifier == msg.n {
+			m.st.notifier = oversight.Noop{}
+			m.appendTranscript(fmt.Sprintf("%s warning: telegram oversight ping failed: %v — oversight disabled\n", milkTag(), msg.err))
+		}
+		return m, nil
 
 	case telegramGetMeMsg:
 		if msg.err != nil {
@@ -5099,22 +5119,35 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 
 	// TUI mode continues even when both agents are unavailable so the user can
 	// add providers via /agent commands without re-launching.
+	//
+	// Every probe below runs through boundedPings (issue #388): a blackholed
+	// dependency costs at most one bounded wait at launch instead of its own
+	// dial/HTTP timeout (the local agent's HTTP client has none of its own,
+	// and the CLI/subprocess pings were bare execs), and the two-ping branches
+	// probe concurrently. The healthy path is unchanged — milliseconds.
+	httpPing := func(a *local.Agent) func() error {
+		return func() error {
+			pingCtx, cancel := context.WithTimeout(ctx, availPingTimeout)
+			defer cancel()
+			return a.Ping(pingCtx)
+		}
+	}
 	var localAvail, escalationAvail bool
 	if tuiPrimaryCLIAgent != nil {
-		localAvail = tuiPrimaryCLIAgent.Ping() == nil
+		localAvail = boundedPings(func() error { return tuiPrimaryCLIAgent.Ping() })[0]
 		escalationAvail = true // CLI/local escalation checked lazily
 		if !localAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: "+tuiPrimaryAC.Name+" primary agent unreachable")
 		}
 	} else if tuiSubprocessPrimaryAgent != nil {
-		localAvail = tuiSubprocessPrimaryAgent.Ping() == nil
+		localAvail = boundedPings(func() error { return tuiSubprocessPrimaryAgent.Ping() })[0]
 		escalationAvail = true // CLI/local escalation checked lazily
 		if !localAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: "+tuiPrimaryAC.Name+" primary agent unreachable")
 		}
 	} else if escalationLocalAgent != nil {
-		localAvail = localAgent.Ping(ctx) == nil
-		escalationAvail = escalationLocalAgent.Ping(ctx) == nil
+		avail := boundedPings(httpPing(localAgent), httpPing(escalationLocalAgent))
+		localAvail, escalationAvail = avail[0], avail[1]
 		if !localAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
 		}
@@ -5122,8 +5155,8 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: escalation agent unreachable — primary only")
 		}
 	} else if tuiSubprocessAgent != nil {
-		localAvail = localAgent.Ping(ctx) == nil
-		escalationAvail = tuiSubprocessAgent.Ping() == nil
+		avail := boundedPings(httpPing(localAgent), func() error { return tuiSubprocessAgent.Ping() })
+		localAvail, escalationAvail = avail[0], avail[1]
 		if !localAvail {
 			fmt.Fprintln(os.Stderr, milkTag()+" warning: primary agent unreachable — routing all to escalation agent")
 		}
@@ -5487,16 +5520,17 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		})
 	}
 
-	// Wire remote input: messages from the oversight backend are injected as turns.
-	if tn, ok := st.notifier.(interface {
-		SetOnInput(func(string))
-		StartPolling(context.Context)
-	}); ok {
-		tn.SetOnInput(func(text string) {
-			p.Send(remoteInputMsg{text: text})
-		})
-		tn.StartPolling(ctx)
-	}
+	// Wire remote input: messages from the oversight backend are injected as
+	// turns — and verify the notifier in the background (issue #388): startup
+	// never waits on Telegram. Polling starts only once the backend answers
+	// (oversightVerifyTimeout bound), and a failure lands as
+	// oversightFailedMsg: the notifier swaps to Noop with the warning in the
+	// transcript.
+	notify := st.notifier
+	armOversight(ctx, notify,
+		func(text string) { p.Send(remoteInputMsg{text: text}) },
+		func(err error) { p.Send(oversightFailedMsg{n: notify, err: err}) },
+	)
 
 	// Mode 1000+1006 at rest: X10 basic mouse tracking + SGR extension. Wheel
 	// scroll is reliably reported as tea.MouseMsg under 1000; some terminals

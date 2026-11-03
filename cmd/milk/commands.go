@@ -855,13 +855,12 @@ func (m model) setTelegramEnabled(on bool) model {
 		return m
 	}
 	m.st.notifier = newNotifier(m.st.cfg)
-	if tn, ok := m.st.notifier.(interface {
-		SetOnInput(func(string))
-		StartPolling(context.Context)
-	}); ok && m.st.program != nil {
-		p := m.st.program
-		tn.SetOnInput(func(text string) { p.Send(remoteInputMsg{text: text}) })
-		tn.StartPolling(m.ctx)
+	if m.st.program != nil {
+		n, p := m.st.notifier, m.st.program
+		armOversight(m.ctx, n,
+			func(text string) { p.Send(remoteInputMsg{text: text}) },
+			func(err error) { p.Send(oversightFailedMsg{n: n, err: err}) },
+		)
 	}
 	if on {
 		m.appendTranscript(milkTag() + " Telegram oversight enabled\n")
@@ -889,15 +888,17 @@ func (m model) commitTelegramSetup(token string, chatID int64) model {
 		return m
 	}
 
-	// Re-init notifier with the new credentials.
+	// Re-init notifier with the new credentials. Verification runs in the
+	// background like every other notifier arm (issue #388); the "sending
+	// test message" announcement below stays synchronous — it is interactive
+	// feedback the user is waiting on, and /setup just validated the token.
 	m.st.notifier = newNotifier(m.st.cfg)
-	if tn, ok := m.st.notifier.(interface {
-		SetOnInput(func(string))
-		StartPolling(context.Context)
-	}); ok && m.st.program != nil {
-		p := m.st.program
-		tn.SetOnInput(func(text string) { p.Send(remoteInputMsg{text: text}) })
-		tn.StartPolling(m.ctx)
+	if m.st.program != nil {
+		n, p := m.st.notifier, m.st.program
+		armOversight(m.ctx, n,
+			func(text string) { p.Send(remoteInputMsg{text: text}) },
+			func(err error) { p.Send(oversightFailedMsg{n: n, err: err}) },
+		)
 	}
 
 	m.appendTranscript(fmt.Sprintf("%s Telegram configured (chat_id: %d) — sending test message…\n", milkTag(), chatID))

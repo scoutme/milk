@@ -25,6 +25,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -36,10 +38,11 @@ import (
 )
 
 // startOversight arms the serve process's remote oversight: build the
-// notifier from config (newNotifier pings the backend and warns on stderr),
-// route incoming remote messages to sessions, and start the polling loop.
-// Called from runServe with the serve context, so polling dies with the
-// process.
+// notifier from config (network-free — verification happens in
+// resetNotifier's armOversight call, issue #388), route incoming remote
+// messages to sessions, and start the polling loop once the backend has
+// answered its background ping. Called from runServe with the serve
+// context, so polling dies with the process.
 func (s *acpServer) startOversight(ctx context.Context) {
 	s.mu.Lock()
 	s.serveCtx = ctx
@@ -52,15 +55,15 @@ func (s *acpServer) startOversight(ctx context.Context) {
 // re-points remote-input routing at it. The previous notifier's polling loop
 // is cancelled first: two concurrent getUpdates consumers on the same bot
 // would split the message stream between two stale callbacks.
+//
+// Verification is backgrounded (issue #388): newNotifier builds without
+// touching the network, and armOversight pings the backend from its own
+// goroutine — serve startup never waits on Telegram. Polling starts only for
+// a backend that answered; a failure lands as the old synchronous ping's
+// fail-closed verdict — a stderr warning and oversight.Noop — unless a newer
+// notifier replaced this one meanwhile.
 func (s *acpServer) resetNotifier() {
 	n := newNotifierFor(s.cfg)
-	tn, polling := n.(interface {
-		SetOnInput(func(string))
-		StartPolling(context.Context)
-	})
-	if polling {
-		tn.SetOnInput(s.handleRemoteInput)
-	}
 
 	s.mu.Lock()
 	if s.notifierStop != nil {
@@ -69,16 +72,33 @@ func (s *acpServer) resetNotifier() {
 	}
 	s.notifier = n
 	var loopCtx context.Context
-	if polling && s.serveCtx != nil {
+	if s.serveCtx != nil {
 		var cancel context.CancelFunc
 		loopCtx, cancel = context.WithCancel(s.serveCtx)
 		s.notifierStop = cancel
 	}
 	s.mu.Unlock()
 
-	if polling && loopCtx != nil {
-		tn.StartPolling(loopCtx)
+	if loopCtx == nil {
+		// Not serving yet: register input routing only — polling (and its
+		// verification) arms on the startOversight call, which carries the
+		// serve context.
+		if plain, ok := n.(interface {
+			SetOnInput(func(string))
+			StartPolling(context.Context)
+		}); ok {
+			plain.SetOnInput(s.handleRemoteInput)
+		}
+		return
 	}
+	armOversight(loopCtx, n, s.handleRemoteInput, func(err error) {
+		fmt.Fprintf(os.Stderr, milkTag()+" warning: telegram oversight ping failed: %v — oversight disabled\n", err)
+		s.mu.Lock()
+		if s.notifier == n {
+			s.notifier = oversight.Noop{}
+		}
+		s.mu.Unlock()
+	})
 }
 
 // notifierOrNil returns the serve process's notifier — oversight.Noop before

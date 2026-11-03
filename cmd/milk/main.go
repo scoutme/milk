@@ -279,8 +279,20 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	localAvail := primaryRunner != nil && primaryRunner.Ping() == nil
-	escalationAvail := escalationRunner != nil && escalationRunner.Ping() == nil
+	// Both probes run concurrently, each capped at availPingTimeout
+	// (issue #388): a blocked dependency costs one bounded wait at launch
+	// instead of an unbounded dial timeout. Both-down still fails fast —
+	// after the bound, never after the OS gives up on the connection.
+	localAvail, escalationAvail := false, false
+	switch {
+	case primaryRunner != nil && escalationRunner != nil:
+		up := boundedPings(primaryRunner.Ping, escalationRunner.Ping)
+		localAvail, escalationAvail = up[0], up[1]
+	case primaryRunner != nil:
+		localAvail = boundedPings(primaryRunner.Ping)[0]
+	case escalationRunner != nil:
+		escalationAvail = boundedPings(escalationRunner.Ping)[0]
+	}
 
 	if !localAvail {
 		fmt.Fprintf(os.Stderr, "%s warning: %s primary agent unreachable\n", milkTag(), cfg.ActiveAgent().Name)
@@ -993,8 +1005,18 @@ func loadSessionForRun(cwd string) (*session.Session, error) {
 }
 
 func checkAgentAvailability(ctx context.Context, cfg config.Config, localAgent *local.Agent, cliAgent *claude.Agent) (bool, bool, error) {
-	localAvail := localAgent.Ping(ctx) == nil
-	escalationAvail := cliAgent.Ping() == nil
+	// Concurrent, each bounded (issue #388): the local agent's HTTP ping is
+	// ctx-capped, the CLI ping is a local exec — a blocked host costs one
+	// bounded wait at startup, never its own dial timeout.
+	up := boundedPings(
+		func() error {
+			pingCtx, cancel := context.WithTimeout(ctx, availPingTimeout)
+			defer cancel()
+			return localAgent.Ping(pingCtx)
+		},
+		func() error { return cliAgent.Ping() },
+	)
+	localAvail, escalationAvail := up[0], up[1]
 
 	if !localAvail {
 		fmt.Fprintln(os.Stderr, milkTag()+" "+primaryDownWarning(cfg, escalationAvail))

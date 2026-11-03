@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -46,6 +47,34 @@ type routedTurn struct {
 // availPingTimeout bounds the per-turn availability re-check so an
 // unreachable host can't stall a turn.
 const availPingTimeout = 3 * time.Second
+
+// boundedPings runs every probe concurrently and returns their results in
+// order, each capped at availPingTimeout: an unreachable dependency costs
+// one bounded wait instead of its own dial/HTTP timeout. Startup probes use
+// it (issue #388) so a blackholed agent host can't stall milk's launch — the
+// healthy path is unchanged, probes answer in milliseconds. Probes are plain
+// func() error so ctx-less CLI/subprocess pings get the same ceiling as the
+// HTTP ones; the buffered result channel means an abandoned probe goroutine
+// never blocks writing its outcome.
+func boundedPings(probes ...func() error) []bool {
+	res := make([]bool, len(probes))
+	var wg sync.WaitGroup
+	for i, probe := range probes {
+		wg.Add(1)
+		go func(i int, probe func() error) {
+			defer wg.Done()
+			done := make(chan error, 1)
+			go func() { done <- probe() }()
+			select {
+			case err := <-done:
+				res[i] = err == nil
+			case <-time.After(availPingTimeout):
+			}
+		}(i, probe)
+	}
+	wg.Wait()
+	return res
+}
 
 // refreshTurnAvailability re-checks any agent that reads unavailable before
 // routing a turn. Availability is captured when the runners are built
