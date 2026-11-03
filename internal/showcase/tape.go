@@ -74,15 +74,37 @@ func RenderTape(m *Manifest, res Result, opts RenderOpts) string {
 			fmt.Fprintf(&b, "# skipped in calibration (skip_if matched) — nothing to record\n")
 			continue
 		}
-		for _, step := range beat.Steps {
+		// Each wait's measured time is emitted as an inline Sleep at the
+		// step where it happened — never lumped at the beat's end: a
+		// keypress must replay in the same gap it had in calibration
+		// (typing the next command 0ms after the Enter that starts a model
+		// turn, or the flyover-accept Enter before the picker rendered,
+		// replays narration that never happened). Sub-measure steps fold
+		// into the trailing sleep — total replay time stays
+		// margin*elapsed+base, relocated rather than added.
+		var slowSteps time.Duration
+		for si, step := range beat.Steps {
 			writeStep(&b, step, res.Vars)
+			if ok && si < len(timing.Steps) {
+				d := timing.Steps[si]
+				if secs := d.Seconds() * m.Margin; secs >= minStepSleep {
+					fmt.Fprintf(&b, "Sleep %.1fs\n", secs)
+					slowSteps += d
+				}
+			}
 		}
 		if ok {
-			fmt.Fprintf(&b, "Sleep %s\n", sleepDuration(timing.Elapsed, m.Margin, m.Base))
+			fmt.Fprintf(&b, "Sleep %s\n", sleepDuration(timing.Elapsed-slowSteps, m.Margin, m.Base))
 		}
 	}
 	return b.String()
 }
+
+// minStepSleep is the smallest per-step Sleep the tape emits (seconds,
+// after margin): a wait short enough to vanish under typing-speed latency
+// needs no pause — the next keystroke arrives naturally — while every real
+// wait gets its own visible, faithful gap.
+const minStepSleep = 0.3
 
 // writeStep emits the vhs commands for one calibrated step. Waits and
 // extracts have no vhs counterpart — their cost is inside the beat's sleep.

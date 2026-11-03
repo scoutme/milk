@@ -11,69 +11,86 @@ Set TypingSpeed 60ms
 Set PlaybackSpeed 0.9
 
 # ── launch ──────────────────────────────────────────────────────
-Type "cd '/home/scoutme/altworkspace/milk' && MILK_CONFIG_ROOT='/tmp/milk-showcase-rec-3132933084' '/home/scoutme/.local/bin/milk' --new"
+Type "cd '/home/scoutme/altworkspace/milk' && MILK_CONFIG_ROOT='/tmp/milk-showcase-rec-3690051715' '/home/scoutme/.local/bin/milk' --new"
 Enter
-Sleep 7.3s
+Sleep 3.5s
 
 # ── startup: fresh session — no tasks yet; the tour closes this loop later ──
 Type "/tasks"
 Enter
 # wait: [milk] tasks:
-Sleep 1.0s
+Sleep 0.4s
+Sleep 0.6s
 
 # ── learn: /learn records a fact — the memory panel opens with the new percept ──
 Type "/learn milk's showcase is defined in demo/showcase.yaml"
 Enter
 # wait: [milk] learned:
+Sleep 0.4s
 # wait: CONTEXT BRICKS
-Sleep 7.5s
+Sleep 6.5s
+Sleep 0.6s
 
 # ── primary-turn: a prompt runs on the primary agent — busy indicator until the answer lands ──
 Type "reply with exactly: ready"
 Enter
 # wait: role:PRIMARY
+Sleep 0.4s
 # until gone: role:PRIMARY
-Sleep 3.7s
+Sleep 5.3s
+Sleep 0.6s
 
 # ── task: create_task work lands in the tasks panel — list it, then close it ──
 Type "Create a task titled showcase-tour-demo and reply: done"
 Enter
 # wait: role:PRIMARY
+Sleep 0.4s
 # until gone: role:PRIMARY
+Sleep 21.0s
 # wait: showcase-tour-demo
 Type "/tasks"
 Enter
 # wait: pending     showcase-tour-demo
 # extracted {{task_id}}
-Type "/task done 0bbd2cca"
+Sleep 0.4s
+Type "/task done 224db160"
 Enter
 # wait: marked done
-Sleep 16.2s
+Sleep 0.4s
+Sleep 0.6s
 
 # ── bg: the agent picker flyover chooses a background agent — the job finishes into the transcript ──
 Type "/bg start write a haiku about terminals"
 Enter
 # wait: ↑↓ choose
+Sleep 0.4s
 Enter
 # wait: terminals" completed
-Sleep 16.2s
+Sleep 10.7s
+Sleep 0.6s
 
 # ── routing: /escalate pins to the escalation agent for one turn, /primary hands control back ──
 # until gone: role:PRIMARY
+Sleep 4.2s
 Type "/escalate"
 Enter
 # wait: pinned to mimo-pro-local
+Sleep 0.4s
 Type "reply with exactly: from-escalation"
 Enter
 # wait: role:ESCALATION
+Sleep 0.4s
 # until gone: role:ESCALATION
+Sleep 6.1s
 Type "/primary"
 Enter
 # wait: pinned to mimo-local
-Sleep 15.8s
+Sleep 0.4s
+Sleep 0.6s
 
 # ── git: opening the git panel — the grouped tab strip shows the session's panel set ──
 Type "/panel git"
 Enter
 # wait: ⎇
-Sleep 1.0s
+Sleep 0.4s
+Sleep 0.6s
