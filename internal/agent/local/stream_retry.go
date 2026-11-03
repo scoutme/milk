@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -30,8 +31,23 @@ func (a *Agent) noDataTimeout() time.Duration {
 	return defaultStreamNoDataTimeout
 }
 
+// retryPolicy resolves this agent's turn-retry policy from its limits
+// block (issue #391: limits.turn_retries / limits.turn_retry_backoff_max_secs
+// — nil limits or unset fields fall back to the built-in defaults). Used by
+// the streaming layer and background-job loops; standalone, tool-agent and
+// workflow turns resolve the very same fields through cmd/milk's
+// retryPolicyFor, so one knob governs every loop alike.
+func (a *Agent) retryPolicy() workflow.RetryPolicy {
+	return workflow.RetryPolicy{
+		Max:        config.TurnRetries(a.limits),
+		MaxBackoff: config.TurnRetryBackoffMax(a.limits),
+	}
+}
+
 // isRetryableStreamError reports whether re-sending the same request is safe
-// and likely to help: a transient HTTP/2 failure or a stalled stream.
+// and likely to help: a transient HTTP/2 failure, a stalled stream, or —
+// since issue #391 widened workflow.IsRetryableTurnError — a
+// connection-phase failure (TLS handshake timeout, refused dial, …).
 func isRetryableStreamError(err error) bool {
 	return errors.Is(err, errStreamStalled) || workflow.IsRetryableTurnError(err)
 }
@@ -41,17 +57,18 @@ func isRetryableStreamError(err error) bool {
 // and file edits it produced exist only in msgs, so a restart loses the
 // context while the side effects remain.
 func (a *Agent) streamCompletionRetrying(ctx context.Context, msgs []Message, tools []map[string]any, out io.Writer, userMsgIdx int) (string, string, []toolCall, bool, string, error) {
+	policy := a.retryPolicy() // issue #391: limits.turn_retries governs this loop too
 	for attempt := 0; ; attempt++ {
 		text, raw, tcs, empty, reasoning, err := a.streamCompletion(ctx, msgs, tools, out, userMsgIdx)
-		if err == nil || attempt >= workflow.MaxTurnRetries || ctx.Err() != nil || !isRetryableStreamError(err) {
+		if err == nil || attempt >= policy.Max || ctx.Err() != nil || !isRetryableStreamError(err) {
 			return text, raw, tcs, empty, reasoning, err
 		}
 		a.logWarn("transient inference error, re-sending request",
 			"model", a.model, "agent", a.logRole(),
-			"attempt", attempt+1, "max", workflow.MaxTurnRetries, "err", err.Error())
-		fmt.Fprintf(out, "\n[transient error, retrying request %d/%d: %v]\n", attempt+1, workflow.MaxTurnRetries, err)
+			"attempt", attempt+1, "max", policy.Max, "err", err.Error())
+		fmt.Fprintf(out, "\n[transient error, retrying request %d/%d: %v]\n", attempt+1, policy.Max, err)
 		select {
-		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-time.After(policy.Backoff(attempt)):
 		case <-ctx.Done():
 			return "", "", nil, false, "", ctx.Err()
 		}

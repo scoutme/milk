@@ -66,6 +66,23 @@ type RunConfig struct {
 	// Designer disambiguation: when set, the designer sends questions via
 	// cfg.Send and waits for user answers on AnswersCh before finalizing.
 	AnswersCh chan string
+
+	// RetryFor resolves the turn-retry policy for the named agent (issue
+	// #391: limits.turn_retries / limits.turn_retry_backoff_max_secs —
+	// resolved once at workflow launch, per acting agent so a workflow's
+	// roles can carry different agents' policies). nil = the built-in
+	// DefaultRetryPolicy for every agent.
+	RetryFor func(agentName string) RetryPolicy
+}
+
+// PolicyFor returns the retry policy for the named agent — the zero
+// RunConfig falls back to DefaultRetryPolicy so an unset field is never
+// silently "no retries" (issue #391).
+func (c RunConfig) PolicyFor(agentName string) RetryPolicy {
+	if c.RetryFor != nil {
+		return c.RetryFor(agentName)
+	}
+	return DefaultRetryPolicy()
 }
 
 // WorkflowQuestionsMsg is sent to the TUI when the designer identifies

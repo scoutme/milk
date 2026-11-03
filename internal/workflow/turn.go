@@ -27,26 +27,23 @@ func (w *workflowSendWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// MaxTurnRetries is the number of additional attempts made when a turn fails
-// with a transient network/stream error. Workflow runs are long and mostly
-// unattended (multiple sprints, each a multi-minute generator/evaluator
-// exchange); without this, a single upstream hiccup — e.g. the peer
-// resetting an HTTP/2 stream — aborts the entire run and requires a manual
-// /workflow resume. Exported so cmd/milk can apply the same retry behavior
-// to standalone (non-workflow) turns.
-const MaxTurnRetries = 2
-
-// TurnRetryBackoff returns the delay before retry attempt N (0-indexed).
-func TurnRetryBackoff(attempt int) time.Duration {
-	return time.Duration(attempt+1) * time.Second
-}
+// MaxTurnRetries (the default retry count), TurnRetryBackoff (the default
+// backoff) and the RetryPolicy type live in retry.go — issue #391.
 
 // Turn invokes one agent turn for a workflow stage, streams output to the TUI
 // via send, and returns the agent's plain-text response. A transient
 // network/stream error (see IsRetryableTurnError) is retried up to
-// MaxTurnRetries times with a short backoff; any other error, or a context
-// cancellation/deadline, is returned immediately.
+// MaxTurnRetries times with the default backoff; any other error, or a
+// context cancellation/deadline, is returned immediately.
 func Turn(ctx context.Context, r TurnRunner, prompt string, send func(tea.Msg)) (string, error) {
+	return TurnWithPolicy(ctx, r, prompt, send, DefaultRetryPolicy())
+}
+
+// TurnWithPolicy is Turn with an explicit retry policy (issue #391): the
+// caller resolves it from the acting agent's limits — RunConfig.RetryFor —
+// so limits.turn_retries / limits.turn_retry_backoff_max_secs govern
+// workflow turns exactly as they govern every other retry loop.
+func TurnWithPolicy(ctx context.Context, r TurnRunner, prompt string, send func(tea.Msg), policy RetryPolicy) (string, error) {
 	var out io.Writer
 	if send != nil {
 		out = &workflowSendWriter{send: send}
@@ -59,15 +56,15 @@ func Turn(ctx context.Context, r TurnRunner, prompt string, send func(tea.Msg)) 
 		if err == nil {
 			return text, nil
 		}
-		if attempt >= MaxTurnRetries || !IsRetryableTurnError(err) {
+		if attempt >= policy.Max || !IsRetryableTurnError(err) {
 			return "", err
 		}
 		if send != nil {
 			send(WorkflowChunkMsg{Text: fmt.Sprintf(
-				"\n[transient error, retrying %d/%d: %v]\n", attempt+1, MaxTurnRetries, err)})
+				"\n[transient error, retrying %d/%d: %v]\n", attempt+1, policy.Max, err)})
 		}
 		select {
-		case <-time.After(TurnRetryBackoff(attempt)):
+		case <-time.After(policy.Backoff(attempt)):
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
@@ -79,6 +76,13 @@ func Turn(ctx context.Context, r TurnRunner, prompt string, send func(tea.Msg)) 
 // request/response error (bad prompt, auth failure, quota, etc.) that
 // retrying would not fix. A context cancellation/deadline is never
 // retryable: that reflects a deliberate stop, not a hiccup.
+//
+// Retryable classes (issue #391 widened this from stream-level failures
+// only): HTTP/2 stream resets and GOAWAYs — and, new, the
+// connection-phase failures that happen *before* any HTTP/2 stream
+// exists (TLS handshake timeouts, refused/reset dials, temporary DNS,
+// truncated EOFs), which used to be classified non-retryable and killed
+// the turn on attempt 1 with MaxTurnRetries sitting unused.
 func IsRetryableTurnError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -89,5 +93,5 @@ func IsRetryableTurnError(err error) bool {
 	if _, ok := errors.AsType[http2.GoAwayError](err); ok {
 		return true
 	}
-	return false
+	return isTransientTransportError(err)
 }

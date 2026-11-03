@@ -813,6 +813,23 @@ type AgentLimits struct {
 	// Set to -1 for no timeout.
 	TurnTimeoutSecs *int `json:"turn_timeout_secs,omitempty"`
 
+	// TurnRetries overrides how many *additional* attempts a failed turn
+	// gets when the failure is a transient network error (issue #391:
+	// HTTP/2 stream resets, TLS handshake timeouts, refused/reset dials,
+	// temporary DNS — the same class for every retry loop). Semantics per
+	// the AgentLimits convention: nil/0 = built-in default (2), negative =
+	// disabled (the turn runs once, never retried), positive = exact.
+	// Applies to standalone turns, workflow turns, tool-agent calls,
+	// background jobs and the streaming request layer alike.
+	TurnRetries *int `json:"turn_retries,omitempty"`
+
+	// TurnRetryBackoffMaxSecs caps the exponential wait between retries
+	// (issue #391: nominal 1s, 2s, 4s… hard cap; up to +25% jitter never
+	// exceeds it). nil/0 = built-in default (30s), positive = exact.
+	// Diverges from the negative-disables convention on purpose: there is
+	// no "no backoff" mode — the wait between retries always exists.
+	TurnRetryBackoffMaxSecs *int `json:"turn_retry_backoff_max_secs,omitempty"`
+
 	// TurnDeadlineSecs is an opt-in wall-clock deadline for a turn (default:
 	// off — 0 or -1). When set, milk asks the agent to wrap up with a final
 	// summary at the deadline (milk-loop agents: a forced text-only closing
@@ -2360,6 +2377,40 @@ func (c Config) AgentIterationBudgetNotice(a AgentConfig, roleLabel string) stri
 	}
 	return fmt.Sprintf("agent %q has no known context window — the tool-iteration budget falls back to %d; set context_window_tokens (budget then derives as max(20, window/4096)) or limits.max_tool_iterations (e.g. -1 = unlimited) to define it",
 		name, c.AgentMaxToolIterations(a))
+}
+
+// TurnRetries resolves limits.turn_retries (issue #391): nil/0 = built-in
+// default (2 — mirrored from workflow.MaxTurnRetries; the two are pinned
+// equal by TestRetryPolicy_DefaultsMatchConfig in internal/workflow, since
+// this package cannot import workflow to do it here), negative = disabled
+// (0: the turn runs once), positive = exact. The policy's Max means
+// "additional attempts", so the loop condition `attempt >= Max` honors an
+// explicit 0 as "never retry".
+func TurnRetries(l *AgentLimits) int {
+	if l != nil && l.TurnRetries != nil {
+		v := *l.TurnRetries
+		if v < 0 {
+			return 0 // disabled
+		}
+		if v > 0 {
+			return v
+		}
+	}
+	return 2 // built-in default == workflow.MaxTurnRetries
+}
+
+// TurnRetryBackoffMax resolves limits.turn_retry_backoff_max_secs (issue
+// #391): nil/non-positive = the built-in 30s cap (==
+// workflow.DefaultRetryBackoffMax), positive = exact seconds. Non-positive
+// deliberately means "unset" rather than "disabled": the wait between
+// retries always exists (see the field's comment).
+func TurnRetryBackoffMax(l *AgentLimits) time.Duration {
+	if l != nil && l.TurnRetryBackoffMaxSecs != nil {
+		if v := *l.TurnRetryBackoffMaxSecs; v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	}
+	return 30 * time.Second // == workflow.DefaultRetryBackoffMax
 }
 
 // AgentTurnTimeout returns the per-turn timeout for the given agent.
