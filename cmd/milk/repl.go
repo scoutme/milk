@@ -5491,9 +5491,7 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	// Wire task store redraw: when tasks change, send a tick to trigger View()
 	// and (unless the user has manually closed it) auto-open the tasks panel.
 	if taskStore != nil {
-		taskStore.SetOnChange(func() {
-			p.Send(taskStoreChangedMsg{})
-		})
+		wireTaskStoreRedraw(p, taskStore)
 		m.taskEventPrev = taskEventSnapshot(taskStore)
 	}
 

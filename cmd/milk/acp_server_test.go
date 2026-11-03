@@ -592,6 +592,24 @@ func TestACPBackground_FinishedDuringTurnFollowsUpAfterIt(t *testing.T) {
 		defer mu.Unlock()
 		return strings.Contains(strings.Join(bodies, "\n"), local.BackgroundFollowupPrompt)
 	})
+	// Seeing the follow-up's request body is not its completion: the turn
+	// finishes — and since #379 consolidates memory on its way out — after
+	// the test body returns, racing this test's TempDir teardown
+	// ("directory not empty" on .milk/memory). Wait for the follow-up's own
+	// running→idle pair (two runs seen, ended idle) plus a settle for the
+	// trailing writes, the same way TestACPBackground_TurnsNeverOverlap
+	// lets its follow-up finish.
+	acpWaitFor(t, "follow-up turn finished (running→idle)", func() bool {
+		st := acpStates(conn)
+		running := 0
+		for _, s := range st {
+			if s == acp.SessionStateRunning {
+				running++
+			}
+		}
+		return running >= 2 && st[len(st)-1] == acp.SessionStateIdle
+	})
+	time.Sleep(300 * time.Millisecond) // trailing consolidation writes into .milk/memory
 }
 
 func TestACPBackground_TurnsNeverOverlap(t *testing.T) {
