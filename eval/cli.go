@@ -63,6 +63,7 @@ func evalRunCmd() *cobra.Command {
 		judgeAgent  string
 		repetitions int
 		experiment  string
+		isolate     string
 	)
 
 	cmd := &cobra.Command{
@@ -109,6 +110,9 @@ func evalRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("repetitions") {
 					exp.Repetitions = repetitions
 				}
+				if cmd.Flags().Changed("isolate") {
+					exp.Isolate = isolate
+				}
 			}
 
 			// Parse agent names. With an experiment, the specs are the
@@ -144,6 +148,7 @@ func evalRunCmd() *cobra.Command {
 				results, err = h.RunExperiment(ctx, exp)
 			} else {
 				h.Repetitions = repetitions
+				h.Isolation = IsolationConfig{Mode: isolate}
 				results, err = h.RunAll(ctx, scenarioDir, agentSpecs, category, multiTurn)
 			}
 			if err != nil {
@@ -175,6 +180,7 @@ func evalRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&judgeAgent, "judge-agent", "", "agent name from ~/.milk/config.json to use as the LLM judge (default: primary agent)")
 	cmd.Flags().IntVar(&repetitions, "repetitions", 1, "run every scenario N times, fully isolated (fresh workdir, fresh sandbox) — for nth-run variance")
 	cmd.Flags().StringVar(&experiment, "experiment", "", "experiment YAML file defining the full suite (adapters, scenarios, repetitions, judge, sandbox, budgets); explicit flags override its fields")
+	cmd.Flags().StringVar(&isolate, "isolate", "", "filesystem isolation for agent runs: auto|bwrap|off (bubblewrap; workdir + state roots writable, everything else read-only — issue #355; empty = the experiment's isolate: field)")
 
 	return cmd
 }

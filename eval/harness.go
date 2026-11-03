@@ -27,6 +27,12 @@ type Harness struct {
 	// (a scenario's own budget refines it field-by-field via MergeBudget).
 	DefaultBudget *Budget
 
+	// Isolation is the filesystem isolation request for flag-driven runs
+	// (--isolate, issue #355); RunExperiment replaces it with the
+	// experiment's own isolate: field. Resolved once per run by
+	// applyIsolation.
+	Isolation IsolationConfig
+
 	// progress reports phase transitions (starting an adapter, waiting on a
 	// turn, judging) to stderr. Nil until RunAll sets it up; runOne/RunScenario
 	// tolerate nil (progressReporter's methods no-op / fall back to a plain
@@ -317,6 +323,31 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 	}, nil
 }
 
+// applyIsolation resolves the isolation request once — probing bubblewrap
+// a single time per run — and hands the effective mode to every adapter
+// that supports it (issue #355): one comparison is never run
+// half-sandboxed. A degradation ("auto" without a usable bubblewrap) is
+// reported loudly here rather than swallowed — "unsandboxed" must be a
+// visible fact, never an assumption: the whole point of the issue is that
+// uncontained runs were silent.
+func (h *Harness) applyIsolation(cfg IsolationConfig) error {
+	effective, warning, err := cfg.Resolve()
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		h.progress.Logf("%s", warning)
+	}
+	for _, a := range h.Adapters {
+		if ia, ok := a.(Isolatable); ok {
+			ia.SetIsolation(effective)
+		} else if effective != IsolateOff {
+			h.progress.Logf("note: %s has no isolation support — running unsandboxed", a.Name())
+		}
+	}
+	return nil
+}
+
 // RunAll runs all scenarios from the scenario directory against the specified
 // adapter names and returns all ScenarioResults.
 func (h *Harness) RunAll(ctx context.Context, scenarioDir string, adapterNames []string, category string, multiTurnOnly bool) ([]ScenarioResult, error) {
@@ -354,6 +385,12 @@ func (h *Harness) RunAll(ctx context.Context, scenarioDir string, adapterNames [
 
 	h.progress = newProgressReporter(os.Stderr)
 	defer h.progress.Stop()
+
+	// Filesystem isolation (issue #355) for the flag-driven path; the
+	// experiment path resolves its own isolate: field in RunExperiment.
+	if err := h.applyIsolation(h.Isolation); err != nil {
+		return nil, err
+	}
 
 	return h.runScenarios(ctx, scenarios), nil
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -47,6 +48,11 @@ type mimoAdapter struct {
 
 	// binArg pins the binary to launch (--mimo-bin pseudo-flag).
 	binArg string
+
+	// isolation is the resolved filesystem isolation (issue #355, "" = off):
+	// IsolateBwrap wraps every batch run in a bubblewrap sandbox with this
+	// adapter's state root writable.
+	isolation string
 }
 
 // mimoBinary resolves the mimocode CLI to launch. A variable so tests can
@@ -342,6 +348,24 @@ func (a *mimoAdapter) Start(ctx context.Context, workdir string) error {
 	return nil
 }
 
+// SetIsolation applies the harness-resolved filesystem isolation (issue
+// #355): IsolateBwrap wraps every batch run in a bubblewrap sandbox.
+func (a *mimoAdapter) SetIsolation(effective string) { a.isolation = effective }
+
+// isolateRW is this adapter's legitimate writable surface outside the
+// scenario workdir: mimo's live state root (~/.mimocode — sessions resume
+// from there). mimo-code runs are not state-sandboxed today and isolation
+// must not change what's measured (issue #355 constraint 5), so it stays
+// writable; ~/.config/mimocode (its config) needs only reading and falls
+// out of the read-only default.
+func (a *mimoAdapter) isolateRW() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{ensureRWDir(filepath.Join(home, ".mimocode"))}
+}
+
 // RunPrompt runs one batch turn: `mimo run --format json [--yolo] [-s
 // sessionID] -- <prompt>` in the scenario workdir. stdout is the event
 // stream (consumed via parseMimoStream); stderr is captured (capped) so a
@@ -362,8 +386,7 @@ func (a *mimoAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	args = append(args, a.extraArgs...)
 	args = append(args, "--", prompt) // `--` guards prompts starting with "-"
 
-	cmd := exec.CommandContext(ctx, a.mimoBin, args...)
-	cmd.Dir = a.workdir
+	cmd := isolatedExec(ctx, a.isolation, append([]string{a.mimoBin}, args...), a.workdir, a.isolateRW()...)
 	stderr := &tailBuffer{max: 8192}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()

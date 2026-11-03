@@ -38,6 +38,34 @@ type claudeAdapter struct {
 	// result lines carry the session-cumulative cost, so a turn's cost is the
 	// delta (see turnCostUSD).
 	lastCostUSD float64
+
+	// isolation is the resolved filesystem isolation (issue #355, "" = off):
+	// IsolateBwrap wraps the launched CLI in a bubblewrap sandbox (the tmux
+	// shell stays outside; the agent and every tool it spawns run inside).
+	isolation string
+}
+
+// SetIsolation applies the harness-resolved filesystem isolation (issue
+// #355): IsolateBwrap wraps the launched CLI in a bubblewrap sandbox.
+func (a *claudeAdapter) SetIsolation(effective string) { a.isolation = effective }
+
+// isolateRW is this adapter's legitimate writable surface outside the
+// scenario workdir: Claude Code's own state (~/.claude and the top-level
+// ~/.claude.json — its session/transcript state, which this adapter itself
+// reads back). claude-code runs against the real ~/.claude today and
+// isolation must not change what's measured (issue #355 constraint 5), so
+// that root stays writable; the file is created empty when missing (what
+// Claude Code's own first run does) because bubblewrap cannot bind a
+// missing path.
+func (a *claudeAdapter) isolateRW() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{
+		ensureRWDir(filepath.Join(home, ".claude")),
+		ensureRWFile(filepath.Join(home, ".claude.json")),
+	}
 }
 
 // claudeActivityStatePath returns the file used to persist when a claude-code
@@ -231,10 +259,19 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 		}
 	}()
 
-	// Launch Claude Code.
-	cmd := fmt.Sprintf("cd %s && claude --session-id %s --dangerously-skip-permissions", workdir, a.sessionID)
-	if len(a.extraArgs) > 0 {
-		cmd += " " + strings.Join(a.extraArgs, " ")
+	// Launch Claude Code. With filesystem isolation (issue #355) the launch
+	// line is the bubblewrap wrapper — same argv, whole filesystem read-only
+	// except the workdir and claude's state root — while the tmux shell
+	// itself stays outside the sandbox.
+	var cmd string
+	if a.isolation == IsolateBwrap {
+		argv := append([]string{"claude", "--session-id", a.sessionID, "--dangerously-skip-permissions"}, a.extraArgs...)
+		cmd = shellJoin(isolateWrap(argv, workdir, a.isolateRW()...))
+	} else {
+		cmd = fmt.Sprintf("cd %s && claude --session-id %s --dangerously-skip-permissions", workdir, a.sessionID)
+		if len(a.extraArgs) > 0 {
+			cmd += " " + strings.Join(a.extraArgs, " ")
+		}
 	}
 	if err := tmuxSendKeys(a.sessionName, cmd); err != nil {
 		return fmt.Errorf("tmux send-keys: %w", err)
