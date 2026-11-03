@@ -5,8 +5,9 @@
 #   task showcase:record   calibrate against a live TUI (tmux) → generate
 #                          demo/demo.tape → record the GIF (vhs)
 #   task demo              re-render the committed tape as-is (no agents)
-# A headless verifier (same beats, asserted in CI) is the planned second
-# runner of this definition.
+#   task showcase:run       assert the same beats — PASS/FAIL report,
+#                          exit non-zero on the first broken wait (tmux only;
+#                          -beats a,b runs a named subset)
 #
 # Every step sends exactly what the tape sends; every `wait` is what the
 # recorder actually polls for in the pane — never a guessed sleep. Pattern

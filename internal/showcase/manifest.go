@@ -18,6 +18,7 @@ package showcase
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,6 +251,49 @@ func (s *Step) validate(beat string, idx int) error {
 		return fmt.Errorf("beat %q step %d: extract needs pattern and name", beat, idx)
 	}
 	return nil
+}
+
+// FilterBeats narrows the manifest to the named beat ids (comma-separated,
+// manifest order kept — a subset still tells its story in narrative order).
+// An unknown name is an error: a typo'd `-beats` subset must fail loudly
+// rather than silently run nothing — or worse, silently run everything.
+func (m *Manifest) FilterBeats(csv string) error {
+	want := map[string]bool{}
+	for _, id := range strings.Split(csv, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	kept := make([]Beat, 0, len(want))
+	for i := range m.Beats {
+		if want[m.Beats[i].ID] {
+			kept = append(kept, m.Beats[i])
+			delete(want, m.Beats[i].ID)
+		}
+	}
+	if len(want) > 0 {
+		missing := make([]string, 0, len(want))
+		for id := range want {
+			missing = append(missing, id)
+		}
+		slices.Sort(missing) // map order is random; a config error reads the same everywhere
+		return fmt.Errorf("unknown beat id(s) in -beats: %s (manifest has: %s)",
+			strings.Join(missing, ", "), m.beatIDs())
+	}
+	m.Beats = kept
+	return nil
+}
+
+// beatIDs lists every beat id in order (error messages, reports).
+func (m *Manifest) beatIDs() string {
+	ids := make([]string, len(m.Beats))
+	for i := range m.Beats {
+		ids[i] = m.Beats[i].ID
+	}
+	return strings.Join(ids, ", ")
 }
 
 // Interpolate replaces {{name}} placeholders from vars. Unknown names are

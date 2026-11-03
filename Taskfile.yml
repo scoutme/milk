@@ -89,6 +89,13 @@ tasks:
     deps:
       - build
 
+  showcase:run:
+    desc: Verify the showcase beats against a live TUI — PASS/FAIL report, non-zero exit on the first broken wait (-beats a,b for a subset)
+    cmds:
+      - go run ./cmd/showcase -manifest demo/showcase.yaml -verify {{.CLI_ARGS}}
+    deps:
+      - build
+
   build:mock:
     desc: Compile milk-mock binary into current directory
     cmds:

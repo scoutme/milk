@@ -1,14 +1,17 @@
-// Command showcase records milk's showcase GIF from the one manifest in
-// demo/showcase.yaml (issue #387, ADR-0099):
+// Command showcase runs milk's showcase from the one manifest in
+// demo/showcase.yaml (issue #387, ADR-0099) through its two runners:
 //
 //  1. calibrate — drive a live TUI in tmux, wait on pane state (never on
 //     guessed sleeps), and measure each beat;
 //  2. generate — write demo/demo.tape from those measurements;
-//  3. record — hand the tape to vhs for the visual artifact.
+//  3. record — hand the tape to vhs for the visual artifact;
+//  4. verify (-verify) — the same beats, asserted: every wait must hold
+//     within the timeout, a PASS/FAIL report to stdout, exit non-zero on
+//     the first broken beat (-beats narrows to named beats).
 //
 // Steps 1+2 are deterministic given a working agent config; step 3 needs
-// vhs. `-tape-only` stops after the tape (CI-friendly: needs tmux + milk +
-// configured agents, but no vhs/display).
+// vhs; step 4 needs only tmux. `-tape-only` stops after the tape
+// (CI-friendly: needs tmux + milk + configured agents, but no vhs/display).
 package main
 
 import (
@@ -32,6 +35,8 @@ func main() {
 		vhsBin       = flag.String("vhs", "vhs", "vhs binary for the recording pass")
 		configPath   = flag.String("config", "", "source config.json (default: <milk state root>/config.json)")
 		tapeOnly     = flag.Bool("tape-only", false, "calibrate and generate the tape, skip the vhs recording")
+		verify       = flag.Bool("verify", false, "assert the beats instead of recording: same manifest, PASS/FAIL report on stdout, non-zero exit on the first broken wait (runner B, issue #387)")
+		beats        = flag.String("beats", "", "comma-separated beat ids to run (default: all; unknown ids are an error)")
 		margin       = flag.Float64("margin", 0, "override the manifest's sleep margin (>= 1)")
 		timeout      = flag.Duration("timeout", 0, "override the per-wait timeout")
 		session      = flag.String("session", "", "tmux session name (default: showcase-<pid>)")
@@ -39,33 +44,62 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*manifestPath, *milkBin, *vhsBin, *configPath, *tapeOnly, *margin, *timeout, *session, *keep); err != nil {
+	if err := run(runOpts{
+		manifestPath: *manifestPath, milkBin: *milkBin, vhsBin: *vhsBin, srcConfig: *configPath,
+		tapeOnly: *tapeOnly, verify: *verify, beats: *beats,
+		marginOverride: *margin, timeoutOverride: *timeout, session: *session, keep: *keep,
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, "showcase: "+err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(manifestPath, milkBin, vhsBin, srcConfig string, tapeOnly bool, marginOverride float64, timeoutOverride time.Duration, session string, keep bool) error {
+// runOpts is one showcase invocation's flags — a struct because flat
+// parameters past ~8 invite argument-order swaps between two booleans and
+// two strings that both parse fine and mean completely different runs.
+type runOpts struct {
+	manifestPath    string
+	milkBin         string
+	vhsBin          string
+	srcConfig       string
+	tapeOnly        bool
+	verify          bool
+	beats           string
+	marginOverride  float64
+	timeoutOverride time.Duration
+	session         string
+	keep            bool
+}
+
+func run(o runOpts) error {
+	manifestPath, milkBin, vhsBin, srcConfig := o.manifestPath, o.milkBin, o.vhsBin, o.srcConfig
+	keep, session, tapeOnly := o.keep, o.session, o.tapeOnly
 	manifest, err := showcase.Load(manifestPath)
 	if err != nil {
 		return err
 	}
-	if marginOverride > 0 {
-		if marginOverride < 1 {
-			return fmt.Errorf("margin %.2f must be >= 1", marginOverride)
+	if o.beats != "" {
+		if err := manifest.FilterBeats(o.beats); err != nil {
+			return err
 		}
-		manifest.Margin = marginOverride
 	}
-	if timeoutOverride > 0 {
-		manifest.Timeout = timeoutOverride
+	if o.marginOverride > 0 {
+		if o.marginOverride < 1 {
+			return fmt.Errorf("margin %.2f must be >= 1", o.marginOverride)
+		}
+		manifest.Margin = o.marginOverride
+	}
+	if o.timeoutOverride > 0 {
+		manifest.Timeout = o.timeoutOverride
 	}
 
 	// Preflight: the toolchain decides what this run can produce, loudly.
+	// Verify needs tmux only — it never records.
 	tmuxOK, vhsOK := showcase.Available()
 	if !tmuxOK {
 		return fmt.Errorf("tmux not found — calibration drives a real terminal (install tmux)")
 	}
-	if !tapeOnly && !vhsOK {
+	if !o.tapeOnly && !o.verify && !vhsOK {
 		return fmt.Errorf("vhs not found — install it (gem install vhs) or pass -tape-only")
 	}
 	milkPath, err := resolveMilk(milkBin)
@@ -110,7 +144,6 @@ func run(manifestPath, milkBin, vhsBin, srcConfig string, tapeOnly bool, marginO
 	launch := fmt.Sprintf("MILK_CONFIG_ROOT=%s %s", shellQuote(calRoot), shellQuote(milkPath)) +
 		" " + strings.TrimSpace(manifest.Launch)
 
-	fmt.Fprintf(os.Stderr, "showcase: calibrating %d beat(s) in tmux...\n", len(manifest.Beats))
 	opts := showcase.Options{
 		Session:     session,
 		Workdir:     workdir,
@@ -119,13 +152,25 @@ func run(manifestPath, milkBin, vhsBin, srcConfig string, tapeOnly bool, marginO
 		Timeout:     manifest.Timeout,
 		KeepSession: keep,
 	}
+
+	// ---- runner B: assert instead of record --------------------------------
+	// (before the "calibrating" line: verifying must not claim to measure)
+	if o.verify {
+		fmt.Fprintf(os.Stderr, "showcase: verifying %d beat(s) in tmux...\n", len(manifest.Beats))
+		rep, verr := showcase.Verify(context.Background(), manifest, opts)
+		if rep != nil {
+			fmt.Print(rep.Summary()) // the report is the product — stdout, before any error text
+		}
+		if verr != nil {
+			return fmt.Errorf("%w\n%s", verr, sessionHint(keep, session))
+		}
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "showcase: calibrating %d beat(s) in tmux...\n", len(manifest.Beats))
 	res, err := showcase.Calibrate(context.Background(), manifest, opts)
 	if err != nil {
-		hint := fmt.Sprintf("(tmux session %q kept for inspection)", session)
-		if !keep {
-			hint = fmt.Sprintf("(tmux session %q killed; rerun with -keep to inspect)", session)
-		}
-		return fmt.Errorf("%w\n%s", err, hint)
+		return fmt.Errorf("%w\n%s", err, sessionHint(keep, session))
 	}
 	for _, t := range res.Timings {
 		state := "ok"
@@ -205,4 +250,13 @@ func resolveMilk(flagVal string) (string, error) {
 
 func shellQuote(p string) string {
 	return "'" + strings.ReplaceAll(p, `'`, `'\''`) + "'"
+}
+
+// sessionHint tells a failed run where its tmux session went — kept when
+// asked, killed otherwise (with the exact flag to keep it next time).
+func sessionHint(keep bool, session string) string {
+	if keep {
+		return fmt.Sprintf("(tmux session %q kept for inspection)", session)
+	}
+	return fmt.Sprintf("(tmux session %q killed; rerun with -keep to inspect)", session)
 }
