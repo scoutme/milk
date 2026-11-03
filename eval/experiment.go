@@ -57,6 +57,15 @@ type Experiment struct {
 	Repetitions int `yaml:"repetitions"`
 	// Sandbox configures isolated agent state roots for the run (milk-tui).
 	Sandbox ExperimentSandbox `yaml:"sandbox"`
+	// Isolate is filesystem isolation for every agent run (issue #355):
+	// "auto" — bubblewrap when it works on this host, a loud warning and an
+	// unsandboxed run otherwise; "bwrap" — require it, fail closed; "off" or
+	// "" (the default) — run uncontained. Applies to every adapter in the
+	// comparison alike (RunExperiment resolves it once): sandboxing one side
+	// and not the other changes what the comparison measures. The
+	// scenario workdir is writable, /tmp is a fresh scratch, each adapter's
+	// own state root stays writable — everything else is read-only.
+	Isolate string `yaml:"isolate,omitempty"`
 	// Budget is the default metric budget asserted against every run; a
 	// scenario's own `budget:` block refines it field-by-field.
 	Budget *Budget `yaml:"budget"`
@@ -193,6 +202,11 @@ func (e *Experiment) Validate() error {
 	default:
 		return fmt.Errorf("sandbox.seed must be \"config\" or \"none\", got %q", e.Sandbox.Seed)
 	}
+	switch e.Isolate {
+	case "", IsolateOff, IsolateAuto, IsolateBwrap:
+	default:
+		return fmt.Errorf("isolate must be %q, %q or %q, got %q", IsolateAuto, IsolateBwrap, IsolateOff, e.Isolate)
+	}
 	seen := map[string]bool{}
 	for i, v := range e.Versions {
 		if v.Ref == "" && v.MilkBinary == "" {
@@ -205,6 +219,14 @@ func (e *Experiment) Validate() error {
 		seen[label] = true
 	}
 	return nil
+}
+
+// IsolationConfig resolves the experiment's isolate: field into the
+// isolation instruction (issue #355). The backend itself is probed once
+// per experiment (Harness.applyIsolation), so every adapter in one
+// comparison shares a single verdict — never half-sandboxed.
+func (e *Experiment) IsolationConfig() IsolationConfig {
+	return IsolationConfig{Mode: e.Isolate}
 }
 
 // SandboxEnabled reports whether the experiment asked for fresh sandboxes.
@@ -343,6 +365,12 @@ func (h *Harness) RunExperiment(ctx context.Context, exp *Experiment) ([]Scenari
 		} else if scfg.Enabled {
 			h.progress.Logf("note: %s has no sandbox support — running against live state", a.Name())
 		}
+	}
+
+	// Filesystem isolation (issue #355): resolved once (one bubblewrap
+	// probe), applied to every adapter alike.
+	if err := h.applyIsolation(exp.IsolationConfig()); err != nil {
+		return nil, err
 	}
 
 	h.Repetitions = exp.Repetitions

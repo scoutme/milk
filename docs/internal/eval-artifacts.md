@@ -78,6 +78,20 @@ Outputs made for humans to read, not for the tree to carry.
 - **Examples must stay pristine** — docs link at them; an example that someone
   "swapped the prompt" in stops teaching the format and starts confusing it.
 
+## Run isolation (issue #355)
+
+Run artifacts are only trustworthy if the run was contained. With
+`isolate: auto|bwrap` ([the eval reference](../reference/eval.md#filesystem-isolation))
+an agent run cannot write outside its scenario workdir, its per-run `/tmp`
+scratch and its own state root — so results under `eval/results/` describe
+runs that provably could not have modified the rest of the machine (other
+clones, the live checkout, `$HOME`), and cross-repetition contamination
+through escaped writes is structurally impossible. With `isolate: off`
+(the default) **no such guarantee exists**: anything a run wrote anywhere
+on the machine is invisible to `file_changes`, is not cleaned up with the
+workdir, and may influence later runs — treat uncontained results as
+provenance-uncertain.
+
 ## Quick reference
 
 | artifact | home |

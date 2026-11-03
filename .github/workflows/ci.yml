@@ -39,6 +39,10 @@ jobs:
 
       # Pure gate: main has always been gofmt-clean. (gofmt only reads .go
       # files, so the website's mkdocs build output needs no exclusion.)
+      - name: Install bubblewrap (eval isolation probes, issue #355)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"

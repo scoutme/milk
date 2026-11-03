@@ -32,6 +32,7 @@ Runs scenarios against one or more adapters, judges each turn, and prints + pers
 | `--category` | (none) | Filter to one category (`smoke`, `code_generation`, `debugging`, `refactoring`, …). |
 | `--multi-turn` | `false` | Only run scenarios with `multi_turn: true`. |
 | `--repetitions` | `1` | Run every scenario N times, fully isolated (fresh temp workdir, fresh sandbox per run) — for nth-run variance. |
+| `--isolate` | (none) | Filesystem isolation for agent runs: `auto`\|`bwrap`\|`off` — see [Filesystem isolation](#filesystem-isolation). Explicit flags override the experiment's `isolate:` field. |
 | `--results` | `~/.milk/eval/results` | Output directory (outside the source tree, under the milk state root); writes `results.json`. |
 | `--judge-agent` | primary agent | Agent name from `~/.milk/config.json` to use as the LLM judge instead of the primary agent — see [Judging](#judging). |
 
@@ -77,6 +78,7 @@ sandbox:                                                          # see Sandboxe
   seed: config                                                    # config (default) | none
   allow_tools: true                                               # let batch runs execute mutating tools
   milk_binary: ""                                                 # optional: pin the milk binary to drive
+isolate: off                                                      # filesystem isolation: auto | bwrap | off (default off) — see Filesystem isolation
 budget:                                                           # metric thresholds asserted per run (see Metric budgets)
   max_input_tokens: 100000
   max_output_tokens: 20000
@@ -105,6 +107,35 @@ Without sandboxing, every milk-tui run lives in the real `~/.milk` state root �
 Per-adapter pseudo-flags do the same without an experiment file: `milk-tui[--sandbox]`, `milk-tui[--sandbox-seed,/path/config.json]`, `milk-tui[--allow-tools]`, `milk-tui[--milk-bin,/path/to/milk]`, `milk-tui[--label,<name>]`. Explicit pseudo-flags win over experiment values.
 
 Two caveats: `claude-code` has no sandbox support (it drives a tmux session against the real `~/.claude`; an experiment's `sandbox:` section is skipped for it with a note), and MCP servers needing OAuth are not seeded — their tokens live in the (empty) state root, so the run warns `not authorized` and continues without them.
+
+---
+
+## Filesystem isolation
+
+A temp workdir and a fresh state root are *state* boundaries, not filesystem ones: nothing stops an agent from writing anywhere else on the machine — and nothing detects it (issue [#355](https://github.com/scoutme/milk/issues/355) records a real incident: scoring agents escaping into the live checkout across repetitions, one escape chain committed as legitimate-looking work). `isolate:` wraps **every agent process of every adapter in the comparison** in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox (Linux):
+
+```yaml
+isolate: auto                    # auto | bwrap | off (default off)
+```
+
+or `milk eval run --isolate=auto` (explicit flags override the experiment's field).
+
+| Mode | Behavior |
+|---|---|
+| `off` / unset | Uncontained — the historical behavior. |
+| `auto` | bubblewrap where it works; otherwise a **loud warning** and an uncontained run (macOS, Windows, kernels without user namespaces). |
+| `bwrap` | Required: fail closed when bubblewrap is missing or unusable — never silently uncontained. |
+
+The shape is **read-only by default, enumerate the writes** (`eval/isolate.go`):
+
+- the whole filesystem is mounted **read-only** — agent binaries, git identity, `$HOME` config, other repos all stay *visible* (nothing is hidden from the agent, so the evaluation stays pure: **no prompt or context changes**), just unwritable;
+- **writable**: the scenario workdir, a fresh per-run `/tmp` scratch (tmpfs, gone with the run), and the adapter's own state root — milk's `MILK_CONFIG_ROOT`/sandbox root, mimo's `~/.mimocode`, claude-code's `~/.claude` + `~/.claude.json`. State semantics are deliberately unchanged, so sandboxed and non-sandboxed baselines stay comparable (constraint: never measure a different thing);
+- the **network namespace is shared** on purpose — localhost model servers keep working;
+- the judge and the harness run **outside** the sandbox.
+
+The mode is resolved **once per run** (one real probe — a bare `bwrap` binary on `PATH` is not enough; kernels with user namespaces disabled fail every run) and handed to every adapter alike, so a comparison is never half-sandboxed. Degradation is always reported: "unsandboxed" is a visible fact in the run log, never an assumption. A surface missing from the writable list fails **loudly** (tool errors caught in testing) instead of silently escaping — the allowlist only ever grows from observed, reproducible needs. `file_changes` in results remains the workdir snapshot: isolation *prevents* escapes rather than reporting them.
+
+Rejected alternatives are recorded in issue #355 so they aren't re-proposed: prompt-level guardrails (contaminate the evaluation), worktree `git status` guards (too narrow, false-positive on the operator's own edits), tool-trail write tripwires (block legitimate surfaces), path concealment (agents can `ls ~` regardless).
 
 ---
 

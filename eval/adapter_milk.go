@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/transport/streamjson"
 )
 
@@ -42,6 +43,11 @@ type milkAdapter struct {
 	// MILK_CONFIG_ROOT so no run sees a previous run's sessions or memory.
 	sandbox    SandboxConfig
 	sandboxDir string // created per Start, removed per Stop
+
+	// isolation is the resolved filesystem isolation (issue #355, "" = off):
+	// IsolateBwrap wraps every batch run in a bubblewrap sandbox with this
+	// adapter's state root writable.
+	isolation string
 
 	// label renames this adapter in reports and results.json (Name()) — for
 	// side-by-side version matrices where several milk-tui adapters run the
@@ -366,6 +372,27 @@ func (a *milkAdapter) SetSandbox(c SandboxConfig) {
 	}
 }
 
+// SetIsolation applies the harness-resolved filesystem isolation (issue
+// #355): IsolateBwrap wraps every batch run in a bubblewrap sandbox.
+func (a *milkAdapter) SetIsolation(effective string) { a.isolation = effective }
+
+// isolateRW is this adapter's legitimate writable surface outside the
+// scenario workdir: the milk state root the run uses — the fresh sandbox
+// root when sandbox mode is on, the live one otherwise. State semantics are
+// deliberately unchanged by isolation (issue #355 constraint 5: don't
+// change what's measured); everything else in the state root (sessions,
+// memory, caches) is exactly what the run is supposed to write.
+func (a *milkAdapter) isolateRW() []string {
+	if a.sandboxDir != "" {
+		return []string{ensureRWDir(a.sandboxDir)}
+	}
+	d, err := config.Dir()
+	if err != nil {
+		return nil
+	}
+	return []string{ensureRWDir(d)}
+}
+
 func (a *milkAdapter) Start(ctx context.Context, workdir string) error {
 	a.workdir = workdir
 	if a.milkBin == "" {
@@ -466,8 +493,7 @@ func (a *milkAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult, 
 	args = append(args, a.extraArgs...)
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, a.milkBin, args...)
-	cmd.Dir = a.workdir
+	cmd := isolatedExec(ctx, a.isolation, append([]string{a.milkBin}, args...), a.workdir, a.isolateRW()...)
 	cmd.Stderr = os.Stderr
 	if a.sandboxDir != "" {
 		cmd.Env = append(os.Environ(), "MILK_CONFIG_ROOT="+a.sandboxDir)
