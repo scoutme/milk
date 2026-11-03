@@ -882,16 +882,17 @@ type model struct {
 	// (ADR-0087, "/panel autoopen on|off", config panel_auto_open,
 	// default on): while off, autoOpenPanel and applyMemoryContentDefault
 	// never open a panel — panels open only on an explicit toggle
-	// (/panel <name> or F1-F6). Per-panel manual overrides and the
-	// tabbed-theme gate layer on top when it is on.
+	// (/panel <name> or F1-F6). Per-panel manual overrides layer on top
+	// when it is on.
 	panelAutoOpen bool
 
-	// panelTabMRU is the tabbed-theme (ADR-0079) most-recently-viewed stack
-	// of panel tabs, front = the panel in the shared slot. Activation order
-	// only — which panels exist and which are open lives in the per-panel
-	// flags — so closing the front tab hands the slot back to the tab the
-	// user looked at before, like closing a browser tab. Unused when the
-	// theme has no tabs (panels are laid out side by side there).
+	// panelTabMRU is the most-recently-viewed stack of panels (the view
+	// stack, ADR-0098): front = the panel the user looked at last. The
+	// activation order only — which panels exist and which are open lives
+	// in the per-panel flags — so the state file's persisted "active"
+	// panel and the preferences display follow the user's own navigation.
+	// It never decides visibility: layout is the width budget's
+	// free/grouped split (ADR-0089/0096), on every theme.
 	panelTabMRU []panelRegion
 
 	// panelActivity is each region's last content/attention timestamp — the
@@ -5395,11 +5396,6 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	}
 
 	setTheme(st.cfg.Theme)
-	// The panel state and the memory default above were applied before the
-	// theme was known; tabs are exclusive (ADR-0079), so a sibling session's
-	// multi-open state collapses to its front panel now that the tabbed
-	// theme (if chosen) is active. No-op on theme "off".
-	m.enforceTabbedPanelExclusivity()
 	animationsEnabled = isTTY && st.cfg.AnimationsEnabled()
 	defer applyThemeTerminal()()
 	p := tea.NewProgram(m)

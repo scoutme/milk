@@ -400,3 +400,49 @@ func TestPanelShortcut_BringsHiddenPanelToFront(t *testing.T) {
 		t.Error("with no room to show it, the press falls back to closing the panel")
 	}
 }
+
+// TestMaxShownPanels_CapsVisibleColumns: max_shown_panels caps the width
+// budget directly (ADR-0098) — 1 keeps the one-column experience (every
+// open panel behind the group column's strip), 2 halves the row, 0 and
+// negatives hand the count back to the width, and a cap above the
+// width-derived count never adds columns. The cap is read live from the
+// session config on every layout pass, so changing it alone reshapes the
+// layout immediately (the hot-reload rule — apply now, never restart).
+func TestMaxShownPanels_CapsVisibleColumns(t *testing.T) {
+	m := layoutTestModel(t, 200, 40) // width-derived: 4 columns
+	m.panelMemory, m.panelTasks, m.panelBackground = true, true, true
+	m.workflowPanelOpen, m.panelProject, m.panelGit = true, true, true
+	if got := len(visiblePanels(&m)); got != 4 {
+		t.Fatalf("uncapped visible = %d, want 4 (width-derived)", got)
+	}
+
+	m.st.cfg.MaxShownPanels = 1
+	got := visiblePanels(&m)
+	if len(got) != 1 || got[0] != m.budgetTop() {
+		t.Errorf("cap=1: visible = %v, want exactly the group top", got)
+	}
+	// The one-column experience keeps every panel reachable behind the strip.
+	if g := m.budgetTabGroupFor(m.budgetTop()); len(g) != 6 {
+		t.Errorf("cap=1 group = %v, want all six panels behind the strip", g)
+	}
+
+	m.st.cfg.MaxShownPanels = 2
+	if n := len(visiblePanels(&m)); n != 2 {
+		t.Errorf("cap=2: visible = %d, want 2 (one free + the group top)", n)
+	}
+
+	m.st.cfg.MaxShownPanels = 0
+	if n := len(visiblePanels(&m)); n != 4 {
+		t.Errorf("cap=0: visible = %d, want the width-derived 4", n)
+	}
+
+	m.st.cfg.MaxShownPanels = -1
+	if n := len(visiblePanels(&m)); n != 4 {
+		t.Errorf("negative cap: visible = %d, want the width-derived 4", n)
+	}
+
+	m.st.cfg.MaxShownPanels = 99
+	if n := len(visiblePanels(&m)); n != 4 {
+		t.Errorf("cap above the width: visible = %d, want the width-derived 4 — a cap never adds columns", n)
+	}
+}

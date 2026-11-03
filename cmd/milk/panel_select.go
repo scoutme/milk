@@ -30,8 +30,7 @@ const (
 // (regionNone for the main viewport) and the column offset within that
 // region's own rendered width, walking the panels in the same left-to-right
 // order View() joins them in (panelRenderOrder) — and the same visibility
-// test (panelVisible), so on a tabbed theme the one panel in the shared slot
-// owns every panel column.
+// test (panelVisible), so drawn columns and hit targets can never drift.
 func (m *model) regionAt(x int) (panelRegion, int) {
 	off := m.mainWidth()
 	if x < off {
@@ -160,25 +159,12 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev mouseEvent)
 			// background/workflow, attach to that job's/the workflow's live
 			// buffer (ADR-0047) instead of printing.
 			m.clearPanelSelection()
-			// Tab bar (ADR-0079): on a tabbed theme the tab strip is the
-			// panel's first content row (on screen row panelRowStart while
-			// the panel is scrolled to the top). A click on a tab label does
-			// what that tab's F-key does: bring the panel's tab to the
-			// front of the shared slot, opening the panel first when its tab
-			// is closed. The strip renders in fixed f1–f6 table order (labels
-			// never reorder on selection), so the hit-test walks exactly that.
-			if panelTabsActive() && ev.Y == panelRowStart && lineIdx == 0 {
-				if tab := panelTabAt(col); tab != regionNone {
-					dragCmd = m.handlePanelTabClick(tab)
-					break
-				}
-			}
-			// Budget overflow tabs (issue #373): the group column — the
-			// rightmost one — carries the strip of the grouped panels.
-			// Clicking a grouped tab moves that panel to the top of its
-			// group (stamp, never toggled closed); a click never closes
-			// anything (see handleBudgetTabClick).
-			if !panelTabsActive() && ev.Y == panelRowStart && lineIdx == 0 {
+			// Overflow tabs (issue #373, every theme per ADR-0098): the
+			// group column — the rightmost one — carries the strip of the
+			// grouped panels. Clicking a grouped tab moves that panel to
+			// the top of its group (stamp, never toggled closed); a click
+			// never closes anything (see handleBudgetTabClick).
+			if ev.Y == panelRowStart && lineIdx == 0 {
 				if tab := budgetTabAt(m.budgetTabGroupFor(region), panelWidth(region)-1, col); tab != regionNone {
 					dragCmd = m.handleBudgetTabClick(tab)
 					break
@@ -211,45 +197,17 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev mouseEvent)
 	return m, dragCmd
 }
 
-// handlePanelTabClick runs a click on a tab of the tabbed theme's tab bar
-// (ADR-0079) — same effect as that tab's F-key / /panel <name>: a closed tab
-// opens its panel through the regular toggle path (manual override,
-// persistence and the project/git content fetches all happen), which also
-// closes whatever was in the slot — tabs are exclusive. An open tab just
-// comes to the front: for the front label that is a no-op (closing stays the
-// F-key / /panel gesture), and for open-but-hidden residue it brings the
-// panel forward and closes the rest, restoring the invariant.
-func (m *model) handlePanelTabClick(region panelRegion) tea.Cmd {
-	if !m.panelRawOpen(region) {
-		res, cmd := m.handlePanelCmd(panelSubName(region))
-		if mm, ok := res.(model); ok {
-			*m = mm
-		}
-		return cmd
-	}
-	m.activatePanelTab(region) // stamps the move like opening does (ADR-0089)
-	m.closeAllButPanelTabs(region)
-	m.savePanelStateReport()
-	m.syncLayout()
-	// Moving is announced like every other move: opening toasts "on", the
-	// sibling F-key/bring-to-front toasts "brought to front" — a tab click
-	// onto an open panel is the same event class and gets the same line.
-	m.notify(panelDisplayName(region)+" panel: brought to front", "/panel "+panelSubName(region))
-	return nil
-}
-
 // handleBudgetTabClick runs a click on a width-budget overflow tab (issue
-// #373) — and it only ever moves a panel to the top of its group: on a
-// grouped panel that is not on top, exactly the F-key / /panel <name>
-// bring-to-front — its recency stamp makes it the group's freshest, so the
-// group column shows it ("between the grouped ones, the fresher one is on
-// top"). The sets themselves never move (the grouped ones are always the
-// rightmost open ones) and nothing is ever toggled closed (ADR-0089's
-// rule). On the top's own label — the panel already on screen in the group
-// column — a deliberate no-op: clicking what you are pointing at must not
-// move or close it; closing stays with the F-key / /panel press, which
-// handlePanelCmdToggle still toggles. Sibling layout only; the tabbed
-// theme's bar keeps its own front-tab-close semantics (ADR-0079).
+// #373, every theme per ADR-0098) — and it only ever moves a panel to the
+// top of its group: on a grouped panel that is not on top, exactly the
+// F-key / /panel <name> bring-to-front — its recency stamp makes it the
+// group's freshest, so the group column shows it ("between the grouped
+// ones, the fresher one is on top"). The sets themselves never move (the
+// grouped ones are always the rightmost open ones) and nothing is ever
+// toggled closed (ADR-0089's rule). On the top's own label — the panel
+// already on screen in the group column — a deliberate no-op: clicking what
+// you are pointing at must not move or close it; closing stays with the
+// F-key / /panel press, which handlePanelCmdToggle still toggles.
 func (m *model) handleBudgetTabClick(region panelRegion) tea.Cmd {
 	if m.panelVisible(region) {
 		return nil // on-screen tab: forward-only navigation, never a toggle

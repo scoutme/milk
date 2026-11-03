@@ -176,14 +176,15 @@ var commandRegistry = []cmdSpec{
                          double-click a file to insert an @-mention
   /panel git             toggle the git graph panel (right side) — also F6
                          click a commit to preview its summary and diff
+                         a press on a visible panel closes it; a press on a
+                         panel the width budget grouped (see
+                         max_shown_panels) brings that panel to the top of
+                         the group's strip instead of closing it, and a
+                         click on a grouped tab does the same as its F-key
   /panel autoopen [on|off]  show or set content-driven auto-open (default on):
                          panels open themselves when new content appears
                          (config key panel_auto_open; off = open only on an
-                         explicit toggle)
-                         on a tabbed theme (/theme supermilk) the six panels are
-                         tabs of one shared slot: on a hidden tab this switches
-                         to it instead of closing, and clicking a tab label
-                         does the same as its F-key`},
+                         explicit toggle)`},
 	{name: cmdForget, hosts: hostTUI, desc: "delete a percept (asks for confirmation)", hint: "<pat|#id>", help: `  /forget <pat|#id>      delete a percept (asks for confirmation)`},
 	{name: cmdSkipPerms, hosts: hostBoth, desc: "approve every tool call without asking, or go back to asking", hint: "[on|off]", help: `  /skip-permissions      show current skip-permissions state
   /skip-permissions on   all agents auto-approve tool uses (no prompts)

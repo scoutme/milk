@@ -777,6 +777,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `animations` | bool | `true` | Spring animations in the TUI: side panels slide in and out, the mouse wheel scrolls with inertia. `false` makes both instant |
 | `remember_panel_state` | bool | `true` | Durable side-panel layout (ADR-0078 as amended by ADR-0087): panel open/closed choices persist per folder to `~/.milk/panel-state/*.json` and are restored at startup — as layout only, never vetoing auto-open of new content. `false` = session-only panels |
 | `panel_auto_open` | bool | `true` | Master switch for content-driven panel auto-open (ADR-0087): panels open themselves when new content appears (a manual close sticks only while the dismissed content is live, ADR-0059). `false` = panels open only on an explicit `/panel <name>` toggle (or F1-F6). Toggled by `/panel autoopen on\|off` |
+| `max_shown_panels` | int | `0` | Cap on visible side-panel columns ([ADR-0098](../adr/0098-one-panel-layout-every-theme.md)): `0`/absent = the width budget decides; `1` = the one-column experience (every open panel behind the group column's tab strip, still clickable); a cap never adds columns. Applies to every theme; hot-reloads immediately |
 
 ---
 

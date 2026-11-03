@@ -41,9 +41,9 @@ once):
   no open, no toast, no tab activation — and `applyMemoryContentDefault`
   skips its startup open too. Nothing else changes: manual `/panel <name>`
   and F1-F6 toggles, the per-panel manual override, the finalization reset
-  (ADR-0059), per-folder panel state (ADR-0078), and the tabbed-theme slot
-  gate (ADR-0079) all behave exactly as before, layering on top when the
-  switch is on.
+  (ADR-0059), per-folder panel state (ADR-0078), and — while it existed —
+  the tabbed-theme slot gate (ADR-0079, retired by ADR-0098) all behave
+  exactly as before, layering on top when the switch is on.
 
 ### Companion change: saved panel state is startup layout (amends ADR-0078)
 

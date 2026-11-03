@@ -8,7 +8,10 @@
 > active panels — is superseded: the open panels now split by position into
 > the free ones (leftmost, one per column) and the grouped ones (rightmost,
 > tabbed in the last column, the freshest of them on top). The slot count
-> and width math of this ADR stand unchanged.
+> and width math of this ADR stand unchanged. Since
+> [ADR-0098](0098-one-panel-layout-every-theme.md) the split runs on **every
+> theme**, and `max_shown_panels` may cap the count below the width-derived
+> one (0 = the width decides).
 
 ## Context
 
@@ -111,9 +114,11 @@ freshest forever:
   `panelRenderOrder` — the original left-to-right fill, as tie-break only.
 - **Transcript floor holds.** Whenever any panel shows, the main area keeps
   at least 40 cols; the 20-col clamp stays unreachable through panel layout.
-- **Tabs fall out naturally.** On a tabbed theme only the front tab is in
+- **Tabs fall out naturally.** ~~On a tabbed theme only the front tab is in
   layout, so it is the only candidate — recency is irrelevant there
-  (ADR-0079 unchanged).
+  (ADR-0079 unchanged).~~ *Retired with ADR-0079 by
+  [ADR-0098](0098-one-panel-layout-every-theme.md): the budget split above
+  decides on every theme.*
 - **No flapping.** Only substantive changes stamp, so swaps track real
   events (a workflow holding a slot *while it streams* is the point; when
   its stream ends, the next event elsewhere overtakes it).
