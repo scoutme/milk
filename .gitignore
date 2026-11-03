@@ -40,3 +40,6 @@ website/.venv/
 # Python bytecode caches (scripts/__pycache__)
 __pycache__/
 *.pyc
+
+# showcase record output (task showcase:record); the committed asset is the compressed variant
+docs/assets/milk-tui.gif

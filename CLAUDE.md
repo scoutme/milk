@@ -59,6 +59,8 @@ cmd/milk/update_core.go       # host-independent self-update (one check path: sk
 cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, field descriptors/defaults, config commit) shared by TUI handleInitWizardKey, ACP pendingInit chat flow and ACP form dialogs
 cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 cmd/milk/idlewatch.go         # shared idle watchdog: activity-refreshed turn warning + opt-in deadline wrap-up, TUI and ACP (issue #305)
+internal/tmux/                 # tmux session driver (send-keys + capture-pane polling) — state-synchronized terminal control shared by eval's claude adapter and the showcase recorder
+internal/showcase/              # showcase manifest (beats = keys + pane-state waits), calibration runner, vhs-tape generator, clean config root (ADR-0099)
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json
 internal/transport/acp/       # ACP v2 wire vocabulary + stdio.go's JSON-RPC transport (StdioConn)
 internal/config/              # config loading (~/.milk/config.json)
@@ -78,6 +80,8 @@ internal/livebuf/             # thread-safe byte-capped text buffer for live bac
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/mcpauth/             # native MCP OAuth: RFC 9728/8414 discovery, RFC 7591 DCR, PKCE, token store (~/.milk/mcp_oauth/)
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
+cmd/showcase/                 # `task showcase:record` — calibrate a live TUI session (tmux) → generate demo/demo.tape → record GIF (vhs), from demo/showcase.yaml (issue #387, ADR-0099)
+demo/                          # showcase: showcase.yaml (the beat manifest, single source of truth) + generated demo.tape (replayable as-is; edit the manifest, not the tape)
 eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui, mimo-code), judge, report (see docs/reference/eval.md)
 ```
 
