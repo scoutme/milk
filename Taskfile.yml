@@ -69,9 +69,23 @@ tasks:
       - echo "installed milk-smolagent to {{.SCRIPTS_DEST}}"
 
   demo:
-    desc: Record the TUI demo gif (requires vhs)
+    desc: Re-render the showcase GIF from the committed tape (requires vhs, no calibration)
     cmds:
       - vhs demo/demo.tape
+    deps:
+      - build
+
+  showcase:record:
+    desc: Calibrate the showcase against a live TUI, regenerate demo/demo.tape, record the GIF (tmux + vhs)
+    cmds:
+      - go run ./cmd/showcase -manifest demo/showcase.yaml
+    deps:
+      - build
+
+  showcase:tape:
+    desc: Calibrate and regenerate demo/demo.tape only (tmux, no vhs)
+    cmds:
+      - go run ./cmd/showcase -manifest demo/showcase.yaml -tape-only
     deps:
       - build
 

@@ -1,0 +1,112 @@
+# Milk feature-tour showcase — the single source of truth for the recorded
+# TUI demo (issue #387, ADR-0099).
+#
+# Two runners consume this file:
+#   task showcase:record   calibrate against a live TUI (tmux) → generate
+#                          demo/demo.tape → record the GIF (vhs)
+#   task demo              re-render the committed tape as-is (no agents)
+# A headless verifier (same beats, asserted in CI) is the planned second
+# runner of this definition.
+#
+# Every step sends exactly what the tape sends; every `wait` is what the
+# recorder actually polls for in the pane — never a guessed sleep. Pattern
+# texts below were captured from a real session, not invented.
+
+name: milk-feature-tour
+output: docs/assets/milk-tui.gif
+tape: demo.tape              # generated next to this file, replacing the old hand-written tape
+launch: "--new"            # arguments only — the recorder prepends cd + MILK_CONFIG_ROOT + the absolute binary
+workdir: "."                 # the repo: the git beat needs a real repository
+margin: 1.5                  # sleep = measured × 1.5 (+ base) — second-run latency headroom
+base: 0.4                    # visible beat boundary even with zero waits
+timeout: 60s                 # one wait beyond this = broken beat = failed calibration
+
+# A showcase must not depend on live infrastructure: strip these config keys
+# for the clean run root (agents and settings are kept — the tour runs the
+# user's own configured agents; sessions/memory/panel state start empty so
+# every recording opens on the same defaults and the panels *appear* on cue).
+strip_config_keys:
+  - remote_oversight
+
+terminal:
+  width: 1200                # vhs px
+  height: 700
+  cols: 120                  # tmux cells for the calibration pass
+  rows: 40
+  font_size: 14
+  theme: Dracula
+  typing_speed: 60ms
+  playback_speed: 0.9
+
+beats:
+  - id: startup
+    note: "fresh session — no tasks yet; the tour closes this loop later"
+    steps:
+      - type: "/tasks"
+      - key: Enter
+        wait: "[milk] tasks:"   # also proves the submit path before the tour begins
+
+  - id: learn
+    note: "/learn records a fact — the memory panel opens with the new percept"
+    steps:
+      - type: "/learn milk's showcase is defined in demo/showcase.yaml"
+      - key: Enter
+        wait: "[milk] learned:"
+      - wait: "CONTEXT BRICKS"   # memory panel auto-opened (panel content event, #347)
+
+  - id: primary-turn
+    note: "a prompt runs on the primary agent — busy indicator until the answer lands"
+    steps:
+      - type: "reply with exactly: ready"
+      - key: Enter
+        wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+
+  - id: task
+    note: "create_task work lands in the tasks panel — list it, then close it"
+    steps:
+      - type: "Create a task titled showcase-tour-demo and reply: done"
+      - key: Enter
+        wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - wait: "showcase-tour-demo"            # tasks panel auto-opened with the new task
+      - type: "/tasks"
+      - key: Enter
+        wait: "pending     showcase-tour-demo"
+        extract:
+          pattern: '([0-9a-f]{8})\s+pending\s+showcase-tour-demo'
+          name: task_id
+      - type: "/task done {{task_id}}"
+      - key: Enter
+        wait: "marked done"
+
+  - id: bg
+    note: "the agent picker flyover chooses a background agent — the job finishes into the transcript"
+    steps:
+      - type: "/bg start write a haiku about terminals"
+      - key: Enter
+        wait: "↑↓ choose"                     # flyover open (ADR-0082 / #382)
+      - key: Enter                            # accept the preselected default
+        wait: "terminals\" completed"         # the done-notice line; NOT status=ok — that suffix is an optional model-emitted tag (ParseBackgroundResult), absent when the model skips the convention
+
+  - id: routing
+    note: "/escalate pins to the escalation agent for one turn, /primary hands control back"
+    steps:
+      - wait_absent: "role:PRIMARY"   # a finished background job can trigger milk's automatic follow-up turn — never type over a running turn (it would queue)
+      - type: "/escalate"
+      - key: Enter
+        wait: "pinned to mimo-pro-local"
+      - type: "reply with exactly: from-escalation"
+      - key: Enter
+        wait: "role:ESCALATION"
+      - wait_absent: "role:ESCALATION"
+      - type: "/primary"
+      - key: Enter
+        wait: "pinned to mimo-local"
+
+  - id: git
+    note: "opening the git panel — the grouped tab strip shows the session's panel set"
+    steps:
+      - type: "/panel git"
+      - key: Enter
+        wait: "⎇"                              # git header (branch) rendered

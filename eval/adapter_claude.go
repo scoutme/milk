@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/tmux"
 )
 
 func init() {
@@ -248,14 +249,14 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 	a.transcriptPath = filepath.Join(home, ".claude", "projects", encodedCwd, a.sessionID+".jsonl")
 
 	// Create tmux session.
-	if err := tmuxNewSession(a.sessionName, 200, 50); err != nil {
+	if err := tmux.NewSession(a.sessionName, 200, 50); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
 	// The harness only Stops an adapter whose Start succeeded; don't leak the
 	// tmux session when a later startup step fails.
 	defer func() {
 		if err != nil {
-			_ = tmuxKillSession(a.sessionName)
+			_ = tmux.KillSession(a.sessionName)
 		}
 	}()
 
@@ -273,10 +274,10 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 			cmd += " " + strings.Join(a.extraArgs, " ")
 		}
 	}
-	if err := tmuxSendKeys(a.sessionName, cmd); err != nil {
+	if err := tmux.SendKeys(a.sessionName, cmd); err != nil {
 		return fmt.Errorf("tmux send-keys: %w", err)
 	}
-	if err := tmuxSendEnter(a.sessionName); err != nil {
+	if err := tmux.SendEnter(a.sessionName); err != nil {
 		return fmt.Errorf("tmux send-enter: %w", err)
 	}
 
@@ -284,7 +285,7 @@ func (a *claudeAdapter) Start(ctx context.Context, workdir string) (err error) {
 	// ("Yes, I trust this folder") rather than the main prompt.
 	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := pollPaneContains(pollCtx, a.sessionName, "❯", 500*time.Millisecond); err != nil {
+	if err := tmux.PollPaneContains(pollCtx, a.sessionName, "❯", 500*time.Millisecond); err != nil {
 		return fmt.Errorf("waiting for Claude Code ready: %w", err)
 	}
 
@@ -312,24 +313,24 @@ func (a *claudeAdapter) confirmTrustDialogIfShown(ctx context.Context) error {
 	watchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
-		pane, _ := tmuxCapturePane(a.sessionName)
+		pane, _ := tmux.CapturePane(a.sessionName)
 		if strings.Contains(pane, "trust this folder") || strings.Contains(pane, "Yes, I trust") {
 			for i := 0; i < 3 && !trustYesSelected(pane); i++ {
-				if err := tmuxSendKey(a.sessionName, "Down"); err != nil {
+				if err := tmux.SendKey(a.sessionName, "Down"); err != nil {
 					return fmt.Errorf("selecting trust option: %w", err)
 				}
 				time.Sleep(300 * time.Millisecond)
-				pane, _ = tmuxCapturePane(a.sessionName)
+				pane, _ = tmux.CapturePane(a.sessionName)
 			}
 			if !trustYesSelected(pane) {
 				return fmt.Errorf("could not select %q in the trust dialog", "Yes, I trust this folder")
 			}
-			if err := tmuxSendEnter(a.sessionName); err != nil {
+			if err := tmux.SendEnter(a.sessionName); err != nil {
 				return fmt.Errorf("confirming trust dialog: %w", err)
 			}
 			clearCtx, cancel2 := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel2()
-			return pollPaneNotContains(clearCtx, a.sessionName, "trust this folder", 300*time.Millisecond)
+			return tmux.PollPaneNotContains(clearCtx, a.sessionName, "trust this folder", 300*time.Millisecond)
 		}
 		select {
 		case <-watchCtx.Done():
@@ -437,7 +438,7 @@ func (a *claudeAdapter) RunPrompt(ctx context.Context, prompt string) (RunResult
 }
 
 func (a *claudeAdapter) Stop() error {
-	return tmuxKillSession(a.sessionName)
+	return tmux.KillSession(a.sessionName)
 }
 
 // sendPromptUntilAccepted sends prompt via tmux and verifies Claude Code
@@ -460,13 +461,13 @@ func (a *claudeAdapter) sendPromptUntilAccepted(ctx context.Context, prompt stri
 	typed := false
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if !typed {
-			if err := tmuxSendKeys(a.sessionName, prompt); err != nil {
+			if err := tmux.SendKeys(a.sessionName, prompt); err != nil {
 				return fmt.Errorf("tmux send-keys: %w", err)
 			}
 			typed = true
 		}
 		time.Sleep(enterDelay)
-		if err := tmuxSendEnter(a.sessionName); err != nil {
+		if err := tmux.SendEnter(a.sessionName); err != nil {
 			return fmt.Errorf("tmux send-enter: %w", err)
 		}
 
@@ -479,7 +480,7 @@ func (a *claudeAdapter) sendPromptUntilAccepted(ctx context.Context, prompt stri
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if pane, err := tmuxCapturePane(a.sessionName); err == nil && !strings.Contains(pane, marker) {
+		if pane, err := tmux.CapturePane(a.sessionName); err == nil && !strings.Contains(pane, marker) {
 			typed = false // keystrokes were dropped: type the prompt again
 		}
 	}
