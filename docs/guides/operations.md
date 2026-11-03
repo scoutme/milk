@@ -281,7 +281,7 @@ On success: `[milk] config reloaded`. On error: `[milk] config reload error: <re
 
 **Not hot-reloaded**: a running turn's config snapshot, and MCP OAuth authorization (still requires the interactive `/mcp auth <server>` flow).
 
-**Availability is never frozen**: a rebuilt runner with a `run_cmd` has its server started right away (as at startup), and if an agent still reads unavailable when the runners were built — server booting, or config reloaded while it was down — every turn re-checks it (bounded, so a dead host can't stall a turn) and routes to it again as soon as it answers. No restart needed to recover.
+**Availability is never frozen**: a rebuilt runner with a `run_cmd` has its server started right away (as at startup), and if an agent still reads unavailable when the runners were built — server booting, or config reloaded while it was down — every turn re-checks it (bounded, so a dead host can't stall a turn) and routes to it again as soon as it answers. No restart needed to recover. **Startup probes follow the same rule once** (issue #388): they run concurrently, each capped at 3s — a blackholed dependency costs one bounded wait at launch instead of an unbounded dial/HTTP timeout (single-prompt with both agents down still fails fast, after the bound), and the health verdict arriving late only corrects a status line, never a frozen one.
 
 ### Recovering from a corrupted `config.json`
 
@@ -336,6 +336,8 @@ Forward agent activity and permission prompts to a mobile device.
 ```
 
 **Enable/disable at runtime** (credentials preserved): `/setup telegram on` / `/setup telegram off`.
+
+**Startup never waits on the backend** (issue #388): the notifier is built without touching the network and verified in the background — the poll loop starts only after `getMe` answers (10s bound), a failure switches oversight off with the warning in the transcript (stderr under `serve`) instead of stalling the launch, and the "oversight active" announcement fires on success. A blocked `api.telegram.org` costs milk nothing at startup.
 
 | Key | Default | Description |
 |---|---|---|
