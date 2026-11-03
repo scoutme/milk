@@ -44,13 +44,17 @@ func (r *stagedRunner) Run(_ context.Context, _ string, _ io.Writer) (string, er
 	return r.resp, nil
 }
 
-// waitForPanel renders the panel until ready reports true (or a 10s deadline
-// passes) and returns the last rendering either way. Progress reports reach the
+// waitForPanel renders the panel until ready reports true (or a 30s deadline
+// passes) and returns the last rendering either way. The deadline is generous
+// on purpose: macOS -race runners are 3-4x slower than linux and this test
+// failed twice in a row at 10s while item 3's goroutine sat runnable behind
+// the parked wave-2 worker — a genuinely absent node still fails within one
+// bounded window. Progress reports reach the
 // state asynchronously after the wave signal, so tests must poll instead of
 // sleeping a fixed guess — the old 100ms sleep flaked on loaded CI runners
 // (issue #338; reproduces with sleep(0) as "panel missing" failures).
 func waitForPanel(mu *sync.Mutex, st *workflow.State, width int, ready func(panel string) bool) string {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		mu.Lock()
 		rows := buildGenericWorkflowPanelLines(st, width)
