@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -57,31 +60,92 @@ func TestView_DeclaresFocusReportingAndTitle(t *testing.T) {
 	}
 }
 
-func TestBlurPausesPanelPolling(t *testing.T) {
+// TestBlurDoesNotGatePollingWork pins issue #389: focus is presentation-
+// only. The project and git refresh ticks must produce the same probe
+// messages while blurred as while focused — those probes are #347's
+// panel-event source (toasts, auto-open, veto release), and a
+// multi-display viewer keeps an eye on an unfocused window. The poll
+// timers stay armed either way; the input-area dimming (#367) is the
+// focus-dependent part, pinned separately below.
+func TestBlurDoesNotGatePollingWork(t *testing.T) {
 	m := layoutTestModel(t, 80, 24)
 	m.panelGit = true
-	next, _ := m.Update(tea.BlurMsg{})
-	m = next.(model)
-	if !m.blurred {
-		t.Fatal("blur should mark the model")
+	m.panelProject = true
+
+	// msgTypes flattens the returned command tree (batches included) and
+	// records each leaf's message type — the shape a gate would change.
+	msgTypes := func(cmd tea.Cmd) []string {
+		t.Helper()
+		var out []string
+		var walk func(tea.Cmd)
+		walk = func(c tea.Cmd) {
+			if c == nil {
+				return
+			}
+			got := c()
+			if b, ok := got.(tea.BatchMsg); ok {
+				for _, inner := range b {
+					walk(inner)
+				}
+				return
+			}
+			out = append(out, fmt.Sprintf("%T", got))
+		}
+		walk(cmd)
+		sort.Strings(out)
+		return out
 	}
-	_, cmd := m.Update(gitRefreshMsg{})
-	if cmd == nil {
-		t.Fatal("the poll timer must stay armed while blurred")
+
+	for _, tc := range []struct {
+		name  string
+		msg   tea.Msg
+		setup func(*model)
+	}{
+		{"project tick, panel open", projectRefreshMsg{}, func(m *model) { m.panelProject = true }},
+		{"project tick, panel closed (the #347 event source)", projectRefreshMsg{}, func(m *model) { m.panelProject = false }},
+		{"git tick, panel open", gitRefreshMsg{}, func(m *model) { m.panelGit = true }},
+		{"git tick, panel closed", gitRefreshMsg{}, func(m *model) { m.panelGit = false }},
+	} {
+		m.panelGit, m.panelProject = false, false
+		tc.setup(&m)
+		m.blurred = false
+		_, focused := m.Update(tc.msg)
+		m.blurred = true
+		_, blurred := m.Update(tc.msg)
+		if focused == nil {
+			t.Fatalf("%s: the poll timer must stay armed while focused", tc.name)
+		}
+		if blurred == nil {
+			t.Fatalf("%s: the poll timer must stay armed while blurred", tc.name)
+		}
+		gotF, gotB := msgTypes(focused), msgTypes(blurred)
+		if len(gotF) == 0 {
+			t.Fatalf("%s: focused refresh ran no probe", tc.name)
+		}
+		if !reflect.DeepEqual(gotB, gotF) {
+			t.Errorf("%s: blurred produced message types %v, focused produced %v — blur must not gate the probe (issue #389)", tc.name, gotB, gotF)
+		}
 	}
-	next, _ = m.Update(tea.FocusMsg{})
+
+	// The flag itself still tracks focus (the dim rendering depends on it).
+	next, _ := m.Update(tea.FocusMsg{})
 	if next.(model).blurred {
 		t.Error("focus should clear the blurred flag")
 	}
 }
 
-func TestBlurFreezesTipRotation(t *testing.T) {
+// TestBlurKeepsTipRotation pins issue #389 the same way for the idle tip
+// line: an idle unfocused window keeps cycling tips (the multi-display
+// viewer's idle view stays alive). The ADR-0061 attention gates (busy,
+// pending prompt) keep freezing rotation regardless of focus — the busy
+// half is pinned in tips_test.go.
+func TestBlurKeepsTipRotation(t *testing.T) {
 	m := layoutTestModel(t, 80, 24)
 	m.blurred = true
 	before := m.tipIdx
 	next, _ := m.Update(tipsTickMsg{gen: m.tipsGen})
-	if next.(model).tipIdx != before {
-		t.Error("tips must not rotate while the window is blurred")
+	if next.(model).tipIdx == before {
+		t.Error("tips must keep rotating while blurred (issue #389)")
 	}
 }
 
