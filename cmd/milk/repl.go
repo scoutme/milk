@@ -782,8 +782,11 @@ type model struct {
 	palette *paletteState
 
 	// blurred is true while the terminal window lacks focus (tea.BlurMsg).
-	// Zero value = focused, so a bare model behaves as before. Background
-	// polling (tips rotation, project/git refresh) pauses while it is set.
+	// Zero value = focused, so a bare model behaves as before. Focus is
+	// presentation only (issue #389): the input area renders dimmed and
+	// cursorless while set (#367), but polling, toasts and tips keep
+	// running — an unfocused window in a multi-display setup stays a live
+	// view, and #347's event probes are never gated on focus.
 	blurred bool
 	// currentTurnThinking accumulates thinking text for the current in-progress
 	// turn so it can be stored in session.Turn.Thinking when the turn completes.
@@ -3126,9 +3129,11 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The rotation freezes while a turn runs or a prompt is pending —
 		// the tip line's row stays reserved (no layout jump) but the user's
 		// attention is elsewhere, so the tip only advances while they are
-		// actually idle (ADR-0061). An advance also ends the manual-browse
+		// actually idle (ADR-0061). Focus is deliberately NOT one of the
+		// conditions (issue #389): a multi-display viewer's unfocused
+		// window keeps cycling. An advance also ends the manual-browse
 		// pin (tipPinned), restoring contextual-hint precedence.
-		if !m.busy && !m.hasPendingPrompt() && !m.blurred {
+		if !m.busy && !m.hasPendingPrompt() {
 			m.tipIdx++
 			m.tipPinned = false
 		}
@@ -3281,13 +3286,13 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, memoryPollTick()
 
 	case projectRefreshMsg:
-		if m.blurred {
-			return m, projectPollTick() // keep the timer alive, skip the work
-		}
 		// The tick chain is permanent now (issue #347): the git status
 		// probe it carries is the panel-event source even while the
 		// project panel is closed — that is what notices content edges
 		// without an open panel. Only the file listing is display work.
+		// Never gated on focus either (issue #389): blur is
+		// presentation-only, so the event source keeps running and an
+		// unfocused window still toasts and auto-opens.
 		if !m.panelProject {
 			return m, tea.Batch(projectPollTick(), m.changesetRefreshCmd())
 		}
@@ -3300,8 +3305,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Also permanent (issue #347): while the panel is closed the cheap
 		// timer keeps itself alive but skips the graph fetch — status
 		// edges/toasts come from the changeset probe either way, and an
-		// auto-opened panel gets a fresh graph from that event.
-		if m.blurred || !m.panelGit {
+		// auto-opened panel gets a fresh graph from that event. Focus is
+		// not a condition (issue #389): an open git panel keeps its graph
+		// live even in an unfocused window.
+		if !m.panelGit {
 			return m, gitPollTick()
 		}
 		return m, tea.Batch(gitPollTick(), refreshGitCmd(m.st.cwd))
