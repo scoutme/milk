@@ -8,8 +8,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 // flakyExecRunner fails with errs[0], errs[1], ... on successive Execute
@@ -101,9 +105,13 @@ func TestExecuteWithRetry_GivesUpAfterMaxRetries(t *testing.T) {
 }
 
 func TestExecuteWithRetry_DoesNotRetryNonTransientError(t *testing.T) {
+	// HTTP status errors surface as plain messages and are deliberately
+	// never retried (issue #391 — the widened classification covers
+	// connection-phase failures; io.EOF-family moved to the transient side
+	// with it and is pinned in workflow's classifier table).
 	runner := &flakyExecRunner{
 		name: "test",
-		errs: []error{io.ErrUnexpectedEOF},
+		errs: []error{errors.New("inference server returned 401: unauthorized")},
 	}
 
 	_, err := executeWithRetry(context.Background(), runner, config.Config{}, &session.Session{},
@@ -171,5 +179,102 @@ func TestRunPrimaryWithSession_SurvivesTransientStreamError(t *testing.T) {
 	}
 	if runner.calls != 2 {
 		t.Errorf("want 2 Execute calls (1 failure + 1 retry), got %d", runner.calls)
+	}
+}
+
+// connRefusedErr builds the connection-phase failure class issue #391
+// widened the classifier for: a real *net.OpError as the transport wraps
+// dial failures (and TLS handshake timeouts classify via the net.Error
+// timeout path — see workflow's real-chain probes).
+func connRefusedErr() error {
+	return &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+}
+
+// TestExecuteWithRetry_RetriesConnectionPhaseFailure pins the core of
+// issue #391 end-to-end at the standalone-turn seam: a connection-phase
+// error now retries through the same loop that already existed for HTTP/2
+// stream resets.
+func TestExecuteWithRetry_RetriesConnectionPhaseFailure(t *testing.T) {
+	runner := &flakyExecRunner{
+		name: "test",
+		errs: []error{connRefusedErr()},
+		res:  TurnResult{Text: "recovered"},
+	}
+
+	res, err := executeWithRetry(context.Background(), runner, config.Config{}, &session.Session{},
+		nil, RolePrimary, escalation.ContextModeFirst, "", "", nil, false, "hi", TurnCallbacks{}, io.Discard)
+	if err != nil {
+		t.Fatalf("connection-phase failure must be retried: %v", err)
+	}
+	if res.Text != "recovered" {
+		t.Errorf("got %q, want %q", res.Text, "recovered")
+	}
+	if runner.calls != 2 {
+		t.Errorf("want 2 Execute calls (1 failure + 1 retry), got %d", runner.calls)
+	}
+}
+
+// TestExecuteWithRetry_LimitsGovernRetries: limits.turn_retries on the
+// acting agent's entry decides the loop — positive = exact extra attempts,
+// negative = disabled (run once). Backoff comes from the same policy
+// (backoff_max_secs floors at 1s here — the knob is whole seconds).
+func TestExecuteWithRetry_LimitsGovernRetries(t *testing.T) {
+	t.Run("positive = exact retries", func(t *testing.T) {
+		retries := 1
+		cfg := config.Config{Agents: []config.AgentConfig{{Name: "test",
+			Limits: &config.AgentLimits{TurnRetries: &retries}}}}
+		runner := &flakyExecRunner{
+			name: "test",
+			errs: []error{connRefusedErr(), connRefusedErr(), connRefusedErr()},
+		}
+		_, err := executeWithRetry(context.Background(), runner, cfg, &session.Session{},
+			nil, RolePrimary, escalation.ContextModeFirst, "", "", nil, false, "hi", TurnCallbacks{}, io.Discard)
+		if err == nil {
+			t.Fatal("want the failure surfaced after the configured retries")
+		}
+		if runner.calls != 2 {
+			t.Errorf("turn_retries=1: %d calls, want 2 (1 + 1 retry)", runner.calls)
+		}
+	})
+	t.Run("negative = disabled", func(t *testing.T) {
+		disabled := -1
+		cfg := config.Config{Agents: []config.AgentConfig{{Name: "test",
+			Limits: &config.AgentLimits{TurnRetries: &disabled}}}}
+		runner := &flakyExecRunner{name: "test", errs: []error{connRefusedErr()}}
+		_, err := executeWithRetry(context.Background(), runner, cfg, &session.Session{},
+			nil, RolePrimary, escalation.ContextModeFirst, "", "", nil, false, "hi", TurnCallbacks{}, io.Discard)
+		if err == nil {
+			t.Fatal("want the error — nothing may retry a disabled policy")
+		}
+		if runner.calls != 1 {
+			t.Errorf("turn_retries disabled: %d calls, want exactly 1", runner.calls)
+		}
+	})
+}
+
+// TestRetryToolCall_PolicyGoverned: the tool-agent loop takes its policy
+// from the agent being called — fast test-local timing, and Max=0 runs once.
+func TestRetryToolCall_PolicyGoverned(t *testing.T) {
+	fast := workflow.RetryPolicy{Max: 1, Base: time.Millisecond, MaxBackoff: 2 * time.Millisecond}
+	calls := 0
+	fn := func() (string, error) {
+		calls++
+		if calls == 1 {
+			return "", connRefusedErr()
+		}
+		return "ok", nil
+	}
+	got, err := retryToolCall(context.Background(), fast, fn)
+	if err != nil || got != "ok" || calls != 2 {
+		t.Errorf("got %q err=%v after %d calls, want \"ok\"/nil/2", got, err, calls)
+	}
+
+	calls = 0
+	fn0 := func() (string, error) { calls++; return "", connRefusedErr() }
+	if _, err := retryToolCall(context.Background(), workflow.RetryPolicy{Max: 0}, fn0); err == nil {
+		t.Fatal("want the error surfaced when the policy disables retries")
+	}
+	if calls != 1 {
+		t.Errorf("Max=0: %d calls, want exactly 1", calls)
 	}
 }

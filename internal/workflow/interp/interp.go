@@ -641,7 +641,7 @@ func execAgentTurn(ec *execContext, s workflow.Stage) (string, error) {
 	}
 	turnStart := time.Now()
 	obs.Debug("workflow.stage.start", ec.logAttrs("stage", s.ID, "role", s.Role, "runner", runner.Name(), "prompt_chars", len(prompt))...)
-	out, err := workflow.Turn(turnCtx, runner, prompt, ec.cfg.Send)
+	out, err := workflow.TurnWithPolicy(turnCtx, runner, prompt, ec.cfg.Send, ec.cfg.PolicyFor(runner.Name()))
 	if err != nil {
 		obs.Warn("workflow.stage.error", ec.logAttrs("stage", s.ID, "role", s.Role, "elapsed_ms", time.Since(turnStart).Milliseconds(), "err", err.Error())...)
 		return "", fmt.Errorf("workflow: stage %q: %w", s.ID, err)
@@ -791,7 +791,7 @@ func resolveUserCheckpointDance(ec *execContext, s workflow.Stage, runner workfl
 	if mar, ok := runner.(workflow.MemoryAwareTurnRunner); ok {
 		mar.SetUseMemoryForNextCall(s.UseMemory)
 	}
-	final, err := workflow.Turn(ec.ctx, runner, finalPrompt, ec.cfg.Send)
+	final, err := workflow.TurnWithPolicy(ec.ctx, runner, finalPrompt, ec.cfg.Send, ec.cfg.PolicyFor(runner.Name()))
 	if err != nil {
 		return "", fmt.Errorf("workflow: stage %q (finalize): %w", s.ID, err)
 	}

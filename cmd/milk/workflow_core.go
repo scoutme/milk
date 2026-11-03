@@ -28,6 +28,9 @@ type workflowPlan struct {
 	StateDir   string
 	ID         int
 	Resuming   bool
+	// RetryFor resolves each acting agent's turn-retry policy at launch
+	// (issue #391: limits.turn_retries / limits.turn_retry_backoff_max_secs).
+	RetryFor func(agentName string) workflow.RetryPolicy
 }
 
 // planWorkflow resolves roleValues (role -> agent name or alias) against cfg
@@ -48,7 +51,8 @@ func planWorkflow(cfg config.Config, sess *session.Session, def workflow.Definit
 			return workflowPlan{}, fmt.Errorf("cannot determine workflow ID: %w", err)
 		}
 	}
-	return workflowPlan{Def: def, Task: task, AgentNames: agentNames, StateDir: stateDir, ID: id, Resuming: resuming}, nil
+	return workflowPlan{Def: def, Task: task, AgentNames: agentNames, StateDir: stateDir, ID: id, Resuming: resuming,
+		RetryFor: func(name string) workflow.RetryPolicy { return retryPolicyFor(cfg, name) }}, nil
 }
 
 // defaultRoleValues fills every role of def that given leaves unset with the
@@ -94,6 +98,7 @@ func (p workflowPlan) newRunner(sess *session.Session, runTask string, runners m
 		StateDir:   p.StateDir,
 		AnswersCh:  answersCh,
 		WorkflowID: p.ID,
+		RetryFor:   p.RetryFor,
 	}
 }
 

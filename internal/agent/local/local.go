@@ -2664,7 +2664,7 @@ func ParseBackgroundResult(raw string) (text, status, filesTouched string) {
 // an attached viewer sees the retry happen rather than losing the earlier
 // output — that's intentional, not an oversight.
 func (a *Agent) runBackgroundTaskWithRetry(ctx context.Context, jobID string, inbox chan string, cwd, task, contextSummary string, out io.Writer, mem *memory.Store) (string, session.TokenUsage, error) {
-	return retryBackgroundTask(ctx, jobID, a.model, func() (string, session.TokenUsage, error) {
+	return retryBackgroundTask(ctx, jobID, a.model, a.retryPolicy(), func() (string, session.TokenUsage, error) {
 		return a.RunBackgroundTask(ctx, jobID, inbox, cwd, task, contextSummary, out, mem)
 	})
 }
@@ -2672,16 +2672,17 @@ func (a *Agent) runBackgroundTaskWithRetry(ctx context.Context, jobID string, in
 // retryBackgroundTask is runBackgroundTaskWithRetry's retry loop, factored
 // out as a closure-taking function (mirroring cmd/milk's retryToolCall) so
 // the retry behavior itself is testable without a real HTTP/2 stream error.
-func retryBackgroundTask(ctx context.Context, jobID, model string, fn func() (string, session.TokenUsage, error)) (string, session.TokenUsage, error) {
+// policy is the resolved per-agent retry policy (issue #391).
+func retryBackgroundTask(ctx context.Context, jobID, model string, policy workflow.RetryPolicy, fn func() (string, session.TokenUsage, error)) (string, session.TokenUsage, error) {
 	for attempt := 0; ; attempt++ {
 		result, tokens, err := fn()
-		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
+		if err == nil || attempt >= policy.Max || !workflow.IsRetryableTurnError(err) {
 			return result, tokens, err
 		}
 		obs.Warn("background job: transient error, retrying",
-			"job", jobID, "model", model, "attempt", attempt+1, "max_attempts", workflow.MaxTurnRetries, "err", err)
+			"job", jobID, "model", model, "attempt", attempt+1, "max_attempts", policy.Max, "err", err)
 		select {
-		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-time.After(policy.Backoff(attempt)):
 		case <-ctx.Done():
 			return "", tokens, ctx.Err()
 		}

@@ -9,12 +9,15 @@ package local
 
 import (
 	"context"
-	"io"
+	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/workflow"
 )
 
 func bgStreamResetErr() error {
@@ -46,7 +49,7 @@ func TestRetryBackgroundTask_RecoversFromTransientStreamError(t *testing.T) {
 		result: "recovered",
 	}
 
-	result, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
+	result, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", workflow.DefaultRetryPolicy(), task.run)
 	if err != nil {
 		t.Fatalf("retryBackgroundTask returned error: %v", err)
 	}
@@ -63,7 +66,7 @@ func TestRetryBackgroundTask_GivesUpAfterMaxRetries(t *testing.T) {
 		errs: []error{bgStreamResetErr(), bgStreamResetErr(), bgStreamResetErr()},
 	}
 
-	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
+	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", workflow.DefaultRetryPolicy(), task.run)
 	if err == nil {
 		t.Fatal("want error after exhausting retries, got nil")
 	}
@@ -73,15 +76,46 @@ func TestRetryBackgroundTask_GivesUpAfterMaxRetries(t *testing.T) {
 }
 
 func TestRetryBackgroundTask_DoesNotRetryNonTransientError(t *testing.T) {
+	// A non-transport failure: HTTP status errors surface as plain messages
+	// and are deliberately never retried (issue #391 — the widened
+	// classification covers connection-phase failures only; io.EOF-family
+	// errors moved to the transient side with it).
 	task := &flakyBackgroundTask{
-		errs: []error{io.ErrUnexpectedEOF},
+		errs: []error{errors.New("inference server returned 401: unauthorized")},
 	}
 
-	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", task.run)
+	_, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", workflow.DefaultRetryPolicy(), task.run)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
 	if task.calls != 1 {
 		t.Errorf("non-transient error must not be retried, got %d calls", task.calls)
+	}
+}
+
+// TestRetryBackgroundTask_RetriesConnectionPhaseFailures pins issue #391's
+// core: a connection-establishment failure (dial refused — the class that
+// includes TLS handshake timeouts) is retryable, where before only HTTP/2
+// stream errors were. A deliberately tiny backoff keeps the loop fast.
+func TestRetryBackgroundTask_RetriesConnectionPhaseFailures(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	task := &flakyBackgroundTask{
+		errs:   []error{refused},
+		result: "recovered",
+	}
+	policy := workflow.RetryPolicy{Max: 1, Base: time.Millisecond, MaxBackoff: 2 * time.Millisecond}
+	result, _, err := retryBackgroundTask(context.Background(), "job_test", "test-model", policy, task.run)
+	if err != nil {
+		t.Fatalf("connection-phase failure must be retried: %v", err)
+	}
+	if result != "recovered" || task.calls != 2 {
+		t.Errorf("got result %q after %d calls, want \"recovered\" after 2", result, task.calls)
+	}
+
+	// And an explicit Max=0 (limits.turn_retries: negative) disables retries.
+	task2 := &flakyBackgroundTask{errs: []error{refused}}
+	_, _, err = retryBackgroundTask(context.Background(), "job_test", "test-model", workflow.RetryPolicy{Max: 0}, task2.run)
+	if err == nil || task2.calls != 1 {
+		t.Errorf("Max=0 must run exactly once, got err=%v calls=%d", err, task2.calls)
 	}
 }

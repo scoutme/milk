@@ -105,6 +105,26 @@ func drainPendingBangOutput(sess *session.Session) string {
 	return b.String()
 }
 
+// retryPolicyFor resolves the turn-retry policy for a named agent from its
+// limits (issue #391): limits.turn_retries and
+// limits.turn_retry_backoff_max_secs, with the built-in defaults when the
+// agent is unknown (version-matrix labels, CLI display names — the same
+// lookup-miss convention as EffectiveToolAgents) or the fields are unset.
+// Every cmd/milk retry loop builds its policy through here, so one config
+// knob governs standalone turns, tool-agent calls and workflow turns alike
+// (the local agent's own loops resolve the same fields via
+// Agent.retryPolicy).
+func retryPolicyFor(cfg config.Config, agentName string) workflow.RetryPolicy {
+	var l *config.AgentLimits
+	if ac, ok := cfg.AgentByName(agentName); ok {
+		l = ac.Limits
+	}
+	return workflow.RetryPolicy{
+		Max:        config.TurnRetries(l),
+		MaxBackoff: config.TurnRetryBackoffMax(l),
+	}
+}
+
 // executeWithRetry wraps runner.Execute with the same transient network/stream
 // error retry (HTTP/2 stream reset or GOAWAY) that workflow turns already get
 // via workflow.Turn — without it, a single upstream hiccup ends a standalone
@@ -124,18 +144,19 @@ func executeWithRetry(
 	cbs TurnCallbacks,
 	out io.Writer,
 ) (TurnResult, error) {
+	policy := retryPolicyFor(cfg, runner.Name()) // issue #391
 	for attempt := 0; ; attempt++ {
 		res, err := runner.Execute(ctx, cfg, sess, mem, role, ctxMode, sessionID, nonce, percepts, injectInstructions, prompt, cbs, out)
 		// A turn that already ran tools must not be re-run from its prompt: its
 		// results exist only in the failed run, and its edits are already on
 		// disk, so the retry would redo or contradict them without knowing.
 		// The failed turn's trail is recorded instead (recordInterruptedTurn).
-		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) || turnRanTools(res) {
+		if err == nil || attempt >= policy.Max || !workflow.IsRetryableTurnError(err) || turnRanTools(res) {
 			return res, err
 		}
-		fmt.Fprintf(out, "\n[transient error, retrying %d/%d: %v]\n", attempt+1, workflow.MaxTurnRetries, err)
+		fmt.Fprintf(out, "\n[transient error, retrying %d/%d: %v]\n", attempt+1, policy.Max, err)
 		select {
-		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-time.After(policy.Backoff(attempt)):
 		case <-ctx.Done():
 			return TurnResult{}, ctx.Err()
 		}
@@ -145,17 +166,17 @@ func executeWithRetry(
 // retryToolCall wraps a tool-agent RunToolCall with the same transient
 // network/stream error retry executeWithRetry gives ordinary turns.
 // RunToolCall had none at all — a single upstream hiccup (e.g. an HTTP/2
-// stream reset) failed the whole tool-agent call outright, with no fallback,
-// unlike primary/escalation turns which already retry through exactly this
-// error class via workflow.IsRetryableTurnError.
-func retryToolCall(ctx context.Context, fn func() (string, error)) (string, error) {
+// stream reset, or since issue #391 a TLS handshake timeout) failed the
+// whole tool-agent call outright. policy is the resolved policy of the
+// agent being called (its own limits — not the caller's).
+func retryToolCall(ctx context.Context, policy workflow.RetryPolicy, fn func() (string, error)) (string, error) {
 	for attempt := 0; ; attempt++ {
 		text, err := fn()
-		if err == nil || attempt >= workflow.MaxTurnRetries || !workflow.IsRetryableTurnError(err) {
+		if err == nil || attempt >= policy.Max || !workflow.IsRetryableTurnError(err) {
 			return text, err
 		}
 		select {
-		case <-time.After(workflow.TurnRetryBackoff(attempt)):
+		case <-time.After(policy.Backoff(attempt)):
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
@@ -289,7 +310,7 @@ func runPrimaryWithSession(
 				if err != nil {
 					return "", err
 				}
-				return retryToolCall(dctx, func() (string, error) {
+				return retryToolCall(dctx, retryPolicyFor(cfg, agentName), func() (string, error) {
 					return tr.RunToolCall(dctx, cfg, request, images, dout)
 				})
 			})
@@ -560,7 +581,7 @@ func runEscalationWithSession(
 				if err != nil {
 					return "", err
 				}
-				return retryToolCall(dctx, func() (string, error) {
+				return retryToolCall(dctx, retryPolicyFor(cfg, agentName), func() (string, error) {
 					return tr.RunToolCall(dctx, cfg, request, images, dout)
 				})
 			})
