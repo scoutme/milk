@@ -13,6 +13,10 @@
 
 milk routes each prompt between a cheap primary agent and a deeper escalation agent while keeping one shared conversation. Routine work stays fast and inexpensive; hard turns move to the stronger model with full context, and follow-up turns stay there until you switch back.
 
+<p align="center">
+  <img src="docs/assets/milk-tui-1200-compressed.gif" alt="milk TUI in action — a session where panels open on events: a dirty tree brings git and the changed files, a background job, tasks and a recorded fact fill the dashboard" width="100%" />
+</p>
+
 ## Features
 
 - **Automatic routing and handoff** — per-prompt routing from explicit flags, session state, a rules/scorer layer, and a primary-model classifier. The primary agent can escalate itself with `escalate(reason)`, and auto-sticky escalation keeps follow-ups on the stronger model.
