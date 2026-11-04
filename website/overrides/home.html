@@ -47,7 +47,22 @@
         <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--escalation"></span> Escalation</span>
         <span class="mk-state-chip"><span class="mk-status-dot mk-status-dot--escalation-waiting"></span> Waiting</span>
       </div>
-      <img class="mk-terminal__screen" src="{{ 'assets/milk-tui-compressed.gif' | url }}" alt="milk TUI demo" loading="lazy" />
+      <!-- The site hero clip: mp4 (H.264, 2.3 MB) instead of the 8.3 MB
+           animated GIF — web.dev's standard advice for product loops. No
+           poster: the only candidate (the GIF) would pull 8.3 MB on every
+           visit. The GIF stays as <video> fallback content for clients
+           without H.264 video, and never loads in browsers that play it. -->
+      <video id="mk-hero-video" class="mk-terminal__screen" src="{{ 'assets/milk-tui.mp4' | url }}" autoplay muted loop playsinline preload="metadata" aria-label="milk TUI demo — a session opening panels, running a job and tracking tasks">
+        <img class="mk-terminal__screen" src="{{ 'assets/milk-tui-1200-compressed.gif' | url }}" alt="milk TUI demo" />
+      </video>
+      <script>
+        (function () {
+          if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            var v = document.getElementById('mk-hero-video');
+            if (v) { v.removeAttribute('autoplay'); v.pause(); }
+          }
+        })();
+      </script>
     </div>
   </div>
 </section>
