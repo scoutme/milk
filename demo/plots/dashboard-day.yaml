@@ -1,0 +1,111 @@
+# Plot C — "dashboard day": the UI-first story. milk boots straight into a
+# live workspace — five panels open (from the seeded panel-state), a dirty
+# working tree, a pending notification — then a background job through the
+# agent-picker flyover, real tasks, a recorded fact. Every distinctive
+# surface in one sitting: the width-budget group strip, event toasts, the
+# flyover's timed default, panel content events. One of three candidate
+# plots for the showcase (#387).
+#
+#   go run ./cmd/showcase -manifest demo/plots/dashboard-day.yaml -verify
+#   task showcase:record MANIFEST=demo/plots/dashboard-day.yaml
+
+name: milk-plot-dashboard-day
+output: docs/assets/showcase-dashboard-day.gif
+tape: dashboard-day.tape
+launch: "--new"
+workdir: "demo/.workdirs/dashboard"
+margin: 1.5
+base: 0.4
+timeout: 90s
+
+strip_config_keys:
+  - remote_oversight
+
+allow_tools: true           # the background job runs tools unattended
+
+seed:
+  - |
+    find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  - |
+    cat > README.md <<'EOF'
+    # dashboard demo repo
+
+    A tiny project the showcase panels watch: files in the project panel,
+    history in the git panel, a pending change for the changeset.
+    EOF
+  - |
+    cat > lib.go <<'EOF'
+    package main
+
+    import "fmt"
+
+    func Greeting() string { return "showcase" }
+
+    func main() { fmt.Println("hello", Greeting()) }
+    EOF
+  - |
+    git init -q
+    git add -A
+    git -c user.email=showcase@eval -c user.name=showcase commit -qm "seed: dashboard demo repo"
+    printf '\n// wip: review me before the demo\n' >> lib.go
+  - |
+    mkdir -p "$STATE_ROOT/panel-state"
+    name=$(basename "$WORKDIR" | sed 's/[^A-Za-z0-9._-]/-/g')
+    hash=$(printf '%s' "$WORKDIR" | sha256sum | cut -c1-12)
+    printf '{"version":1,"panels":{"background":true,"git":true,"memory":true,"project":true,"tasks":true},"active":"git","folder":"%s"}' "$WORKDIR" > "$STATE_ROOT/panel-state/${name}-${hash}.json"
+
+terminal:
+  width: 1400
+  height: 700
+  cols: 140
+  rows: 40
+  font_size: 14
+  theme: Dracula
+  typing_speed: 60ms
+  playback_speed: 0.9
+
+beats:
+  - id: startup
+    note: "frame one is already a workspace: five panels, dirty git, group strip"
+    steps:
+      - wait: "CONTEXT BRICKS"     # memory panel (a free column — always visible) proves the seeded layout
+      - wait: "files git"          # the group strip's labels — the plot's signature, present whichever tab is on top (boot group-top order is racy: git's first graph stamp vs project's changeset)
+
+  - id: react
+    note: "a live edit — the project panel's changeset and the git strip react while you watch"
+    steps:
+      - type: "Add the line 'hello from the dashboard' to README.md and reply: done"
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - wait: "✎2"                # git panel (group top — the edit stamped it fresh): two modified files, persistent; branch-name agnostic
+
+  - id: bg
+    note: "the agent-picker flyover picks the background agent — timed default preselected"
+    steps:
+      - type: "/bg start write a haiku about terminals"
+      - key: Enter
+        wait: "↑↓ choose"          # flyover open (#382)
+      - key: Enter                 # accept the preselected default
+      - wait: "terminals\" completed"
+
+  - id: tasks
+    note: "two real tasks land in the already-open tasks panel"
+    steps:
+      - wait_absent: "role:PRIMARY"   # a finished job can trigger a follow-up turn — wait it out
+      - type: "Create two tasks titled exactly \"REFRESH demo assets\" and \"REVIEW panel toasts\". Reply: done"
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - type: "/tasks"
+      - key: Enter
+        wait: "pending     REFRESH"   # transcript list — caps-stable first word (models re-case: observed), combo never self-matches
+      - wait: "○ REVIEW"              # the tasks panel's checkbox row, persistent (the transcript line wraps at this width)
+
+  - id: learn
+    note: "record the session's fact — the memory panel opens on it"
+    steps:
+      - type: "/learn dashboard day: five panels, one view (showcase plot C)"
+      - key: Enter
+      - wait: "[milk] learned:"
+      - wait: "CONTEXT BRICKS"

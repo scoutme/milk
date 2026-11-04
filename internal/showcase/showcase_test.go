@@ -1,6 +1,7 @@
 package showcase
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,10 +171,20 @@ beats:
 	}
 }
 
-// TestVhsQuote: the Type argument must survive a shell-ish tokenizer —
-// backslashes and quotes in command text are real (paths, regexes).
+// TestVhsQuote: the Type argument must survive vhs's tokenizer.
+// No quote: double-quoted with tokenizer-significant escapes. A quote
+// anywhere: backtick raw form — vhs has no \" escape inside double quotes
+// (a quoted prompt parsed as garbage while recording the plots' task
+// titles), and raw form passes backslashes through literally, which is
+// what a TUI input line wants.
 func TestVhsQuote(t *testing.T) {
-	if got, want := vhsQuote(`a"b\c`), `"a\"b\\c"`; got != want {
+	if got, want := vhsQuote(`a\b`), `"a\\b"`; got != want {
+		t.Errorf("vhsQuote = %s, want %s", got, want)
+	}
+	if got, want := vhsQuote(`a"b\c`), "`a\"b\\c`"; got != want {
+		t.Errorf("quoted vhsQuote = %s, want %s", got, want)
+	}
+	if got, want := vhsQuote("plain prompt"), `"plain prompt"`; got != want {
 		t.Errorf("vhsQuote = %s, want %s", got, want)
 	}
 	if got, want := shellQuote(`/tmp/it's`), `'/tmp/it'\''s'`; got != want {
@@ -221,7 +232,7 @@ func TestWriteCleanConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	out, err := WriteCleanConfig(src, dst, []string{"remote_oversight"})
+	out, err := WriteCleanConfig(src, dst, []string{"remote_oversight"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +247,7 @@ func TestWriteCleanConfig(t *testing.T) {
 	if !strings.Contains(got, "mimo-local") || !strings.Contains(got, "paper") {
 		t.Errorf("agents/settings lost: %s", got)
 	}
-	if _, err := WriteCleanConfig(filepath.Join(srcDir, "nope.json"), dst, nil); err == nil {
+	if _, err := WriteCleanConfig(filepath.Join(srcDir, "nope.json"), dst, nil, false); err == nil {
 		t.Error("missing source config must error (a configured milk is required)")
 	}
 }
@@ -315,5 +326,114 @@ beats:
 	// trailing = (7.2s - 7.0s slow)*1.5 + 0.4 = 0.7s
 	if !strings.Contains(tape, "Sleep 0.7s") {
 		t.Errorf("trailing sleep must cover only unemitted time (want Sleep 0.7s):\n%s", tape)
+	}
+}
+
+// TestRunSeeds: seeds run in order, in the workdir, with WORKDIR/STATE_ROOT
+// in the environment; a failing seed fails loudly with its output; no seeds
+// means no workdir is created (today's behavior, byte-for-byte).
+func TestRunSeeds(t *testing.T) {
+	root := t.TempDir()
+	wd := filepath.Join(root, "wd")
+	st := filepath.Join(root, "state")
+
+	m := &Manifest{Seed: []string{
+		`printf '%s' "$STATE_ROOT" > state.path`,
+		`test -f state.path && printf '%s' "$WORKDIR" > wd.path`,
+		`printf ok > out.txt`,
+	}}
+	if err := RunSeeds(m, wd, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wd, "state.path")); string(got) != st {
+		t.Errorf("STATE_ROOT = %q, want %q", got, st)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wd, "wd.path")); string(got) != wd {
+		t.Errorf("WORKDIR = %q, want %q", got, wd)
+	}
+	if _, err := os.Stat(filepath.Join(wd, "out.txt")); err != nil {
+		t.Errorf("third seed did not run in the workdir: %v", err)
+	}
+
+	// Re-running resets (the calibration pass must start where seeds left
+	// off, every pass): overwrite works, order holds.
+	m.Seed = append(m.Seed, `rm out.txt`)
+	if err := RunSeeds(m, wd, st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, "out.txt")); !os.IsNotExist(err) {
+		t.Error("later seed did not run after earlier ones")
+	}
+
+	// A failing seed reports its index, command and output.
+	m.Seed = []string{`echo first-ok`, `echo seed-failed; exit 3`}
+	err := RunSeeds(m, wd, st)
+	if err == nil {
+		t.Fatal("failing seed must error")
+	}
+	if !strings.Contains(err.Error(), "seed 1") || !strings.Contains(err.Error(), "seed-failed") {
+		t.Errorf("error must name the seed and its output, got: %v", err)
+	}
+
+	// Empty seeds: no-op, no workdir.
+	empty := &Manifest{}
+	wd2 := filepath.Join(root, "never")
+	if err := RunSeeds(empty, wd2, st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(wd2); !os.IsNotExist(err) {
+		t.Error("empty seeds must not create the workdir")
+	}
+}
+
+// TestWriteCleanConfig_AllowTools: allow_tools patches every seeded agent
+// entry with dangerously_skip_permissions (the key skipPermissionsFor reads)
+// — and only the seeded copy; the source config is never touched.
+func TestWriteCleanConfig_AllowTools(t *testing.T) {
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "config.json")
+	orig := `{"agents":[{"name":"a"},{"name":"b","dangerously_skip_permissions":false}]}`
+	if err := os.WriteFile(src, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	out, err := WriteCleanConfig(src, dst, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	raw, _ := os.ReadFile(out)
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Agents) != 2 {
+		t.Fatalf("agents = %d, want 2", len(doc.Agents))
+	}
+	for i, a := range doc.Agents {
+		if v, ok := a["dangerously_skip_permissions"].(bool); !ok || !v {
+			t.Errorf("agent %d: dangerously_skip_permissions = %v, want true", i, a["dangerously_skip_permissions"])
+		}
+	}
+	if rawSrc, _ := os.ReadFile(src); string(rawSrc) != orig {
+		t.Error("source config was modified — seeds may only touch the copy")
+	}
+
+	// allow_tools: false leaves flags alone (a config that prompts keeps prompting).
+	dst2 := t.TempDir()
+	out2, err := WriteCleanConfig(src, dst2, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc2 struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	raw2, _ := os.ReadFile(out2)
+	if err := json.Unmarshal(raw2, &doc2); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := doc2.Agents[0]["dangerously_skip_permissions"]; ok && v == true {
+		t.Error("allow_tools: false must not inject the flag")
 	}
 }

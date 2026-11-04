@@ -139,10 +139,16 @@ func sleepDuration(elapsed time.Duration, margin, base float64) string {
 	return fmt.Sprintf("%.1fs", secs)
 }
 
-// vhsQuote renders text as a vhs Type argument: double-quoted, with the
-// escapes vhs (a shell-ish tokenizer) treats as significant. The texts are
-// literal TUI input — never shell-evaluated — so $ and backticks stay as-is.
+// vhsQuote renders text as a vhs Type argument. vhs's tokenizer has no
+// \" escape inside double quotes (a quoted prompt like `titled "X"` parses
+// as garbage — hit while recording the plot prompts), so text containing a
+// double quote switches to vhs's backtick raw-string form, which takes
+// quotes literally. Backtick inside backtick is the one unsupported shape
+// (no prompt needs it; both delimiters would be ambiguous anyway).
 func vhsQuote(s string) string {
+	if strings.Contains(s, `"`) && !strings.Contains(s, "`") {
+		return "`" + s + "`"
+	}
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return `"` + s + `"`

@@ -56,7 +56,7 @@ beats:
 
 	// Clean root: the probe must not touch the real state either.
 	root := t.TempDir()
-	if _, err := WriteCleanConfig(filepath.Join(dir, ".milk", "config.json"), root, m.StripConfigKeys); err != nil {
+	if _, err := WriteCleanConfig(filepath.Join(dir, ".milk", "config.json"), root, m.StripConfigKeys, m.AllowTools); err != nil {
 		t.Skip("clean config: " + err.Error())
 	}
 	res, err := Calibrate(context.Background(), m, Options{

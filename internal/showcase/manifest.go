@@ -42,6 +42,22 @@ type Manifest struct {
 	// Workdir is the directory the run happens in, relative to the working
 	// directory (".": the repo — the git panel beat needs a real repo).
 	Workdir string `yaml:"workdir"`
+	// Seed is a list of shell commands run before *every* pass — verify,
+	// calibrate, and the recorded replay — with cwd = the run workdir and
+	// env WORKDIR / STATE_ROOT (the pass's config root). Every pass must
+	// start from the same state: calibration mutates the workdir (the
+	// model under test edits files), so seeds reset it, and per-root state
+	// (panel-state, …) must exist in each fresh config root. Commands may
+	// create the workdir themselves (it is mkdir'ed first). Empty = today's
+	// behavior (no seeds).
+	Seed []string `yaml:"seed,omitempty"`
+	// AllowTools grants the seeded agents dangerously_skip_permissions so
+	// tool-mutating beats (edit_file, bash) run unattended — batch runs have
+	// no one to answer a permission ask, and a blocked ask hangs the turn
+	// (observed: the first fix-typo verify died waiting on edit_file's
+	// [Y/n/a/d]). Only the *seeded* config copy is patched — the live config
+	// is never modified. Same semantics as eval's sandbox allow_tools.
+	AllowTools bool `yaml:"allow_tools,omitempty"`
 	// Margin inflates each measured duration for the recording pass
 	// (typing speed, second-run latency variance). sleep = elapsed*margin
 	// + base. 0 = default 1.5; margin < 1 is rejected (a recording that

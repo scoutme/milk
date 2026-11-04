@@ -1,0 +1,137 @@
+# Plot B — "session archaeology": milk's own working shape, recreated on a
+# seeded mini-repo. A real design conversation: read the issue → quote it →
+# escalate for root cause → come back and implement → prove it runs → record
+# the fact. Every turn visibly switches agents (the status line's role
+# indicator), which is milk's signature move. One of three candidate plots
+# for the showcase (#387).
+#
+#   go run ./cmd/showcase -manifest demo/plots/session-archaeology.yaml -verify
+#   task showcase:record MANIFEST=demo/plots/session-archaeology.yaml
+
+name: milk-plot-session-archaeology
+output: docs/assets/showcase-session-archaeology.gif
+tape: session-archaeology.tape
+launch: "--new"
+workdir: "demo/.workdirs/session-arch"
+margin: 1.5
+base: 0.4
+timeout: 90s
+
+strip_config_keys:
+  - remote_oversight
+
+allow_tools: true           # implementation and job beats run tools unattended
+
+seed:
+  - |
+    find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  - |
+    cat > go.mod <<'EOF'
+    module sessionarch
+
+    go 1.22
+    EOF
+  - |
+    cat > ISSUES.md <<'EOF'
+    # open issues
+
+    ## SHW-2049 — status line blinks while the agent streams
+
+    The status line repaints on every segment instead of settling: on a long
+    streaming turn it performs blink-twice-per-second and the elapsed counter jumps.
+
+    Acceptance: a 2000ms streaming window at the bounded rate of one repaint
+    per 500ms must print `repaints=4` (see blink.go) instead of the current
+    unbounded value.
+    EOF
+  - |
+    cat > blink.go <<'EOF'
+    package main
+
+    import "fmt"
+
+    // RepaintLines returns how many times the status line repaints in a
+    // streaming window of windowMS milliseconds.
+    func RepaintLines(windowMS int) int {
+        return windowMS / 100
+    }
+
+    func main() {
+        fmt.Printf("repaints=%d\n", RepaintLines(2000))
+    }
+    EOF
+  - |
+    cat > blink_test.go <<'EOF'
+    package main
+
+    import "testing"
+
+    func TestBoundedRepaints(t *testing.T) {
+        if got := RepaintLines(2000); got != 4 {
+            t.Fatalf("RepaintLines(2000) = %d, want 4", got)
+        }
+    }
+    EOF
+  - |
+    git init -q
+    git add -A
+    git -c user.email=showcase@eval -c user.name=showcase commit -qm "repro: SHW-2049 blink-twice-per-second"
+
+terminal:
+  width: 1200
+  height: 700
+  cols: 120
+  rows: 40
+  font_size: 14
+  theme: Dracula
+  typing_speed: 60ms
+  playback_speed: 0.9
+
+beats:
+  - id: startup
+    note: "the git panel opens on the seeded history — SHW-2049 is already on screen"
+    steps:
+      - type: "/panel git"
+      - key: Enter
+        wait: "SHW-2049"          # the seeded commit subject in the graph
+
+  - id: read
+    note: "read the issue and quote it — the model works from real context"
+    steps:
+      - type: "Read ISSUES.md and quote issue SHW-2049 verbatim, including its reproduction line."
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - wait: "blink-twice-per-second"   # unique to the issue body — proven only by having read it
+
+  - id: route
+    note: "/escalate takes the root-cause question to the escalation agent, /primary returns"
+    steps:
+      - wait_absent: "role:PRIMARY"   # never type over a running turn (queue rule)
+      - type: "/escalate"
+      - key: Enter
+        wait: "pinned to mimo-pro-local"
+      - type: "What is the root cause of SHW-2049? One short paragraph, no fix yet."
+      - key: Enter
+      - wait: "role:ESCALATION"
+      - wait_absent: "role:ESCALATION"
+
+  - id: implement
+    note: "back on the primary: the fix lands and proves itself"
+    steps:
+      - type: "/primary"
+      - key: Enter
+        wait: "pinned to mimo-local"
+      - type: "Implement the fix for SHW-2049 in blink.go — keep it minimal — then run go run . and reply with its output verbatim."
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - wait: "repaints=4"          # acceptance criteria, verbatim from the issue
+
+  - id: learn
+    note: "the fact is recorded — the memory panel opens on it"
+    steps:
+      - type: "/learn SHW-2049 fixed: repaints bounded to one per 500ms (showcase plot B)"
+      - key: Enter
+      - wait: "[milk] learned:"
+      - wait: "CONTEXT BRICKS"
