@@ -1,0 +1,128 @@
+# Plot A — "fix the typo": the developer story. A seeded mini-repo ships with
+# a real off-by-one; milk reads the requirement, fixes main.go, runs it, tests
+# it, files the task, records the fact. The panels' event toasts fire
+# organically off the model's own writes (#366/#347) — no synthetic demo
+# text anywhere. One of three candidate plots for the showcase (#387).
+#
+#   go run ./cmd/showcase -manifest demo/plots/fix-typo.yaml -verify   # assert
+#   task showcase:record MANIFEST=demo/plots/fix-typo.yaml             # record
+#
+# Seeds reset and rebuild the workdir before every pass (calibration mutates
+# it; the recorded replay must start where the measurements did).
+
+name: milk-plot-fix-typo
+output: docs/assets/showcase-fix-typo.gif
+tape: fix-typo.tape
+launch: "--new"
+workdir: "demo/.workdirs/fix-typo"
+margin: 1.5
+base: 0.4
+timeout: 90s                 # one wait beyond this = broken beat; generous because thinking turns vary (a passing wait costs nothing extra)
+
+strip_config_keys:
+  - remote_oversight
+
+allow_tools: true           # tool-mutating beats (edit_file, bash) must not hang on an ask
+
+seed:
+  - |
+    find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  - |
+    cat > go.mod <<'EOF'
+    module fixtypos
+
+    go 1.22
+    EOF
+  - |
+    cat > main.go <<'EOF'
+    package main
+
+    import "fmt"
+
+    // Count counts from 1 to 10.
+    func Count() int {
+        n := 0
+        for i := 1; i < 10; i++ {
+            n++
+        }
+        return n
+    }
+
+    func main() {
+        fmt.Printf("count=%d\n", Count())
+    }
+    EOF
+  - |
+    cat > main_test.go <<'EOF'
+    package main
+
+    import "testing"
+
+    func TestCountToTen(t *testing.T) {
+        if got := Count(); got != 10 {
+            t.Fatalf("Count() = %d, want 10", got)
+        }
+    }
+    EOF
+  - |
+    cat > README.md <<'EOF'
+    # counter
+
+    The counter counts from 1 to 10.
+
+    Verify: `go run .` must print `count=10`, and `go test ./...` must pass.
+    EOF
+  - |
+    git init -q
+    git add -A
+    git -c user.email=showcase@eval -c user.name=showcase commit -qm "counter: counts to 10"
+
+terminal:
+  width: 1200
+  height: 700
+  cols: 120
+  rows: 40
+  font_size: 14
+  theme: Dracula
+  typing_speed: 60ms
+  playback_speed: 0.9
+
+beats:
+  - id: startup
+    note: "open the project and git panels — the seeded repo is real (files, branch, commit)"
+    steps:
+      - type: "/panel project"
+      - key: Enter
+        wait: "main.go"
+      - type: "/panel git"
+      - key: Enter
+        wait: "⎇"
+
+  - id: fix
+    note: "the requirement vs. the code — the model finds the off-by-one and proves it"
+    steps:
+      - type: "The README acceptance fails: go run . does not print the required output. Fix main.go, then run go run . and go test -v ./... and reply with both outputs verbatim."
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait: "count=10"          # the fix's proof — deterministic program output
+      - wait: "PASS"              # -v makes go test print PASS even from cache; both land in the verbatim reply
+
+  - id: task
+    note: "the ship-it task lands in the tasks panel (content event, #347)"
+    steps:
+      - wait_absent: "role:PRIMARY"   # drain the test turn (or its follow-up) before typing
+      - type: "Create a task titled \"SHIPIT counter fix\" and reply: done"
+      - key: Enter
+      - wait: "role:PRIMARY"
+      - wait_absent: "role:PRIMARY"
+      - type: "/tasks"
+      - key: Enter
+        wait: "pending     SHIPIT"   # transcript list — SHIPIT is caps-stable (models re-case first words: observed), the combo never self-matches
+
+  - id: learn
+    note: "/learn records what happened — memory panel opens on the new percept"
+    steps:
+      - type: "/learn counter counts to 10 — fixed the off-by-one in Count (showcase plot A)"
+      - key: Enter
+      - wait: "[milk] learned:"
+      - wait: "CONTEXT BRICKS"

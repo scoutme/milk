@@ -20,7 +20,7 @@ import (
 // configured agents, exactly like a normal session.
 //
 // Returns the config.json path written inside dstDir.
-func WriteCleanConfig(srcConfigPath, dstDir string, strip []string) (string, error) {
+func WriteCleanConfig(srcConfigPath, dstDir string, strip []string, allowTools bool) (string, error) {
 	data, err := os.ReadFile(srcConfigPath)
 	if err != nil {
 		return "", fmt.Errorf("reading config %s (a configured milk is required): %w", srcConfigPath, err)
@@ -31,6 +31,18 @@ func WriteCleanConfig(srcConfigPath, dstDir string, strip []string) (string, err
 	}
 	for _, key := range strip {
 		delete(doc, key)
+	}
+	// allow_tools: auto-approve tools on every seeded agent entry (the
+	// documented per-agent meaning — skipPermissionsFor reads it directly),
+	// so a tool-mutating beat can't hang on an unanswered permission ask.
+	if allowTools {
+		if agents, ok := doc["agents"].([]any); ok {
+			for _, entry := range agents {
+				if agent, ok := entry.(map[string]any); ok {
+					agent["dangerously_skip_permissions"] = true
+				}
+			}
+		}
 	}
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

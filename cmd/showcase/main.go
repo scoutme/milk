@@ -138,7 +138,7 @@ func run(o runOpts) error {
 	if !keep {
 		defer os.RemoveAll(calRoot)
 	}
-	if _, err := showcase.WriteCleanConfig(srcConfig, calRoot, manifest.StripConfigKeys); err != nil {
+	if _, err := showcase.WriteCleanConfig(srcConfig, calRoot, manifest.StripConfigKeys, manifest.AllowTools); err != nil {
 		return err
 	}
 	launch := fmt.Sprintf("MILK_CONFIG_ROOT=%s %s", shellQuote(calRoot), shellQuote(milkPath)) +
@@ -151,6 +151,14 @@ func run(o runOpts) error {
 		ConfigRoot:  calRoot,
 		Timeout:     manifest.Timeout,
 		KeepSession: keep,
+	}
+
+	// Seeds build the plot's starting state for this pass — before verify
+	// AND calibrate (they share this root; the flags are exclusive), and
+	// again for the record root below (calibration just mutated the
+	// workdir, and the replay must start where the measurements did).
+	if err := showcase.RunSeeds(manifest, workdir, calRoot); err != nil {
+		return err
 	}
 
 	// ---- runner B: assert instead of record --------------------------------
@@ -188,7 +196,10 @@ func run(o runOpts) error {
 	if !keep {
 		defer os.RemoveAll(recRoot)
 	}
-	if _, err := showcase.WriteCleanConfig(srcConfig, recRoot, manifest.StripConfigKeys); err != nil {
+	if _, err := showcase.WriteCleanConfig(srcConfig, recRoot, manifest.StripConfigKeys, manifest.AllowTools); err != nil {
+		return err
+	}
+	if err := showcase.RunSeeds(manifest, workdir, recRoot); err != nil {
 		return err
 	}
 	tape := manifest.TapePath(manifestPath)

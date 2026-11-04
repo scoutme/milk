@@ -76,16 +76,20 @@ tasks:
       - build
 
   showcase:record:
-    desc: Calibrate the showcase against a live TUI, regenerate demo/demo.tape, record the GIF (tmux + vhs)
+    desc: Calibrate the showcase against a live TUI, regenerate the tape, record the GIF (tmux + vhs); MANIFEST=path selects a plot from demo/plots/
+    vars:
+      MANIFEST: '{{.MANIFEST | default "demo/showcase.yaml"}}'
     cmds:
-      - go run ./cmd/showcase -manifest demo/showcase.yaml
+      - go run ./cmd/showcase -manifest {{.MANIFEST}}
     deps:
       - build
 
   showcase:tape:
-    desc: Calibrate and regenerate demo/demo.tape only (tmux, no vhs)
+    desc: Calibrate and regenerate the tape only (tmux, no vhs); MANIFEST=path selects a plot from demo/plots/
+    vars:
+      MANIFEST: '{{.MANIFEST | default "demo/showcase.yaml"}}'
     cmds:
-      - go run ./cmd/showcase -manifest demo/showcase.yaml -tape-only
+      - go run ./cmd/showcase -manifest {{.MANIFEST}} -tape-only
     deps:
       - build
 
