@@ -41,13 +41,14 @@ func main() {
 		timeout      = flag.Duration("timeout", 0, "override the per-wait timeout")
 		session      = flag.String("session", "", "tmux session name (default: showcase-<pid>)")
 		keep         = flag.Bool("keep", false, "keep temp config roots and the tmux session (debugging)")
+		seedOnly     = flag.Bool("seed-only", false, "materialize the record roots (seed master + active, agents included) and exit — re-render without recalibrating or a live model")
 	)
 	flag.Parse()
 
 	if err := run(runOpts{
 		manifestPath: *manifestPath, milkBin: *milkBin, vhsBin: *vhsBin, srcConfig: *configPath,
 		tapeOnly: *tapeOnly, verify: *verify, beats: *beats,
-		marginOverride: *margin, timeoutOverride: *timeout, session: *session, keep: *keep,
+		marginOverride: *margin, timeoutOverride: *timeout, session: *session, keep: *keep, seedOnly: *seedOnly,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "showcase: "+err.Error())
 		os.Exit(1)
@@ -69,11 +70,12 @@ type runOpts struct {
 	timeoutOverride time.Duration
 	session         string
 	keep            bool
+	seedOnly        bool
 }
 
 func run(o runOpts) error {
 	manifestPath, milkBin, vhsBin, srcConfig := o.manifestPath, o.milkBin, o.vhsBin, o.srcConfig
-	keep, session, tapeOnly := o.keep, o.session, o.tapeOnly
+	keep, session, tapeOnly, seedOnly := o.keep, o.session, o.tapeOnly, o.seedOnly
 	manifest, err := showcase.Load(manifestPath)
 	if err != nil {
 		return err
@@ -128,6 +130,19 @@ func run(o runOpts) error {
 	}
 	if session == "" {
 		session = fmt.Sprintf("showcase-%d", os.Getpid())
+	}
+
+	// ---- seed-only: roots for a re-render, nothing else ------------------
+	// The tape's launch line re-copies <workdir>-seed into <workdir>-root on
+	// every render; this materializes the seed without a live calibration
+	// (fresh clone, or any time the roots are missing).
+	if seedOnly {
+		seed, root, serr := showcase.MaterializeSeed(srcConfig, manifest, workdir)
+		if serr != nil {
+			return serr
+		}
+		fmt.Fprintf(os.Stderr, "showcase: record roots ready seed=%s root=%s\nrun `vhs %s` to render\n", seed, root, manifest.TapePath(manifestPath))
+		return nil
 	}
 
 	// ---- pass 1: calibrate against a clean root --------------------------
@@ -188,24 +203,22 @@ func run(o runOpts) error {
 		fmt.Fprintf(os.Stderr, "  %-16s %6.1fs %s\n", t.ID, t.Elapsed.Seconds(), state)
 	}
 
-	// ---- pass 2: generate the tape (its own clean root for the record) ---
-	recRoot, err := os.MkdirTemp("", "milk-showcase-rec-*")
+	// ---- pass 2: generate the tape (persistent seed/active record roots) --
+	// The roots live beside the workdir — <plot>-seed is the pristine master
+	// (clean config with the user's agents + the manifest's seeds), <plot>-root
+	// what milk launches with, re-copied from the seed by the tape on every
+	// render. They outlive the record run deliberately: the old temp root was
+	// removed with the pass, so any later render booted a config-less milk —
+	// recordings of it complaining about a missing primary agent.
+	seedRoot, recRoot, err := showcase.MaterializeSeed(srcConfig, manifest, workdir)
 	if err != nil {
-		return err
-	}
-	if !keep {
-		defer os.RemoveAll(recRoot)
-	}
-	if _, err := showcase.WriteCleanConfig(srcConfig, recRoot, manifest.StripConfigKeys, manifest.AllowTools); err != nil {
-		return err
-	}
-	if err := showcase.RunSeeds(manifest, workdir, recRoot); err != nil {
 		return err
 	}
 	tape := manifest.TapePath(manifestPath)
 	rendered := showcase.RenderTape(manifest, res, showcase.RenderOpts{
 		MilkPath:   milkPath,
 		ConfigRoot: recRoot,
+		SeedRoot:   seedRoot,
 		Workdir:    workdir,
 	})
 	if err := os.WriteFile(tape, []byte(rendered), 0o644); err != nil {
@@ -213,7 +226,7 @@ func run(o runOpts) error {
 	}
 	fmt.Fprintf(os.Stderr, "showcase: wrote %s\n", tape)
 	if keep {
-		fmt.Fprintf(os.Stderr, "showcase: kept config roots cal=%s rec=%s session=%s\n", calRoot, recRoot, session)
+		fmt.Fprintf(os.Stderr, "showcase: kept cal root %s (record roots persist: %s, %s) session=%s\n", calRoot, seedRoot, recRoot, session)
 	}
 
 	// ---- pass 3: record ---------------------------------------------------
@@ -225,15 +238,53 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "showcase: recording %s with vhs...\n", manifest.Output)
+	fmt.Fprintf(os.Stderr, "showcase: recording %s with vhs...\n", showcase.MP4Path(manifest.Output))
 	cmd := exec.Command(vhsBin, abs)
 	cmd.Dir = cwd // Output is relative to the invocation directory, as before
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("vhs: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "showcase: recorded %s\n", manifest.Output)
+	// vhs exits 0 even when its ffmpeg dies mid-encode (an OOM kill leaves a
+	// 0-byte file and a "Host your GIF" footer) — the artifact itself is the
+	// only honest success signal.
+	raw := showcase.MP4Path(manifest.Output)
+	if fi, serr := os.Stat(raw); serr != nil || fi.Size() == 0 {
+		return fmt.Errorf("vhs produced no recording at %s (empty or missing — its ffmpeg may have been killed, e.g. out of memory; check `dmesg | grep -i oom`)", raw)
+	}
+	ff, ferr := exec.LookPath("ffmpeg")
+	if ferr != nil {
+		return fmt.Errorf("ffmpeg not found — needed to derive %s from %s", manifest.Output, raw)
+	}
+	fmt.Fprintf(os.Stderr, "showcase: deriving %s from %s (two-pass palette)...\n", manifest.Output, raw)
+	if err := showcase.GIFTwoPass(context.Background(), ff, raw, manifest.Output); err != nil {
+		return err
+	}
+	// Refresh the committed compressed variant too (gitignore: the tracked
+	// asset is the compressed one — the site hero) so a record never ships
+	// a stale homepage clip; without gifsicle the raw stands alone and the
+	// note says so.
+	comp, cerr := showcase.CompressGIF(mustLookPath("gifsicle"), manifest.Output, showcase.CompressedPath(manifest.Output))
+	if cerr != nil {
+		return cerr
+	}
+	if comp != "" {
+		fmt.Fprintf(os.Stderr, "showcase: compressed %s\n", comp)
+	} else {
+		fmt.Fprintf(os.Stderr, "showcase: gifsicle not found — %s not refreshed\n", showcase.CompressedPath(manifest.Output))
+	}
+	fmt.Fprintf(os.Stderr, "showcase: recorded %s (+ raw %s)\n", manifest.Output, raw)
 	return nil
+}
+
+// mustLookPath is LookPath with an empty-string fallback (soft-skip callers
+// take "" as "feature disabled", not as an error).
+func mustLookPath(name string) string {
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return ""
+	}
+	return p
 }
 
 // resolveMilk picks the binary the showcase records: -milk, then MILK_BIN,

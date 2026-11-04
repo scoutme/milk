@@ -1,5 +1,7 @@
-# Milk feature-tour showcase — the single source of truth for the recorded
-# TUI demo (issue #387, ADR-0099).
+# Milk feature-tour showcase — a narrative walkthrough of the core features
+# (issue #387, ADR-0099). Gallery clip: the site hero (homepage terminal)
+# is demo/plots/dashboard-day.yaml writing docs/assets/milk-tui*.gif; this
+# tour records to showcase-feature-tour.*.
 #
 # Two runners consume this file:
 #   task showcase:record   calibrate against a live TUI (tmux) → generate
@@ -14,13 +16,14 @@
 # texts below were captured from a real session, not invented.
 
 name: milk-feature-tour
-output: docs/assets/milk-tui.gif
+output: docs/assets/showcase-feature-tour.gif
 tape: demo.tape              # generated next to this file, replacing the old hand-written tape
 launch: "--new"            # arguments only — the recorder prepends cd + MILK_CONFIG_ROOT + the absolute binary
 workdir: "."                 # the repo: the git beat needs a real repository
 margin: 1.5                  # sleep = measured × 1.5 (+ base) — second-run latency headroom
 base: 0.4                    # visible beat boundary even with zero waits
-timeout: 60s                 # one wait beyond this = broken beat = failed calibration
+between: 1.5s                 # reading pause at beat boundaries — the next command types only after it
+timeout: 120s                # one wait beyond this = broken beat = failed calibration (headroom for model latency: bg completions ride it)
 
 # A showcase must not depend on live infrastructure: strip these config keys
 # for the clean run root (agents and settings are kept — the tour runs the

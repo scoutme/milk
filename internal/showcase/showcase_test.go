@@ -139,17 +139,20 @@ beats:
 	tape := RenderTape(m, res, RenderOpts{
 		MilkPath:   "/home/u/.local/bin/milk",
 		ConfigRoot: "/tmp/rec-root",
+		SeedRoot:   "/home/u/repo-seed",
 		Workdir:    "/home/u/repo",
 	})
 
 	wantLines := []string{
-		"Output docs/x.gif",
+		"Output docs/x.mp4", // the tape records the raw mp4 — the gif is derived two-pass (GIFTwoPass)
 		`Set Width 1200`,
 		`Set Theme "Dracula"`,
 		`Set PlaybackSpeed 0.9`,
-		`Type "cd '/home/u/repo' && MILK_CONFIG_ROOT='/tmp/rec-root' '/home/u/.local/bin/milk' --new"`,
+		"Hide", // setup frames (shell + launch + boot) are not content
+		`Type@0ms "rm -rf '/tmp/rec-root' && cp -r '/home/u/repo-seed' '/tmp/rec-root' && cd '/home/u/repo' && MILK_CONFIG_ROOT='/tmp/rec-root' '/home/u/.local/bin/milk' --new"`,
 		"Enter",
 		"Sleep 4.5s", // 2s × 2 + 0.5
+		"Show",       // milk is up — the recording starts here
 		"# ── learn: learn a fact ──",
 		`Type "/learn milk's showcase"`,
 		"Enter",
@@ -157,6 +160,8 @@ beats:
 		"# wait: learned:",
 		"# ── task: close the task ──",
 		"# skipped in calibration (skip_if matched)",
+		"# hold the final view — the last screen stays a few seconds before the loop",
+		"Sleep 5s", // the finished composition holds before the loop
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(tape, want) {
@@ -168,6 +173,20 @@ beats:
 		if strings.Contains(tape[idx:], "Type ") {
 			t.Error("skipped beat still types in the tape")
 		}
+	}
+	// Setup order: Hide wraps the whole launch (through the boot sleep) and
+	// Show lands before the first beat — milk owns frame one of the recording.
+	launchIdx := strings.Index(tape, `Type@0ms "rm -rf`)
+	showIdx := strings.Index(tape, "Show")
+	if !(strings.Index(tape, "Hide") < launchIdx && launchIdx < showIdx) {
+		t.Errorf("Hide/Show must wrap the launch line:\n%s", tape)
+	}
+	if showIdx > strings.Index(tape, "# ── learn") {
+		t.Error("Show must come before the first beat")
+	}
+	// The tape ends holding the finished view for a few seconds.
+	if !strings.HasSuffix(tape, "Sleep 5s\n") {
+		t.Errorf("tape must end with the final-view hold, got tail %q", tape[max(0, len(tape)-40):])
 	}
 }
 
@@ -249,6 +268,175 @@ func TestWriteCleanConfig(t *testing.T) {
 	}
 	if _, err := WriteCleanConfig(filepath.Join(srcDir, "nope.json"), dst, nil, false); err == nil {
 		t.Error("missing source config must error (a configured milk is required)")
+	}
+}
+
+// TestRenderTape_NoSeedRoot_PlainLaunch: without a seed root the launch is
+// the plain cd+config line (callers that manage the root themselves).
+func TestRenderTape_NoSeedRoot_PlainLaunch(t *testing.T) {
+	m, err := Load(writeManifest(t, `
+name: t
+output: docs/x.gif
+tape: demo.tape
+launch: "--new"
+margin: 1
+base: 0.5
+terminal: {cols: 80, rows: 24, width: 800, height: 400}
+beats:
+  - id: b
+    steps:
+      - type: "hi"
+      - key: Enter
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape := RenderTape(m, Result{LaunchElapsed: time.Second}, RenderOpts{
+		MilkPath: "/bin/milk", ConfigRoot: "/tmp/root", Workdir: "/w",
+	})
+	if strings.Contains(tape, "cp -r") || strings.Contains(tape, "rm -rf") {
+		t.Errorf("no SeedRoot must not re-seed:\n%s", tape)
+	}
+	if !strings.Contains(tape, `Type@0ms "cd '/w' && MILK_CONFIG_ROOT='/tmp/root' '/bin/milk' --new"`) {
+		t.Errorf("plain launch missing:\n%s", tape)
+	}
+}
+
+// TestMaterializeSeed: the record roots are rebuilt pristine from the user's
+// config every time — agents kept (the showcase runs the user's own agents),
+// strip keys gone, seed commands applied to the seed half, and the active
+// root cleared so the tape's re-copy starts from the master instead of
+// inheriting a previous render's mutations (the failure mode that made
+// re-renders show config-less milk).
+func TestMaterializeSeed(t *testing.T) {
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "config.json")
+	if err := os.WriteFile(src, []byte(`{"remote_oversight":{"backend":"telegram"},"agents":[{"name":"mimo-local"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(writeManifest(t, `
+name: t
+output: docs/x.gif
+tape: demo.tape
+launch: "--new"
+terminal: {cols: 80, rows: 24, width: 800, height: 400}
+strip_config_keys: [remote_oversight]
+seed:
+  - echo seeded > "$STATE_ROOT/marker.txt"
+beats:
+  - id: b
+    steps:
+      - type: "hi"
+      - key: Enter
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir := t.TempDir()
+	root := ActiveRootFor(workdir)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "stale-session.json"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seed, gotRoot, err := MaterializeSeed(src, m, workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seed != SeedRootFor(workdir) || gotRoot != root {
+		t.Errorf("roots = %s/%s, want %s/%s", seed, gotRoot, SeedRootFor(workdir), root)
+	}
+	cfg, err := os.ReadFile(filepath.Join(seed, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "mimo-local") {
+		t.Errorf("agents lost from the seed config: %s", cfg)
+	}
+	if strings.Contains(string(cfg), "remote_oversight") {
+		t.Errorf("strip key survived: %s", cfg)
+	}
+	if _, err := os.Stat(filepath.Join(seed, "marker.txt")); err != nil {
+		t.Errorf("seed command did not run against the seed root: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Error("active root must be cleared so the tape's re-copy starts clean")
+	}
+
+	// A second materialization resets mutations in the seed half too.
+	if err := os.WriteFile(filepath.Join(seed, "stale.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := MaterializeSeed(src, m, workdir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(seed, "stale.txt")); !os.IsNotExist(err) {
+		t.Error("stale seed mutation survived re-materialization")
+	}
+}
+
+// TestRenderTape_BetweenBeats: the between pause lands after every beat but
+// the last — the viewer reads the result before the next command types (the
+// maintainer caught /tasks and /learn typing back-to-back in the dashboard
+// recording: waits measure completion, not reading comfort).
+func TestRenderTape_BetweenBeats(t *testing.T) {
+	m, err := Load(writeManifest(t, `
+name: t
+output: docs/x.gif
+tape: demo.tape
+launch: "--new"
+margin: 1
+base: 0.4
+between: 1.5s
+terminal: {cols: 80, rows: 24, width: 800, height: 400}
+beats:
+  - id: one
+    steps:
+      - type: "/tasks"
+      - key: Enter
+      - wait: "tasks:"
+  - id: two
+    steps:
+      - type: "/learn x"
+      - key: Enter
+  - id: three
+    steps:
+      - type: "bye"
+      - key: Enter
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tape := RenderTape(m, Result{Timings: []BeatTiming{
+		{ID: "one", Elapsed: time.Second},
+		{ID: "two", Elapsed: 500 * time.Millisecond},
+		{ID: "three", Elapsed: 500 * time.Millisecond},
+	}}, RenderOpts{MilkPath: "/bin/milk", ConfigRoot: "/tmp/root", Workdir: "/w"})
+	if got := strings.Count(tape, "Sleep 1.5s"); got != 2 {
+		t.Errorf("between pauses = %d, want 2 (every beat but the last)\n%s", got, tape)
+	}
+	// The last beat is followed by the hold, never a between pause.
+	if !strings.HasSuffix(strings.TrimSpace(tape), "Sleep 5s") {
+		t.Errorf("tape must end in the final hold:\n%q", tape[len(tape)-60:])
+	}
+	// A bad duration is rejected at load, not by vhs at record time.
+	bad := writeManifest(t, `
+name: t
+output: docs/x.gif
+tape: demo.tape
+launch: "--new"
+between: 40parsnips
+terminal: {cols: 80, rows: 24, width: 800, height: 400}
+beats:
+  - id: one
+    steps:
+      - type: "hi"
+      - key: Enter
+`)
+	if _, err := Load(bad); err == nil || !strings.Contains(err.Error(), "between") {
+		t.Errorf("invalid between must fail Load, got %v", err)
 	}
 }
 

@@ -17,6 +17,7 @@ launch: "--new"
 workdir: "demo/.workdirs/fix-typo"
 margin: 1.5
 base: 0.4
+between: 1.5s                 # reading pause at beat boundaries — the next command types only after it
 timeout: 90s                 # one wait beyond this = broken beat; generous because thinking turns vary (a passing wait costs nothing extra)
 
 strip_config_keys:
@@ -78,10 +79,10 @@ seed:
     git -c user.email=showcase@eval -c user.name=showcase commit -qm "counter: counts to 10"
 
 terminal:
-  width: 1200
-  height: 700
-  cols: 120
-  rows: 40
+  width: 1900               # 10px/col × 190 — keep the cell geometry, scale the frame
+  height: 1120              # 17.5px/row × 64 (even rows → integer px), aspect ≈ the original 12:7
+  cols: 190
+  rows: 64
   font_size: 14
   theme: Dracula
   typing_speed: 60ms
