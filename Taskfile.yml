@@ -93,6 +93,15 @@ tasks:
     deps:
       - build
 
+  showcase:seed:
+    desc: Materialize the showcase record roots (clean config with agents + seeds) without calibrating or recording; MANIFEST=path selects a plot
+    vars:
+      MANIFEST: '{{.MANIFEST | default "demo/showcase.yaml"}}'
+    cmds:
+      - go run ./cmd/showcase -manifest {{.MANIFEST}} -seed-only
+    deps:
+      - build
+
   showcase:run:
     desc: Verify the showcase beats against a live TUI — PASS/FAIL report, non-zero exit on the first broken wait (-beats a,b for a subset)
     cmds:

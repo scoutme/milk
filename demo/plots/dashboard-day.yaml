@@ -1,21 +1,27 @@
-# Plot C — "dashboard day": the UI-first story. milk boots straight into a
-# live workspace — five panels open (from the seeded panel-state), a dirty
-# working tree, a pending notification — then a background job through the
-# agent-picker flyover, real tasks, a recorded fact. Every distinctive
-# surface in one sitting: the width-budget group strip, event toasts, the
-# flyover's timed default, panel content events. One of three candidate
-# plots for the showcase (#387).
+# Plot C — "dashboard day": the UI-first story. milk boots into a quiet
+# workspace — panels closed, tree clean — and every panel in the story opens
+# *because an event arrived*: the edit's dirty edge brings git+project, the
+# job spawns the background panel, the first task opens tasks, the fact opens
+# memory — which, with max_shown_panels=3, overflows into the width-budget
+# group strip live on camera. A background job through the agent-picker
+# flyover rides along. One of three candidate plots for the showcase (#387).
 #
 #   go run ./cmd/showcase -manifest demo/plots/dashboard-day.yaml -verify
 #   task showcase:record MANIFEST=demo/plots/dashboard-day.yaml
 
 name: milk-plot-dashboard-day
-output: docs/assets/showcase-dashboard-day.gif
+# The site hero: this output IS docs/assets/milk-tui.gif — the recorded raw
+# the tracked milk-tui-compressed.gif (website/overrides/home.html) is
+# derived from. `task showcase:record MANIFEST=…dashboard-day.yaml` rebuilds
+# the homepage clip end to end (raw + compressed). The other two plots are
+# gallery candidates; the feature tour moved to showcase-feature-tour.
+output: docs/assets/milk-tui.gif
 tape: dashboard-day.tape
 launch: "--new"
 workdir: "demo/.workdirs/dashboard"
 margin: 1.5
 base: 0.4
+between: 1.5s                 # reading pause at beat boundaries — the next command types only after it
 timeout: 90s
 
 strip_config_keys:
@@ -47,18 +53,24 @@ seed:
     git init -q
     git add -A
     git -c user.email=showcase@eval -c user.name=showcase commit -qm "seed: dashboard demo repo"
-    printf '\n// wip: review me before the demo\n' >> lib.go
+    # clean boot on purpose: the react beat's edit must be the clean→dirty
+    # edge that auto-opens the git panel (#347) — a pre-dirtied tree would
+    # make it a drift and the panel would never open.
   - |
-    mkdir -p "$STATE_ROOT/panel-state"
-    name=$(basename "$WORKDIR" | sed 's/[^A-Za-z0-9._-]/-/g')
-    hash=$(printf '%s' "$WORKDIR" | sha256sum | cut -c1-12)
-    printf '{"version":1,"panels":{"background":true,"git":true,"memory":true,"project":true,"tasks":true},"active":"git","folder":"%s"}' "$WORKDIR" > "$STATE_ROOT/panel-state/${name}-${hash}.json"
+    python3 - "$STATE_ROOT/config.json" <<'EOF'
+    import json, sys
+    p = sys.argv[1]
+    with open(p) as f: d = json.load(f)
+    d["max_shown_panels"] = 3       # cap: 3 free columns, the rest grouped
+    d["panel_auto_open"] = True     # events open the panels (ADR-0087/#347)
+    with open(p, "w") as f: json.dump(d, f, indent=2)
+    EOF
 
 terminal:
-  width: 1400
-  height: 700
-  cols: 140
-  rows: 40
+  width: 1900               # 10px/col × 190
+  height: 1120              # 17.5px/row × 64 — same geometry as plots A/B
+  cols: 190
+  rows: 64
   font_size: 14
   theme: Dracula
   typing_speed: 60ms
@@ -66,31 +78,33 @@ terminal:
 
 beats:
   - id: startup
-    note: "frame one is already a workspace: five panels, dirty git, group strip"
+    note: "quiet boot — no panels, clean tree; every panel below opens on an event"
     steps:
-      - wait: "CONTEXT BRICKS"     # memory panel (a free column — always visible) proves the seeded layout
-      - wait: "files git"          # the group strip's labels — the plot's signature, present whichever tab is on top (boot group-top order is racy: git's first graph stamp vs project's changeset)
+      - type: "/tasks"
+      - key: Enter
+      - wait: "[milk] tasks:"    # transcript only — proves the submit path while no panel is open (feature-tour precedent)
 
   - id: react
-    note: "a live edit — the project panel's changeset and the git strip react while you watch"
+    note: "the edit's clean→dirty edge auto-opens git and project — content from a clean previous state (#347)"
     steps:
       - type: "Add the line 'hello from the dashboard' to README.md and reply: done"
       - key: Enter
       - wait: "role:PRIMARY"
       - wait_absent: "role:PRIMARY"
-      - wait: "✎2"                # git panel (group top — the edit stamped it fresh): two modified files, persistent; branch-name agnostic
+      - wait: "✎1"                # the dirty count — a panel opened on the edge (pre-seeded dirt would have been a drift: no open)
+      - wait: "M README.md"        # project panel's changed-file row — its own auto-open proof (transcript renders the diff as `--- README.md`, never this form; git's open is proven by ✎1 above)
 
   - id: bg
-    note: "the agent-picker flyover picks the background agent — timed default preselected"
+    note: "the agent-picker flyover picks the background agent — its panel opens on the spawn event"
     steps:
       - type: "/bg start write a haiku about terminals"
       - key: Enter
-        wait: "↑↓ choose"          # flyover open (#382)
+      - wait: "↑↓ choose"          # flyover open (#382)
       - key: Enter                 # accept the preselected default
       - wait: "terminals\" completed"
 
   - id: tasks
-    note: "two real tasks land in the already-open tasks panel"
+    note: "the first task opens the tasks panel — the fourth open panel, so git groups"
     steps:
       - wait_absent: "role:PRIMARY"   # a finished job can trigger a follow-up turn — wait it out
       - type: "Create two tasks titled exactly \"REFRESH demo assets\" and \"REVIEW panel toasts\". Reply: done"
@@ -100,12 +114,13 @@ beats:
       - type: "/tasks"
       - key: Enter
         wait: "pending     REFRESH"   # transcript list — caps-stable first word (models re-case: observed), combo never self-matches
-      - wait: "○ REVIEW"              # the tasks panel's checkbox row, persistent (the transcript line wraps at this width)
+      - wait: "○ REVIEW"              # the tasks panel's checkbox row — the panel opened on the task event
 
   - id: learn
-    note: "record the session's fact — the memory panel opens on it"
+    note: "the fact opens memory — five panels, cap 3: the group strip appears"
     steps:
-      - type: "/learn dashboard day: five panels, one view (showcase plot C)"
+      - type: "/learn dashboard day: panels open on events (showcase plot C)"
       - key: Enter
       - wait: "[milk] learned:"
-      - wait: "CONTEXT BRICKS"
+      - wait: "CONTEXT BRICKS"   # memory auto-opened (panel content event, #347 — feature-tour precedent)
+      - wait: "files git"        # the group strip: free = memory/tasks/bg, grouped = files+git (cap 3)

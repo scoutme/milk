@@ -44,4 +44,5 @@ __pycache__/
 # showcase record output (task showcase:record); the committed asset is the compressed variant
 docs/assets/milk-tui.gif
 docs/assets/showcase-*.gif
+docs/assets/*.mp4
 demo/.workdirs/

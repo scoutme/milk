@@ -39,13 +39,23 @@ now built).
    never satisfies its wait **fails the calibration loudly with the pane
    excerpt** — the failure mode of guessing is a bad video; the failure mode
    of state-sync is an error.
-3. **A clean config root per pass** — the run gets a copy of the user's
-   config minus `strip_config_keys` (`remote_oversight`: a recording must
-   not depend on or announce live infrastructure — the telegram ping warning
-   that would open every transcript is stripped, not special-cased), and
-   empty sessions/memory/panel state, so every recording opens on the same
+3. **A clean config root per pass, persisting beside the workdir** — the
+   run gets a copy of the user's config minus `strip_config_keys`
+   (`remote_oversight`: a recording must not depend on or announce live
+   infrastructure — the telegram ping warning that would open every
+   transcript is stripped, not special-cased), and empty
+   sessions/memory/panel state, so every recording opens on the same
    defaults and the panels *appear* on cue. Agents and settings are the
-   user's own: the showcase runs their configured agents.
+   user's own: the showcase runs their configured agents. The roots are
+   two halves at `<workdir>-seed` (pristine master: config + seeds) and
+   `<workdir>-root` (active, what milk launches with, gitignored under
+   `demo/.workdirs/`) — and the tape's hidden launch line re-copies
+   seed → root on **every** render. Both halves persist deliberately: the
+   original temp root died with the record pass, so every later re-render
+   booted a config-less milk and the recording showed it complaining
+   about a missing primary agent instead of working; a mutated root would
+   equally break the calibration's measured starting state.
+   `task showcase:seed` re-materializes them without a live run.
 4. **Not eval** — eval's schema is prompt+rubric+judge for model quality;
    showcase beats are UI/state assertions, and the visual runner cannot be
    headless while the verifier must be. Forcing one schema onto both

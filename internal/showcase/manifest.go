@@ -66,6 +66,13 @@ type Manifest struct {
 	// Base is added to every sleep (seconds, default 0.4) so even a
 	// zero-wait beat gets a visible beat boundary in the recording.
 	Base float64 `yaml:"base"`
+	// Between is an extra pause after every beat but the last (vhs duration
+	// like "1.5s"; "" = none) — reading room at beat boundaries: the
+	// calibration measures when waits *completed*, not how long a viewer
+	// needs to read the result before the next command types. Without it a
+	// short wait (base is only 0.4s) makes back-to-back commands look glued
+	// together.
+	Between string `yaml:"between,omitempty"`
 	// Timeout bounds every single wait (default 60s). A wait that can't be
 	// satisfied is a broken beat — the recorder fails loudly with the last
 	// pane capture instead of recording garbage.
@@ -191,6 +198,11 @@ func (m *Manifest) Validate() error {
 	}
 	if m.Margin < 1 {
 		return fmt.Errorf("margin %v must be >= 1 (a recording must sleep at least as long as reality)", m.Margin)
+	}
+	if m.Between != "" {
+		if _, err := time.ParseDuration(m.Between); err != nil {
+			return fmt.Errorf("between %q is not a duration (e.g. 1.5s): %w", m.Between, err)
+		}
 	}
 	if m.Terminal.Cols <= 0 || m.Terminal.Rows <= 0 {
 		return fmt.Errorf("terminal.cols/rows must be positive (tmux calibration size)")
