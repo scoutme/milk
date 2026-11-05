@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -2978,7 +2979,8 @@ func Load() (Config, error) {
 }
 
 // configBackupSuffix names the last-known-good copy of a config file,
-// refreshed on every successful Save or successful parse. If the primary
+// refreshed on a successful Save or parse that carries an effective change
+// (see saveConfigBackup — bookkeeping-only differences don't count). If the primary
 // file is later found corrupted — e.g. by a malformed automated edit —
 // LoadFrom falls back to this backup instead of leaving milk unable to
 // start.
@@ -3036,8 +3038,39 @@ func loadConfigBackup(path string) (Config, error) {
 // saveConfigBackup best-effort refreshes path's backup copy with data (bytes
 // that were just written or successfully parsed). Failures are ignored —
 // the backup is a safety net, not a guarantee.
+//
+// The backup is rewritten only on an effective change: when the existing
+// backup already holds an equivalent config (see configsEquivalent) the write
+// is skipped, so a plain start or a metadata-only save (update_last_check)
+// leaves the last-known-good copy — and its mtime — alone.
 func saveConfigBackup(path string, data []byte) {
-	_ = os.WriteFile(path+configBackupSuffix, data, 0o600)
+	bakPath := path + configBackupSuffix
+	if old, err := os.ReadFile(bakPath); err == nil && configsEquivalent(old, data) {
+		return
+	}
+	_ = os.WriteFile(bakPath, data, 0o600)
+}
+
+// configBackupVolatileKeys are top-level config keys that carry bookkeeping,
+// not user configuration: a change to them alone is not an effective change.
+// Mirrors the TUI reload path, which ignores the same bookkeeping when
+// deciding whether anything user-visible changed.
+var configBackupVolatileKeys = []string{"update_last_check"}
+
+// configsEquivalent reports whether two config documents are the same
+// configuration, ignoring formatting, key order and configBackupVolatileKeys.
+// Either side failing to parse as a JSON object is "not equivalent", so a
+// corrupt backup is always replaced by a good file.
+func configsEquivalent(a, b []byte) bool {
+	var ma, mb map[string]any
+	if json.Unmarshal(a, &ma) != nil || json.Unmarshal(b, &mb) != nil || ma == nil || mb == nil {
+		return false
+	}
+	for _, k := range configBackupVolatileKeys {
+		delete(ma, k)
+		delete(mb, k)
+	}
+	return reflect.DeepEqual(ma, mb)
 }
 
 // ValidationWarning describes a configuration problem found at startup.
