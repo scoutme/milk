@@ -55,13 +55,38 @@ func (as *acpSession) flushPendingFollowup() {
 		return
 	}
 	as.mu.Lock()
-	wave, user := as.pendingWaveFollowup, as.pendingUserFollowup
+	wave, user, shell := as.pendingWaveFollowup, as.pendingUserFollowup, as.pendingShellFollowup
 	as.mu.Unlock()
 	switch {
 	case user:
 		as.requestFollowup(false)
+	case shell:
+		as.requestShellFollowup()
 	case wave:
 		as.requestFollowup(true)
+	}
+}
+
+// requestShellFollowup is requestFollowup's shell counterpart (ADR-0100):
+// an awaited background shell completed — no job manager involved, no wave
+// concept; pending counts the queued shell events at the shared drain, so a
+// wake whose notices an intervening turn already delivered skips instead of
+// burning an empty turn.
+func (as *acpSession) requestShellFollowup() {
+	if as.closed.Load() {
+		return
+	}
+	locked := as.turnMu.TryLock()
+	d := decideFollowup(false, 0, shellEventsPendingForFollowup(), !locked)
+	if d != followupNow && locked {
+		as.turnMu.Unlock()
+	}
+	as.mu.Lock()
+	var throwawayWave bool
+	applyFollowupDecision(false, d, &throwawayWave, &as.pendingShellFollowup)
+	as.mu.Unlock()
+	if d == followupNow {
+		go as.runFollowup()
 	}
 }
 

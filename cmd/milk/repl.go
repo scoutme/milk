@@ -306,10 +306,12 @@ type backgroundJobDoneMsg struct{ job *local.Job }
 type backgroundShellStartedMsg struct{ info local.ShellInfo }
 
 // backgroundShellDoneMsg is sent when a background shell exits (ADR-0064).
-// Unlike backgroundJobDoneMsg it writes no transcript block: a shell's
-// output is live-buffer material, read through the attach view or
-// bash_output, not turn output the model reported. Toast + panel
-// finalization only.
+// Plain lifecycle stays toast + panel finalization only — but an awaited
+// shell (bash await: true) or a failed one now also writes a transcript
+// block and, for awaited exits, wakes a follow-up turn (ADR-0100): same
+// predicate as the prompt-side drain queue, so what the user sees is what
+// the model gets. Clean un-awaited output stays live-buffer material, read
+// through the attach view or bash_output.
 type backgroundShellDoneMsg struct{ info local.ShellInfo }
 
 // backgroundBatchDoneMsg is sent exactly once when the last currently-
@@ -857,6 +859,12 @@ type model struct {
 	// waiting on unrelated work the user didn't ask this particular
 	// request to wait for.
 	pendingUserBackgroundFollowup bool
+	// pendingShellFollowup is the shell counterpart (ADR-0100): an awaited
+	// background shell (bash await: true) exited while a turn was running,
+	// so the wake is remembered for handleAgentDone instead of dropped.
+	// No wave concept — one shell, one follow-up; the drain delivers all
+	// queued completions anyway.
+	pendingShellFollowup bool
 
 	// active tool use — non-empty while the escalation agent is executing a tool call
 	activeToolUse string
@@ -1998,6 +2006,9 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 	// background-followup and remote-input chain).
 	if next, cmd, ok := m.drainQueuedPrompt(); ok {
 		return next, cmd
+	}
+	if m.pendingShellFollowup {
+		return m.maybeAutoFollowupShells()
 	}
 	if m.pendingUserBackgroundFollowup {
 		return m.maybeAutoFollowupBackgroundJobs(false)
@@ -3462,6 +3473,19 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backgroundShellDoneMsg:
 		m.stampPanelActivity(regionBackground) // shell row status changed (ADR-0089)
 		m.notify(fmt.Sprintf("background shell %s %s", msg.info.ID, msg.info.StatusLabel()), "/bg list")
+		// Model-facing delivery (ADR-0100): an awaited exit or a failure also
+		// lands in the transcript (same predicate as the prompt-side queue in
+		// local), so it can't pass by unseen — clean un-awaited exits stay
+		// toast-only like before.
+		if block := renderShellDoneBlock(msg.info, ""); block != "" {
+			m.appendTranscript(block)
+		}
+		// Awaited completions wake a follow-up turn once idle (the "report as
+		// soon as it fires" promise); failures without await wait for the next
+		// user turn via the drain — no wake.
+		if msg.info.Await {
+			return m.maybeAutoFollowupShells()
+		}
 		// The last running shell (or job) exiting finalizes the background
 		// panel's content — re-arm auto-open so the next one opens it again
 		// (no-op while other background work is still live; ADR-0059).
@@ -4315,6 +4339,29 @@ func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model
 	busy := m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil
 	d := decideFollowup(waitForWholeWave, mgr.ActiveCount(), mgr.PendingCount(), busy)
 	applyFollowupDecision(waitForWholeWave, d, &m.pendingBackgroundFollowup, &m.pendingUserBackgroundFollowup)
+	if d != followupNow {
+		return m, nil
+	}
+	return m.submitInput(backgroundFollowupPrompt, dim("[background]")+" ")
+}
+
+// shellEventsPendingForFollowup is the pending-count seam for the shell wake
+// (ADR-0100): production reads the registry's process-global queue; tests
+// stub it, because any concurrent turn dispatch anywhere in the process
+// drains that queue — host-behavior tests must not race the world.
+var shellEventsPendingForFollowup = local.PendingShellEvents
+
+// maybeAutoFollowupShells delivers queued shell completion notices
+// (ADR-0100) as a real follow-up turn once idle — the wake half of bash
+// await. Reuses decideFollowup with no wave concept: pending counts queued
+// shell events (a wake whose events were already drained by an intervening
+// turn must not burn an empty turn — the same pending==0 guard the job
+// follow-up relies on), busy defers instead of dropping.
+func (m model) maybeAutoFollowupShells() (tea.Model, tea.Cmd) {
+	busy := m.busy || m.pendingPerm != nil || m.pendingDirectBash != nil || m.ptyPane != nil
+	d := decideFollowup(false, 0, shellEventsPendingForFollowup(), busy)
+	var throwawayWave bool // followupNow would clear a wave flag — must not touch the job ones
+	applyFollowupDecision(false, d, &throwawayWave, &m.pendingShellFollowup)
 	if d != followupNow {
 		return m, nil
 	}

@@ -96,6 +96,10 @@ type acpSession struct {
 	// requested while a turn was running, to be retried when it ends.
 	pendingWaveFollowup bool
 	pendingUserFollowup bool
+	// pendingShellFollowup is the shell wake (ADR-0100): an awaited
+	// background shell exited mid-turn; requestShellFollowup retries when
+	// the turn ends.
+	pendingShellFollowup bool
 
 	taskStore       *tasks.Store
 	workflowRunning atomic.Bool

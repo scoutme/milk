@@ -85,6 +85,61 @@ func renderBgShowShell(s local.ShellInfo) string {
 	return b.String()
 }
 
+// renderShellDoneBlock renders the transcript block written the moment a
+// background shell's completion is owed to the model (ADR-0100): an awaited
+// shell's exit — whatever its status — or an un-awaited shell that failed.
+// Same rule as the prompt-side queue (local.ShellWantsNotice is the single
+// predicate), so what the user sees is what the model gets; clean un-awaited
+// exits stay toast/panel-only (lifecycle noise, ADR-0048). tail is the
+// output captured for the notice — empty string reads the live buffer now
+// (the TUI path, where the buffer is certainly still alive) and falls back
+// to "(no output)".
+func renderShellDoneBlock(info local.ShellInfo, tail string) string {
+	if !local.ShellWantsNotice(info) {
+		return ""
+	}
+	var b strings.Builder
+	label := "background shell"
+	if info.Await {
+		label = "awaited background shell"
+	}
+	fmt.Fprintf(&b, "\n%s %s %s (%q) — %s\n", milkTag(), label, info.ID, info.Command, info.StatusLabel())
+	if tail == "" {
+		if buf, ok := local.ShellLive(info.ID); ok {
+			tail = buf.Snapshot()
+		}
+	}
+	tail = strings.TrimRight(tail, "\n")
+	if strings.TrimSpace(tail) == "" {
+		fmt.Fprintf(&b, "%s (no output)\n", milkTag())
+	} else {
+		fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(tail, backgroundJobResultMaxChars))
+	}
+	return b.String()
+}
+
+// renderShellNotices turns drained completion events (ADR-0100) into the
+// prompt/history prefix next to drainBackgroundJobs' results — the events a
+// follow-up turn reports on. Capped to the same budget as job results, so
+// one chatty failed watcher can't flood the next turn.
+func renderShellNotices(events []local.ShellEvent) string {
+	if len(events) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range events {
+		what := fmt.Sprintf("background shell %s (%q) — %s", e.Info.ID, e.Info.Command, e.Info.StatusLabel())
+		if e.Info.Await {
+			what = "awaited " + what
+		}
+		fmt.Fprintf(&b, "[shell-finished] %s\n", what)
+		if tail := strings.TrimRight(e.Tail, "\n"); strings.TrimSpace(tail) != "" {
+			fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(tail, backgroundJobResultMaxChars))
+		}
+	}
+	return b.String()
+}
+
 // renderBgShow prints one job's full, uncapped result — the target the
 // truncation hint in renderBackgroundJobDoneBlock points at, and the manual
 // "take its output" path for any older job (/bg show <id>, TUI and ACP alike).

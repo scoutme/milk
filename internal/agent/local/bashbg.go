@@ -40,6 +40,7 @@ type bgShell struct {
 	command string // the sh -c command line — kept for panel rows and ACP titles (ADR-0064)
 	dir     string
 	owner   string // who started it (workflow identity such as "worker·Item-2"); "" when unattributed
+	await   bool   // agent asked for a completion notice (bash await: true) — see ADR-0100
 	cmd     *exec.Cmd
 	out     *livebuf.Buffer
 	done    chan struct{}
@@ -66,6 +67,7 @@ type ShellInfo struct {
 	Finished   bool
 	ExitCode   int
 	Err        error
+	Await      bool // started with await: true — completion wakes a follow-up (ADR-0100)
 	StartedAt  time.Time
 	FinishedAt time.Time
 }
@@ -100,9 +102,30 @@ func (s *bgShell) info() ShellInfo {
 		Finished:   s.finished,
 		ExitCode:   s.exitCode,
 		Err:        s.exitErr,
+		Await:      s.await,
 		StartedAt:  s.started,
 		FinishedAt: s.finishedAt,
 	}
+}
+
+// ShellWantsNotice is the single predicate for shell-completion delivery to
+// the model (ADR-0100): an awaited shell's completion is delivered whatever
+// its status (the await promise is "wake me when it fires" — including
+// exit 0), and an un-awaited shell is delivered only when it *failed* —
+// nonzero exit or exec error, but not a deliberate kill_bash/lifetime stop
+// (a stop the user or milk itself asked for is not news). Clean un-awaited
+// exits stay toast/panel-only, exactly as they were before.
+func ShellWantsNotice(i ShellInfo) bool {
+	if !i.Finished {
+		return false
+	}
+	if i.Await {
+		return true
+	}
+	if i.Killed {
+		return false
+	}
+	return i.Err != nil || i.ExitCode != 0
 }
 
 // statusLine renders the shell's state prefix for bash_output results.
@@ -141,6 +164,51 @@ type shellRegistry struct {
 	nextID     int
 	listeners  map[int]*shellListener
 	nextListen int
+	doneQueue  []ShellEvent // completion notices owed to the model (ADR-0100)
+}
+
+// ShellEvent is one queued shell-completion notice: the state snapshot plus
+// the output tail captured at exit (the live buffer is reaped 30 min after
+// exit, but the drain may run later). Queued by the registry itself — once
+// per shell regardless of how many listeners are attached — and drained by
+// the next dispatched turn, mirroring how background-job results reach the
+// model (ADR-0043's drain pattern).
+type ShellEvent struct {
+	Info ShellInfo
+	Tail string // last lines of output at exit ("" when there were none)
+}
+
+const (
+	shellEventQueueCap = 32
+	shellEventTailMax  = 15 // lines of output captured per event
+)
+
+// DrainShellEvents returns and clears every queued completion notice. Called
+// from the dispatch paths next to drainBackgroundJobs — whoever turns runs
+// next delivers them.
+func DrainShellEvents() []ShellEvent {
+	bgShells.mu.Lock()
+	q := bgShells.doneQueue
+	bgShells.doneQueue = nil
+	bgShells.mu.Unlock()
+	return q
+}
+
+// PendingShellEvents reports how many completion notices are waiting — the
+// "pending" count the follow-up decision rules consume (a wake with nothing
+// to drain would burn an empty turn).
+func PendingShellEvents() int {
+	bgShells.mu.Lock()
+	defer bgShells.mu.Unlock()
+	return len(bgShells.doneQueue)
+}
+
+// pushDoneEventLocked queues one completion notice. Caller holds r.mu.
+func (r *shellRegistry) pushDoneEventLocked(e ShellEvent) {
+	r.doneQueue = append(r.doneQueue, e)
+	if len(r.doneQueue) > shellEventQueueCap {
+		r.doneQueue = r.doneQueue[len(r.doneQueue)-shellEventQueueCap:]
+	}
 }
 
 // shellListener is one registration from AddShellListener; pointers so the
@@ -260,11 +328,42 @@ func killShell(id, reason, requester string) (ShellInfo, bool) {
 // run_in_background (ADR-0063), also used by the UI layers' tests. Returns
 // the shell's initial state snapshot.
 func StartBackgroundShell(command, dir string) (ShellInfo, error) {
-	s, err := bgShells.start(command, dir, "")
+	s, err := bgShells.start(command, dir, "", false)
 	if err != nil {
 		return ShellInfo{}, err
 	}
 	return s.info(), nil
+}
+
+// StartBackgroundShellAwait is StartBackgroundShell with the await marker:
+// the completion notice is queued for the model whatever the status. Used by
+// tests and UI layers that exercise ADR-0100's wake path.
+func StartBackgroundShellAwait(command, dir string) (ShellInfo, error) {
+	s, err := bgShells.start(command, dir, "", true)
+	if err != nil {
+		return ShellInfo{}, err
+	}
+	return s.info(), nil
+}
+
+// shellOutputTail keeps the last shellEventTailMax non-empty-trailing lines
+// of a finished shell's output for its completion notice — enough for the
+// decisive lines without shipping the whole buffer into the next prompt.
+func shellOutputTail(out string) string {
+	lines := strings.Split(out, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > shellEventTailMax {
+		lines = lines[len(lines)-shellEventTailMax:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // StopBackgroundShells kills every tracked background shell. Called from the
@@ -295,7 +394,9 @@ func (r *shellRegistry) reapLocked() {
 }
 
 // start registers and starts a background shell running sh -c command in dir.
-func (r *shellRegistry) start(command, dir, owner string) (*bgShell, error) {
+// await marks the shell as agent-awaited: its completion is queued for the
+// model whatever its status (ADR-0100).
+func (r *shellRegistry) start(command, dir, owner string, await bool) (*bgShell, error) {
 	r.mu.Lock()
 	r.reapLocked()
 	if len(r.shells) >= maxBackgroundShells {
@@ -309,6 +410,7 @@ func (r *shellRegistry) start(command, dir, owner string) (*bgShell, error) {
 		command: command,
 		dir:     dir,
 		owner:   owner,
+		await:   await,
 		out:     livebuf.New(bgShellOutputBufferByte),
 		done:    make(chan struct{}),
 		started: time.Now(),
@@ -358,7 +460,16 @@ func (r *shellRegistry) start(command, dir, owner string) (*bgShell, error) {
 			attrs = append(attrs, "err", exitErr.Error())
 		}
 		obs.Info("bgshell.exit", attrs...)
-		r.fire(s.info(), false) // ADR-0064: shell-finished lifecycle event
+		// Queue the model-facing completion notice BEFORE firing listeners, so
+		// a wake decision made from a listener already sees it pending
+		// (decideFollowup's pending==0 guard would otherwise skip the wake).
+		info := s.info()
+		if ShellWantsNotice(info) {
+			r.mu.Lock()
+			r.pushDoneEventLocked(ShellEvent{Info: info, Tail: shellOutputTail(s.out.Snapshot())})
+			r.mu.Unlock()
+		}
+		r.fire(info, false) // ADR-0064: shell-finished lifecycle event
 	}()
 
 	// Auto-kill after the hard lifetime cap.

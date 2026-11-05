@@ -132,6 +132,11 @@ func (as *acpSession) setupShells() {
 				stop() // flush output before the terminal status row
 			}
 			as.notify(acp.BackgroundShellCall(info))
+			// Awaited shells wake a follow-up on ACP too (ADR-0100) — the
+			// drain at dispatch delivers the content either way.
+			if info.Await {
+				as.requestShellFollowup()
+			}
 		},
 	)
 }
