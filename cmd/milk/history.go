@@ -67,11 +67,30 @@ func writeHistoryFile(path string, history []string) {
 }
 
 // activeHistory returns the slice used for navigation (session or global).
+// The corpus follows the input mode: bang-mode ("!") input is shell input,
+// so it navigates and searches the shell's history (plus milk's record of
+// its own executed commands) instead of milk's input history.
 func (m *model) activeHistory() []string {
+	if m.bangMode {
+		return m.shellHistoryLines()
+	}
 	if m.useGlobalHistory {
 		return m.globalHistory
 	}
 	return m.sessionHistory
+}
+
+// historySearchLabel renders the Ctrl+R/Ctrl+S prompt label. In bang mode it
+// names the shell corpus so the source of a match is never ambiguous.
+func historySearchLabel(bangMode, forward bool) string {
+	dir := "r"
+	if forward {
+		dir = "f"
+	}
+	if bangMode {
+		return yellow("("+dir+"-search:shell)") + " ❯ "
+	}
+	return yellow("("+dir+"-search)") + " ❯ "
 }
 
 func appendDeduped(h []string, entry string, max int) []string {

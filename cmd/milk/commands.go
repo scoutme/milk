@@ -1671,7 +1671,24 @@ func (m model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searching = false
 		m.searchQuery.Reset()
 		m.ta.SetValue(m.saved)
+		m.leadingPasted = m.savedLeadingPasted // the restored text keeps its paste provenance
 		m.refreshPrompt()
+		m.syncLayout()
+		return m, nil
+	case "up", "down", "left", "right":
+		// Arrows leave the search keeping the current match: they mean "let
+		// me use and modify what I found", and they were dead keys inside
+		// search before this (ignored by the printable-only default below).
+		// left/right also reach the textarea on this very press (cursor lands
+		// in the match); up/down are consumed by the exit instead — handing
+		// them to historyBack/Forward would replace the match the press is
+		// supposed to preserve.
+		m.searching = false
+		m.searchQuery.Reset()
+		m.refreshPrompt()
+		if msg.String() == "left" || msg.String() == "right" {
+			return m.handleKey(msg)
+		}
 		m.syncLayout()
 		return m, nil
 	case "enter":
@@ -1687,18 +1704,29 @@ func (m model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.searchQuery.Reset()
 			m.searchQuery.WriteString(s[:len(s)-1])
 			m.searchIdx = -1
-			m = m.historySearchBack()
+			if m.searchQuery.Len() == 0 {
+				// Query fully erased: the finding goes with it — restore what
+				// the input held when the search started (entry-captured) instead
+				// of leaving the last match on screen.
+				m.ta.SetValue(m.saved)
+				m.leadingPasted = m.savedLeadingPasted
+			} else {
+				m = m.historySearchBack()
+			}
 		}
 		m.syncLayout()
 		return m, nil
 	default:
-		// Accept printable single-rune input
-		if r := msg.String(); len(r) == 1 {
-			if m.searchQuery.Len() == 0 {
-				m.saved = m.ta.Value()
-				m.searchIdx = -1
-			}
-			m.searchQuery.WriteString(r)
+		// Accept printable input: bubbletea reports space as the key name
+		// "space" (neither String() nor Text carries the character), and
+		// counting RUNES rather than bytes admits non-ASCII queries too —
+		// queries are shell commands, spaces and accents belong in them.
+		s := msg.String()
+		if s == "space" {
+			s = " "
+		}
+		if r := []rune(s); len(r) == 1 {
+			m.searchQuery.WriteString(string(r))
 			m.searchIdx = -1
 			m = m.historySearchBack()
 			m.syncLayout()
@@ -1724,6 +1752,9 @@ func (m model) handleHistoryCmd(sub string) model {
 		}
 		m.appendTranscript(fmt.Sprintf("%s history mode: %s  (session: %d entries, global: %d entries)\n",
 			milkTag(), mode, len(m.sessionHistory), len(m.globalHistory)))
+	}
+	if m.bangMode {
+		m.appendTranscript(milkTag() + dim(" bang-mode (!) history is the shell's — /history selects the input-history source only\n"))
 	}
 	return m
 }
