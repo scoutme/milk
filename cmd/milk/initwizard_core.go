@@ -345,7 +345,9 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 			Description: "Specialist agent. Describe its capabilities here.",
 		})
 	}
-	if err := saveLocalOrGlobal(cfg, st.cwd); err != nil {
+	// Explicit recovery path (#404): the wizard rebuilt config from the
+	// user's answers, so it writes even after a failed load.
+	if err := saveLocalOrGlobalForced(cfg, st.cwd); err != nil {
 		return cfg, "", err
 	}
 

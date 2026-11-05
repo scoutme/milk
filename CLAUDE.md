@@ -63,7 +63,7 @@ internal/tmux/                 # tmux session driver (send-keys + capture-pane p
 internal/showcase/              # showcase manifest (beats = keys + pane-state waits), calibration recorder + assertion verifier runners, vhs-tape generator, clean config root (ADR-0099)
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json
 internal/transport/acp/       # ACP v2 wire vocabulary + stdio.go's JSON-RPC transport (StdioConn)
-internal/config/              # config loading (~/.milk/config.json)
+internal/config/              # config loading (~/.milk/config.json) + write safety (ADR-0101: atomic/locked saves, backup = previous content, persist guard, bookkeeping patch, SaveEvent observer)
 internal/session/             # session state + store (~/.milk/sessions/)
 internal/router/              # routing logic (rules + weighted scorer + local model)
 internal/agent/local/         # OpenAI-compat client + Bedrock Converse native path + auth transports (SigV4, Bearer, custom headers) + tool loop + stream detector
@@ -74,6 +74,7 @@ internal/agent/smolagent/     # subprocess provider (wraps subprocess agent)
 internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/instructions/        # loads the target repo's AGENTS.md/CLAUDE.md into agent system/static context
 internal/textbudget/          # shared head+tail truncation helper for bounding large text before prompt hand-off
+internal/testutil/            # TestMain state-root sandbox + real-config canary for test binaries (#404 hygiene)
 internal/sgr/                 # SGR state tracker + row primitives (SelfContain, WithBackground, LastBackground, Highlight) — ADR-0072
 internal/vp/                  # forked bubbles viewport (MIT, ADR-0088): deferred longest-line measurement + SetLines — the per-keystroke render path
 internal/livebuf/             # thread-safe byte-capped text buffer for live background-job/workflow output (ADR-0047)

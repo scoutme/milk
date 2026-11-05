@@ -65,10 +65,22 @@ func SaveLocal(cfg Config) error { return SaveLocalIn(cfg, "") }
 // SaveLocalIn writes the local config under dir (see LocalConfigPathIn for
 // the empty-dir rule), creating the directory if needed. Unlike Save(), this
 // does NOT write the backup — local configs are project-scoped and don't need
-// the global recovery mechanism.
-func SaveLocalIn(cfg Config, dir string) error {
+// the global recovery mechanism. Writes are atomic, lock-serialized and
+// subject to the persist guard (#404).
+func SaveLocalIn(cfg Config, dir string) error { return saveLocalIn(cfg, dir, false) }
+
+// SaveLocalInForced is SaveLocalIn for explicit recovery paths (the init
+// wizard rebuilding a config after a failed load); a successful write clears
+// the persist guard.
+func SaveLocalInForced(cfg Config, dir string) error { return saveLocalIn(cfg, dir, true) }
+
+func saveLocalIn(cfg Config, dir string, force bool) error {
 	p, err := LocalConfigPathIn(dir)
 	if err != nil {
+		return err
+	}
+	if err := persistAllowed(cfg, force); err != nil {
+		emitSaveEvent(SaveEvent{Kind: "refused", Path: p, Err: err})
 		return err
 	}
 	d := filepath.Dir(p)
@@ -79,7 +91,13 @@ func SaveLocalIn(cfg Config, dir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	if err := writeConfigFile(p, data, "saved", false); err != nil {
+		return err
+	}
+	if force {
+		setPersistGuard(false) // the forced write put a real config on disk
+	}
+	return nil
 }
 
 // DeepMerge merges src into dst using the following rules:
@@ -207,6 +225,9 @@ func DeepMerge(dst, src Config) Config {
 	}
 	if src.MaxShownPanels != 0 {
 		dst.MaxShownPanels = src.MaxShownPanels
+	}
+	if src.ConfigConsent != "" {
+		dst.ConfigConsent = src.ConfigConsent
 	}
 	if src.PanelAutoOpen != nil {
 		dst.PanelAutoOpen = src.PanelAutoOpen
@@ -1229,6 +1250,15 @@ type Config struct {
 	// every theme (the supermilk port shares the same budget) and
 	// hot-reloads like every other scalar (configReloadMsg).
 	MaxShownPanels int `json:"max_shown_panels,omitempty"`
+
+	// ConfigConsent selects how config self-writes behave when the process
+	// failed to load a real config (#404): unset or "strict" (default)
+	// refuses to persist a defaults()-derived config anywhere except the
+	// init wizard's explicit forced path; "open" restores the legacy
+	// permissive behavior. Background bookkeeping stamps
+	// (update_last_check) go through the surgical re-read patch
+	// (PatchBookkeeping) either way — they never snapshot memory to disk.
+	ConfigConsent string `json:"config_consent,omitempty"`
 
 	// PanelAutoOpen is the master switch for content-driven panel
 	// auto-open (ADR-0087): with it on (the default) a side panel opens
@@ -3014,11 +3044,21 @@ func LoadFrom(path string) (Config, error) {
 	if parseErr := json.Unmarshal(data, &cfg); parseErr != nil {
 		wrapped := fmt.Errorf("parsing config %s: %w", path, parseErr)
 		if bakCfg, bakErr := loadConfigBackup(path); bakErr == nil {
+			setPersistGuard(false) // recovered: real content in hand
 			return bakCfg, &ErrConfigRecovered{Path: path, ParseErr: wrapped}
 		}
+		// Unparseable primary and no usable backup: defaults() below may be
+		// handed to callers to run the session, but it must never find its
+		// way back to disk (issue #404) — the persist guard refuses ordinary
+		// saves until a real load or the init wizard's forced save clears it.
+		setPersistGuard(true)
 		return defaults(), wrapped
 	}
-	saveConfigBackup(path, data)
+	setPersistGuard(false)
+	// Loads deliberately do NOT refresh the backup (#404): a refresh would
+	// replace the last-known-good copy with whatever the current file holds
+	// — including a wiped-but-valid one — at the very next start. Only the
+	// writer snapshots the previous content (rotateConfigBackup).
 	return cfg, nil
 }
 
@@ -3035,21 +3075,12 @@ func loadConfigBackup(path string) (Config, error) {
 	return cfg, nil
 }
 
-// saveConfigBackup best-effort refreshes path's backup copy with data (bytes
-// that were just written or successfully parsed). Failures are ignored —
-// the backup is a safety net, not a guarantee.
-//
-// The backup is rewritten only on an effective change: when the existing
-// backup already holds an equivalent config (see configsEquivalent) the write
-// is skipped, so a plain start or a metadata-only save (update_last_check)
-// leaves the last-known-good copy — and its mtime — alone.
-func saveConfigBackup(path string, data []byte) {
-	bakPath := path + configBackupSuffix
-	if old, err := os.ReadFile(bakPath); err == nil && configsEquivalent(old, data) {
-		return
-	}
-	_ = os.WriteFile(bakPath, data, 0o600)
-}
+// saveConfigBackup was removed in #404: the backup is no longer refreshed
+// from loads (that let a wiped-but-valid file replace the last-known-good
+// copy at the next start) nor written with the new bytes (a backup of what
+// you just wrote restores nothing). See rotateConfigBackup in safety.go —
+// the writer snapshots the previous content, and configsEquivalent decides
+// whether a change is effective enough to churn the backup (#405).
 
 // configBackupVolatileKeys are top-level config keys that carry bookkeeping,
 // not user configuration: a change to them alone is not an effective change.
@@ -3383,16 +3414,42 @@ func SaveScope(cfg Config, scope string) error { return SaveScopeIn(cfg, scope, 
 // scope = "global" writes to the state root's config.json (default).
 // scope = "local"  writes to .milk/config.json under dir.
 // Any other value falls back to global.
-func SaveScopeIn(cfg Config, scope, dir string) error {
+func SaveScopeIn(cfg Config, scope, dir string) error { return saveScopeIn(cfg, scope, dir, false) }
+
+// SaveScopeInForced is SaveScopeIn for explicit recovery paths (init);
+// see SaveForced.
+func SaveScopeInForced(cfg Config, scope, dir string) error {
+	return saveScopeIn(cfg, scope, dir, true)
+}
+
+func saveScopeIn(cfg Config, scope, dir string, force bool) error {
 	if scope == "local" {
+		if force {
+			return SaveLocalInForced(cfg, dir)
+		}
 		return SaveLocalIn(cfg, dir)
+	}
+	if force {
+		return SaveForced(cfg)
 	}
 	return Save(cfg)
 }
 
-func Save(cfg Config) error {
+func Save(cfg Config) error { return saveGlobal(cfg, false) }
+
+// SaveForced bypasses the persist guard — for explicit recovery paths only
+// (the init wizard rebuilding config after a failed load, #404). A
+// successful write clears the guard: real config is back on disk.
+func SaveForced(cfg Config) error { return saveGlobal(cfg, true) }
+
+func saveGlobal(cfg Config, force bool) error {
 	dir, err := Dir()
 	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := persistAllowed(cfg, force); err != nil {
+		emitSaveEvent(SaveEvent{Kind: "refused", Path: path, Err: err})
 		return err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -3402,10 +3459,11 @@ func Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeConfigFile(path, data, "saved", true); err != nil {
 		return err
 	}
-	saveConfigBackup(path, data)
+	if force {
+		setPersistGuard(false)
+	}
 	return nil
 }

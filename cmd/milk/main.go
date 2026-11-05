@@ -992,6 +992,16 @@ func initObs(cfg config.Config) (shutdown func(context.Context) error) {
 		fmt.Fprintf(os.Stderr, "%s warning: OTel init failed: %v\n", milkTag(), err)
 		return func(context.Context) error { return nil }
 	}
+	// Attribute every config self-write to the milk log (#404): saves,
+	// bookkeeping patches and refusals — a future wipe gets a log line
+	// instead of an overwritten mtime. No-op when OTel is disabled.
+	config.SetSaveObserver(func(ev config.SaveEvent) {
+		if ev.Kind == "refused" {
+			obs.Warn("config_write_refused", "path", ev.Path, "err", ev.Err)
+			return
+		}
+		obs.Info("config_write", "kind", ev.Kind, "path", ev.Path, "bytes", ev.Bytes)
+	})
 	// internal/loop can't import internal/obs directly (import cycle via
 	// internal/config), so hand it the same log sink explicitly — otherwise
 	// its diagnostics fall back to slog.Default() and bleed raw log lines
@@ -2422,7 +2432,9 @@ func runInitWizard() error {
 	} else {
 		scope = promptLocalOrGlobal()
 	}
-	if err := saveConfigForScope(cfg, scope); err != nil {
+	// Explicit recovery path (#404): init rebuilds config from scratch, so
+	// it writes even when the previous load failed — and clears the guard.
+	if err := saveConfigForScopeForced(cfg, scope); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
@@ -2773,6 +2785,18 @@ func saveConfigForScope(cfg config.Config, scope string) error {
 		}
 	}
 	return config.SaveScope(cfg, scope)
+}
+
+// saveConfigForScopeForced bypasses the persist guard — init only (#404):
+// the init wizard is the one path allowed to write config after a failed
+// load, because it replaces the whole file with user-provided content.
+func saveConfigForScopeForced(cfg config.Config, scope string) error {
+	if scope == "local" {
+		if err := ensureLocalConfig(""); err != nil {
+			return err
+		}
+	}
+	return config.SaveScopeInForced(cfg, scope, "")
 }
 
 // ensureLocalConfig creates .milk/config.json under dir ("" = process cwd)

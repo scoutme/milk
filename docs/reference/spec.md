@@ -329,6 +329,7 @@ Not available over ACP (the client cannot survive its server process being repla
   "sticky_escalation": true,
   "copy_on_select": false,
   "max_shown_panels": 0,
+  "config_consent": "strict",
   "queue_while_busy": true,
   "acp_resume": true,
   "experimental_lazy_history_management": false,
@@ -355,6 +356,10 @@ Unset (or `"folded"`) or `"expanded"` — the TUI's **starting** fold status for
 ### `max_shown_panels` field
 
 An integer cap on how many side-panel columns the width budget shows at once ([ADR-0098](../adr/0098-one-panel-layout-every-theme.md)). Unset or `0` (the default) = the width decides (`floor((width-40)/33)`); `1` keeps the one-column experience — every open panel groups behind the rightmost column's tab strip, still switchable by clicking — and higher values narrow an ultrawide layout. The cap applies to **every theme** (supermilk shares the same budget since the ADR-0098 port), never adds columns beyond what fits, and is read live on every layout pass, so a config save or `/reload` takes effect without a restart. See [operations — panels and width budget](../guides/operations.md).
+
+### `config_consent` field
+
+Unset or `"strict"` (the default) or `"open"` — how config self-writes behave when the process **failed to load a real config** (issue #404, [ADR-0101](../adr/0101-config-write-safety.md)): under `strict`, every save from an ordinary path (slash commands, ACP option updates, CLI config commands) is refused with a user-facing error until a successful load, a recovery from backup, or the init wizard's explicit rebuild clears the failure — a defaults()-derived config can never be persisted over a good one. `"open"` restores the legacy permissive behavior. Background bookkeeping stamps (`update_last_check`, `update_skipped_version`) bypass neither rule: they are written by a surgical re-read-single-key patch that only ever touches a file it just parsed. Every config save, patch and refusal additionally emits a `config_write` / `config_write_refused` observability event when OTel is enabled.
 
 ### `shell_history_cmd` field
 
