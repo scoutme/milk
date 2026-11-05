@@ -96,7 +96,7 @@ func (m model) handleTab(dir int) model {
 
 	// Build or reuse the match list.
 	if len(m.tabMatches) == 0 || curLine != m.tabLine {
-		res := buildTabMatches(beforeCursor, m.st.cwd, m.paramLookup)
+		res := buildTabMatchesMode(beforeCursor, m.st.cwd, m.paramLookup, m.bangMode)
 		m.tabMatches = res.matches
 		m.tabIdx = 0
 		m.tabLine = curLine
@@ -379,7 +379,7 @@ func (m model) applyCompletionToken(token string) string {
 	if m.tabValueMode {
 		return applyValueCompletion(m.tabBeforeCursor, m.tabSegPrefix+token)
 	}
-	return applyTabCompletion(m.tabBeforeCursor, token)
+	return applyCompletionTo(m.tabBeforeCursor, token, m.bangMode)
 }
 
 // applyValueCompletion inserts a completed parameter value into line, which is
@@ -549,9 +549,23 @@ func (m *model) rebuildInlineHints() {
 		}
 		raw := make([]string, len(matches))
 		for i, p := range matches {
-			raw[i] = " " + dim("@"+p)
+			if m.bangMode {
+				// Trigger-only "@": show what the shell will receive.
+				raw[i] = " " + dim(p)
+			} else {
+				raw[i] = " " + dim("@"+p)
+			}
 		}
 		m.setHints(m.capHints(raw))
+		return
+	}
+
+	// Bang mode = shell input: the @-path hints above still apply, every
+	// slash hint below (top-level, subcommand, compound, trailing-space)
+	// would complete milk's own commands inside a shell command — "/usr/…"
+	// is not /help's cousin.
+	if m.bangMode {
+		m.setHints(nil)
 		return
 	}
 
@@ -747,7 +761,7 @@ func (m *model) commitHintSelection() bool {
 	beforeCursor := string(runes[:col])
 	afterCursor := string(runes[col:])
 
-	completed := applyTabCompletion(beforeCursor, raw)
+	completed := applyCompletionTo(beforeCursor, raw, m.bangMode)
 	lines[curLine] = completed + afterCursor
 	m.ta.SetValue(strings.Join(lines, "\n"))
 	precedingLen := 0
@@ -915,9 +929,32 @@ type paramLookup func(ns string) []string
 // the slash-command token (e.g. "/memory") for subcommand completions so that
 // the whole "/cmd sub…" sequence is replaced in one step. valueMode marks
 // concrete parameter-value completions (namespaces.go).
+// buildTabMatches completes non-bang input (the plain prompt). Input mode
+// matters: in bang mode the buffer is a shell command, where only @-path
+// completion applies — buildTabMatchesMode carries the model's bang state.
 func buildTabMatches(input, cwd string, lookup paramLookup) tabBuild {
+	return buildTabMatchesMode(input, cwd, lookup, false)
+}
+
+func buildTabMatchesMode(input, cwd string, lookup paramLookup, bangMode bool) tabBuild {
 	words := strings.Fields(input)
 	if len(words) == 0 {
+		return tabBuild{}
+	}
+
+	// Bang mode = shell input ("/usr/bin/thing" is a command, not a slash
+	// token — isSlashCmdToken matches any single-slash word): no trailing-
+	// space subcommand listing, no top-level slash completion, no slash-
+	// parameter values — those only exist for milk's own commands. @-paths
+	// stay (commands take file arguments), as plain paths: the "@" is the
+	// completion trigger, and the shell would read "ls @docs/x" literally.
+	if bangMode {
+		if input[len(input)-1] == ' ' || input[len(input)-1] == '\t' {
+			return tabBuild{}
+		}
+		if last := words[len(words)-1]; strings.HasPrefix(last, "@") {
+			return buildAtTokenMatches(last, cwd, true)
+		}
 		return tabBuild{}
 	}
 
@@ -943,15 +980,7 @@ func buildTabMatches(input, cwd string, lookup paramLookup) tabBuild {
 	// Only complete the last word — the token the cursor is actively on.
 	last := words[len(words)-1]
 	if strings.HasPrefix(last, "@") {
-		const tabCompletionLimit = 50
-		// A Tab press may wait briefly for the first index build, so Tab right
-		// after startup still completes from the full candidate list.
-		matches := atPathMatches(last[1:], cwd, tabCompletionLimit, fileIndexTabWait)
-		atMatches := make([]string, len(matches))
-		for j, p := range matches {
-			atMatches[j] = "@" + p
-		}
-		return tabBuild{matches: atMatches}
+		return buildAtTokenMatches(last, cwd, false)
 	}
 
 	// Partial subcommand: cursor is on a non-slash token and the preceding word
@@ -991,4 +1020,40 @@ func buildTabMatches(input, cwd string, lookup paramLookup) tabBuild {
 		}
 	}
 	return tabBuild{matches: matches}
+}
+
+// buildAtTokenMatches completes an @-path token — the one completion type
+// that applies in every input mode (commands take file arguments, and
+// bang-mode input shares it with the plain prompt). In bang mode the
+// candidates carry NO "@": the sigil is milk's mention syntax and the
+// completion trigger; the shell would treat "@docs/x" as a literal path.
+func buildAtTokenMatches(last, cwd string, bangMode bool) tabBuild {
+	const tabCompletionLimit = 50
+	// A Tab press may wait briefly for the first index build, so Tab right
+	// after startup still completes from the full candidate list.
+	matches := atPathMatches(last[1:], cwd, tabCompletionLimit, fileIndexTabWait)
+	atMatches := make([]string, len(matches))
+	for j, p := range matches {
+		if bangMode {
+			atMatches[j] = p
+		} else {
+			atMatches[j] = "@" + p
+		}
+	}
+	return tabBuild{matches: atMatches}
+}
+
+// applyCompletionTo routes an accepted completion token into input. In bang
+// mode the "@" that triggered @-path completion is replaced by the plain
+// path (candidates are already plain there) — the trigger is milk's, not the
+// shell's syntax.
+func applyCompletionTo(input, token string, bang bool) string {
+	if bang {
+		if result, found := replaceLastToken(input, func(w string) bool {
+			return strings.HasPrefix(w, "@")
+		}, token); found {
+			return result
+		}
+	}
+	return applyTabCompletion(input, token)
 }

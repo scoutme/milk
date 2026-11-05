@@ -164,7 +164,9 @@ var commandRegistry = []cmdSpec{
   /export --no-reasoning  omit reasoning blocks (text fences / JSON thinking) — they are included by default`},
 	{name: cmdHistory, hosts: hostTUI, desc: "show or set the input history navigation mode", hint: "[global|session]", help: `  /history               show current history navigation mode
   /history global        navigate global input history
-  /history session       navigate session input history (default)`},
+  /history session       navigate session input history (default)
+
+  bang-mode ("!") input always navigates/searches shell history`},
 	{name: cmdPanel, hosts: hostTUI, desc: "toggle a side panel (memory, tasks, background, workflow, project, git), or the content-driven auto-open", hint: "memory|tasks|background|workflow|project|git|autoopen [on|off]", help: `  /panel memory          toggle the memory panel (right side) — also F1
                          double-click an entry to expand/collapse its content
   /panel tasks           toggle the tasks panel (right side) — also F2
@@ -398,7 +400,7 @@ var helpBlocks = []helpBlock{
     Esc                           clear selection
 
   Input history
-    Up / Down (single-line input)   navigate history
+    Up / Down (single-line input)   navigate history (shell history in bang mode !)
     Ctrl+Up / Ctrl+Down             navigate history (or extend transcript selection when active)
     Ctrl+R                          reverse incremental search
     Ctrl+S                          forward incremental search

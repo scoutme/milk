@@ -232,6 +232,10 @@ func DeepMerge(dst, src Config) Config {
 		dst.UpdateLastCheck = src.UpdateLastCheck
 	}
 
+	if src.ShellHistoryCmd != "" {
+		dst.ShellHistoryCmd = src.ShellHistoryCmd
+	}
+
 	// Slice overrides (replace when non-nil)
 	if src.ConfigEditors != nil {
 		dst.ConfigEditors = src.ConfigEditors
@@ -1428,6 +1432,13 @@ type Config struct {
 	// against the first whitespace-delimited token of the input.
 	// Example: ["ls", "git", "docker"]
 	DirectBashAllow []string `json:"direct_bash_allow,omitempty"`
+
+	// ShellHistoryCmd overrides the command used to dump the shell history
+	// that bang-mode ("!") input navigates and searches. Empty = per-$SHELL
+	// incantation (bash/zsh/fish built in). Set it for custom setups (atuin,
+	// nushell, exotic HISTFILE locations): the command must print bare
+	// commands, one per line, on stdout.
+	ShellHistoryCmd string `json:"shell_history_cmd,omitempty"`
 
 	// ShellBinaries adds extra first-token names to the set recognised as
 	// shell commands by the shell-detector heuristic. Useful for uncommon

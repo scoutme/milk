@@ -2320,3 +2320,12 @@ func TestDeepMerge_MaxShownPanels(t *testing.T) {
 		t.Errorf("unset source changed the cap to %d, want 4", got)
 	}
 }
+
+func TestDeepMerge_ShellHistoryCmd(t *testing.T) {
+	if got := DeepMerge(Config{ShellHistoryCmd: "old"}, Config{ShellHistoryCmd: "new"}).ShellHistoryCmd; got != "new" {
+		t.Errorf("merge overwrote to %q, want new", got)
+	}
+	if got := DeepMerge(Config{ShellHistoryCmd: "keep"}, Config{}).ShellHistoryCmd; got != "keep" {
+		t.Errorf("unset source changed the cmd to %q, want keep", got)
+	}
+}

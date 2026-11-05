@@ -31,6 +31,10 @@ type ptyPaneState struct {
 
 // launchPTYPane starts shellCmd inside a PTY and wires the output reader.
 func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
+	// Single choke point for every command milk executes on the user's
+	// behalf (bang-mode and allow-listed direct-bash runs): record it in
+	// milk's shell history so bang-mode Ctrl+R finds it later.
+	m.recordShellCommand(shellCmd)
 	vpH := m.viewportHeight()
 	paneCols := m.mainWidth() - 1 // -1 for the scrollbar column
 	if vpH < 3 {

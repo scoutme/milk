@@ -797,9 +797,10 @@ type model struct {
 	spinnerFrame int
 
 	// history navigation
-	sessionHistory     []string // entries for this session only (default navigation)
-	globalHistory      []string // entries across all sessions
-	useGlobalHistory   bool     // when true, navigate globalHistory instead
+	sessionHistory     []string        // entries for this session only (default navigation)
+	globalHistory      []string        // entries across all sessions
+	useGlobalHistory   bool            // when true, navigate globalHistory instead
+	shellHist          *shellHistCache // bang-mode corpus: shell + milk-executed commands
 	histIdx            int
 	saved              string
 	savedLeadingPasted bool // leadingPasted snapshot for saved, restored on historyForward back to it
@@ -1360,6 +1361,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		transcript:          &strings.Builder{},
 		currentTurnThinking: &strings.Builder{},
 		searchQuery:         &strings.Builder{},
+		shellHist:           &shellHistCache{},
 		showTips:            st.cfg.ShowTipsEnabled(),
 		thinkFoldOpen:       st.cfg.ThinkFoldExpanded(), // starting fold status (issue #278)
 		mem:                 mem,
@@ -1396,11 +1398,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 func (m *model) refreshPrompt() {
 	var label string
 	if m.searching {
-		dir := "r"
-		if m.searchForward {
-			dir = "f"
-		}
-		label = yellow("("+dir+"-search)") + " ❯ "
+		label = historySearchLabel(m.bangMode, m.searchForward)
 	} else if m.bangMode {
 		label = red("!") + " "
 	} else {
@@ -1557,6 +1555,7 @@ func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.bangMode {
 			input = "!" + input
 			m.bangMode = false
+			m.histIdx = -1 // history corpus swapped (bang ↔ input)
 			m.refreshPrompt()
 		}
 		// "!" is always available regardless of busy state (issue #128): it's
@@ -3696,6 +3695,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// plain string match on "!" alone would miss that and insert it literally.
 	if !m.bangMode && m.ta.Value() == "" && strings.HasPrefix(msg.Text, "!") {
 		m.bangMode = true
+		m.histIdx = -1 // history corpus swapped (bang ↔ input)
 		if rest := msg.Text[1:]; rest != "" {
 			m.ta.InsertString(rest)
 		}
@@ -3710,6 +3710,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// instead of being a no-op.
 		if m.bangMode && m.ta.Value() == "" {
 			m.bangMode = false
+			m.histIdx = -1 // history corpus swapped (bang ↔ input)
 			m.refreshPrompt()
 			return m, nil
 		}
@@ -3751,6 +3752,12 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchForward = false
 		m.searchQuery.Reset()
 		m.searchIdx = -1
+		// What the input held when the search started: esc/cancel and a query
+		// erased back to empty restore THIS text (the first-char capture it
+		// replaces missed both — and a stale `saved` from a previous search
+		// clobbered the current input on a no-typing esc).
+		m.saved = m.ta.Value()
+		m.savedLeadingPasted = m.leadingPasted
 		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
@@ -3759,6 +3766,8 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchForward = true
 		m.searchQuery.Reset()
 		m.searchIdx = -1
+		m.saved = m.ta.Value()
+		m.savedLeadingPasted = m.leadingPasted
 		m.refreshPrompt()
 		m.syncLayout()
 		return m, nil
@@ -4072,6 +4081,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if m.bangMode || m.ta.Value() != "" {
 		m.ta.Reset()
 		m.bangMode = false
+		m.histIdx = -1 // history corpus swapped (bang ↔ input)
 		m.leadingPasted = false
 
 		m.tabMatches = nil
@@ -4124,6 +4134,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.bangMode {
 		input = "!" + input
 		m.bangMode = false
+		m.histIdx = -1 // history corpus swapped (bang ↔ input)
 		m.refreshPrompt()
 	}
 	m.ta.Reset()
