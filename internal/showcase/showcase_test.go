@@ -625,3 +625,37 @@ func TestWriteCleanConfig_AllowTools(t *testing.T) {
 		t.Error("allow_tools: false must not inject the flag")
 	}
 }
+
+// TestEnsureRCHomeForLaunch pins the #404 forensics guard: under $SHELL=zsh
+// a fresh (rc-less) HOME gets a stub .zshrc before any tmux line is typed, a
+// non-zsh shell stays untouched, and an existing rc is never modified.
+func TestEnsureRCHomeForLaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/usr/bin/zsh")
+	ensureRCHomeForLaunch()
+	if _, err := os.Stat(filepath.Join(home, ".zshrc")); err != nil {
+		t.Fatalf("zsh shell + rc-less home: .zshrc not created: %v", err)
+	}
+
+	home2 := t.TempDir()
+	t.Setenv("HOME", home2)
+	t.Setenv("SHELL", "/bin/bash")
+	ensureRCHomeForLaunch()
+	if _, err := os.Stat(filepath.Join(home2, ".zshrc")); err == nil {
+		t.Error("bash shell should not get a .zshrc")
+	}
+
+	sentinel := []byte("# mine\ntypeset -U path\n")
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ensureRCHomeForLaunch()
+	got, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(sentinel) {
+		t.Errorf("existing .zshrc modified: %q", got)
+	}
+}

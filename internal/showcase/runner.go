@@ -3,11 +3,14 @@ package showcase
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/tmux"
 )
 
@@ -87,6 +90,11 @@ func Calibrate(ctx context.Context, m *Manifest, opts Options) (Result, error) {
 // session name) in place and returns a fresh Result — both runners need the
 // same resolution rules.
 func prepare(opts *Options, m *Manifest) Result {
+	// The typed launch line starts with an env prefix
+	// (MILK_CONFIG_ROOT=...): under an rc-less HOME the pane's zsh opens its
+	// first-run menu and swallows the whole line — the #404 forensics
+	// "fixture artifact". Ensure the pane's home is rc-complete first.
+	ensureRCHomeForLaunch()
 	if opts.Timeout == 0 {
 		opts.Timeout = m.Timeout
 	}
@@ -97,6 +105,25 @@ func prepare(opts *Options, m *Manifest) Result {
 		opts.Session = fmt.Sprintf("milk-showcase-%d", time.Now().UnixNano()%1e9)
 	}
 	return Result{Vars: map[string]string{}, Snippets: map[string]string{}}
+}
+
+// ensureRCHomeForLaunch suppresses zsh's newuser-install menu in the pane
+// that will type the launch line: with a fresh, rc-less HOME (a throwaway-HOME
+// suite run, a sandboxed fixture), the wizard sits in the foreground and eats
+// the MILK_CONFIG_ROOT= prefix as menu input — the child then starts against
+// the real state root (issue #404 forensics, "a first apparent hit in
+// internal/showcase"). Writes only when $SHELL is zsh and the file is absent,
+// so a complete, real home is never modified.
+func ensureRCHomeForLaunch() {
+	shell := filepath.Base(os.Getenv("SHELL"))
+	if !strings.HasSuffix(shell, "zsh") {
+		return // the menu is a zsh phenomenon; no other shell needs this
+	}
+	home, err := os.UserHomeDir() // honours $HOME exactly like the pane will
+	if err != nil || home == "" {
+		return
+	}
+	_ = testutil.EnsureShellRC(home)
 }
 
 // openLive launches the TUI in the session and waits until the header is
