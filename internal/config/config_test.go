@@ -2329,3 +2329,91 @@ func TestDeepMerge_ShellHistoryCmd(t *testing.T) {
 		t.Errorf("unset source changed the cmd to %q, want keep", got)
 	}
 }
+
+// The backup is the last-known-good copy: it is rewritten only on an
+// effective change, never by a plain start or a metadata-only save.
+func TestSaveConfigBackup_SkipsWhenNothingEffectiveChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	bak := path + configBackupSuffix
+	first := []byte(`{"agent":"a","update_last_check":"2026-01-01T00:00:00Z"}`)
+	saveConfigBackup(path, first)
+
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(bak, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, data := range map[string][]byte{
+		"identical":              first,
+		"timestamp only":         []byte(`{"agent":"a","update_last_check":"2026-11-05T07:57:39Z"}`),
+		"timestamp dropped":      []byte(`{"agent":"a"}`),
+		"reformatted, reordered": []byte("{\n  \"update_last_check\": \"x\",\n  \"agent\": \"a\"\n}"),
+	} {
+		saveConfigBackup(path, data)
+		fi, err := os.Stat(bak)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.ModTime().After(old.Add(time.Second)) {
+			t.Errorf("%s: backup was rewritten, want it left alone", name)
+		}
+		got, _ := os.ReadFile(bak)
+		if string(got) != string(first) {
+			t.Errorf("%s: backup content changed to %q", name, got)
+		}
+	}
+}
+
+func TestSaveConfigBackup_WritesOnEffectiveChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	bak := path + configBackupSuffix
+	saveConfigBackup(path, []byte(`{"agent":"a","agents":[{"name":"a"}]}`))
+
+	// An agents wipe is an effective change and must be recorded (the backup
+	// tracks the file; the skip only suppresses no-op refreshes).
+	changed := []byte(`{"agent":"a"}`)
+	saveConfigBackup(path, changed)
+	if got, _ := os.ReadFile(bak); string(got) != string(changed) {
+		t.Errorf("backup = %q, want the changed content", got)
+	}
+}
+
+func TestSaveConfigBackup_ReplacesCorruptOrMissingBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	bak := path + configBackupSuffix
+	good := []byte(`{"agent":"a"}`)
+
+	saveConfigBackup(path, good) // no backup yet
+	if got, _ := os.ReadFile(bak); string(got) != string(good) {
+		t.Fatalf("missing backup not created: %q", got)
+	}
+	if err := os.WriteFile(bak, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saveConfigBackup(path, good) // corrupt backup must be replaced
+	if got, _ := os.ReadFile(bak); string(got) != string(good) {
+		t.Errorf("corrupt backup not replaced: %q", got)
+	}
+}
+
+func TestLoadFrom_UnchangedConfigLeavesBackupUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	bak := path + configBackupSuffix
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(bak, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(bak)
+	if fi.ModTime().After(old.Add(time.Second)) {
+		t.Error("second LoadFrom of an unchanged file rewrote the backup")
+	}
+}
