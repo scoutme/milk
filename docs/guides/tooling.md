@@ -10,7 +10,7 @@ The primary agent (HTTP or Bedrock backends) has these tools available with no c
 
 | Tool | Parameters | Returns |
 |---|---|---|
-| `bash(command, workdir?, run_in_background?)` | `command string` | stdout, stderr, exit_code — or a `shell_id` with `run_in_background` (see [Background shells](#background-shells)) |
+| `bash(command, workdir?, run_in_background?, await?)` | `command string` | stdout, stderr, exit_code — or a `shell_id` with `run_in_background` (see [Background shells](#background-shells)) |
 | `bash_output(shell_id, tail_lines?)` | shell ID from `bash run_in_background` | status line (running/exited/killed) + retained output |
 | `kill_bash(shell_id)` | shell ID | ok — stops the shell's process group; output stays readable until reaped |
 | `find_files(path, pattern)` | root dir + glob (`*`, `?`, `**` — e.g. `*_test.go`, `src/**/*.ts`) | matching file paths, newest-first, capped at 500 with a truncation marker — honors `.gitignore` via git when available; use `grep` for contents |
@@ -86,6 +86,7 @@ Long-running processes (dev servers, watchers, REPLs) go through `bash` with `ru
 
 - A shell **outlives the turn** that started it and is killed when milk exits; it is never persisted across restarts.
 - Bounded: max 16 concurrent shells, auto-killed after 1 hour, output retained in a 256 KB buffer (oldest dropped). A finished shell's output stays readable for 30 minutes, then is reaped.
+- **Completion delivery** ([ADR-0100](../adr/0100-background-shell-completion-delivery.md)): `await: true` promises a completion notice — exit status whatever — with the next turn's prompt *and* a follow-up turn once idle (the "report as soon as it fires" case; the spawn result echoes the guarantee). Without `await`, a shell that **fails** (nonzero exit) is noticed anyway (the failure net — a deliberate `kill_bash` is not news); clean un-awaited exits stay pull-only, read with `bash_output` as before. Notices carry a 15-line output tail and appear as a `[shell-finished]` prompt prefix plus a transcript block.
 - `bash` also takes `workdir` for a per-command working-directory override (default: the session cwd).
 - Permissions: `run_in_background` rides the normal `bash` permission ask; `bash_output` is read-only; `kill_bash` can only stop shells this agent started.
 

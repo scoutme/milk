@@ -35,7 +35,7 @@ cmd/milk/panel_git.go         # git graph panel (/panel git, F6): branch+dirty h
 cmd/milk/gitgraph.go           # git log plumbing + code-laid commit-graph lanes (pure layoutGraph, unit-tested) + gitShow preview
 cmd/milk/tips.go              # idle tip line below the input: curated + registry-derived tips, contextual hints, rotation + browsing (ADR-0061, /tips on|off|next|prev|pick|search, Alt+Up/Down)
 cmd/milk/attach.go            # TUI attach view: swap main transcript for a background job's/workflow's internal/livebuf.Buffer (ADR-0047)
-cmd/milk/background_ui.go     # background-job result block written to the transcript on completion + /bg show full-result renderer
+cmd/milk/background_ui.go     # background-job result block written to the transcript on completion + shell-completion blocks/notices (ADR-0100) + /bg show full-result renderer
 cmd/milk/outputformat.go      # --output-format text|json|stream-json builders, wired in main.go's run()
 cmd/milk/serve.go             # `milk serve --acp` cobra command
 cmd/milk/acp_server.go        # ACP method dispatch (initialize, session/new|list|resume|close|delete, set_config_option, prompt, cancel) — see docs/reference/acp-integration.md

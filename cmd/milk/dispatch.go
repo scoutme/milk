@@ -259,6 +259,9 @@ func runPrimaryWithSession(
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// RecordNeed/percept-matching/session bookkeeping below.
 	events := drainBackgroundJobs(ctx, mgr, sess)
+	// Shell completion notices (ADR-0100): awaited exits and failures drained
+	// into this turn's prompt prefix alongside job results.
+	events += renderShellNotices(local.DrainShellEvents())
 	noticesBlock, nNotices := pendingEventsBlock(sess)
 	events += noticesBlock
 	dispatchPrompt := events + drainPendingBangOutput(sess) + prompt
@@ -473,6 +476,9 @@ func runEscalationWithSession(
 	// results (ADR-0043) — prompt itself stays the user's actual text for
 	// percept-matching/session bookkeeping below.
 	events := drainBackgroundJobs(ctx, mgr, sess)
+	// Shell completion notices (ADR-0100): awaited exits and failures drained
+	// into this turn's prompt prefix alongside job results.
+	events += renderShellNotices(local.DrainShellEvents())
 	noticesBlock, nNotices := pendingEventsBlock(sess)
 	events += noticesBlock
 	dispatchPrompt := events + drainPendingBangOutput(sess) + prompt
