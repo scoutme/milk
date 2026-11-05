@@ -1247,6 +1247,19 @@ func saveLocalOrGlobal(cfg config.Config, dir string) error {
 	return config.SaveScopeIn(cfg, scope, dir)
 }
 
+// saveLocalOrGlobalForced bypasses the persist guard — the init wizard's
+// commit only (#404). Every other saveLocalOrGlobal call site is an explicit
+// user action but still refuses to write a config the process failed to load.
+func saveLocalOrGlobalForced(cfg config.Config, dir string) error {
+	scope := preferredSaveScope(dir)
+	if scope == "local" {
+		if err := ensureLocalConfig(dir); err != nil {
+			return fmt.Errorf("creating local config: %w", err)
+		}
+	}
+	return config.SaveScopeInForced(cfg, scope, dir)
+}
+
 // execAgentRemove removes the named agent from config.
 // Refuses if the agent is currently active as primary or escalation.
 func execAgentRemove(name string, st *interactiveState) string {

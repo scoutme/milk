@@ -21,11 +21,20 @@ import (
 
 // Install seams: tests stub these so /update install never resolves or
 // replaces the running go-test binary. Production wires the real updater
-// functions.
+// functions. checkLatest is the release-feed seam: tests stub it so the
+// stamp logic can run without a network round trip.
 var (
 	updateBinaryPath = updater.CurrentBinaryPath
 	updateApply      = updater.Apply
+	checkLatest      = updater.CheckLatest
 )
+
+// bookkeepingPatch is updateCheck/skipUpdateRelease's disk write: a
+// surgical re-read-single-key patch (config.PatchBookkeeping), never a
+// snapshot of the in-memory struct — the 15s network call in between must
+// not be able to stomp an edit made to the file meanwhile (#404's lost-
+// update race). Indirection exists so tests can stub the disk write.
+var bookkeepingPatch = config.PatchBookkeeping
 
 // updateCheck fetches the newest applicable release and records the check.
 // Compared to the raw updater call it applies milk's skip filter (a release
@@ -33,14 +42,15 @@ var (
 // every successful check — up to date included, which is the whole point:
 // without the write-back on the boring path, every surface would re-hit the
 // release feed on every start while up to date and the shared 24h debounce
-// would never hold. cfg is mutated and saved to the auto-detected scope.
+// would never hold. cfg is updated in memory; only the stamp key is patched
+// to disk (see bookkeepingPatch).
 func updateCheck(ctx context.Context, cfg *config.Config, dir string) (*updater.Release, error) {
-	rel, err := updater.CheckLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
+	rel, err := checkLatest(ctx, version, cfg.UpdateCheckIncludePrerelease())
 	if err != nil {
 		return nil, err
 	}
 	cfg.UpdateLastCheck = time.Now().UTC().Format(time.RFC3339)
-	_ = saveLocalOrGlobal(*cfg, dir)
+	_ = bookkeepingPatch(dir, map[string]string{"update_last_check": cfg.UpdateLastCheck})
 	if rel != nil && rel.Tag == cfg.UpdateSkippedVersion {
 		return nil, nil
 	}
@@ -70,7 +80,7 @@ func updateInstall(ctx context.Context, rel *updater.Release, progress func(done
 // newer release appears.
 func skipUpdateRelease(cfg *config.Config, tag string, dir string) {
 	cfg.UpdateSkippedVersion = tag
-	_ = saveLocalOrGlobal(*cfg, dir)
+	_ = bookkeepingPatch(dir, map[string]string{"update_skipped_version": tag})
 }
 
 // updateAvailableNotice is the out-of-band "new release" line, used by the

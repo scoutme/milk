@@ -1120,7 +1120,10 @@ func TestUpsertMCPServer_NormalizesAuthNone(t *testing.T) {
 	}
 }
 
-func TestLoadFrom_ValidJSON_RefreshesBackup(t *testing.T) {
+// #404: loads must never touch the backup — refreshing it from whatever
+// the current file holds would replace the last-known-good copy with a
+// wiped-but-valid config at the very next start.
+func TestLoadFrom_ValidJSON_LeavesBackupAlone(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
@@ -1135,12 +1138,8 @@ func TestLoadFrom_ValidJSON_RefreshesBackup(t *testing.T) {
 		t.Errorf("Agent = %q, want %q", cfg.Agent, "good")
 	}
 
-	bakData, err := os.ReadFile(path + configBackupSuffix)
-	if err != nil {
-		t.Fatalf("expected a backup file to be written, got: %v", err)
-	}
-	if string(bakData) != `{"agent":"good"}` {
-		t.Errorf("backup content = %q, want the just-loaded bytes", bakData)
+	if _, err := os.Stat(path + configBackupSuffix); err == nil {
+		t.Fatal("LoadFrom wrote a backup — loads must leave .bak alone (#404)")
 	}
 }
 
@@ -1159,18 +1158,22 @@ func TestLoadFrom_InvalidJSON_NoBackup_ReturnsHardError(t *testing.T) {
 	if errors.As(err, &recovered) {
 		t.Errorf("did not expect ErrConfigRecovered when no backup exists, got %v", err)
 	}
+	// This trip is the persist guard working (#404); clear it so it doesn't
+	// leak into later tests sharing this binary.
+	t.Cleanup(ResetLoadFailedState)
 }
 
 func TestLoadFrom_InvalidJSON_WithBackup_Recovers(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	// First load with valid content seeds the backup.
+	// Seed the backup directly: loads never write it anymore (#404), so the
+	// fixture carries the last-known-good copy the way a previous save left it.
 	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFrom(path); err != nil {
-		t.Fatalf("seeding LoadFrom() error = %v, want nil", err)
+	if err := os.WriteFile(path+configBackupSuffix, []byte(`{"agent":"good"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	// Simulate a bad automated edit: the primary file becomes invalid JSON.
@@ -1194,9 +1197,12 @@ func TestLoadFrom_InvalidJSON_WithBackup_Recovers(t *testing.T) {
 	}
 }
 
-func TestSave_RefreshesBackup(t *testing.T) {
+// #404: the backup holds the PREVIOUS content — the bytes a save is about
+// to replace — never the new bytes (a backup of what you just wrote restores
+// nothing), and a first-ever save has no previous content to snapshot.
+func TestSave_SnapshotsPreviousContentToBackup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := Save(Config{Agent: "saved"}); err != nil {
+	if err := Save(Config{Agent: "first"}); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := Dir()
@@ -1204,22 +1210,33 @@ func TestSave_RefreshesBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "config.json")
+	if _, err := os.Stat(path + configBackupSuffix); err == nil {
+		t.Fatal("greenfield save created a backup with nothing to restore from")
+	}
+
+	if err := Save(Config{Agent: "second"}); err != nil {
+		t.Fatal(err)
+	}
 	bakData, err := os.ReadFile(path + configBackupSuffix)
 	if err != nil {
-		t.Fatalf("expected Save to refresh the backup, got: %v", err)
+		t.Fatalf("expected Save to snapshot the previous content, got: %v", err)
 	}
 	var got Config
 	if err := json.Unmarshal(bakData, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Agent != "saved" {
-		t.Errorf("backup Agent = %q, want %q", got.Agent, "saved")
+	if got.Agent != "first" {
+		t.Errorf("backup Agent = %q, want %q (the content being replaced)", got.Agent, "first")
 	}
 }
 
 func TestLoad_RecoversFromBackupEndToEnd(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// Two effective saves: the second snapshots the first into .bak (#404).
 	if err := Save(Config{Agent: "good"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Config{Agent: "v2"}); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := Dir()
@@ -2330,13 +2347,16 @@ func TestDeepMerge_ShellHistoryCmd(t *testing.T) {
 	}
 }
 
-// The backup is the last-known-good copy: it is rewritten only on an
-// effective change, never by a plain start or a metadata-only save.
-func TestSaveConfigBackup_SkipsWhenNothingEffectiveChanged(t *testing.T) {
+// The backup is the last-known-good copy of the PREVIOUS content (#404):
+// a write only rotates it when the change is effective — a plain start or a
+// metadata-only save never churns it (#405).
+func TestRotateBackup_SkipsWhenNothingEffectiveChanged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	bak := path + configBackupSuffix
 	first := []byte(`{"agent":"a","update_last_check":"2026-01-01T00:00:00Z"}`)
-	saveConfigBackup(path, first)
+	if err := os.WriteFile(bak, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(bak, old, old); err != nil {
@@ -2349,7 +2369,7 @@ func TestSaveConfigBackup_SkipsWhenNothingEffectiveChanged(t *testing.T) {
 		"timestamp dropped":      []byte(`{"agent":"a"}`),
 		"reformatted, reordered": []byte("{\n  \"update_last_check\": \"x\",\n  \"agent\": \"a\"\n}"),
 	} {
-		saveConfigBackup(path, data)
+		rotateConfigBackup(path, first, data)
 		fi, err := os.Stat(bak)
 		if err != nil {
 			t.Fatal(err)
@@ -2364,35 +2384,37 @@ func TestSaveConfigBackup_SkipsWhenNothingEffectiveChanged(t *testing.T) {
 	}
 }
 
-func TestSaveConfigBackup_WritesOnEffectiveChange(t *testing.T) {
+func TestRotateBackup_SnapshotsPreviousOnEffectiveChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	bak := path + configBackupSuffix
-	saveConfigBackup(path, []byte(`{"agent":"a","agents":[{"name":"a"}]}`))
+	prev := []byte(`{"agent":"a","agents":[{"name":"a"}]}`)
 
-	// An agents wipe is an effective change and must be recorded (the backup
-	// tracks the file; the skip only suppresses no-op refreshes).
-	changed := []byte(`{"agent":"a"}`)
-	saveConfigBackup(path, changed)
-	if got, _ := os.ReadFile(bak); string(got) != string(changed) {
-		t.Errorf("backup = %q, want the changed content", got)
+	// An agents wipe on disk is an effective change: the PREVIOUS (good)
+	// content is what lands in the backup, so the wipe can be undone.
+	rotateConfigBackup(path, prev, []byte(`{"agent":"a"}`))
+	if got, _ := os.ReadFile(bak); string(got) != string(prev) {
+		t.Errorf("backup = %q, want the previous (good) content", got)
 	}
 }
 
-func TestSaveConfigBackup_ReplacesCorruptOrMissingBackup(t *testing.T) {
+func TestRotateBackup_MissingBackupCreated_CorruptPreviousIgnored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	bak := path + configBackupSuffix
 	good := []byte(`{"agent":"a"}`)
 
-	saveConfigBackup(path, good) // no backup yet
+	// No backup yet: first effective rotation creates it from the previous
+	// content.
+	rotateConfigBackup(path, good, []byte(`{"agent":"b"}`))
 	if got, _ := os.ReadFile(bak); string(got) != string(good) {
 		t.Fatalf("missing backup not created: %q", got)
 	}
-	if err := os.WriteFile(bak, []byte(`{not json`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	saveConfigBackup(path, good) // corrupt backup must be replaced
-	if got, _ := os.ReadFile(bak); string(got) != string(good) {
-		t.Errorf("corrupt backup not replaced: %q", got)
+
+	// A corrupt file on disk must never be rotated over the last-known-good
+	// copy (#404): the backup stays whatever it was.
+	keep, _ := os.ReadFile(bak)
+	rotateConfigBackup(path, []byte(`{not json`), []byte(`{"agent":"c"}`))
+	if got, _ := os.ReadFile(bak); string(got) != string(keep) {
+		t.Errorf("corrupt previous content clobbered the backup: %q", got)
 	}
 }
 
@@ -2401,10 +2423,11 @@ func TestLoadFrom_UnchangedConfigLeavesBackupUntouched(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"agent":"good"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFrom(path); err != nil {
+	// A pre-existing backup (a save left it there), aged an hour.
+	bak := path + configBackupSuffix
+	if err := os.WriteFile(bak, []byte(`{"agent":"older"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bak := path + configBackupSuffix
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(bak, old, old); err != nil {
 		t.Fatal(err)
@@ -2412,8 +2435,14 @@ func TestLoadFrom_UnchangedConfigLeavesBackupUntouched(t *testing.T) {
 	if _, err := LoadFrom(path); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
 	fi, _ := os.Stat(bak)
 	if fi.ModTime().After(old.Add(time.Second)) {
-		t.Error("second LoadFrom of an unchanged file rewrote the backup")
+		t.Error("LoadFrom rewrote the backup — loads must never touch it (#404)")
+	}
+	if got, _ := os.ReadFile(bak); string(got) != `{"agent":"older"}` {
+		t.Errorf("backup content changed to %q", got)
 	}
 }

@@ -98,3 +98,4 @@
 * [98. One Panel Layout for Every Theme: the hybrid budget everywhere](0098-one-panel-layout-every-theme.md) *(supersedes 79's docking; extends 96 to every theme + `max_shown_panels`)*
 * [99. Showcase Runs: one manifest, two runners — calibrated recording first](0099-showcase-runs.md) *(converges #387 at the definition; `demo/showcase.yaml` → tmux calibration → vhs)*
 * [100. Background Shell Completion Delivery: await opt-in and the failure net](0100-background-shell-completion-delivery.md) *(bash `await: true` wakes a follow-up on exit; nonzero exits noticed without it — jobs' drain pattern for shells)*
+* [101. Config write safety: atomic, backed-up, guarded, attributable](0101-config-write-safety.md) *(#404 incident — persist guard, backup = previous content, bookkeeping patch, consent by construction)*

@@ -68,6 +68,8 @@ The knobs that control injection limits, re-injection cadence, and per-agent ove
 
 milk exports OpenTelemetry-shaped signals to JSONL files under `~/.milk/otel/` — no external backend required.
 
+Config mutations are part of that record ([#404](https://github.com/scoutme/milk/issues/404), [ADR-0101](../adr/0101-config-write-safety.md)): every config save, bookkeeping patch and refused write emits a `config_write` / `config_write_refused` event (kind, path, byte count) — a future config incident is attributable from the log instead of lost to overwritten mtimes. The write itself is atomic and lock-serialized, and `config.json.bak` always holds the content the *previous* save replaced.
+
 | Command | Action |
 |---|---|
 | `/metrics` | Latest value for each metric+label combination |
