@@ -31,7 +31,7 @@ milk rewrites its own configuration from several runtime paths (update-check sta
 
 **Test hygiene:**
 
-- `internal/testutil.SandboxStateRoot()` — `TestMain`-level redirection of `HOME`/`USERPROFILE`/`MILK_CONFIG_ROOT` for `cmd/milk`, `internal/config`, `internal/session`, `internal/agent/local`, plus a **canary** that fails the run (exit 98) if the real `config.json` changed bytes during it. Convention became a property of the suite.
+- `internal/testutil.SandboxStateRoot()` — `TestMain`-level redirection of `HOME`/`USERPROFILE`/`MILK_CONFIG_ROOT` for `cmd/milk`, `internal/config`, `internal/session`, `internal/agent/local`, plus a **canary** that fails the run (exit 98) if the real `config.json` changed bytes during it. Convention became a property of the suite. Synthesized homes are **rc-complete**: `EnsureShellRC` seeds a comments-only `.zshrc` (sandbox always; the showcase pane only under `$SHELL=zsh`), because an rc-less HOME makes zsh run its first-run menu, which swallows harness keystrokes — env-prefixed launch lines included — and silently launches against the real state root (the #404 forensics "fixture artifact").
 
 ## Consequences
 

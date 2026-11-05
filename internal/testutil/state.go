@@ -14,6 +14,39 @@ import (
 	"strings"
 )
 
+// EnsureShellRC writes a minimal .zshrc into home — and only when it is
+// absent. An rc-less HOME makes interactive zsh run its zsh-newuser-install
+// first-run menu, which sits in the foreground and swallows every keystroke a
+// harness types afterwards: a typed launch line with its
+// MILK_CONFIG_ROOT=... prefix is eaten as menu input, so the child starts
+// against the wrong (real) state root — the "first apparent hit" in the #404
+// config-wipe forensics, and the reason synthesized homes must be
+// rc-complete. The content is comments only (it sources nothing and changes
+// no shell behavior); its mere presence suppresses the wizard. Existing files
+// are never modified.
+func EnsureShellRC(home string) error {
+	if home == "" {
+		return nil
+	}
+	path := filepath.Join(home, ".zshrc")
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		return nil // present: leave the user's file alone
+	case !os.IsNotExist(err):
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, []byte(shellRCStub), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// shellRCStub suppresses zsh-newuser-install purely by existing.
+const shellRCStub = `# created by milk's test harness (testutil.EnsureShellRC).
+# An rc-less HOME triggers zsh's newuser-install first-run menu, which
+# swallows harness keystrokes (issue #404 forensics). Comments only.
+`
+
 // realConfigPath resolves the config file the way config.Dir does — from the
 // CURRENT environment — for the caller to capture BEFORE SandboxStateRoot
 // redirects it.
@@ -70,6 +103,13 @@ func SandboxStateRoot() (canary func() error) {
 	_ = os.Setenv("USERPROFILE", tmp)
 	// Empty = config.Dir falls through to HOME (its env check trims first).
 	_ = os.Setenv("MILK_CONFIG_ROOT", "")
+	// The sandbox HOME is rc-less by construction: an interactive zsh child
+	// (tmux panes, launch lines) would open its newuser-install menu and
+	// swallow the keystrokes after it — env prefixes included, which is how a
+	// harness line loses its state-root override (issue #404 forensics).
+	if err := EnsureShellRC(tmp); err != nil {
+		panic("testutil: cannot seed sandbox .zshrc: " + err.Error())
+	}
 
 	return func() error {
 		if canaryPath == "" {
