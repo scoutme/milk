@@ -68,7 +68,7 @@ func (as *acpSession) flushPendingFollowup() {
 }
 
 // requestShellFollowup is requestFollowup's shell counterpart (ADR-0100):
-// an awaited background shell completed — no job manager involved, no wave
+// a background shell completed — no job manager involved, no wave
 // concept; pending counts the queued shell events at the shared drain, so a
 // wake whose notices an intervening turn already delivered skips instead of
 // burning an empty turn.

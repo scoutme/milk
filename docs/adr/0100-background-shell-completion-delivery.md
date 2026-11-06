@@ -67,3 +67,36 @@ Constraints that shaped the design:
   delivers nothing extra (the pending==0 guard) — accepted rarity.
 - The queue is process-global like the shells themselves: whichever turn
   runs next delivers, matching the shell's own tool contract.
+
+## Amendment: deterministic delivery (2026-11-06)
+
+The `await: true` opt-in is **removed**. The incident that exposed it: the
+model promised "reporting as soon as the watcher fires" and then emitted the
+parameter in **0 of 10** spawned shells (narrating it every time) — a
+generative flag cannot gate a deterministic listener. This amendment makes
+delivery structural, mirroring background agent jobs (whose completion was
+always delivered, with no per-job flag):
+
+- **Spawn registers the interest.** Every finished background shell delivers
+  (15-line tail, `[shell-finished]` prompt prefix, transcript block, wake via
+  `decideFollowup`) — whatever its exit status. A job's result is by
+  definition news; a shell exiting is the same thing.
+- **Stops are not news.** A deliberate `kill_bash` (or the lifetime-cap
+  auto-kill) stays toast/panel-only — a stop the user or milk itself asked
+  for has nothing to report.
+- **`ShellWantsNotice` shrinks to `Finished && !Killed`** — the notice queue
+  and the wake gate (TUI `maybeAutoFollowupShells`, ACP
+  `requestShellFollowup`) share this one predicate, so wake and delivery
+  cannot disagree.
+- The sections above describing the await opt-in and the "failure net"
+  describe the **superseded** design; the failure net is subsumed (every exit
+  is noticed).
+
+Coalescing is unchanged: `decideFollowup`'s pending==0 guard plus the bounded
+event queue turn a burst of exits into one follow-up turn. The companion
+system-prompt rule ("promise 'report as soon as it finishes' only with
+await:true…") was deleted with this amendment — with the automatic wake, the
+promise is structurally kept and needs no generative discipline. The
+`bash`-tool rule about testing unattended scripts by hand (pipes hiding exit
+codes, untested failure paths, `--json` over human output) stays: delivery
+infrastructure cannot fix a watcher whose own script lies.

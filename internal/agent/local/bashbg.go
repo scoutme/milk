@@ -40,10 +40,10 @@ type bgShell struct {
 	command string // the sh -c command line — kept for panel rows and ACP titles (ADR-0064)
 	dir     string
 	owner   string // who started it (workflow identity such as "worker·Item-2"); "" when unattributed
-	await   bool   // agent asked for a completion notice (bash await: true) — see ADR-0100
 	cmd     *exec.Cmd
 	out     *livebuf.Buffer
 	done    chan struct{}
+	settled chan struct{} // closed after exit bookkeeping: notice queued or suppressed, listeners fired
 	started time.Time
 
 	mu         sync.Mutex
@@ -67,7 +67,6 @@ type ShellInfo struct {
 	Finished   bool
 	ExitCode   int
 	Err        error
-	Await      bool // started with await: true — completion wakes a follow-up (ADR-0100)
 	StartedAt  time.Time
 	FinishedAt time.Time
 }
@@ -102,30 +101,19 @@ func (s *bgShell) info() ShellInfo {
 		Finished:   s.finished,
 		ExitCode:   s.exitCode,
 		Err:        s.exitErr,
-		Await:      s.await,
 		StartedAt:  s.started,
 		FinishedAt: s.finishedAt,
 	}
 }
 
 // ShellWantsNotice is the single predicate for shell-completion delivery to
-// the model (ADR-0100): an awaited shell's completion is delivered whatever
-// its status (the await promise is "wake me when it fires" — including
-// exit 0), and an un-awaited shell is delivered only when it *failed* —
-// nonzero exit or exec error, but not a deliberate kill_bash/lifetime stop
-// (a stop the user or milk itself asked for is not news). Clean un-awaited
-// exits stay toast/panel-only, exactly as they were before.
+// the model (ADR-0100 as amended): spawn registers the interest — a finished
+// shell delivers exactly like a background agent job, whatever its status.
+// The only exception is a stopped shell (deliberate kill_bash or the lifetime
+// cap): a stop the user or milk itself asked for is not news. Delivery
+// follows the listener, never a model-set flag.
 func ShellWantsNotice(i ShellInfo) bool {
-	if !i.Finished {
-		return false
-	}
-	if i.Await {
-		return true
-	}
-	if i.Killed {
-		return false
-	}
-	return i.Err != nil || i.ExitCode != 0
+	return i.Finished && !i.Killed
 }
 
 // statusLine renders the shell's state prefix for bash_output results.
@@ -328,18 +316,7 @@ func killShell(id, reason, requester string) (ShellInfo, bool) {
 // run_in_background (ADR-0063), also used by the UI layers' tests. Returns
 // the shell's initial state snapshot.
 func StartBackgroundShell(command, dir string) (ShellInfo, error) {
-	s, err := bgShells.start(command, dir, "", false)
-	if err != nil {
-		return ShellInfo{}, err
-	}
-	return s.info(), nil
-}
-
-// StartBackgroundShellAwait is StartBackgroundShell with the await marker:
-// the completion notice is queued for the model whatever the status. Used by
-// tests and UI layers that exercise ADR-0100's wake path.
-func StartBackgroundShellAwait(command, dir string) (ShellInfo, error) {
-	s, err := bgShells.start(command, dir, "", true)
+	s, err := bgShells.start(command, dir, "")
 	if err != nil {
 		return ShellInfo{}, err
 	}
@@ -394,9 +371,10 @@ func (r *shellRegistry) reapLocked() {
 }
 
 // start registers and starts a background shell running sh -c command in dir.
-// await marks the shell as agent-awaited: its completion is queued for the
-// model whatever its status (ADR-0100).
-func (r *shellRegistry) start(command, dir, owner string, await bool) (*bgShell, error) {
+// Spawn registers the delivery interest: the shell's completion is queued for
+// the model when it exits, whatever its status — except kills (ADR-0100 as
+// amended).
+func (r *shellRegistry) start(command, dir, owner string) (*bgShell, error) {
 	r.mu.Lock()
 	r.reapLocked()
 	if len(r.shells) >= maxBackgroundShells {
@@ -410,9 +388,9 @@ func (r *shellRegistry) start(command, dir, owner string, await bool) (*bgShell,
 		command: command,
 		dir:     dir,
 		owner:   owner,
-		await:   await,
 		out:     livebuf.New(bgShellOutputBufferByte),
 		done:    make(chan struct{}),
+		settled: make(chan struct{}),
 		started: time.Now(),
 	}
 	s.cmd = exec.Command("sh", "-c", command)
@@ -470,6 +448,7 @@ func (r *shellRegistry) start(command, dir, owner string, await bool) (*bgShell,
 			r.mu.Unlock()
 		}
 		r.fire(info, false) // ADR-0064: shell-finished lifecycle event
+		close(s.settled)
 	}()
 
 	// Auto-kill after the hard lifetime cap.
@@ -500,6 +479,16 @@ func (s *bgShell) kill(reason, requester string) {
 		"cross_owner", requester != "" && s.owner != "" && requester != s.owner)
 	if proc != nil {
 		killProcGroup(s.cmd)
+	}
+}
+
+// WaitShellSettled blocks until the shell's exit bookkeeping has completed —
+// its completion notice is queued (or deliberately suppressed) and listeners
+// have fired. Tests spawning real shells wait on this so a late event cannot
+// leak past their cleanup into the shared queue.
+func WaitShellSettled(id string) {
+	if s, ok := bgShells.get(id); ok {
+		<-s.settled
 	}
 }
 

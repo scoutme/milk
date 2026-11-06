@@ -1,9 +1,9 @@
 package main
 
-// ADR-0100 TUI tests: background-shell completion delivery — transcript block
-// for awaited exits and failures (never clean un-awaited exits), the follow-up
-// wake for awaited shells (fires when idle, defers when busy), and the
-// prompt-prefix renderer that the drain hands to the next turn.
+// ADR-0100 (as amended) TUI tests: background-shell completion delivery —
+// a transcript block for every finished shell except deliberate stops, the
+// follow-up wake (fires when idle, defers when busy), and the prompt-prefix
+// renderer that the drain hands to the next turn.
 //
 // The wake tests stub shellEventsPendingForFollowup: the completion queue is
 // process-global and ANY concurrent turn dispatch in the test binary drains
@@ -28,53 +28,53 @@ func stubShellPending(t *testing.T, n int) {
 	t.Cleanup(func() { shellEventsPendingForFollowup = orig })
 }
 
-func TestRenderShellDoneBlock_Predicate(t *testing.T) {
-	awaited := local.ShellInfo{ID: "s9", Command: "make release", Finished: true, Await: true, ExitCode: 0}
-	failed := local.ShellInfo{ID: "s10", Command: "racy watcher", Finished: true, ExitCode: 1}
+func TestRenderShellDoneBlock_AllFinishedExceptKilled(t *testing.T) {
 	clean := local.ShellInfo{ID: "s11", Command: "git status", Finished: true, ExitCode: 0}
+	failed := local.ShellInfo{ID: "s10", Command: "racy watcher", Finished: true, ExitCode: 1}
+	killed := local.ShellInfo{ID: "s12", Command: "dev server", Finished: true, Killed: true}
 
-	if block := renderShellDoneBlock(clean, ""); block != "" {
-		t.Errorf("clean un-awaited exit must stay toast-only, got block:\n%s", block)
-	}
-	block := renderShellDoneBlock(awaited, "built ok")
-	if !strings.Contains(block, "awaited background shell s9") || !strings.Contains(block, "exited 0") || !strings.Contains(block, "built ok") {
-		t.Errorf("awaited block missing content:\n%s", block)
+	block := renderShellDoneBlock(clean, "working tree clean")
+	if !strings.Contains(block, "background shell s11") || !strings.Contains(block, "exited 0") || !strings.Contains(block, "working tree clean") {
+		t.Errorf("clean exit block missing content:\n%s", block)
 	}
 	block = renderShellDoneBlock(failed, "boom")
 	if !strings.Contains(block, "background shell s10") || !strings.Contains(block, "exited 1") || !strings.Contains(block, "boom") {
 		t.Errorf("failure block missing content:\n%s", block)
 	}
+	if block := renderShellDoneBlock(killed, ""); block != "" {
+		t.Errorf("a deliberate stop must stay toast-only, got block:\n%s", block)
+	}
 }
 
-func TestBackgroundShellDoneMsg_AwaitedBusyDefersWake(t *testing.T) {
+func TestBackgroundShellDoneMsg_BusyDefersWake(t *testing.T) {
 	stubShellPending(t, 1)
 	m := newTestModelForPanels(t)
 	m.busy = true
-	info := local.ShellInfo{ID: "s12", Command: "watch", Finished: true, Await: true, ExitCode: 0}
+	info := local.ShellInfo{ID: "s12", Command: "watch", Finished: true, ExitCode: 0}
 
 	next, _ := m.Update(backgroundShellDoneMsg{info: info})
 	nm := next.(model)
 
 	if !nm.pendingShellFollowup {
-		t.Error("awaited completion while busy must remember the wake")
+		t.Error("completion while busy must remember the wake")
 	}
 	if strings.Contains(nm.transcript.String(), backgroundFollowupPrompt) {
 		t.Error("no follow-up may start while busy")
 	}
-	if !strings.Contains(nm.transcript.String(), "awaited background shell s12") {
-		t.Errorf("awaited completion must land in the transcript; transcript:\n%s", nm.transcript.String())
+	if !strings.Contains(nm.transcript.String(), "background shell s12") {
+		t.Errorf("completion must land in the transcript; transcript:\n%s", nm.transcript.String())
 	}
 }
 
-func TestBackgroundShellDoneMsg_AwaitedIdleFiresFollowup(t *testing.T) {
+func TestBackgroundShellDoneMsg_IdleFiresFollowup(t *testing.T) {
 	stubShellPending(t, 1)
 	m := newTestModelForPanels(t)
-	info := local.ShellInfo{ID: "s13", Command: "release watcher", Finished: true, Await: true, ExitCode: 0}
+	info := local.ShellInfo{ID: "s13", Command: "release watcher", Finished: true, ExitCode: 0}
 
 	next, cmd := m.Update(backgroundShellDoneMsg{info: info})
 	nm := next.(model)
 	if cmd == nil {
-		t.Fatal("awaited completion while idle must start the follow-up turn")
+		t.Fatal("completion while idle must start the follow-up turn")
 	}
 	if nm.pendingShellFollowup {
 		t.Error("an immediate follow-up must not leave the retry flag set")
@@ -87,36 +87,38 @@ func TestBackgroundShellDoneMsg_AwaitedIdleFiresFollowup(t *testing.T) {
 	}
 }
 
-func TestBackgroundShellDoneMsg_UnawaitedFailureNoWake(t *testing.T) {
-	stubShellPending(t, 0) // decision sees nothing queued: no wake, flag must clear
+// A wake whose events were already drained by an intervening turn must not
+// burn an empty turn — decideFollowup's pending==0 guard, pinned at the UI.
+func TestBackgroundShellDoneMsg_DrainedEventsNoWake(t *testing.T) {
+	stubShellPending(t, 0)
 	m := newTestModelForPanels(t)
 	info := local.ShellInfo{ID: "s14", Command: "racy watcher", Finished: true, ExitCode: 1}
 
 	next, _ := m.Update(backgroundShellDoneMsg{info: info})
 	nm := next.(model)
 	if nm.pendingShellFollowup {
-		t.Error("un-awaited failure must not wake a follow-up turn")
+		t.Error("a drained wake must not set the retry flag")
 	}
 	if strings.Contains(nm.transcript.String(), backgroundFollowupPrompt) {
-		t.Error("un-awaited failure must not start a follow-up turn")
+		t.Error("a drained wake must not start a follow-up turn")
 	}
 	if !strings.Contains(nm.transcript.String(), "background shell s14") {
-		t.Errorf("failure must land in the transcript:\n%s", nm.transcript.String())
+		t.Errorf("the block must still land in the transcript:\n%s", nm.transcript.String())
 	}
 }
 
-func TestBackgroundShellDoneMsg_CleanUnawaitedStaysSilent(t *testing.T) {
+func TestBackgroundShellDoneMsg_KilledStaysSilent(t *testing.T) {
 	stubShellPending(t, 0)
 	m := newTestModelForPanels(t)
-	info := local.ShellInfo{ID: "s15", Command: "git status", Finished: true, ExitCode: 0}
+	info := local.ShellInfo{ID: "s15", Command: "dev server", Finished: true, Killed: true, ExitCode: -1}
 
 	next, _ := m.Update(backgroundShellDoneMsg{info: info})
 	nm := next.(model)
 	if nm.pendingShellFollowup {
-		t.Error("clean un-awaited exit must not wake")
+		t.Error("a deliberate stop must not wake")
 	}
 	if strings.Contains(nm.transcript.String(), "background shell s15") {
-		t.Error("clean exit must not write a transcript block")
+		t.Error("a deliberate stop must not write a transcript block")
 	}
 }
 
@@ -125,7 +127,7 @@ func TestBackgroundShellDoneMsg_CleanUnawaitedStaysSilent(t *testing.T) {
 // never touches the shared queue (so no stub, no race).
 func TestBackgroundShellDoneMsg_RealFailedShellBlock(t *testing.T) {
 	stubShellPending(t, 0)
-	t.Cleanup(func() { local.DrainShellEvents() }) // the registry still queues this failure — don't leak it to neighbors
+	t.Cleanup(func() { local.DrainShellEvents() }) // the registry still queues this exit — don't leak it to neighbors
 	m := newTestModelForPanels(t)
 	info := startTestShell(t, "echo boom-real-output >&2; exit 7")
 
@@ -139,7 +141,7 @@ func TestBackgroundShellDoneMsg_RealFailedShellBlock(t *testing.T) {
 		t.Errorf("block must carry the live-buffer tail:\n%s", block)
 	}
 	if nm.pendingShellFollowup {
-		t.Error("un-awaited failure must never wake")
+		t.Error("a drained wake must never set the flag")
 	}
 }
 
@@ -161,7 +163,7 @@ func TestMaybeAutoFollowupShells_BusyDefersKeepsFlag(t *testing.T) {
 	stubShellPending(t, 1)
 	m := newTestModelForPanels(t)
 	m.busy = true
-	info := local.ShellInfo{ID: "s16", Command: "w", Finished: true, Await: true, ExitCode: 0}
+	info := local.ShellInfo{ID: "s16", Command: "w", Finished: true, ExitCode: 0}
 
 	next, _ := m.Update(backgroundShellDoneMsg{info: info}) // pending=1 + busy → retryLater
 	if !next.(model).pendingShellFollowup {
@@ -181,12 +183,12 @@ func TestRenderShellNotices_PromptPrefix(t *testing.T) {
 		t.Errorf("empty drain = %q, want \"\"", got)
 	}
 	events := []local.ShellEvent{
-		{Info: local.ShellInfo{ID: "s1", Command: "watch 42", Finished: true, Await: true, ExitCode: 0}, Tail: "ready"},
+		{Info: local.ShellInfo{ID: "s1", Command: "watch 42", Finished: true, ExitCode: 0}, Tail: "ready"},
 		{Info: local.ShellInfo{ID: "s2", Command: "watch 9", Finished: true, ExitCode: 2}, Tail: "conflict"},
 	}
 	got := renderShellNotices(events)
 	for _, want := range []string{
-		"[shell-finished] awaited background shell s1 (\"watch 42\") — exited 0",
+		"[shell-finished] background shell s1 (\"watch 42\") — exited 0",
 		"ready",
 		"[shell-finished] background shell s2 (\"watch 9\") — exited 2",
 		"conflict",
