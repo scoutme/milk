@@ -86,11 +86,12 @@ func renderBgShowShell(s local.ShellInfo) string {
 }
 
 // renderShellDoneBlock renders the transcript block written the moment a
-// background shell's completion is owed to the model (ADR-0100): an awaited
-// shell's exit — whatever its status — or an un-awaited shell that failed.
-// Same rule as the prompt-side queue (local.ShellWantsNotice is the single
-// predicate), so what the user sees is what the model gets; clean un-awaited
-// exits stay toast/panel-only (lifecycle noise, ADR-0048). tail is the
+// background shell's completion is owed to the model (ADR-0100 as amended):
+// every finished shell except a deliberate stop — spawn registers the
+// interest, exactly like a background agent job. Same rule as the
+// prompt-side queue (local.ShellWantsNotice is the single predicate), so
+// what the user sees is what the model gets; kills stay toast/panel-only
+// (lifecycle noise, ADR-0048). tail is the
 // output captured for the notice — empty string reads the live buffer now
 // (the TUI path, where the buffer is certainly still alive) and falls back
 // to "(no output)".
@@ -99,11 +100,7 @@ func renderShellDoneBlock(info local.ShellInfo, tail string) string {
 		return ""
 	}
 	var b strings.Builder
-	label := "background shell"
-	if info.Await {
-		label = "awaited background shell"
-	}
-	fmt.Fprintf(&b, "\n%s %s %s (%q) — %s\n", milkTag(), label, info.ID, info.Command, info.StatusLabel())
+	fmt.Fprintf(&b, "\n%s background shell %s (%q) — %s\n", milkTag(), info.ID, info.Command, info.StatusLabel())
 	if tail == "" {
 		if buf, ok := local.ShellLive(info.ID); ok {
 			tail = buf.Snapshot()
@@ -129,9 +126,6 @@ func renderShellNotices(events []local.ShellEvent) string {
 	var b strings.Builder
 	for _, e := range events {
 		what := fmt.Sprintf("background shell %s (%q) — %s", e.Info.ID, e.Info.Command, e.Info.StatusLabel())
-		if e.Info.Await {
-			what = "awaited " + what
-		}
 		fmt.Fprintf(&b, "[shell-finished] %s\n", what)
 		if tail := strings.TrimRight(e.Tail, "\n"); strings.TrimSpace(tail) != "" {
 			fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(tail, backgroundJobResultMaxChars))

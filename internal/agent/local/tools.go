@@ -165,14 +165,13 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 			"type": "function",
 			"function": map[string]any{
 				"name":        "bash",
-				"description": "Execute a shell command and return stdout, stderr, and exit code. Runs in the session working directory (or workdir). Set run_in_background=true for long-running processes (dev servers, watchers) — it returns a shell_id immediately; read output with bash_output, stop with kill_bash.",
+				"description": "Execute a shell command and return stdout, stderr, and exit code. Runs in the session working directory (or workdir). Set run_in_background=true for long-running processes (dev servers, watchers) — it returns a shell_id immediately; read output with bash_output, stop with kill_bash. Pipes can hide the exit code: test unattended scripts (watchers, poll loops) by hand — including their failure paths — before leaving them running; in automation prefer machine-readable state (--json) over parsing human output.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"command":           map[string]any{"type": "string", "description": "Shell command to execute"},
 						"workdir":           map[string]any{"type": "string", "description": "Working directory for the command (default: session cwd)"},
-						"run_in_background": map[string]any{"type": "boolean", "description": "Start the command in the background and return a shell_id (default false)"},
-						"await":             map[string]any{"type": "boolean", "description": "With run_in_background: on exit, deliver a completion notice (with output tail) to your next turn and wake a follow-up turn when idle — whatever the exit status. Shells that exit nonzero are noticed even without await; clean exits without await stay pull-only (default false)"},
+						"run_in_background": map[string]any{"type": "boolean", "description": "Start the command in the background and return a shell_id (default false). On exit a completion notice (15-line output tail) reaches your next turn and wakes a follow-up when idle — kill_bash stops are silent"},
 						"timeout_seconds":   map[string]any{"type": "integer", "description": "Timeout in seconds (default 120, max 600); ignored with run_in_background"},
 					},
 					"required": []string{"command"},
@@ -1237,18 +1236,13 @@ func runBash(ctx context.Context, args map[string]any, cwd string) (string, bool
 	// immediately (ADR-0063). timeout_seconds does not apply — the shell is
 	// bounded by the registry's lifetime cap and kill_bash instead.
 	if bg, _ := args["run_in_background"].(bool); bg {
-		await, _ := args["await"].(bool)
-		s, err := bgShells.start(command, dir, shellActor(ctx), await)
+		s, err := bgShells.start(command, dir, shellActor(ctx))
 		if err != nil {
 			return toolResult{Error: err.Error(), ExitCode: -1}.String(), false
 		}
-		note := ""
-		if await {
-			note = "; await: a completion notice arrives with your next turn (wake if idle)"
-		}
 		return toolResult{Output: fmt.Sprintf(
-			"started background shell %s%s — read its output with bash_output(shell_id: %q), stop it with kill_bash(shell_id: %q)",
-			s.id, note, s.id, s.id)}.String(), false
+			"started background shell %s — read its output with bash_output(shell_id: %q), stop it with kill_bash(shell_id: %q)",
+			s.id, s.id, s.id)}.String(), false
 	}
 
 	timeout := bashDefaultTimeout

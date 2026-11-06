@@ -145,7 +145,7 @@ func TestBash_Workdir(t *testing.T) {
 // Background shell lifecycle: start, read output, kill. Exit criteria for
 // Phase 3 ("dev server up, hit it, kill it") in unit form.
 func TestBackgroundShell_Lifecycle(t *testing.T) {
-	s, err := bgShells.start("echo boot; sleep 30; echo done", t.TempDir(), "", false)
+	s, err := bgShells.start("echo boot; sleep 30; echo done", t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestBackgroundShell_OwnerFromBoardIdentity(t *testing.T) {
 	if got := shellActor(ctx); got != "worker\u00b7Item-2" {
 		t.Fatalf("shellActor = %q", got)
 	}
-	s, err := bgShells.start("sleep 30", t.TempDir(), shellActor(ctx), false)
+	s, err := bgShells.start("sleep 30", t.TempDir(), shellActor(ctx))
 	if err != nil {
 		t.Fatal(err)
 	}

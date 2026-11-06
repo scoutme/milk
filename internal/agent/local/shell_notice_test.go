@@ -1,10 +1,12 @@
 package local
 
-// ADR-0100 tests: shell completion notices — the await opt-in (wake on exit,
-// any status), the failure net (nonzero exits noticed without await), and the
-// clean/killed exits that must stay pull-only. Real shells, real exits.
+// ADR-0100 tests (as amended): shell completion delivery is deterministic —
+// spawn registers the interest, every finished shell is noticed whatever its
+// status, and only stops (deliberate kill_bash / the lifetime cap) stay
+// silent. Real shells, real exits.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ func waitShellFinished(t *testing.T, id string) ShellInfo {
 	for time.Now().Before(deadline) {
 		info, ok := BackgroundShell(id)
 		if ok && info.Finished {
+			WaitShellSettled(id) // exit bookkeeping done: the notice is queued (or suppressed) before the test proceeds
 			return info
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -26,25 +29,17 @@ func waitShellFinished(t *testing.T, id string) ShellInfo {
 }
 
 func TestShellWantsNotice(t *testing.T) {
-	unfinished := func(a bool) ShellInfo { return ShellInfo{Await: a} }
-	ok0 := func(a, killed bool) ShellInfo {
-		return ShellInfo{Finished: true, Await: a, Killed: killed}
-	}
-	fail := func(a bool) ShellInfo {
-		return ShellInfo{Finished: true, Await: a, ExitCode: 3}
-	}
 	tests := []struct {
 		name string
 		in   ShellInfo
 		want bool
 	}{
-		{"unfinished never", unfinished(true), false},
-		{"awaited clean exit", ok0(true, false), true}, // the await promise: any status
-		{"unawaited clean exit", ok0(false, false), false},
-		{"unawaited failure", fail(false), true}, // the failure net
-		{"awaited failure", fail(true), true},
-		{"killed without await", ok0(false, true), false}, // a deliberate stop is not news
-		{"killed with await", ok0(true, true), true},      // await still delivers
+		{"unfinished never", ShellInfo{}, false},
+		{"clean exit delivers", ShellInfo{Finished: true}, true},
+		{"failure delivers", ShellInfo{Finished: true, ExitCode: 3}, true},
+		{"exec error delivers", ShellInfo{Finished: true, Err: errors.New("boom")}, true},
+		{"killed stays silent", ShellInfo{Finished: true, Killed: true}, false},
+		{"killed failure stays silent", ShellInfo{Finished: true, Killed: true, ExitCode: 3}, false},
 	}
 	for _, tt := range tests {
 		if got := ShellWantsNotice(tt.in); got != tt.want {
@@ -62,18 +57,15 @@ func drainShellEventsClean(t *testing.T) {
 	}
 }
 
-func TestAwaitedShell_QueuesNoticeWithTail(t *testing.T) {
+func TestCleanExit_QueuesNoticeWithTail(t *testing.T) {
 	drainShellEventsClean(t)
-	info, err := StartBackgroundShellAwait("echo hello-from-await; exit 0", "")
+	info, err := StartBackgroundShell("echo hello-from-exit; exit 0", "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if !info.Await {
-		t.Fatal("StartBackgroundShellAwait must produce an Await shell")
-	}
 	fin := waitShellFinished(t, info.ID)
 	if !ShellWantsNotice(fin) {
-		t.Fatal("awaited clean exit must want a notice")
+		t.Fatal("clean exit must want a notice (spawn registers the interest)")
 	}
 	if got := PendingShellEvents(); got != 1 {
 		t.Fatalf("pending = %d, want 1", got)
@@ -83,10 +75,10 @@ func TestAwaitedShell_QueuesNoticeWithTail(t *testing.T) {
 		t.Fatalf("drained %d events, want 1", len(ev))
 	}
 	e := ev[0]
-	if e.Info.ID != info.ID || !e.Info.Await || e.Info.ExitCode != 0 {
-		t.Errorf("event info = %+v, want id=%s await=true exit=0", e.Info, info.ID)
+	if e.Info.ID != info.ID || e.Info.ExitCode != 0 {
+		t.Errorf("event info = %+v, want id=%s exit=0", e.Info, info.ID)
 	}
-	if !strings.Contains(e.Tail, "hello-from-await") {
+	if !strings.Contains(e.Tail, "hello-from-exit") {
 		t.Errorf("tail = %q, want the shell's output", e.Tail)
 	}
 	if got := PendingShellEvents(); got != 0 {
@@ -94,18 +86,15 @@ func TestAwaitedShell_QueuesNoticeWithTail(t *testing.T) {
 	}
 }
 
-func TestUnawaitedFailure_QueuesNoticeWithoutWake(t *testing.T) {
+func TestFailure_QueuesNoticeWithTail(t *testing.T) {
 	drainShellEventsClean(t)
 	info, err := StartBackgroundShell("echo boom-to-stderr >&2; exit 3", "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	fin := waitShellFinished(t, info.ID)
-	if fin.Await {
-		t.Fatal("shell must not be awaited")
-	}
+	waitShellFinished(t, info.ID)
 	if got := PendingShellEvents(); got != 1 {
-		t.Fatalf("failed unawaited shell: pending = %d, want 1 (failure net)", got)
+		t.Fatalf("failed shell: pending = %d, want 1", got)
 	}
 	ev := DrainShellEvents()
 	if len(ev) != 1 || ev[0].Info.ExitCode != 3 {
@@ -116,19 +105,7 @@ func TestUnawaitedFailure_QueuesNoticeWithoutWake(t *testing.T) {
 	}
 }
 
-func TestUnawaitedCleanExit_QueuesNothing(t *testing.T) {
-	drainShellEventsClean(t)
-	info, err := StartBackgroundShell("exit 0", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitShellFinished(t, info.ID)
-	if got := PendingShellEvents(); got != 0 {
-		t.Fatalf("clean unawaited exit: pending = %d, want 0 (pull-only)", got)
-	}
-}
-
-func TestKilledShell_QueuesNothingWithoutAwait(t *testing.T) {
+func TestKilledShell_QueuesNothing(t *testing.T) {
 	drainShellEventsClean(t)
 	info, err := StartBackgroundShell("sleep 30", "")
 	if err != nil {
@@ -137,7 +114,7 @@ func TestKilledShell_QueuesNothingWithoutAwait(t *testing.T) {
 	killShell(info.ID, "ui", "") // requester "" — unattributed
 	waitShellFinished(t, info.ID)
 	if got := PendingShellEvents(); got != 0 {
-		t.Fatalf("killed unawaited shell: pending = %d, want 0 (deliberate stop)", got)
+		t.Fatalf("killed shell: pending = %d, want 0 (a deliberate stop is not news)", got)
 	}
 }
 

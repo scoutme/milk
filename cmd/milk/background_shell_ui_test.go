@@ -20,6 +20,7 @@ func startTestShell(t *testing.T, command string) local.ShellInfo {
 	for time.Now().Before(deadline) {
 		cur, _ := local.BackgroundShell(info.ID)
 		if cur.Finished {
+			local.WaitShellSettled(info.ID) // exit bookkeeping done: the notice is queued (or suppressed) — no late event can leak past the test
 			return cur
 		}
 		time.Sleep(10 * time.Millisecond)

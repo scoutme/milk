@@ -3473,24 +3473,24 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backgroundShellDoneMsg:
 		m.stampPanelActivity(regionBackground) // shell row status changed (ADR-0089)
 		m.notify(fmt.Sprintf("background shell %s %s", msg.info.ID, msg.info.StatusLabel()), "/bg list")
-		// Model-facing delivery (ADR-0100): an awaited exit or a failure also
-		// lands in the transcript (same predicate as the prompt-side queue in
-		// local), so it can't pass by unseen — clean un-awaited exits stay
-		// toast-only like before.
+		// Model-facing delivery (ADR-0100 as amended): spawn registers the
+		// interest — every finished shell except a deliberate stop lands in
+		// the transcript (same predicate as the prompt-side queue in local),
+		// so it can't pass by unseen.
 		if block := renderShellDoneBlock(msg.info, ""); block != "" {
 			m.appendTranscript(block)
-		}
-		// Awaited completions wake a follow-up turn once idle (the "report as
-		// soon as it fires" promise); failures without await wait for the next
-		// user turn via the drain — no wake.
-		if msg.info.Await {
-			return m.maybeAutoFollowupShells()
 		}
 		// The last running shell (or job) exiting finalizes the background
 		// panel's content — re-arm auto-open so the next one opens it again
 		// (no-op while other background work is still live; ADR-0059).
 		m.resetManualOverrideIfFinalized(regionBackground)
 		m.syncLayout()
+		// Noticed completions wake a follow-up turn once idle — the same
+		// predicate as the queue and the block, so wake and delivery cannot
+		// disagree (deliberate stops neither block nor wake).
+		if local.ShellWantsNotice(msg.info) {
+			return m.maybeAutoFollowupShells()
+		}
 		return m, nil
 
 	case backgroundBatchDoneMsg:
@@ -4352,8 +4352,8 @@ func (m model) maybeAutoFollowupBackgroundJobs(waitForWholeWave bool) (tea.Model
 var shellEventsPendingForFollowup = local.PendingShellEvents
 
 // maybeAutoFollowupShells delivers queued shell completion notices
-// (ADR-0100) as a real follow-up turn once idle — the wake half of bash
-// await. Reuses decideFollowup with no wave concept: pending counts queued
+// (ADR-0100) as a real follow-up turn once idle — the wake half of shell
+// completion delivery. Reuses decideFollowup with no wave concept: pending counts queued
 // shell events (a wake whose events were already drained by an intervening
 // turn must not burn an empty turn — the same pending==0 guard the job
 // follow-up relies on), busy defers instead of dropping.

@@ -17,10 +17,14 @@ func TestWindowTitle_ReflectsState(t *testing.T) {
 		t.Fatalf("title should start with the app name, got %q", got)
 	}
 	idle := m.windowTitle()
-	// Issue #367: the state is always present as `<glyph> <word>`, idle
-	// being the quiet default with a static glyph.
-	if got := m.windowTitle(); !strings.HasSuffix(got, titleGlyphIdle+" "+titleIdle) {
-		t.Errorf("idle title should end with %q, got %q", titleGlyphIdle+" "+titleIdle, got)
+	// The glyph IS the separator after the app name, right before the agent
+	// (status-bar order; a long agent name can hide the state word in a
+	// truncated tab title but never the glyph). The state word trails.
+	if got := idle; !strings.HasPrefix(got, "milk "+titleGlyphIdle+" ") || !strings.HasSuffix(got, titleIdle) {
+		t.Errorf("idle title should be %q-shaped, got %q", "milk "+titleGlyphIdle+" <agent> · "+titleIdle, got)
+	}
+	if strings.Contains(idle, titleBase+titleSeparator) {
+		t.Errorf("the glyph must replace the app-name separator, got %q", idle)
 	}
 	// Busy: the glyph is a braille spinner frame and it MOVES with the
 	// spinner tick — two frames must yield two titles (motion proof), and
@@ -28,21 +32,21 @@ func TestWindowTitle_ReflectsState(t *testing.T) {
 	m.busy = true
 	m.spinnerFrame = 0
 	busyA := m.windowTitle()
-	if got := busyA; got == idle || !strings.HasSuffix(got, spinnerFrames[0]+" "+titleWorking) {
-		t.Errorf("busy title should end with %q, got %q", spinnerFrames[0]+" "+titleWorking, got)
+	if got := busyA; got == idle || !strings.HasPrefix(got, "milk "+spinnerFrames[0]+" ") || !strings.HasSuffix(got, titleWorking) {
+		t.Errorf("busy title should be %q-shaped, got %q", "milk "+spinnerFrames[0]+" <agent> · "+titleWorking, got)
 	}
 	m.spinnerFrame = 1
 	busyB := m.windowTitle()
 	if busyA == busyB {
 		t.Errorf("busy glyph must rotate with the spinner frame: both %q", busyA)
 	}
-	if !strings.HasSuffix(busyB, spinnerFrames[1]+" "+titleWorking) {
-		t.Errorf("busy title frame 1 should end with %q, got %q", spinnerFrames[1]+" "+titleWorking, busyB)
+	if !strings.HasPrefix(busyB, "milk "+spinnerFrames[1]+" ") {
+		t.Errorf("busy title frame 1 should start with %q, got %q", "milk "+spinnerFrames[1]+" ", busyB)
 	}
 	m.busy = false
 	m.pendingPerm = &permRequestMsg{}
-	if got := m.windowTitle(); !strings.HasSuffix(got, titleGlyphAsk+" "+titleNeedsInput) {
-		t.Errorf("pending prompt title should end with %q, got %q", titleGlyphAsk+" "+titleNeedsInput, got)
+	if got := m.windowTitle(); !strings.HasPrefix(got, "milk "+titleGlyphAsk+" ") || !strings.HasSuffix(got, titleNeedsInput) {
+		t.Errorf("pending prompt title should be %q-shaped, got %q", "milk "+titleGlyphAsk+" <agent> · "+titleNeedsInput, got)
 	}
 }
 
