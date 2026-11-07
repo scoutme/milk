@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scoutme/milk/internal/loop"
@@ -2820,12 +2821,23 @@ func SetDebugLogFilenamePrefixForTest(prefix string) func() {
 // ~/.milk as milk's state root: config.json, sessions, memory, jobs, history,
 // otel, mcp_oauth, servers … The project-local .milk/config.json is untouched
 // (it merges from the working directory either way).
-var rootOverride string
+//
+// rootMu guards the override: Dir() is read from every persistence path —
+// including goroutines outliving the test that restores the root (a leaked
+// ACP follow-up turn vs TestApplyConfigRoot's deferred SetRoot was a real
+// DATA RACE reported by CI's -race leg, 2026-11-07). Readers copy under the
+// lock and resolve paths outside it.
+var (
+	rootMu       sync.RWMutex
+	rootOverride string
+)
 
 // SetRoot redirects milk's state root to root; empty restores the default
 // (~/.milk, or $MILK_CONFIG_ROOT). Call before any config/store access.
 // Returns the previous override so callers (tests) can restore it.
 func SetRoot(root string) (previous string) {
+	rootMu.Lock()
+	defer rootMu.Unlock()
 	previous = rootOverride
 	rootOverride = root
 	return previous
@@ -2834,8 +2846,11 @@ func SetRoot(root string) (previous string) {
 // Dir returns milk's state root: the SetRoot override, else $MILK_CONFIG_ROOT,
 // else ~/.milk. Everything milk persists lives under this directory.
 func Dir() (string, error) {
-	if rootOverride != "" {
-		return filepath.Abs(rootOverride)
+	rootMu.RLock()
+	override := rootOverride
+	rootMu.RUnlock()
+	if override != "" {
+		return filepath.Abs(override)
 	}
 	if env := strings.TrimSpace(os.Getenv("MILK_CONFIG_ROOT")); env != "" {
 		return filepath.Abs(env)
