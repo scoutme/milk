@@ -9,13 +9,14 @@ import (
 
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // tuiSessState builds the interactiveState the TUI handlers run against, with
 // one already-bound current session.
 func tuiSessState(t *testing.T, turns ...string) (*interactiveState, *session.Session) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess := tuiSaveSession(t, "/repo", "aaaa-1111", "alpha", turns)
 	return &interactiveState{sess: sess, cwd: "/repo", notifier: oversight.Noop{}}, sess
 }

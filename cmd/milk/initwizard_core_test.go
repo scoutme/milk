@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // localWizardOpts is the ACP-style option set (no editor question): the agent
@@ -359,7 +360,7 @@ func TestInitAliasRegistration(t *testing.T) {
 // TestConfigShowRendered: /config show goes through the shared renderer on
 // both hosts — the no-local-config branch must still be valid fenced JSON.
 func TestConfigShowRendered(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	// A config on disk so the render has something to show.
 	if err := config.Save(config.Config{Agent: "x", Agents: []config.AgentConfig{{Name: "x", URL: "http://localhost:1", Model: "m", Provider: "local"}}}); err != nil {
 		t.Fatalf("Save: %v", err)

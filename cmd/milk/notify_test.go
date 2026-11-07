@@ -15,6 +15,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // Toast/notification subsystem tests (issue #162, ADR-0048).
@@ -45,7 +46,7 @@ func toastMentions(m model, substr string) bool {
 // newToastTestModel returns a fully wired model for Update/View-level tests.
 func newToastTestModel(t *testing.T) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

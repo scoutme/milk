@@ -9,6 +9,7 @@ import (
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // newTestModelForTokenVelocity builds a minimal model with a real loop
@@ -20,7 +21,7 @@ import (
 // caller must go through obs.RecordTokens instead.
 func newTestModelForTokenVelocity(t *testing.T) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	obs.ResetSessionTokens()
 	t.Cleanup(obs.ResetSessionTokens)
 	sess, err := session.New("/repo", "")

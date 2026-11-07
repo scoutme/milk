@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // --- #165: comma-separated multi-value parameters ---
@@ -193,7 +194,7 @@ func TestApplyCompletionToken_MultiValue(t *testing.T) {
 // isolated so config saves stay inside the test.
 func mvState(t *testing.T) *interactiveState {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Chdir(t.TempDir())
 	return &interactiveState{cfg: config.Config{
 		Agent:      "local",

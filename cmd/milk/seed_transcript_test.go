@@ -8,11 +8,12 @@ import (
 
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func seededModel(t *testing.T, hist []session.Turn) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

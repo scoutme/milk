@@ -1,6 +1,8 @@
 package testutil
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,11 @@ func TestSandboxStateRoot_RedirectsAndCanaries(t *testing.T) {
 	// Clean run: the untouched real config passes.
 	if err := canary(); err != nil {
 		t.Fatalf("clean canary: %v", err)
+	}
+	// A passing canary retires the sandbox root (drain-aware removal), so
+	// suite runs stop leaking milk-test-state-* dirs into /tmp.
+	if _, err := os.Stat(os.Getenv("HOME")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("sandbox root %s survived a passing canary (stat err = %v), want removed", os.Getenv("HOME"), err)
 	}
 
 	// A test writing the real config must fail the canary loudly.

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // tripGuard puts the process into the post-failed-load state: an unparseable
@@ -41,7 +43,7 @@ func tripGuard(t *testing.T) string {
 }
 
 func TestPersistGuard_RefusesAfterFailedLoad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	tripGuard(t)
 
 	if err := Save(Config{Agent: "x"}); !errors.Is(err, ErrPersistRefused) {
@@ -70,7 +72,7 @@ func TestPersistGuard_RefusesAfterFailedLoad(t *testing.T) {
 }
 
 func TestPersistGuard_CoversLocalScopeAndScopeDispatch(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	tripGuard(t)
 
 	localDir := t.TempDir()
@@ -92,7 +94,7 @@ func TestPersistGuard_CoversLocalScopeAndScopeDispatch(t *testing.T) {
 }
 
 func TestPersistGuard_RecoveryAndReadErrors(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	path := tripGuard(t)
 
 	// A read error (missing file) must NOT clear a genuine trip — greenfield
@@ -147,7 +149,7 @@ func TestConfigConsentOpen_AndDeepMerge(t *testing.T) {
 // --- observer ---
 
 func TestSaveObserver_SeesSavedPatchedRefused(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	var mu sync.Mutex
 	var events []SaveEvent
@@ -186,7 +188,7 @@ func TestSaveObserver_SeesSavedPatchedRefused(t *testing.T) {
 // --- patch ---
 
 func TestPatchBookkeeping_SurgicalAndRefusing(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	dir, err := Dir()
 	if err != nil {
 		t.Fatal(err)
@@ -262,7 +264,7 @@ func TestPatchBookkeeping_SurgicalAndRefusing(t *testing.T) {
 }
 
 func TestPatchBookkeeping_LocalScopeAndBackupStability(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	localDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(localDir, ".milk"), 0o700); err != nil {
 		t.Fatal(err)
@@ -315,7 +317,7 @@ func TestPatchBookkeeping_LocalScopeAndBackupStability(t *testing.T) {
 // --- atomicity / lock ---
 
 func TestSave_AtomicLeavesNoTempResidue(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	if err := Save(Config{Agent: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +340,7 @@ func TestSave_AtomicLeavesNoTempResidue(t *testing.T) {
 }
 
 func TestSave_ConcurrentWritersSerialize(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	if err := Save(Config{Agent: "seed"}); err != nil {
 		t.Fatal(err)
 	}

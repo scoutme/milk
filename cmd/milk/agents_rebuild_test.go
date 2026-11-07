@@ -17,6 +17,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/router"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // TestHandleInitWizardKey_CommitRebuildsRunners pins the /config init wiring
@@ -25,7 +26,7 @@ import (
 // agent has to be usable on the next turn without a restart.
 func TestHandleInitWizardKey_CommitRebuildsRunners(t *testing.T) {
 	// The commit really writes config.json — keep it off the developer's ~/.milk.
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Setenv("MILK_CONFIG_ROOT", t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
@@ -279,7 +280,7 @@ func TestRebuildRunners_StartsRunCmdServer(t *testing.T) {
 	ln.Close()
 
 	// Keep PID/log files out of the real home directory.
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Cleanup(func() { _, _ = serverStop("qwen") })
 
 	cfg := config.Config{

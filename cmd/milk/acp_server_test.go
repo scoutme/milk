@@ -16,6 +16,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/router"
+	"github.com/scoutme/milk/internal/testutil"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,7 +65,7 @@ func acpTestServerWithAgent(t *testing.T, h http.HandlerFunc, agentExtra string)
 	t.Cleanup(func() { initSmokeCheckFn = prevSmoke })
 	stubWizardModels(t, nil, errors.New("no server"))
 
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	milkDir := filepath.Join(home, ".milk")
 	if err := os.MkdirAll(milkDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)

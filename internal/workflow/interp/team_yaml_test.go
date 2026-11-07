@@ -8,13 +8,14 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/workflow"
 	"github.com/scoutme/milk/internal/workflow/board"
 )
 
 func loadTeamDefinition(t *testing.T) workflow.Definition {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 

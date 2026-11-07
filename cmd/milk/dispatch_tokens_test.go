@@ -23,6 +23,7 @@ import (
 	"github.com/scoutme/milk/internal/escalation"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // withTempHome points $HOME at a scratch directory for the duration of the
@@ -30,7 +31,7 @@ import (
 // writes to a throwaway ~/.milk/sessions instead of the real one.
 func withTempHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 }
 
 // fakeTokenRunner is a minimal TurnRunner that returns a fixed TurnResult,

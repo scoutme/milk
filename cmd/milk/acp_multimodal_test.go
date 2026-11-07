@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
@@ -246,7 +247,7 @@ func TestACPSession_ConfigHotReload(t *testing.T) {
 	srv := httptest.NewServer(stubRecordingBackend(&bodies, &mu))
 	t.Cleanup(srv.Close)
 
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	milkDir := filepath.Join(home, ".milk")
 	if err := os.MkdirAll(milkDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)

@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func TestShellHistoryCmd_Resolution(t *testing.T) {
@@ -53,7 +55,7 @@ func TestShellHistoryCmd_Resolution(t *testing.T) {
 }
 
 func TestDetectHistfile(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("HISTFILE", "")
 	t.Setenv("XDG_DATA_HOME", "")

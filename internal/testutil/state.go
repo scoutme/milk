@@ -88,7 +88,10 @@ func realConfigPath() string {
 // The redirect is process-wide and permanent for the test binary — tests
 // that t.Setenv their own HOME still get their per-test sandbox (it restores
 // to this one), and child processes (the milk binary, tmux launches) inherit
-// the sandbox root too.
+// the sandbox root too. On a PASSING canary the returned function
+// drain-removes the sandbox root itself (late-writer tolerant, see
+// drainRemoveAll), so suite runs stop leaking milk-test-state-* dirs into
+// /tmp; a FAILED canary keeps the root for forensics.
 func SandboxStateRoot() (canary func() error) {
 	canaryPath := realConfigPath()
 	before, err := os.ReadFile(canaryPath)
@@ -112,24 +115,36 @@ func SandboxStateRoot() (canary func() error) {
 	}
 
 	return func() error {
-		if canaryPath == "" {
-			return nil
-		}
-		after, err := os.ReadFile(canaryPath)
-		switch {
-		case os.IsNotExist(err):
-			if before == nil {
+		check := func() error {
+			if canaryPath == "" {
 				return nil
 			}
-			return fmt.Errorf("test canary: real config %s was DELETED during the test run", canaryPath)
-		case err != nil:
-			return fmt.Errorf("test canary: reading %s: %w", canaryPath, err)
+			after, err := os.ReadFile(canaryPath)
+			switch {
+			case os.IsNotExist(err):
+				if before == nil {
+					return nil
+				}
+				return fmt.Errorf("test canary: real config %s was DELETED during the test run", canaryPath)
+			case err != nil:
+				return fmt.Errorf("test canary: reading %s: %w", canaryPath, err)
+			}
+			if before == nil {
+				return fmt.Errorf("test canary: real config %s was CREATED during the test run (%d bytes) — a test wrote the real state root", canaryPath, len(after))
+			}
+			if !bytes.Equal(before, after) {
+				return fmt.Errorf("test canary: real config %s CHANGED during the test run (%d -> %d bytes) — a test wrote the real state root", canaryPath, len(before), len(after))
+			}
+			return nil
 		}
-		if before == nil {
-			return fmt.Errorf("test canary: real config %s was CREATED during the test run (%d bytes) — a test wrote the real state root", canaryPath, len(after))
+		if err := check(); err != nil {
+			return err // keep the sandbox root: forensics beat hygiene here
 		}
-		if !bytes.Equal(before, after) {
-			return fmt.Errorf("test canary: real config %s CHANGED during the test run (%d -> %d bytes) — a test wrote the real state root", canaryPath, len(before), len(after))
+		// Passing canary: retire the sandbox root (drain-aware, so an orphan
+		// still writing at m.Run's end is absorbed instead of leaking the
+		// dir forever — 115 milk-test-state-* dirs had accumulated in /tmp).
+		if err := drainRemoveAll(tmp, drainTimeout); err != nil {
+			return fmt.Errorf("test sandbox root: %w", err)
 		}
 		return nil
 	}

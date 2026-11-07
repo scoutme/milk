@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // withSandboxedConfigDirs isolates both the global config dir (~/.milk via
@@ -15,7 +16,7 @@ import (
 // (t.Setenv("HOME", ...) + os.Chdir into a temp dir).
 func withSandboxedConfigDirs(t *testing.T) (home, cwd string) {
 	t.Helper()
-	home = t.TempDir()
+	home = testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 
 	cwd = t.TempDir()

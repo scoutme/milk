@@ -11,10 +11,11 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func TestHandleSlashInputNewRefreshesSessionScopedState(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	oldSess, err := session.New("/repo", "")
 	if err != nil {
@@ -63,7 +64,7 @@ func TestHandleSlashInputNewRefreshesSessionScopedState(t *testing.T) {
 // exactly like /new — recognized as a leading command token (not inert
 // text) and replacing the active session with a fresh one.
 func TestHandleSlashInputClearAliasesNew(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	oldSess, err := session.New("/repo", "")
 	if err != nil {
@@ -100,7 +101,7 @@ func TestHandleSlashInputClearAliasesNew(t *testing.T) {
 // or /drop kept persisting under the *previous* session's ~/.milk/jobs file
 // and the new session's triage record never appeared.
 func TestHandleSlashInputNewRepointsBackgroundJobStateFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	oldSess, err := session.New("/repo", "")
 	if err != nil {

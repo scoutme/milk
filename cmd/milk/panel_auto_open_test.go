@@ -15,6 +15,7 @@ import (
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/tasks"
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -25,7 +26,7 @@ import (
 // for a panel that is logically open.
 func newTestModelForPanels(t *testing.T) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

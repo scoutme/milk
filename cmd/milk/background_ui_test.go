@@ -12,6 +12,7 @@ import (
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // TestUpdate_BackgroundJobDoneMsg_NotifiesToast verifies a completed job
@@ -26,7 +27,7 @@ import (
 // it used to reach only the model's next-turn prompt and could pass by
 // completely unseen if the model never reported it.
 func TestUpdate_BackgroundJobDoneMsg_NotifiesToast(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +109,7 @@ func TestRenderBackgroundJobDoneBlock_StructuredMeta(t *testing.T) {
 // truncation hint and the "take its output" question target: full uncapped
 // text for a known job, a not-found line otherwise.
 func TestHandleBgCmd_Show(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +150,7 @@ func TestHandleBgCmd_Show(t *testing.T) {
 // TestStatusBar_BackgroundAgentCount reflects the Manager's ActiveCount and
 // disappears once nothing is running.
 func TestStatusBar_BackgroundAgentCount(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestStatusBar_BackgroundAgentCount(t *testing.T) {
 // until the user happened to send another message. When idle and every job
 // has finished, backgroundBatchDoneMsg must dispatch a real follow-up turn.
 func TestMaybeAutoFollowup_IdleAndDone_DispatchesFollowupTurn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +214,7 @@ func TestMaybeAutoFollowup_IdleAndDone_DispatchesFollowupTurn(t *testing.T) {
 // the model is busy does not interrupt the in-flight turn, and instead
 // retries via handleAgentDone once that turn completes.
 func TestMaybeAutoFollowup_Busy_DefersUntilIdle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +255,7 @@ func TestMaybeAutoFollowup_Busy_DefersUntilIdle(t *testing.T) {
 // newer wave started before the follow-up fired, it waits for that wave's
 // own completion signal instead of firing early.
 func TestMaybeAutoFollowup_ActiveJobsRemain_DoesNotDispatch(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +289,7 @@ func TestMaybeAutoFollowup_ActiveJobsRemain_DoesNotDispatch(t *testing.T) {
 // and Ctrl+J (the universal fallback for Ctrl+Enter) spawns a background job
 // from whatever is currently in the textarea.
 func TestHandleBusyKey_CtrlJSpawnsBackgroundAgent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +353,7 @@ func TestHandleBusyKey_CtrlJSpawnsBackgroundAgent(t *testing.T) {
 // input for the next turn — it never spawns a background agent (the old
 // double-Enter trigger was too easy to fire accidentally).
 func TestHandleBusyKey_EnterDoesNotSpawn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +395,7 @@ func TestHandleBusyKey_EnterDoesNotSpawn(t *testing.T) {
 // TestHandleBusyKey_EmptyInputShowsInterruptHint verifies pressing Enter with
 // nothing typed falls back to the plain "interrupt" hint.
 func TestHandleBusyKey_EmptyInputShowsInterruptHint(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +417,7 @@ func TestHandleBusyKey_EmptyInputShowsInterruptHint(t *testing.T) {
 // other jobs (agent- or user-initiated) are still running — there is no
 // "wave" to wait for.
 func TestMaybeAutoFollowup_UserJob_FiresEvenIfOtherJobsStillRunning(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +456,7 @@ func teaKeyEnter() tea.KeyPressMsg {
 // same left-to-right order panels are joined in View(): memory, tasks,
 // background, workflow, project, git.
 func TestF3TogglesBackgroundPanel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -487,7 +488,7 @@ func TestF3TogglesBackgroundPanel(t *testing.T) {
 // F4 now maps to the workflow panel (last in View()'s join order), not
 // background.
 func TestF4TogglesWorkflowPanel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -513,7 +514,7 @@ func TestF4TogglesWorkflowPanel(t *testing.T) {
 // field F4 does — the shortcut and the slash command are two paths to the
 // same state.
 func TestPanelCommand_Background(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -530,7 +531,7 @@ func TestPanelCommand_Background(t *testing.T) {
 
 // TestBgCmd_List verifies /bg list renders the background-agents table.
 func TestBgCmd_List(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +553,7 @@ func TestBgCmd_List(t *testing.T) {
 
 // TestBgCmd_ListWithJobs verifies /bg list shows job ID, status, and label.
 func TestBgCmd_ListWithJobs(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -581,7 +582,7 @@ func TestBgCmd_ListWithJobs(t *testing.T) {
 
 // TestBgCmd_Stop verifies /bg stop cancels a running job.
 func TestBgCmd_Stop(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -612,7 +613,7 @@ func TestBgCmd_Stop(t *testing.T) {
 
 // TestBgCmd_StopUnknownID verifies /bg stop with an unknown ID reports the miss.
 func TestBgCmd_StopUnknownID(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)
@@ -630,7 +631,7 @@ func TestBgCmd_StopUnknownID(t *testing.T) {
 
 // TestBgCmd_Usage verifies /bg with an unknown subcommand shows usage.
 func TestBgCmd_Usage(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

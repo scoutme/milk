@@ -5,15 +5,19 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
-// overrideHome redirects the milk data dir to a temp directory for the test.
+// overrideHome redirects the milk data dir to a per-test sandbox home with
+// drain-aware cleanup (testutil.SandboxHome) — a late writer from another
+// test's machinery can no longer make this test's TempDir cleanup fail. The
+// env restores at test end via t.Setenv; the returned func stays a no-op so
+// the `defer restore()` call sites keep working unchanged.
 func overrideHome(t *testing.T) func() {
 	t.Helper()
-	tmp := t.TempDir()
-	orig := os.Getenv("HOME")
-	os.Setenv("HOME", tmp)
-	return func() { os.Setenv("HOME", orig) }
+	testutil.SandboxHome(t)
+	return func() {}
 }
 
 func TestNew_CreatesSessionAndIndex(t *testing.T) {
