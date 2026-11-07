@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // TestSaveWiring_GuardRefusalAndWizardForce pins #404's consent rule where
@@ -15,7 +16,7 @@ import (
 // writes and clears the guard. Isolated HOME: the guard is process-global
 // state and must not leak into tests sharing the suite sandbox.
 func TestSaveWiring_GuardRefusalAndWizardForce(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	config.ResetLoadFailedState()
 	t.Cleanup(config.ResetLoadFailedState)
 

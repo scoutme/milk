@@ -8,13 +8,14 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // newFoldDefaultModel mirrors newTestModelForPanels but seeds the config
 // field under test (issue #278).
 func newFoldDefaultModel(t *testing.T, foldDefault string) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

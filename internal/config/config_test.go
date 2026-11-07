@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/loop"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func TestActiveAgent_ByName(t *testing.T) {
@@ -1201,7 +1202,7 @@ func TestLoadFrom_InvalidJSON_WithBackup_Recovers(t *testing.T) {
 // to replace — never the new bytes (a backup of what you just wrote restores
 // nothing), and a first-ever save has no previous content to snapshot.
 func TestSave_SnapshotsPreviousContentToBackup(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	if err := Save(Config{Agent: "first"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1231,7 +1232,7 @@ func TestSave_SnapshotsPreviousContentToBackup(t *testing.T) {
 }
 
 func TestLoad_RecoversFromBackupEndToEnd(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	// Two effective saves: the second snapshots the first into .bak (#404).
 	if err := Save(Config{Agent: "good"}); err != nil {
 		t.Fatal(err)

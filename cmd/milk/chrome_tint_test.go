@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // A bar whose spans close with their own reset must not fall back to the
@@ -44,7 +46,7 @@ func TestTintChrome_LeavesTheSkinAlone(t *testing.T) {
 // Switching theme asks the terminal for its background again, so "off" after
 // the cream skin does not keep the skin's light verdict on a dark terminal.
 func TestThemeSwitch_RequestsBackgroundColor(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Setenv("USERPROFILE", t.TempDir())
 	oldTheme := th
 	t.Cleanup(func() { setTheme(oldTheme.name) })

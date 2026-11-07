@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func withTempMilkHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // windows
 	return home

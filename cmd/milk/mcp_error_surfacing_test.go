@@ -9,13 +9,14 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // TestRefreshMCPForRole_ErrorSurfacedToTranscript verifies that when
 // buildMCPToolSet fails during a mid-session MCP reconnect, the error appears
 // in the TUI transcript (not leaked to stderr above the TUI).
 func TestRefreshMCPForRole_ErrorSurfacedToTranscript(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

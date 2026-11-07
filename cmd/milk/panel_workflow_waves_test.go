@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/workflow"
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
@@ -79,7 +80,7 @@ func waitForPanel(mu *sync.Mutex, st *workflow.State, width int, ready func(pane
 // holding only the pass loop used not to be, and the panel then drew the whole
 // run as done and dropped the running items.
 func TestWorkflowPanel_ShowsRunningItemsOfLaterWave(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	reg, errs := workflow.LoadRegistry()
@@ -180,7 +181,7 @@ func TestDisplayStageLabel_LoopsUseTheirOwnNoun(t *testing.T) {
 // drawn as already done. Guards the shared snapshot-root rule across dev,
 // pair, swarm and team rather than one definition.
 func TestWorkflowPanel_BuiltinsShowRunInProgress(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	reg, errs := workflow.LoadRegistry()

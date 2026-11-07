@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -16,7 +17,7 @@ import (
 // whatever happens to be in the machine's real ~/.milk/workflows.
 func loadDevDefinition(t *testing.T) workflow.Definition {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 

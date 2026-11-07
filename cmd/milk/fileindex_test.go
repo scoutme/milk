@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // gitRepo makes an isolated git work tree (no user or global git config).
@@ -17,7 +19,7 @@ func gitRepo(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	dir := t.TempDir()

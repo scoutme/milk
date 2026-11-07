@@ -11,6 +11,7 @@ import (
 
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/workflow"
 	"github.com/scoutme/milk/internal/workflow/interp"
 )
@@ -346,7 +347,7 @@ func TestHandleWorkflowCmd_DevLaunchesThroughGenericPath(t *testing.T) {
 // ~/.milk/workflows.
 func sandboxMilkHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 }

@@ -9,12 +9,13 @@ import (
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // busyQueueModel returns a busy model with the queue knob set as asked.
 func busyQueueModel(t *testing.T, queueWhileBusy bool) model {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	sess, err := session.New("/repo", "")
 	if err != nil {
 		t.Fatal(err)

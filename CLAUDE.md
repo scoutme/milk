@@ -74,7 +74,7 @@ internal/agent/smolagent/     # subprocess provider (wraps subprocess agent)
 internal/escalation/          # context builder (local transcript → escalation agent prompt)
 internal/instructions/        # loads the target repo's AGENTS.md/CLAUDE.md into agent system/static context
 internal/textbudget/          # shared head+tail truncation helper for bounding large text before prompt hand-off
-internal/testutil/            # TestMain state-root sandbox + real-config canary for test binaries (#404 hygiene)
+internal/testutil/            # TestMain state-root sandbox + real-config canary + per-test SandboxHome with drain-aware cleanup for late writers (#404 hygiene)
 internal/sgr/                 # SGR state tracker + row primitives (SelfContain, WithBackground, LastBackground, Highlight) — ADR-0072
 internal/vp/                  # forked bubbles viewport (MIT, ADR-0088): deferred longest-line measurement + SetLines — the per-keystroke render path
 internal/livebuf/             # thread-safe byte-capped text buffer for live background-job/workflow output (ADR-0047)

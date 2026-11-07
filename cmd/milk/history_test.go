@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // --- appendDeduped ---
@@ -168,10 +170,9 @@ func TestHistoryRoundTrip_CapsAtMax(t *testing.T) {
 }
 
 func TestSessionHistoryPath_CreatesDirs(t *testing.T) {
-	// Temporarily override HOME so sessionHistoryPath creates under t.TempDir()
-	orig := os.Getenv("HOME")
-	defer os.Setenv("HOME", orig)
-	os.Setenv("HOME", t.TempDir())
+	// Sandbox HOME: drain-aware cleanup (a late writer from another test's
+	// machinery must not break this test's temp-dir removal).
+	testutil.SandboxHome(t)
 
 	path, err := sessionHistoryPath("test-session-id")
 	if err != nil {

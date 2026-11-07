@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func TestPrettyHandler_ColoredStructuredLine(t *testing.T) {
@@ -31,7 +32,7 @@ func TestPrettyHandler_ColoredStructuredLine(t *testing.T) {
 }
 
 func TestInitMilkLogger_AcceptsPrettyFormat(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	t.Setenv("USERPROFILE", t.TempDir())
 	dir := t.TempDir()
 	shutdown, err := initMilkLogger(config.OtelConfig{LogFormat: LogFormatPretty, LogLevel: "INFO"}, dir)

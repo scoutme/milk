@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // withTempMilkHome points config.Dir() (and thus storeDir()) at a temp dir
 // for the duration of the test by overriding $HOME.
 func withTempMilkHome(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // windows
 }

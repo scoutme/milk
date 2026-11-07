@@ -16,6 +16,7 @@ import (
 
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
@@ -23,7 +24,7 @@ import (
 // must never touch the developer's real ~/.milk/sessions).
 func scratchSessionStore(t *testing.T) {
 	t.Helper()
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	if err := os.MkdirAll(filepath.Join(home, ".milk"), 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}

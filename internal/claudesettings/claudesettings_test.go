@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 func newTestStore(t *testing.T) (*Store, string) {
@@ -120,7 +122,7 @@ func writeUserSettings(t *testing.T, homeDir, content string) {
 }
 
 func TestAWSAuthRefreshCommand_Present(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	writeUserSettings(t, home, `{"awsAuthRefresh":"aws-credential-helper --profile default"}`)
 
@@ -131,7 +133,7 @@ func TestAWSAuthRefreshCommand_Present(t *testing.T) {
 }
 
 func TestAWSAuthRefreshCommand_Absent(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	writeUserSettings(t, home, `{"someOtherKey":"value"}`)
 
@@ -142,7 +144,7 @@ func TestAWSAuthRefreshCommand_Absent(t *testing.T) {
 }
 
 func TestAWSAuthRefreshCommand_NoFile(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.SandboxHome(t)
 	t.Setenv("HOME", home)
 	// No settings.json written — directory doesn't even have .claude/
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/session"
+	"github.com/scoutme/milk/internal/testutil"
 )
 
 // saveTestSession persists a session with a caller-chosen ID (session.New mints
@@ -25,7 +26,7 @@ func saveTestSession(t *testing.T, cwd, id, name string, turns int, lastUsed tim
 }
 
 func TestOpenSessionNewNames(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	sess, err := openSession("/repo", true, "feature-x")
 	if err != nil {
@@ -45,7 +46,7 @@ func TestOpenSessionNewNames(t *testing.T) {
 }
 
 func TestOpenSessionRefTargetsStored(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	saveTestSession(t, "/repo", "abcd-1111", "older", 2, time.Now().Add(-time.Hour))
 	want := saveTestSession(t, "/repo", "abef-2222", "newer", 0, time.Now())
 
@@ -61,7 +62,7 @@ func TestOpenSessionRefTargetsStored(t *testing.T) {
 }
 
 func TestOpenSessionUnknownRefIsAnError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	saveTestSession(t, "/repo", "abcd-1111", "", 0, time.Now())
 
 	_, err := openSession("/repo", false, "ghost")
@@ -74,7 +75,7 @@ func TestOpenSessionUnknownRefIsAnError(t *testing.T) {
 }
 
 func TestOpenSessionBareResumesMostRecent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	saveTestSession(t, "/repo", "old-1111", "", 0, time.Now().Add(-time.Hour))
 	want := saveTestSession(t, "/repo", "new-2222", "", 0, time.Now())
 
@@ -97,7 +98,7 @@ func TestOpenSessionBareResumesMostRecent(t *testing.T) {
 }
 
 func TestOpSessionNewResumeDrop(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 
 	created := opSessionNew("/repo", "alpha")
 	if created.err != nil {
@@ -147,7 +148,7 @@ func TestOpSessionNewResumeDrop(t *testing.T) {
 }
 
 func TestSessionListTextMarksCurrent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	saveTestSession(t, "/repo", "abcd-1111", "solo", 3, time.Now())
 	saveTestSession(t, "/other", "zzzz-9999", "", 0, time.Now())
 
@@ -183,7 +184,7 @@ func TestRenderOpResultHints(t *testing.T) {
 }
 
 func TestSessionListTextEmptyCWDGroup(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SandboxHome(t)
 	saveTestSession(t, "/other", "zzzz-9999", "", 0, time.Now())
 
 	// session.List returns the queried cwd as an empty group — the listing
