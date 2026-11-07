@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/agent/local"
+	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
 
@@ -374,3 +380,79 @@ func TestToolHeader_TruncatesToOneRow(t *testing.T) {
 
 // ansiLen is the cell width of an ANSI-stripped string for these asserts.
 func ansiLen(s string) int { return len([]rune(ansi.Strip(s))) }
+
+// TestToolBlockView_RealProductionChain drives a REAL turn through the REAL
+// writer chain a dispatched TUI turn builds: runTurn's touchWriter over the
+// sendWriter, dispatch's activityWriter over that, and the tags writers
+// local.Run adds on top when tag callbacks are set (always for a dispatched
+// turn — WithTagCallbacks stores a non-nil onPercept closure unconditionally).
+// The gate must see through ALL of it. The original isMainTurnOut only
+// unwrapped touchWriter/sendWriter, so it returned false for every
+// local-provider turn: no toolCallStartMsg was ever sent, NO fold container
+// was ever created, and tools kept their streamed » hint — the live bug
+// behind "tools are not expandable with mouse nor shortcut nor command":
+// with zero blocks in m.toolBlocks, every expansion surface had nothing to
+// act on. Hand-built sendWriter/touchWriter gate tests passed because they
+// never reproduced this chain (fixture-reality gap — same class as the
+// showcase sleep bug).
+func TestToolBlockView_RealProductionChain(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&requests, 1) == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"fc1","function":{"name":"grep","arguments":"{\"pattern\":\"needle\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		} else {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"found"},"finish_reason":"stop"}]}`+"\n\n")
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var got []tea.Msg
+	capture := func(msg tea.Msg) { got = append(got, msg) }
+
+	// The chain runTurn + dispatch build before Run even starts (sendWriter →
+	// touchWriter → activityWriter) — production constructs it the same way.
+	aw := newActivityWriter(&touchWriter{w: &sendWriter{send: capture}, touch: func() {}})
+
+	agent := local.New(srv.URL, "test-model").
+		WithMemConfig(local.MemConfig{MaxToolIterations: 5}).
+		WithTagCallbacks("nonce-real", "primary", "escalation",
+			func(string) {}, func(string, string) {}).
+		WithOnToolCallView(mainToolCallView(capture)).
+		WithOnToolCallDone(mainToolCallDone(capture))
+
+	// Run adds the tags writers on top (tagNonce set + both callbacks
+	// non-nil): the outermost type reaching executeToolCalls is
+	// *tags.PerceptWriter — the exact type the old gate hit first and
+	// bailed on.
+	if _, err := agent.Run(context.Background(), nil, "find it", aw, &session.Session{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var start toolCallStartMsg
+	var end toolCallEndMsg
+	var sawStart bool
+	for _, m := range got {
+		switch v := m.(type) {
+		case toolCallStartMsg:
+			start, sawStart = v, true
+		case toolCallEndMsg:
+			end = v
+		case chunkMsg:
+			if strings.Contains(v.text, "» grep") {
+				t.Errorf("streamed hint leaked despite takeover: %q", v.text)
+			}
+		}
+	}
+	if !sawStart || start.id != "fc1" || start.name != "grep" {
+		t.Fatalf("gate never passed the production chain — no fold container would open: start=%#v (got %d msgs)", start, len(got))
+	}
+	if !strings.Contains(start.argsJSON, "needle") || start.hintText == "" {
+		t.Errorf("start message carries incomplete payload: %#v", start)
+	}
+	if end.id != "fc1" || end.isError {
+		t.Errorf("done message = %#v, want id=fc1 non-error", end)
+	}
+}

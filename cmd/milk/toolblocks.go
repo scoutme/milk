@@ -13,6 +13,7 @@ import (
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/livebuf"
+	"github.com/scoutme/milk/internal/tags"
 )
 
 // Tool-call fold containers — the tool-side sibling of ADR-0067's think
@@ -379,17 +380,30 @@ func (m *model) collapseToolBlocksBefore(n int) {
 	}
 }
 
-// isMainTurnOut reports whether the agent's run writer is the main turn's
-// transcript stream (runTurn's touchWriter wrapping the sendWriter) — the
-// ownership test behind out-gated view callbacks. Job live buffers, workflow
-// buffers and any other writer return false and keep their streamed hints.
+// isMainTurnOut reports whether the agent's run writer ultimately delivers to
+// the main turn's program send — the ownership test behind out-gated view
+// callbacks. The chain is deeper than its terminals: runTurn wraps sendWriter
+// in touchWriter (idle watchdog), dispatch wraps that in activityWriter
+// (spinner), and local.Run wraps that in the tags writers (need/percept
+// interception) whenever tag callbacks are set — which they always are for a
+// dispatched turn. Every transparent wrapper in that chain must unwrap here;
+// anything else (job live buffers, workflow buffers, plain writers) returns
+// false and keeps its streamed hints. (The original gate knew only
+// touchWriter/sendWriter, so it returned false for EVERY real turn and no
+// fold container was ever created — live symptom: tools kept their » prefix.)
 func isMainTurnOut(out io.Writer) bool {
 	for {
 		switch w := out.(type) {
-		case *touchWriter:
-			out = w.w
 		case *sendWriter:
 			return true
+		case *touchWriter:
+			out = w.w
+		case *activityWriter:
+			out = w.w
+		case *tags.TagWriter:
+			out = w.W
+		case *tags.PerceptWriter:
+			out = w.W
 		default:
 			return false
 		}
