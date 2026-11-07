@@ -32,12 +32,20 @@ a sibling of `thinkBlock` spliced by the same display pass:
   model saw it), not an uncapped re-read.
 - **Ownership — out-gated callbacks, not a flag** (`onToolCallView` /
   `onToolCallDone`, `internal/agent/local`): the callback receives the run's
-  `io.Writer` and only the main turn's stream (`isMainTurnOut`: `touchWriter`
-  → `sendWriter`) yields a message; a `true` return suppresses that call's
-  streamed hint + diff, `false` leaves the stream byte-identical. Jobs,
-  workflow buffers and agent-as-tool copies (built from `da.agentWiring`,
-  never given the callbacks) keep their `»` lines exactly as before — the
-  same spawn-registers-interest shape as ADR-0100, minus any model-set flag.
+  `io.Writer` and only the main turn's stream (`isMainTurnOut` unwraps the
+  whole chain dispatch actually builds — `touchWriter` → `activityWriter` →
+  the tags writers → `sendWriter`) yields a message; a `true` return
+  suppresses that call's streamed hint + diff, `false` leaves the stream
+  byte-identical. Jobs, workflow buffers and agent-as-tool copies (built from
+  `da.agentWiring`, never given the callbacks) keep their `»` lines exactly as
+  before — the same spawn-registers-interest shape as ADR-0100, minus any
+  model-set flag. The gate must unwrap every transparent wrapper or it fails
+  closed on *real* turns while passing hand-built fixtures — the original
+  two-type version returned false for every dispatched turn (no block ever
+  created, tools kept `»`) because dispatch wraps in `activityWriter` and
+  `local.Run` in the tags writers; pinned by
+  `TestToolBlockView_RealProductionChain`, which drives a real turn through
+  the real chain.
 - **The container replaces the hint on main turns**: `toolCallStartMsg` opens
   the block where the hint used to land, and the inline file diff renders
   right after the block — the position it had behind the hint. The message
