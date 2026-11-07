@@ -87,6 +87,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 	if cmd == cmdThink {
 		return m.handleThinkCmd(strings.TrimSpace(rest))
 	}
+	if cmd == cmdTools {
+		return m.handleToolsCmd(strings.TrimSpace(rest))
+	}
 	if cmd == cmdInterrupt {
 		return m.handleInterruptCmd()
 	}
@@ -585,6 +588,36 @@ func (m model) handleThinkCmd(arg string) (model, tea.Cmd) {
 	return m, nil
 }
 
+// handleToolsCmd handles `/tools …` — the tool-call fold containers
+// (toolblocks.go): counts and fold state with no arg, expand|collapse
+// pinning every block, view swapping the main area to a tool-only stream of
+// full inputs and outputs. The tool-side mirror of /think — display-only,
+// busy-safe; state changes are notification toasts like /think (issue #162).
+func (m model) handleToolsCmd(arg string) (model, tea.Cmd) {
+	switch arg {
+	case "expand":
+		m.setAllToolBlocks(true)
+		m.notify("tools: all blocks expanded", "/tools collapse")
+	case "collapse":
+		m.setAllToolBlocks(false)
+		m.notify("tools: all blocks folded", "/tools expand")
+	case "view":
+		return m.startToolView()
+	case "":
+		expanded := 0
+		for i := range m.toolBlocks {
+			if m.toolBlocks[i].expanded {
+				expanded++
+			}
+		}
+		m.appendTranscript(fmt.Sprintf("%s tools: %d tool block(s) · %d expanded, %d folded  (click a ▸ header or use /tools expand|collapse|view)\n",
+			milkTag(), len(m.toolBlocks), expanded, len(m.toolBlocks)-expanded))
+	default:
+		m.appendTranscript(milkTag() + " usage: /tools [expand|collapse|view]\n")
+	}
+	return m, nil
+}
+
 // handleTipsCmd handles `/tips …` — the idle tip line below the input
 // (ADR-0061): visibility (on/off, persisted like /colorize) and tip
 // browsing (next, prev, pick, search). With no arg: shows the current
@@ -726,16 +759,19 @@ func (m model) handleSetupCmd(arg string) (tea.Model, tea.Cmd) {
 		m.ta.Reset()
 		return m, nil
 	case "telegram on":
-		m = m.setTelegramEnabled(true)
+		m = m.setTelegramLevel("on")
+		return m, nil
+	case "telegram lite":
+		m = m.setTelegramLevel("lite")
 		return m, nil
 	case "telegram off":
-		m = m.setTelegramEnabled(false)
+		m = m.setTelegramLevel("off")
 		return m, nil
 	case "telegram status":
 		m.appendTranscript(telegramStatusText(m.st.cfg) + "\n")
 		return m, nil
 	default:
-		m.appendTranscript(milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram off | /setup telegram status\n")
+		m.appendTranscript(milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram lite | /setup telegram off | /setup telegram status\n")
 		return m, nil
 	}
 }
@@ -869,10 +905,11 @@ func resolveTelegramChatID(token string) (int64, error) {
 	return 0, fmt.Errorf("no messages found — send any message to the bot and press Enter again")
 }
 
-// setTelegramEnabled enables or disables Telegram oversight without touching
-// the stored credentials. Saves config and reinitialises the notifier.
-func (m model) setTelegramEnabled(on bool) model {
-	if err := setTelegramEnabledCfg(&m.st.cfg, on, activeConfigDir(m.st)); err != nil {
+// setTelegramLevel sets the Telegram oversight enable level (on/lite/off)
+// without touching the stored credentials. Saves config and reinitialises
+// the notifier.
+func (m model) setTelegramLevel(level string) model {
+	if err := setTelegramLevelCfg(&m.st.cfg, level, activeConfigDir(m.st)); err != nil {
 		m.appendTranscript(milkTag() + " " + err.Error() + "\n")
 		return m
 	}
@@ -884,9 +921,12 @@ func (m model) setTelegramEnabled(on bool) model {
 			func(err error) { p.Send(oversightFailedMsg{n: n, err: err}) },
 		)
 	}
-	if on {
+	switch level {
+	case "on":
 		m.appendTranscript(milkTag() + " Telegram oversight enabled\n")
-	} else {
+	case "lite":
+		m.appendTranscript(milkTag() + " Telegram oversight enabled (lite — tool notifications off)\n")
+	default:
 		m.appendTranscript(milkTag() + " Telegram oversight disabled\n")
 	}
 	return m

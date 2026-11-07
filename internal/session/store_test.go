@@ -185,6 +185,7 @@ func TestLoad_TimeBasedNeedExpiry(t *testing.T) {
 	s.CurrentNeed = "deploy the app"
 	s.CurrentNeedSetAt = 1
 	s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour) // 2 days ago
+	s.LastUsed = time.Now().Add(-2 * time.Hour)              // far restart: past NeedRestartGrace, so the rules run
 	if err := Save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +213,7 @@ func TestLoad_TimeBasedNeedExpiry_Disabled(t *testing.T) {
 	s.CurrentNeed = "deploy the app"
 	s.CurrentNeedSetAt = 1
 	s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour)
+	s.LastUsed = time.Now().Add(-2 * time.Hour) // far restart: pin the disabled-expiry path, not the resume gate
 	if err := Save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -267,4 +269,126 @@ func TestLookup_ByIDPrefix(t *testing.T) {
 		t.Error("Lookup(\"\") = nil error, want error")
 	}
 	_ = b
+}
+
+// TestLoad_ResumeCloseToActivity_KeepsNeed: a load within NeedRestartGrace of
+// the session's last activity is a RESUME of a live session — need state
+// loads verbatim even when BOTH housekeeping rules are armed (the incident: a
+// quick rebuild+restart mid-task dropped the goal in flight). No staleness
+// update either: CurrentNeedSetAt survives.
+func TestLoad_ResumeCloseToActivity_KeepsNeed(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	s, _ := New("/proj/resume", "test")
+	// Armed for the fulfilled rule: an escalation turn exists after the
+	// need's history position (SetAt=1 → pos 0, the escalation is at 1).
+	s.History = []Turn{
+		{Role: RoleUser, Content: "hi"},
+		{Role: RoleAssistant, Agent: AgentEscalation, Content: "handled"},
+	}
+	// Armed for the expiry rule too: the need is 48h old.
+	s.CurrentNeed = "deploy the app"
+	s.CurrentNeedSetAt = 1
+	s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour)
+	s.LastUsed = time.Now() // restarted right after last activity
+	if err := Save(s); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CurrentNeed != "deploy the app" {
+		t.Errorf("resume close to last activity must keep the need, got %q", loaded.CurrentNeed)
+	}
+	if loaded.CurrentNeedSetAt != 1 {
+		t.Errorf("staleness must not update on resume: CurrentNeedSetAt = %d, want 1", loaded.CurrentNeedSetAt)
+	}
+}
+
+// TestLoad_FarRestart_FulfilledNeedClears: past the grace window the
+// fulfilled rule keeps its old behavior — a need predating the session's
+// last escalation turn is cleared (its 24h expiry is still far away, so the
+// clear can only come from the fulfilled rule).
+func TestLoad_FarRestart_FulfilledNeedClears(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	s, _ := New("/proj/fulfilled", "test")
+	s.History = []Turn{
+		{Role: RoleUser, Content: "hi"},
+		{Role: RoleAssistant, Agent: AgentEscalation, Content: "handled"},
+	}
+	s.CurrentNeed = "deploy the app"
+	s.CurrentNeedSetAt = 1
+	s.CurrentNeedUpdatedAt = time.Now().Add(-time.Hour) // fresh: expiry cannot fire
+	s.LastUsed = time.Now().Add(-2 * time.Hour)         // far restart: past NeedRestartGrace
+	if err := Save(s); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CurrentNeed != "" {
+		t.Errorf("far restart with the need fulfilled must clear it, got %q", loaded.CurrentNeed)
+	}
+}
+
+// TestLoad_LegacyFile_MTimeStandsIn: a file written before LastUsed existed
+// (zero value) uses its own mtime as the activity clock — fresh file = resume
+// (rules skipped), aged file = far restart (rules run).
+func TestLoad_LegacyFile_MTimeStandsIn(t *testing.T) {
+	restore := overrideHome(t)
+	defer restore()
+
+	legacy := func(name string) *Session {
+		s, _ := New("/proj/legacy", name)
+		s.CurrentNeed = "deploy the app"
+		s.CurrentNeedSetAt = 1
+		s.CurrentNeedUpdatedAt = time.Now().Add(-48 * time.Hour) // armed for expiry
+		s.LastUsed = time.Time{}                                 // pre-field file
+		if err := Save(s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Fresh file → mtime is recent → resume semantics → kept.
+	fresh := legacy("fresh")
+	if loaded, err := Load(fresh.ID); err != nil {
+		t.Fatal(err)
+	} else if loaded.CurrentNeed != "deploy the app" {
+		t.Errorf("legacy file with fresh mtime must resume (need kept), got %q", loaded.CurrentNeed)
+	}
+
+	// Aged file → mtime stands in as old activity → rules run → cleared.
+	aged := legacy("aged")
+	path, err := sessionPath(aged.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := Load(aged.ID); err != nil {
+		t.Fatal(err)
+	} else if loaded.CurrentNeed != "" {
+		t.Errorf("legacy file with aged mtime must clear (expiry ran), got %q", loaded.CurrentNeed)
+	}
+}
+
+// TestRecordNeed_StampsActivity: a need write refreshes the activity clock
+// the Load gate reads — /need between turns keeps a session "recently used".
+func TestRecordNeed_StampsActivity(t *testing.T) {
+	s, _ := New("/proj/stamp", "test")
+	s.LastUsed = time.Now().Add(-time.Hour)
+	s.RecordNeed("deploy the app")
+	if time.Since(s.LastUsed) > time.Minute {
+		t.Errorf("RecordNeed must stamp LastUsed, got %v ago", time.Since(s.LastUsed))
+	}
 }

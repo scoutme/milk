@@ -64,7 +64,7 @@ func TestInteractiveHelp_Completability(t *testing.T) {
 // single-space separator regression removed.
 func TestSetupAndExportVariants_Present(t *testing.T) {
 	want := map[string][]string{
-		"/setup":  {"/setup telegram", "/setup telegram on", "/setup telegram off", "/setup telegram status"},
+		"/setup":  {"/setup telegram", "/setup telegram on", "/setup telegram lite", "/setup telegram off", "/setup telegram status"},
 		"/export": {"/export", "/export json", "/export <path>", "/export session <id>", "/export --no-reasoning"},
 	}
 	for cmd, sigs := range want {

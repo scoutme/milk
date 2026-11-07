@@ -77,7 +77,7 @@ func (m *model) retractStreamed(from, to string) {
 	switch {
 	case idx >= 0:
 		m.transcript.WriteString(s[:idx] + to + s[idx+len(from):])
-		m.adjustThinkAnchors(idx, len(from), len(to))
+		m.adjustBlockAnchors(idx, len(from), len(to))
 	default:
 		// The fallback note replaces the transcript's tail state — end any
 		// streaming block first so the note lands at the end, not above a
@@ -127,6 +127,7 @@ func (m *model) appendThinkingStreamed(text string) {
 	b := thinkBlock{
 		buf:    &strings.Builder{},
 		anchor: m.transcript.Len(),
+		seq:    m.takeBlockSeq(),
 		// Keep the folding status of the previous block (session state, not
 		// the previous block's row — the turn-boundary tidy folds older blocks
 		// without changing it). userSet matches so a block created in
@@ -493,6 +494,10 @@ func (m *model) reseedTranscriptFromHistory() {
 	m.transcript.Reset()
 	m.thinkBlocks = nil
 	m.thinkBlocksTurnStart = 0
+	// Fold containers are a session view: a switch drops the tool blocks
+	// with the reasoning ones (their anchors point into the old transcript).
+	m.toolBlocks = nil
+	m.toolFoldOpen = false
 	// The starting fold status, re-seeded from config (issue #278): a
 	// switch restores the configured default, not a hardcoded folded —
 	// per-session actions still win for the rest of this session.

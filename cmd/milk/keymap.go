@@ -53,7 +53,7 @@ func newKeyMap() keyMap {
 		tipNext:       key.NewBinding(key.WithKeys("alt+down"), key.WithHelp("alt+down", "next tip")),
 		dismissToasts: key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "dismiss notifications")),
 		palette:       key.NewBinding(key.WithKeys(paletteOpenKey), key.WithHelp(paletteOpenKey, "command palette")),
-		thinkToggle:   key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "fold or unfold the latest reasoning")),
+		thinkToggle:   key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "fold or unfold the latest reasoning (twice: fold all)")),
 		searchBack:    key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "search input history")),
 		searchForward: key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "search history forward")),
 		undo:          key.NewBinding(key.WithKeys("ctrl+z"), key.WithHelp("ctrl+z", "undo")),

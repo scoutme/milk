@@ -32,13 +32,15 @@ func acpSetup(as *acpSession, rest string) (string, string) {
 	case "telegram":
 		return as.startTelegramWizard(), ""
 	case "telegram on":
-		return as.telegramSetEnabled(true), ""
+		return as.telegramSetLevel("on"), ""
+	case "telegram lite":
+		return as.telegramSetLevel("lite"), ""
 	case "telegram off":
-		return as.telegramSetEnabled(false), ""
+		return as.telegramSetLevel("off"), ""
 	case "telegram status":
 		return telegramStatusText(as.oversightConfig()), ""
 	}
-	return milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram off | /setup telegram status", ""
+	return milkTag() + " usage: /setup telegram | /setup telegram on | /setup telegram lite | /setup telegram off | /setup telegram status", ""
 }
 
 // oversightConfig returns the freshest config to read or mutate for
@@ -53,17 +55,21 @@ func (as *acpSession) oversightConfig() config.Config {
 	return as.st.cfg
 }
 
-// telegramSetEnabled flips the backend on/off: save, publish to every live
-// session, and rebuild the process notifier (which pings and announces when
-// enabling — newNotifier's startup message doubles as the test one).
-func (as *acpSession) telegramSetEnabled(on bool) string {
+// telegramSetLevel sets the enable level (on/lite/off): save, publish to
+// every live session, and rebuild the process notifier (which pings and
+// announces when enabling — newNotifier's startup message doubles as the
+// test one).
+func (as *acpSession) telegramSetLevel(level string) string {
 	cfg := as.oversightConfig()
-	if err := setTelegramEnabledCfg(&cfg, on, activeConfigDir(as.st)); err != nil {
+	if err := setTelegramLevelCfg(&cfg, level, activeConfigDir(as.st)); err != nil {
 		return milkTag() + " " + err.Error()
 	}
 	as.applyOversight(cfg)
-	if on {
+	switch level {
+	case "on":
 		return milkTag() + " Telegram oversight enabled"
+	case "lite":
+		return milkTag() + " Telegram oversight enabled (lite — tool notifications off)"
 	}
 	return milkTag() + " Telegram oversight disabled"
 }

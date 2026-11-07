@@ -71,7 +71,7 @@ func TestACPSetup_StatusUsageAndHelp(t *testing.T) {
 	if !strings.Contains(chunks[0], "Telegram oversight: off") || !strings.Contains(chunks[0], "not configured") {
 		t.Errorf("status = %q, want the off state and the not-configured credentials line", chunks[0])
 	}
-	if !strings.Contains(chunks[1], "usage: /setup telegram | /setup telegram on | /setup telegram off | /setup telegram status") {
+	if !strings.Contains(chunks[1], "usage: /setup telegram | /setup telegram on | /setup telegram lite | /setup telegram off | /setup telegram status") {
 		t.Errorf("bogus subcommand = %q, want the full usage line", chunks[1])
 	}
 	if !strings.Contains(chunks[2], "/setup telegram") || !strings.Contains(chunks[2], "Commands available over ACP") {

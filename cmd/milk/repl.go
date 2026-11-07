@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -412,6 +413,29 @@ type taskStoreChangedMsg struct{}
 // toolUseMsg carries the name of a tool Claude just started calling.
 type toolUseMsg struct{ name string }
 
+// toolCallStartMsg offers a main-turn tool call to the transcript as a fold
+// container (toolblocks.go): the untruncated argument summary, the raw
+// argument JSON, the inline file diff (rendered after the block — it used to
+// stream right after the hint), and hintText — the exact bytes a non-main
+// buffer (the workflow live view, via workflowDisplaySend) forwards instead.
+// Produced only by the out-gated onToolCallView callback: jobs and other
+// buffers keep their streamed `»` hints and never send this.
+type toolCallStartMsg struct {
+	id, name, summary string
+	argsJSON          string
+	diff              string
+	hintText          string
+}
+
+// toolCallEndMsg lands a tool outcome on its open block. Unknown ids are
+// ignored (completeToolBlock): a stale or duplicated id must not misfire,
+// and job outcomes can never reach here (same out gate at the source).
+type toolCallEndMsg struct {
+	id      string
+	result  string
+	isError bool
+}
+
 // credRefreshReadyMsg is sent when a background credential refresh completes.
 // label identifies the provider (e.g. "AWS", "token_cmd"). err is non-nil on
 // failure; creds carries new AWS credentials when applicable (nil for token_cmd).
@@ -754,6 +778,26 @@ type model struct {
 	// collapses previous turns' blocks does not change it — and does not
 	// run while it is open (/think expand defines the current default).
 	thinkFoldOpen bool
+	// toolBlocks are this session's tool-call fold containers (see
+	// toolblocks.go) — the tool-side sibling of thinkBlocks, spliced by the
+	// same display pass. Created only for main-turn runs (the out-gated
+	// onToolCallView callback), folded by default, closed at turn end.
+	toolBlocks []toolBlock
+	// toolFoldOpen is the tool blocks' session fold status for the
+	// turn-boundary tidy — no config knob: starts folded, set only by
+	// /tools expand|collapse (mirror of thinkFoldOpen minus the seeding).
+	toolFoldOpen bool
+	// blockSeq numbers BOTH block families' creation for the render tie
+	// break (anchors can coincide — see blocksForRender). Monotonic for the
+	// model's lifetime; it only orders, so it is never reset.
+	blockSeq int
+	// lastCtrlTPress stamps every Ctrl+T press for the fold-all
+	// double-press chord (handleCtrlT): two presses within
+	// ctrlTChordWindow fold every fold container on screen. Every leg
+	// stamps — chords included — so held-key auto-repeat settles into
+	// idempotent fold-alls instead of a toggle cascade, and an aged stamp
+	// is a fresh single toggle.
+	lastCtrlTPress time.Time
 
 	// showTips toggles the idle tip line below the input (ADR-0061, /tips).
 	// Defaults on (config show_tips); the line's row is reserved while it is
@@ -1875,6 +1919,9 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		indexFor(m.st.cwd).invalidate()
 	}
 	m.closeOpenThinkBlock()
+	// A tool call still pending at turn end (cancel, interruption, provider
+	// error) closes without an outcome — args-only body stays truthful.
+	m.closeOpenToolBlock()
 	m.busy = false
 	m.activeToolUse = ""
 	m.cancelTurn = nil
@@ -2205,6 +2252,8 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					// selection over reasoning text is untouched.
 					if idx := m.thinkBlockAtLine(contentLine); idx >= 0 {
 						m.toggleThinkBlock(idx)
+					} else if idx := m.toolBlockAtLine(contentLine); idx >= 0 {
+						m.toggleToolBlock(idx)
 					}
 					m.clearSelection()
 					m.setViewportContent()
@@ -2762,6 +2811,24 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolUseMsg:
 		m.activeToolUse = msg.name
+		return m, nil
+
+	case toolCallStartMsg:
+		// A tool call is regular content's boundary: the streamed hint line
+		// used to close an open reasoning block on arrival — the block open
+		// takes over that role, then the file diff lands after it (it used
+		// to stream right behind the hint). activeToolUse mirrors the
+		// status-bar hint the CLI path already sets via toolUseMsg.
+		m.closeOpenThinkBlock()
+		m.activeToolUse = msg.name
+		m.openToolBlock(msg)
+		if msg.diff != "" {
+			m.appendTranscript(msg.diff)
+		}
+		return m, nil
+
+	case toolCallEndMsg:
+		m.completeToolBlock(msg.id, msg.result, msg.isError)
 		return m, nil
 
 	case clipboardAttachMsg:
@@ -3877,7 +3944,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleTabKey(dir), nil
 	case "ctrl+t":
-		return m.toggleLastThinkBlock(), nil
+		return m.handleCtrlT(), nil
 	case "pgup", "ctrl+u":
 		m.vp.HalfPageUp()
 		return m, nil
@@ -4466,11 +4533,15 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 	m.currentTurnInputChars = 0
 	m.currentTurnThinking.Reset()
 	m.closeOpenThinkBlock()
+	m.closeOpenToolBlock()
 	// Turn-boundary tidy: the new turn collapses the previous turns' blocks —
 	// only while the fold status is folded (/think expand defines the current
 	// default and opts out). Display-only — thinkFoldOpen is untouched.
 	m.collapseThinkBlocksBefore(len(m.thinkBlocks))
 	m.thinkBlocksTurnStart = len(m.thinkBlocks)
+	// Tool blocks take the same tidy, gated on their own fold status
+	// (/tools expand defines it and opts out) — display-only.
+	m.collapseToolBlocksBefore(len(m.toolBlocks))
 	m.loopInterrupt = false
 	m.loopInterruptLabel = ""
 	m.loopWarning = ""
@@ -4597,24 +4668,32 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 					return
 				}
 				var hint string
-				summary := truncateToolSummary(name, cliToolArgSummary(input), termWidth)
-				if summary != "" {
+				fullSummary := cliToolArgSummary(input)
+				if summary := truncateToolSummary(name, fullSummary, termWidth); summary != "" {
 					hint = "\n" + dimWrap("» "+name+": "+summary) + "\n"
 				} else {
 					hint = "\n" + dimWrap("» "+name) + "\n"
 				}
 				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
-					st.notifier.NotifyToolUse(context.Background(), name, cliToolArgSummary(input))
+					st.notifier.NotifyToolUse(context.Background(), name, fullSummary)
 				}
-				if d := cliToolDiff(name, input); d != "" {
-					hint += d
-				}
-				send(chunkMsg{text: hint})
+				d := cliToolDiff(name, input)
+				// On a main turn the hint no longer streams: the fold
+				// container takes its place, with the diff rendered right
+				// after the block (the position it had behind the hint).
+				// hintText still carries the old line+diff bytes — it is what
+				// workflowDisplaySend forwards to a workflow's live view.
+				aj, _ := json.Marshal(input)
+				send(toolCallStartMsg{id: id, name: name, summary: fullSummary,
+					argsJSON: string(aj), diff: d, hintText: hint + d})
 			}).
 			WithOnToolResult(func(id, name, result string, isError bool) {
 				if st.cfg.RemoteOversight.NotifyToolsEnabled() {
 					st.notifier.NotifyToolResult(context.Background(), name, result, isError)
 				}
+				// Land the outcome on the main turn's open block (an unknown
+				// id — AskUserQuestion's skipped start — is a no-op).
+				send(toolCallEndMsg{id: id, result: result, isError: isError})
 			}).
 			WithOnThinking(func(text string) { send(thinkChunkMsg{text: text}) }).
 			WithPermissionHandler(makeTUIPermissionHandler(ir0, st.cs, st.notifier))
@@ -4754,12 +4833,12 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		mgr:                 agents.backgroundMgr,
 	}
 	if agents.local != nil {
-		tuiLocalAgent := wireLocalAgent(agents.local, wiring)
+		tuiLocalAgent := withMainToolCallView(wireLocalAgent(agents.local, wiring), send)
 		tuiAgents.local = tuiLocalAgent
 		tuiAgents.primary = newLocalRunner(tuiLocalAgent, agents.primary.Name())
 	}
 	if agents.escalationLocal != nil {
-		tuiEscLocal := wireLocalAgent(agents.escalationLocal, wiring)
+		tuiEscLocal := withMainToolCallView(wireLocalAgent(agents.escalationLocal, wiring), send)
 		tuiAgents.escalationLocal = tuiEscLocal
 		// agents.escalation can legitimately be nil in minimal embeddings
 		// (tests, single-agent setups) — fall back to the configured name

@@ -708,6 +708,10 @@ func (s *Session) RecordNeed(body string) {
 	s.CurrentNeed = body
 	s.CurrentNeedSetAt = len(s.History) + 1
 	s.CurrentNeedUpdatedAt = time.Now()
+	// The need write is session activity: it refreshes the LastUsed clock the
+	// Load gate reads (see store.NeedRestartGrace) — /need and the <milk:need>
+	// tags keep "recently used" fresh even between turns.
+	s.LastUsed = s.CurrentNeedUpdatedAt
 }
 
 // EscalationEverActive reports whether the escalation agent has ever produced a

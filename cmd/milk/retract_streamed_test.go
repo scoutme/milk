@@ -49,17 +49,22 @@ func TestRetractStreamed_AdjustsThinkBlockAnchors(t *testing.T) {
 	if m.thinkBlocks[1].anchor != 3 {
 		t.Errorf("pre block anchor = %d, want 3", m.thinkBlocks[1].anchor)
 	}
-	// The display still splices both blocks at their (adjusted) anchors.
+	// The display splices both blocks at their (adjusted) anchors, in
+	// anchor order (blocksForRender): the block sitting before the retracted
+	// region renders *inside* it — the old contiguous-text assertion pinned
+	// the accidental clamp the old slice-order splice produced for
+	// out-of-order anchors, not the adjusted positions themselves.
 	disp := m.transcriptDisplay()
-	if !strings.Contains(disp, "AAAXBBB") {
-		t.Errorf("display = %q", disp)
+	want := "AAA\n▸ thinking · 0 lines\nXBBB\n▸ thinking · 0 lines\n"
+	if disp != want {
+		t.Errorf("display = %q, want %q", disp, want)
 	}
 }
 
 func TestAdjustThinkAnchors(t *testing.T) {
 	m := newTestModelForPanels(t)
 	m.thinkBlocks = []thinkBlock{{anchor: 4}, {anchor: 12}, {anchor: 20}}
-	m.adjustThinkAnchors(8, 6, 2) // replace [8,14) with 2 bytes: delta -4
+	m.adjustBlockAnchors(8, 6, 2) // replace [8,14) with 2 bytes: delta -4
 	want := []int{4, 10, 16}
 	for i := range m.thinkBlocks {
 		if m.thinkBlocks[i].anchor != want[i] {
