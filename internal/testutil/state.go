@@ -102,6 +102,11 @@ func SandboxStateRoot() (canary func() error) {
 	if err != nil {
 		panic("testutil: cannot create sandbox state root: " + err.Error())
 	}
+	// Toolchain caches BEFORE the override: a child `go build` deriving
+	// GOMODCACHE from the sandboxed HOME downloads a read-only module cache
+	// the drain can never remove (PR #411 CI failure; `env -u GOPATH`
+	// reproduces it locally). See forwardToolchainCaches.
+	forwardToolchainCaches()
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp)
 	// Empty = config.Dir falls through to HOME (its env check trims first).

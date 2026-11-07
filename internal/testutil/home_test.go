@@ -72,9 +72,11 @@ func TestDrainRemoveAll_AbsorbsLateWriter(t *testing.T) {
 // TestDrainRemoveAll_TimesOutListingLeftovers pins the loud-failure contract:
 // when removal cannot succeed, drain waits its timeout and returns an error
 // that NAMES the leftover file, so a future occurrence identifies its culprit
-// instead of quoting testing's opaque "directory not empty". The failure is
-// made deterministic (a read-only subdir cannot be unlinked from) — the
-// concurrent-write race itself is pinned by the absorb test above.
+// instead of quoting testing's opaque "directory not empty". Driven through
+// the seam with a persistent permission error: the read-only-dir fixture
+// would now be chmod'd into success by makeRemovable (by design), and no
+// owner-created file can stay unremovable — a live writer instead races the
+// loop to a premature nil (the absorb test above pins that side).
 func TestDrainRemoveAll_TimesOutListingLeftovers(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "keeper")
@@ -84,20 +86,89 @@ func TestDrainRemoveAll_TimesOutListingLeftovers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sub, "keeper.txt"), []byte("forever"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(sub, 0o500); err != nil { // r+x: entries listed, not unlinked
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) }) // let TempDir's own cleanup proceed
 
-	err := drainRemoveAll(dir, 300*time.Millisecond)
+	err := drainRemoveAllWith(dir, 300*time.Millisecond, func(string) error {
+		return fs.ErrPermission // the doomed-loop condition, injected
+	})
 	if err == nil {
-		t.Fatal("unremovable tree: drainRemoveAll = nil, want a timeout error")
+		t.Fatal("failing remover: drainRemoveAllWith = nil, want a timeout error")
 	}
 	if !strings.Contains(err.Error(), "outlived its test") {
 		t.Errorf("error %q misses the outlived-its-test diagnosis", err)
 	}
 	if !strings.Contains(err.Error(), "keeper.txt") {
 		t.Errorf("error %q does not name the leftover file, want keeper.txt", err)
+	}
+}
+
+// TestDrainRemoveAll_ChmodsReadOnlyTree is the PR #411 CI incident as a
+// fixture: a child `go build` downloaded the module cache inside the sandbox
+// (read-only 0555 dirs, 0444 files), os.RemoveAll got EACCES forever, and
+// TestMain FATALed after the 5s drain. rm -rf semantics must absorb it.
+func TestDrainRemoveAll_ChmodsReadOnlyTree(t *testing.T) {
+	dir := t.TempDir()
+	mod := filepath.Join(dir, "go", "pkg", "mod", "x@v1.0.0")
+	if err := os.MkdirAll(mod, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mod, "file.go"), []byte("package x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The module cache's real shape: dirs made non-writable after writing.
+	if err := os.Chmod(mod, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "go", "pkg", "mod"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "go", "pkg"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "go"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := drainRemoveAll(dir, 2*time.Second); err != nil {
+		t.Fatalf("read-only module-cache tree should drain with rm -rf semantics, got: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("dir survived drain (stat err = %v), want removed", err)
+	}
+}
+
+// TestForwardToolchainCaches_KeepsCachesOutOfSandbox: exactly CI's condition
+// (no GOMODCACHE/GOCACHE in the env — PR #411 set no GOPATH either), before
+// any HOME override — both caches resolve outside the sandbox home, and a
+// second call with env already set is a no-op.
+func TestForwardToolchainCaches_KeepsCachesOutOfSandbox(t *testing.T) {
+	for _, k := range []string{"GOMODCACHE", "GOCACHE"} {
+		if v, had := os.LookupEnv(k); had {
+			k, v, had := k, v, had
+			t.Cleanup(func() { _ = os.Setenv(k, v); _ = had })
+		}
+		_ = os.Unsetenv(k)
+	}
+	var home string
+	t.Run("child", func(t *testing.T) {
+		home = SandboxHome(t) // forwards BEFORE it overrides HOME
+	})
+	if home == "" {
+		t.Fatal("no sandbox home")
+	}
+	gomod, gocache := os.Getenv("GOMODCACHE"), os.Getenv("GOCACHE")
+	if gomod == "" || gocache == "" {
+		t.Fatalf("caches not forwarded: GOMODCACHE=%q GOCACHE=%q", gomod, gocache)
+	}
+	for name, v := range map[string]string{"GOMODCACHE": gomod, "GOCACHE": gocache} {
+		if strings.HasPrefix(v, home) {
+			t.Errorf("%s = %q landed INSIDE the sandbox home %q", name, v, home)
+		}
+	}
+	// Idempotence: env already set → early return, sentinel survives.
+	_ = os.Setenv("GOMODCACHE", "/sentinel-keep")
+	forwardToolchainCaches()
+	if got := os.Getenv("GOMODCACHE"); got != "/sentinel-keep" {
+		t.Errorf("second forward overwrote the env: %q", got)
 	}
 }
 
