@@ -306,6 +306,100 @@ func gitShow(cwd, hash string) (string, error) {
 	return s, nil
 }
 
+// gitStatusShort runs `git status --short`, optionally scoped to one path
+// (path relative to cwd, "" = whole tree). Click probes pass
+// --no-optional-locks so a preview can never fight the panel's own status
+// poll for the index lock (the #377 lesson, applied to click paths too).
+func gitStatusShort(cwd, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
+	defer cancel()
+	args := []string{"--no-optional-locks", "-C", cwd, "status", "--short"}
+	if path != "" {
+		args = append(args, "--", path)
+	}
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
+	return string(out), err
+}
+
+// gitDiffHEAD renders the complete working-tree-vs-HEAD diff (staged and
+// unstaged alike), scoped to one path when path is set. Same presentation
+// flags and cap as gitShow so previews look consistent across click targets.
+func gitDiffHEAD(cwd, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
+	defer cancel()
+	args := []string{"--no-optional-locks", "-C", cwd, "diff", "--stat", "--patch", "--find-renames", "HEAD"}
+	if path != "" {
+		args = append(args, "--", path)
+	}
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return capGitPreview(string(out)), nil
+}
+
+// gitDiffNoIndex renders an untracked file as a whole-file added diff — git
+// diff never reports untracked files, and /dev/null is the canonical
+// "nothing" side git maps on every platform. Exit code 1 means "differences
+// found", which is success for a diff.
+func gitDiffNoIndex(cwd, rel string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "diff", "--no-index", "--stat", "--patch", "--", "/dev/null", rel)
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+			return "", err
+		}
+	}
+	return capGitPreview(string(out)), nil
+}
+
+// capGitPreview applies gitShow's 128 KB cap to diff-shaped output.
+func capGitPreview(s string) string {
+	if len(s) > gitShowMaxBytes {
+		return s[:gitShowMaxBytes] + "\n… (diff truncated at 128 KB)"
+	}
+	return s
+}
+
+// workingTreePreview composes the git panel header click: `git status
+// --short` (the file-level truth, untracked included) followed by the full
+// diff vs HEAD. A clean tree answers without running the diff; a status
+// failure has nothing trustworthy to show, so it errors (the caller
+// notifies, mirroring git show's failure path).
+func workingTreePreview(cwd string) (string, error) {
+	st, err := gitStatusShort(cwd, "")
+	if err != nil {
+		return "", err
+	}
+	st = strings.TrimRight(st, "\n")
+	if st == "" {
+		return "working tree clean\n", nil
+	}
+	if len(st) > 16*1024 {
+		st = st[:16*1024] + "\n… (status truncated)"
+	}
+	var b strings.Builder
+	b.WriteString(st)
+	b.WriteString("\n")
+	if patch, perr := gitDiffHEAD(cwd, ""); perr == nil {
+		if strings.TrimSpace(patch) != "" {
+			b.WriteString("\n")
+			b.WriteString(patch)
+		}
+	} else {
+		msg := perr.Error()
+		var ee *exec.ExitError
+		if errors.As(perr, &ee) && len(ee.Stderr) > 0 {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		b.WriteString("\n(diff unavailable: " + msg + ")\n")
+	}
+	return b.String(), nil
+}
+
 // errBadHash rejects non-hex input to gitShow.
 var errBadHash = &hashError{}
 
