@@ -93,15 +93,12 @@ func TestHandleBackgroundPanelClick_ShellRowAttaches(t *testing.T) {
 	if idx < 0 {
 		t.Fatalf("no shell row for %s in layout", started.ID)
 	}
-	if cmd := m.handleBackgroundPanelClick(idx); cmd != nil {
-		t.Fatal("first click should only arm, not return a command")
-	}
-	if m.attached != nil {
-		t.Fatal("expected no attach after a single click")
-	}
+	// Pure action: the acting click attaches (the cadence — single =
+	// deferred focus, double = attach without moving focus — is
+	// panelClickAction's job, covered by TestPanelClickCadence_*).
 	cmd := m.handleBackgroundPanelClick(idx)
 	if m.attached == nil {
-		t.Fatal("expected attach after second click within 400ms")
+		t.Fatal("expected attach from the acting click")
 	}
 	if m.attached.kind != attachShell || m.attached.jobID != started.ID {
 		t.Fatalf("attached = %+v, want kind=attachShell id=%s", m.attached, started.ID)

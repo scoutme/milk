@@ -1775,10 +1775,21 @@ func dimWrap(s string) string {
 func cliToolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
 		if v, ok := args[key].(string); ok && v != "" {
-			return v
+			return flattenSummary(v)
 		}
 	}
 	return ""
+}
+
+// flattenSummary collapses embedded newlines into spaces — a summary feeds
+// one-row surfaces only: the tool fold header (toolHeaderRe's `.` cannot
+// span \n, so a multi-line summary would leave the header unmatchable — no
+// click target, an uncollapsible block) and the `» hint line. Width
+// truncation happens downstream; this is shape, not length.
+func flattenSummary(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 // truncateToolSummary truncates a tool summary string to fit within termWidth,

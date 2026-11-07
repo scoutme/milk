@@ -32,14 +32,24 @@ from rules on that field:
    in `panelRenderOrder`, wrapping. Main is deliberately inside the cycle:
    rotation is the only keyboard path *back* to the input area (and shift+pgup
    the way back out). Panels the width budget hides are not in the sequence —
-   only what is actually rendered may be focused (ADR-0089).
+   only what is actually rendered may be focused (ADR-0089). **`tab`/`shift+tab`
+   are rotation aliases whenever the token under the cursor has no
+   completions** — completion always wins (the cycling key doubles as rotation
+   only when cycling has no answer, `handleTabKey`), and bare Tab is free at
+   the terminal level (terminal tab-switching lives on Ctrl+Tab and friends),
+   so the alias costs no chord.
 2. **Paging follows focus** — `pgup`/`pgdown` (and `ctrl+u`/`ctrl+f`) page the
    focused panel's own offset (half the panel height, clamped exactly like the
    wheel: `[0, panelMaxOffset]`) or the transcript when main is focused — the
    original behavior, byte-for-byte, in the default state.
-3. **Click sets focus** — a left press inside a visible panel focuses it; a
-   press in the main area (transcript or input) returns focus there. **Wheel
-   scrolling never moves focus** — scrolling is not a change of intent.
+3. **Click sets focus** — a left *click* inside a visible panel focuses it,
+   deferred behind the same 400 ms window the cadence uses: press and release
+   must be close together for it to count as a click at all (holding the button
+   down is not one), a double click runs the action instead, and a drag
+   selection never moves focus (movement is not a click) — see Consequences.
+   A press in the main area (transcript or input) returns focus there
+   immediately. **Wheel scrolling never moves focus** — scrolling is not a
+   change of intent.
 4. **One accessor, self-healing** — `focusedPanel()` returns the focused panel
    *only while it is visible* (`panelVisible`), else `regionNone`. Closing the
    focused panel, a width-budget re-fit, `/new`, a theme switch — every
@@ -64,7 +74,18 @@ from rules on that field:
 ## Consequences
 
 - Keyboard parity is complete without any new mode: `shift+` rotation,
-  focused paging, click-to-focus, F1–F6 still toggle (bring-to-front for
+  focused paging, click-to-focus — uniformly deferred behind the 400 ms
+  double-click window on *every* side panel (single = focus, double = the
+  panel's action, which must never move focus — ADR-0066's cadence, one
+  machine in `panelClickAction`; only a press+release close together counts
+  as a click — holding the button down is not one — and a drag selection
+  never moves focus; the main area stays immediate at press), plus the row
+  cursor: `↑`/`↓` walk the focused panel's rows (the cursor row wears the
+  selection highlight, scrolling follows), `Enter` runs the cursor row's
+  action — the exact double-click action, rows with items only, never
+  submitting input (`panelActivateRow`) — and typing any text hands focus
+  straight back to the input, keystroke included (type-to-focus),
+  F1–F6 still toggle (bring-to-front for
   grouped panels per issue #373 — toggling a *visible* panel closes it, which
   also drops a focused panel and heals via rule 4).
 - The `/keys` help gains a column for the three bindings; the raw switch cases

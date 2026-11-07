@@ -59,14 +59,14 @@ func TestHandleTab_BangModeGatesTheModel(t *testing.T) {
 	m := newTestModelForPanels(t)
 	m.ta.SetValue("/panel")
 
-	m = m.handleTab(1)
+	m, _ = m.handleTab(1)
 	if len(m.tabMatches) == 0 {
 		t.Fatal("plain prompt: expected /panel completion")
 	}
 
 	m.tabMatches = nil // fresh build on the next press
 	m.bangMode = true
-	m = m.handleTab(1)
+	m, _ = m.handleTab(1)
 	if len(m.tabMatches) != 0 {
 		t.Errorf("bang mode: tabMatches = %v, want empty", m.tabMatches)
 	}
@@ -139,9 +139,9 @@ func TestBangCompletion_InsertsPlainPath(t *testing.T) {
 	m.st.cwd = repo
 	m.bangMode = true
 	m.ta.SetValue("cat @sess")
-	m = m.handleTab(1)
+	m, _ = m.handleTab(1)
 	first := file(t, m.ta.Value())
-	m = m.handleTab(1)
+	m, _ = m.handleTab(1)
 	second := file(t, m.ta.Value())
 	if first == second {
 		t.Errorf("cycling did not advance: %q twice", first)
@@ -152,7 +152,7 @@ func TestBangCompletion_InsertsPlainPath(t *testing.T) {
 	n.st.cwd = repo
 	n.bangMode = true
 	n.ta.SetValue("cat @sess")
-	n = n.handleTab(1)
+	n, _ = n.handleTab(1)
 	n = n.insertActiveCompletion()
 	file(t, n.ta.Value())
 

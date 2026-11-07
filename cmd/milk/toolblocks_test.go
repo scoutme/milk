@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -454,5 +455,77 @@ func TestToolBlockView_RealProductionChain(t *testing.T) {
 	}
 	if end.id != "fc1" || end.isError {
 		t.Errorf("done message = %#v, want id=fc1 non-error", end)
+	}
+}
+
+// TestToolBlock_MultiLineSummary_HeaderStaysOneRowAndCollapsible pins the
+// reported bug: a bash command carrying a heredoc (newlines inside the
+// summary) rendered a multi-line header — toolHeaderRe's `.` cannot cross
+// \n, so the header row never matched, toolBlockAtLine found no target, and
+// the block would not collapse on click. The constructor flattens: one row,
+// matchable, clickable, in every state.
+func TestToolBlock_MultiLineSummary_HeaderStaysOneRowAndCollapsible(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.appendTranscript("run:\n")
+	heredoc := "cd /x && python3 - <<'EOF'\np='cmd/milk/keymap_test.go'\ns=open(p).read()\nold='for _, want'\nEOF"
+	args, err := json.Marshal(map[string]any{"command": heredoc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = toolUpdate(t, m, startMsg("m1", "bash", heredoc, string(args), ""))
+
+	b := &m.toolBlocks[0]
+	if strings.Contains(b.summary, "\n") || strings.Contains(b.summary, "\r") {
+		t.Fatalf("stored summary still has newlines: %q", b.summary)
+	}
+	hdr := m.toolHeader(b)
+	if strip := ansi.Strip(hdr); strings.Contains(strip, "\n") {
+		t.Fatalf("header is not one row: %q", strip)
+	}
+	if n := toolHeaderCount(hdr); n != 1 {
+		t.Fatalf("toolHeaderCount = %d, want 1 (click ordinal)", n)
+	}
+	if !toolHeaderRe.MatchString(ansi.Strip(hdr)) {
+		t.Fatalf("header must match toolHeaderRe: %q", ansi.Strip(hdr))
+	}
+
+	// The collapse bug itself: the rendered header row must be a click
+	// target that maps to this block.
+	rows := strings.Split(m.transcriptDisplay(), "\n")
+	line := -1
+	for i, r := range rows {
+		if strings.Contains(ansi.Strip(r), "▸ bash") {
+			line = i
+			break
+		}
+	}
+	if line < 0 {
+		t.Fatalf("no header row in display: %q", m.transcriptDisplay())
+	}
+	if idx := m.toolBlockAtLine(line); idx != 0 {
+		t.Fatalf("toolBlockAtLine(%d) = %d, want 0 — block is not clickable", line, idx)
+	}
+
+	// Expand (body shows the pretty input) and collapse again: the header
+	// stays one row and matchable on both sides of the toggle.
+	m.toggleToolBlock(0)
+	if !m.toolBlocks[0].expanded {
+		t.Fatal("first toggle should expand")
+	}
+	m.toggleToolBlock(0)
+	if m.toolBlocks[0].expanded {
+		t.Fatal("second toggle should collapse")
+	}
+	if n := toolHeaderCount(m.toolHeader(&m.toolBlocks[0])); n != 1 {
+		t.Fatalf("after toggle: toolHeaderCount = %d, want 1", n)
+	}
+}
+
+// TestCliToolArgSummary_FlattensNewlines: the summary feeding the hint, the
+// fold header and oversight notifications is one row by construction.
+func TestCliToolArgSummary_FlattensNewlines(t *testing.T) {
+	got := cliToolArgSummary(map[string]any{"command": "python3 -\np='f'\r\nEOF"})
+	if got != "python3 - p='f' EOF" {
+		t.Fatalf("cliToolArgSummary = %q, want %q", got, "python3 - p='f' EOF")
 	}
 }

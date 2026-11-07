@@ -19,6 +19,7 @@ import (
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
+	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
 )
 
@@ -271,11 +272,17 @@ type interactiveState struct {
 	autoStickyEscalate bool
 	// stickyPrimary mirrors stickyEscalate for the local model.
 	stickyPrimary bool
-	cwd           string
-	cfg           config.Config
-	mem           *memory.Store
-	cs            *claudesettings.Store // Claude project settings (permissions persistence)
-	program       *tea.Program          // set after tea.NewProgram, before Run
+	// lastRouteTarget/lastRouteReason are the route-announcement state
+	// (routeChangeNote): what the previous routed turn actually ran on and
+	// why — so a turn entering escalation on its own is announced once, not
+	// per turn. Transient, like the ACP twin (acpSession.lastTarget).
+	lastRouteTarget router.Target
+	lastRouteReason string
+	cwd             string
+	cfg             config.Config
+	mem             *memory.Store
+	cs              *claudesettings.Store // Claude project settings (permissions persistence)
+	program         *tea.Program          // set after tea.NewProgram, before Run
 
 	// toolFutures caches per-tool answer channels created by OnToolUse as soon
 	// as each tool call is detected in the stream. The user is asked immediately

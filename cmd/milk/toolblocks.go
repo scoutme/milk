@@ -239,11 +239,16 @@ func (m *model) toolBlockAtLine(line int) int {
 // live signal, exactly like a streaming think header's line count).
 func (m *model) openToolBlock(msg toolCallStartMsg) {
 	b := toolBlock{
-		anchor:   m.transcript.Len(),
-		seq:      m.takeBlockSeq(),
-		id:       msg.id,
-		name:     msg.name,
-		summary:  msg.summary,
+		anchor: m.transcript.Len(),
+		seq:    m.takeBlockSeq(),
+		id:     msg.id,
+		name:   msg.name,
+		// Constructor invariant: headers are one row by construction,
+		// whatever the sender passed (the producers flatten too — this is
+		// the guarantee at the sink; toolHeaderRe cannot span \n, so a
+		// multi-line summary would mean an unclickable, uncollapsible
+		// block).
+		summary:  flattenSummary(msg.summary),
 		argsText: prettyArgs(msg.argsJSON),
 	}
 	m.toolBlocks = append(m.toolBlocks, b)

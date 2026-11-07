@@ -75,7 +75,10 @@ func buildCmdVariants() map[string][]cmdVariant {
 // handleTab advances (dir=+1) or retreats (dir=-1) through the tab completion
 // cycle. For slash commands: cycles entry by entry within a command's variants,
 // then moves to the next/previous command. For @-paths: cycles the flat list.
-func (m model) handleTab(dir int) model {
+// The bool reports whether the key was consumed by completion: false means the
+// token under the cursor has no completions at all, and the caller
+// (handleTabKey) then treats the key as the panel-focus rotation alternative.
+func (m model) handleTab(dir int) (model, bool) {
 	fullInput := m.ta.Value()
 	lines := strings.Split(fullInput, "\n")
 	curLine := m.ta.Line()
@@ -104,7 +107,7 @@ func (m model) handleTab(dir int) model {
 			m.tabValueMode = false
 			m.tabNsLabel = ""
 			m.tabSegPrefix = ""
-			return m
+			return m, false
 		}
 		m.tabPrefix = tabInputPrefix(beforeCursor)
 		m.tabSubcmdMode = res.replaceBase != ""
@@ -271,7 +274,7 @@ func (m model) handleTab(dir int) model {
 	m.highlightHint()
 
 	m.syncLayout()
-	return m
+	return m, true
 }
 
 // syncTabIdxFromHint converts the flat hintIdx back into (tabCmdIdx, tabVarIdx).
@@ -832,14 +835,25 @@ func (m model) acceptActiveCompletion() (model, bool) {
 // cycle through completions. Shared by handleKey and handleBusyKey — tab
 // completion only edits the input buffer, so it works while an agent turn is
 // running too (only Enter-as-submit is trapped there).
+// handleTabKey is the tab key's complete behavior for BOTH dispatch paths
+// (busy and idle): complete when the token under the cursor has completions
+// (or commit the active inline hint), otherwise treat the key as the
+// panel-focus rotation alternative — tab/shift+tab are the mouse-free twin
+// of shift+pgup/shift+pgdown (bare Tab is free at the terminal level: tab
+// switching lives on Ctrl+Tab and friends, so no chord is taken). The rule
+// that keeps both worlds honest: completion ALWAYS wins — cycling only stops
+// being the answer when there is nothing to complete.
 func (m model) handleTabKey(dir int) model {
 	if dir > 0 && m.hintIdx >= 0 && len(m.tabMatches) == 0 {
 		m.commitHintSelection()
 		m.syncLayout()
 		return m
 	}
-	m = m.handleTab(dir)
+	m, handled := m.handleTab(dir)
 	m.syncLayout()
+	if !handled {
+		m.rotatePanelFocus(dir)
+	}
 	return m
 }
 
