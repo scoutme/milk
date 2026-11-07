@@ -91,9 +91,9 @@ func (c themeColor) sgrFg() string {
 }
 
 type themeDef struct {
-	name                                                                       string
-	modern                                                                     bool
-	base, raised, toast, hairline, thumb, text, muted, accent, accentLo, think themeColor
+	name                                                                              string
+	modern                                                                            bool
+	base, raised, toast, hairline, thumb, text, muted, accent, accentLo, think, focus themeColor
 	// terminal colours handed to the emulator while the theme is active
 	tagline                    string // "" = defaultTagline
 	termBg, termFg, termCursor string
@@ -111,7 +111,10 @@ func taglineText() string {
 	return defaultTagline
 }
 
-var themeOff = &themeDef{name: "off"}
+// themeOff keeps colours in code by design (accentStyle, the alt-background
+// fallbacks) — focus is the one tint it declares as a token, so panel render
+// code never carries escapes for it either (issue #412).
+var themeOff = &themeDef{name: "off", focus: themeColor{dark: "#161d2e", light: "#e2e7f3"}}
 
 // supermilk: a milk-white ground with warm ink text, hairline separators and
 // a single muted olive accent; the ANSI ramp is pulled into the same family
@@ -123,6 +126,7 @@ var themeSuperMilk = &themeDef{
 	hairline: fixed("#dcd7c9"), thumb: fixed("#c2bfb4"),
 	text: fixed("#3f2a26"), muted: fixed("#7d7b74"), think: fixed("#5d6f4a"),
 	accent: fixed("#6b6140"), accentLo: fixed("#c9c5b8"),
+	focus:  fixed("#e7e9f5"),
 	termBg: "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
 	termAnsi: [16]string{
 		"#f8f5ee", "#8a4b3c", "#5f6b3a", "#7a6a2e", "#4a6280", "#7a5a78", "#4a6f6a", "#3f2a26",
@@ -136,7 +140,7 @@ var themes = map[string]*themeDef{"off": themeOff, "supermilk": themeSuperMilk}
 var (
 	th                                                                        = themeOff
 	tkBase, tkRaised, tkToast, tkHairline, tkThumb, tkText, tkMuted, tkAccent themeColor
-	tkAccentLo, tkThink                                                       themeColor
+	tkAccentLo, tkThink, tkFocus                                              themeColor
 )
 
 // setTheme activates a theme by name and rebuilds every style derived from
@@ -148,7 +152,7 @@ func setTheme(name string) bool {
 	}
 	th = t
 	tkBase, tkRaised, tkToast, tkHairline, tkThumb = t.base, t.raised, t.toast, t.hairline, t.thumb
-	tkText, tkMuted, tkAccent, tkAccentLo, tkThink = t.text, t.muted, t.accent, t.accentLo, t.think
+	tkText, tkMuted, tkAccent, tkAccentLo, tkThink, tkFocus = t.text, t.muted, t.accent, t.accentLo, t.think, t.focus
 	refreshThemeColors()
 	return true
 }
@@ -277,6 +281,20 @@ func panelAltBackgroundCode() string {
 		return "\033[48;2;24;24;28m"
 	}
 	return "\033[48;2;236;236;239m"
+}
+
+// focusBgCode is the focused side panel's tint (issue #412): a slightly
+// dark-blue background declared per theme (themeDef.focus) — render code
+// carries no escapes, only the token. "" when not a TTY or the active theme
+// declares no focus tint.
+func focusBgCode() string {
+	if !isTTY {
+		return ""
+	}
+	if tkFocus.pick() == "" {
+		return ""
+	}
+	return tkFocus.sgrBg()
 }
 
 func toastBackgroundCode() string {

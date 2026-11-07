@@ -20,6 +20,9 @@ type panelKey struct {
 // comment where they live. It implements help.KeyMap.
 type keyMap struct {
 	panels        []panelKey
+	focusPrev     key.Binding
+	focusNext     key.Binding
+	panelPaging   key.Binding
 	tipPrev       key.Binding
 	tipNext       key.Binding
 	dismissToasts key.Binding
@@ -49,6 +52,9 @@ func newKeyMap() keyMap {
 			panel("f5", "project", "project tree panel"),
 			panel("f6", "git", "git graph panel"),
 		},
+		focusPrev:     key.NewBinding(key.WithKeys("shift+pgup"), key.WithHelp("shift+pgup", "focus previous panel")),
+		focusNext:     key.NewBinding(key.WithKeys("shift+pgdown", "shift+pgdn"), key.WithHelp("shift+pgdown", "focus next panel")),
+		panelPaging:   key.NewBinding(key.WithKeys("pgup", "ctrl+u", "pgdown", "ctrl+f"), key.WithHelp("pgup/pgdn", "scroll focused panel")),
 		tipPrev:       key.NewBinding(key.WithKeys("alt+up"), key.WithHelp("alt+up", "previous tip")),
 		tipNext:       key.NewBinding(key.WithKeys("alt+down"), key.WithHelp("alt+down", "next tip")),
 		dismissToasts: key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "dismiss notifications")),
@@ -92,7 +98,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 // FullHelp implements help.KeyMap: one column per group.
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		k.panelBindings(),
+		append(k.panelBindings(), k.focusPrev, k.focusNext, k.panelPaging),
 		{k.palette, k.tipPrev, k.tipNext, k.dismissToasts, k.thinkToggle},
 		{k.searchBack, k.searchForward, k.undo, k.redo, k.newline, k.interrupt},
 	}

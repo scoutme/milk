@@ -481,10 +481,7 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 	}
 	lines = lines[:h]
 
-	bg := ""
-	if m.panelAltBackground(region) {
-		bg = panelAltBackgroundCode()
-	}
+	bg := m.panelRowBg(region)
 
 	var rows []string
 	for _, line := range lines {
@@ -509,10 +506,7 @@ func (m *model) renderSidePanelScrollbar(region panelRegion, h int) string {
 	total := len(all)
 	needsBar := total > h
 
-	bg := ""
-	if m.panelAltBackground(region) {
-		bg = panelAltBackgroundCode()
-	}
+	bg := m.panelRowBg(region)
 
 	var rows []string
 	if !needsBar {
