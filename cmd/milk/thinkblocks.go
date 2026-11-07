@@ -73,6 +73,9 @@ type thinkBlock struct {
 	// The block text itself never lands in the transcript, so anchors only
 	// shift on retractStreamed surgery (handled there).
 	anchor int
+	// seq orders containers that share an anchor for the display splice
+	// (creation order across both block families — see blocksForRender).
+	seq int
 	// closed is true once no more chunks will arrive (regular content
 	// followed, or the turn ended). While open the block is the transcript's
 	// last content.
@@ -244,15 +247,25 @@ func (m *model) transcriptDisplay() string {
 // the display's full length.
 func (m *model) transcriptDisplayAt() (string, int) {
 	text := m.transcript.String()
-	if len(m.thinkBlocks) == 0 {
+	if len(m.thinkBlocks) == 0 && len(m.toolBlocks) == 0 {
 		return text, len(text)
 	}
 	var sb strings.Builder
 	openAt := -1
 	pos := 0
-	for i := range m.thinkBlocks {
-		b := &m.thinkBlocks[i]
-		at := b.anchor
+	for _, e := range blocksForRender(m.thinkBlocks, m.toolBlocks) {
+		var at int
+		var render func() string
+		var open bool
+		if e.tool {
+			b := &m.toolBlocks[e.idx]
+			at, open = b.anchor, !b.closed
+			render = func() string { return m.renderToolBlock(b) }
+		} else {
+			b := &m.thinkBlocks[e.idx]
+			at, open = b.anchor, !b.closed
+			render = func() string { return m.renderThinkBlock(b) }
+		}
 		if at > len(text) {
 			at = len(text)
 		}
@@ -264,10 +277,10 @@ func (m *model) transcriptDisplayAt() (string, int) {
 		if sb.Len() > 0 && !strings.HasSuffix(prefix, "\n") {
 			sb.WriteString("\n")
 		}
-		if !b.closed && openAt < 0 {
+		if open && openAt < 0 {
 			openAt = sb.Len()
 		}
-		sb.WriteString(m.renderThinkBlock(b))
+		sb.WriteString(render())
 		pos = at
 	}
 	sb.WriteString(text[pos:])
@@ -453,23 +466,8 @@ func (m *model) dropThinkBlocksFrom(n int) {
 	m.invalidateThinkDisplay()
 }
 
-// adjustThinkAnchors shifts block anchors after retractStreamed replaced
-// [idx, idx+oldLen) with newLen bytes of text. Anchors are "render after this
-// many bytes", so an anchor past the replaced region shifts by the delta; an
-// anchor inside it (blocks sit on content boundaries, so this is defensive)
-// clamps to the replacement's end.
-func (m *model) adjustThinkAnchors(idx, oldLen, newLen int) {
-	delta := newLen - oldLen
-	for i := range m.thinkBlocks {
-		a := &m.thinkBlocks[i].anchor
-		switch {
-		case *a >= idx+oldLen:
-			*a += delta
-		case *a > idx:
-			*a = idx + newLen
-		}
-	}
-}
+// adjustThinkAnchors was superseded by adjustBlockAnchors (toolblocks.go):
+// retract surgery shifts BOTH block families' anchors now.
 
 // invalidateThinkDisplay forces the next wrappedTranscript render to rebuild:
 // any fold-state change rewrites the displayed text mid-transcript, so the

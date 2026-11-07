@@ -560,6 +560,21 @@ type Agent struct {
 	// stored as the tool message), and whether the result is an error
 	// (isToolError's authoritative check, not a caller-side heuristic).
 	onToolResult func(id, name, result string, isError bool)
+	// onToolCallView lets a host take over the transcript rendering of a tool
+	// call (the TUI's fold container, cmd/milk/toolblocks.go): it receives the
+	// run's output writer — so the host can tell a main turn's stream from a
+	// job/workflow buffer — the call id, name, the untruncated argument
+	// summary, the raw argument JSON, the inline file diff ("" when none) and
+	// the exact hint line bytes printToolLine would have streamed.
+	// Returning true suppresses this call's streamed hint and diff (the host
+	// rendered them itself); false keeps the stream untouched (jobs, buffers).
+	onToolCallView func(out io.Writer, id, name, summary, argsJSON, diff, hintText string) bool
+	// onToolCallDone is the result-side twin: it fires alongside onToolResult
+	// with the run's output writer, the call id, its result and the error flag.
+	// Returning true marks the host as having delivered the outcome; false
+	// means the host did not (wrong stream) and the caller may ignore it — the
+	// callback has no stream side effects of its own.
+	onToolCallDone func(out io.Writer, id, result string, isError bool) bool
 	// onResponseSegment is called with each contiguous chunk of assistant text
 	// as it completes — once per tool-calling round before its tools dispatch,
 	// and once more with the final round's text.
@@ -1400,6 +1415,24 @@ func (a *Agent) WithOnToolUse(fn func(id, name, summary string, rawInput map[str
 func (a *Agent) WithOnToolResult(fn func(id, name, result string, isError bool)) *Agent {
 	copy := *a
 	copy.onToolResult = fn
+	return &copy
+}
+
+// WithOnToolCallView returns a shallow copy of the agent that offers each
+// tool call to fn before dispatch, letting the host take over its transcript
+// rendering (see the field's doc). The bool return decides whether the
+// streamed hint/diff for that call is suppressed.
+func (a *Agent) WithOnToolCallView(fn func(out io.Writer, id, name, summary, argsJSON, diff, hintText string) bool) *Agent {
+	copy := *a
+	copy.onToolCallView = fn
+	return &copy
+}
+
+// WithOnToolCallDone returns a shallow copy of the agent that delivers each
+// tool outcome to fn alongside onToolResult (see the field's doc).
+func (a *Agent) WithOnToolCallDone(fn func(out io.Writer, id, result string, isError bool) bool) *Agent {
+	copy := *a
+	copy.onToolCallDone = fn
 	return &copy
 }
 
@@ -3183,7 +3216,21 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			continue // agent dispatcher handled below
 		}
 		activityNotify(ctx)() // tool start is real activity for the host's idle watchdog (issue #305)
-		printToolLine(out, tc, a.termWidth)
+		// The inline file diff is computed once: either the view callback
+		// carries it (the host renders hint + diff itself) or it streams
+		// below exactly as before.
+		d := toolDiff(tc.Function.Name, tc.Function.Arguments)
+		viewHandled := false
+		if a.onToolCallView != nil {
+			var argMap map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
+			viewHandled = a.onToolCallView(out, tc.ID, tc.Function.Name,
+				toolArgSummary(argMap), tc.Function.Arguments, d,
+				toolHintText(tc, a.termWidth))
+		}
+		if !viewHandled {
+			printToolLine(out, tc, a.termWidth)
+		}
 		if a.onToolUse != nil {
 			var argMap map[string]any
 			json.Unmarshal([]byte(tc.Function.Arguments), &argMap) //nolint:errcheck
@@ -3194,7 +3241,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 			args = args[:120] + "…"
 		}
 		a.logDebug("tool call", append([]any{"name", tc.Function.Name, "args", args, "agent", a.logRole(), "call_id", tc.ID}, sessionAttrs(sess)...)...)
-		if d := toolDiff(tc.Function.Name, tc.Function.Arguments); d != "" {
+		if !viewHandled && d != "" {
 			fmt.Fprint(out, d)
 		}
 		if toolNeedsPermission(tc.Function.Name) {
@@ -3216,12 +3263,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, msgs []Message, toolCalls 
 	outcomes := a.dispatchBatch(ctx, toolCalls, denied, userPrompt, out, sess, mem, pendingImages)
 	activityNotify(ctx)() // tool end (batch done) — same liveness signal (issue #305)
 
-	if a.onToolResult != nil {
+	if a.onToolResult != nil || a.onToolCallDone != nil {
 		for i, tc := range toolCalls {
 			if strings.HasPrefix(tc.Function.Name, "agent_") {
 				continue
 			}
-			a.onToolResult(tc.ID, tc.Function.Name, outcomes[i].msg.Content, toolCallFailed(tc.Function.Name, outcomes[i].msg.Content))
+			isErr := toolCallFailed(tc.Function.Name, outcomes[i].msg.Content)
+			if a.onToolResult != nil {
+				a.onToolResult(tc.ID, tc.Function.Name, outcomes[i].msg.Content, isErr)
+			}
+			if a.onToolCallDone != nil {
+				a.onToolCallDone(out, tc.ID, outcomes[i].msg.Content, isErr)
+			}
 		}
 	}
 
@@ -3792,14 +3845,16 @@ func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedR
 	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}
 }
 
-// printToolLine writes a one-line dim tool-usage hint to out before a tool is
-// dispatched, mirroring what Claude shows for permission requests.
-// Format:  » <name>: <short summary of key argument>
-// termWidth is the current terminal width (0 = no truncation).
-func printToolLine(out io.Writer, tc toolCall, termWidth int) {
+// toolHintText renders the one-line dim tool-usage hint exactly as
+// printToolLine would stream it (the framed bytes: leading newline, the dim
+// "» name: summary" line, trailing newline). Hosts that take over a call's
+// rendering (onToolCallView) receive this so a non-main buffer — a workflow
+// step's live view — can forward the identical line the stream would have
+// carried.
+func toolHintText(tc toolCall, termWidth int) string {
+	var sb strings.Builder
 	var args map[string]any
 	json.Unmarshal([]byte(tc.Function.Arguments), &args) //nolint:errcheck
-
 	summary := toolArgSummary(args)
 	if summary != "" {
 		prefix := "» " + tc.Function.Name + ": "
@@ -3813,10 +3868,19 @@ func printToolLine(out io.Writer, tc toolCall, termWidth int) {
 				summary = string(runes[:maxSummary-1]) + "…"
 			}
 		}
-		fmt.Fprintf(out, "\n%s\n", ansi.Dim("» "+tc.Function.Name+": "+summary))
+		fmt.Fprintf(&sb, "\n%s\n", ansi.Dim("» "+tc.Function.Name+": "+summary))
 	} else {
-		fmt.Fprintf(out, "\n%s\n", ansi.Dim("» "+tc.Function.Name))
+		fmt.Fprintf(&sb, "\n%s\n", ansi.Dim("» "+tc.Function.Name))
 	}
+	return sb.String()
+}
+
+// printToolLine writes a one-line dim tool-usage hint to out before a tool is
+// dispatched, mirroring what Claude shows for permission requests.
+// Format:  » <name>: <short summary of key argument>
+// termWidth is the current terminal width (0 = no truncation).
+func printToolLine(out io.Writer, tc toolCall, termWidth int) {
+	fmt.Fprint(out, toolHintText(tc, termWidth))
 }
 
 // toolDiff returns a colored inline diff string for edit_file and write_file

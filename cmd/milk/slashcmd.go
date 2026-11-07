@@ -221,6 +221,10 @@ var commandRegistry = []cmdSpec{
   /think collapse        fold every thinking block
   /think view            swap the main area to a thinking-only stream
   /think on|off          ACP only: relay or withhold thought chunks`},
+	{name: cmdTools, hosts: hostTUI, desc: "inspect or fold the turn's tool calls (full input and output)", hint: "[expand|collapse|view]", help: `  /tools                 show tool-block count and fold state
+  /tools expand          expand every tool block (full input + output)
+  /tools collapse        fold every tool block
+  /tools view            swap the main area to a tool-only stream`},
 	{name: cmdQueue, hosts: hostTUI, desc: "review or edit the prompts queued for the next turn", hint: "[list|show <n>|drop <n|last|all>|clear]", help: `  /queue               list the prompts queued for the next turn
   /queue show <n>      print queued prompt <n> in full
   /queue drop <n>      drop queued prompt <n> (also: last, all)
@@ -234,8 +238,9 @@ var commandRegistry = []cmdSpec{
   /tips pick <n>         show tip number <n>
   /tips pick <text>      show the tip whose text matches <text>
   /tips search <query>   list the tips matching <query>`},
-	{name: cmdSetup, hosts: hostBoth, desc: "configure Telegram remote oversight (status, enable, disable, or the setup wizard)", hint: "telegram [on|off|status]", help: `  /setup telegram         configure Telegram remote oversight interactively
-  /setup telegram on      enable Telegram (credentials must already be configured)
+	{name: cmdSetup, hosts: hostBoth, desc: "configure Telegram remote oversight (status, enable levels, or the setup wizard)", hint: "telegram [on|lite|off|status]", help: `  /setup telegram         configure Telegram remote oversight interactively
+  /setup telegram on      enable Telegram, full notifications (credentials must already be configured)
+  /setup telegram lite    enable Telegram without tool notifications
   /setup telegram off     disable Telegram (credentials are preserved)
   /setup telegram status  show current Telegram oversight status`},
 	{name: cmdConfig, hosts: hostBoth, desc: "print the config, run the setup wizard, or open the config file", hint: "[show|init|open]", help: `  /config                print the current config (merged global + local overrides)
@@ -355,7 +360,7 @@ var helpBlocks = []helpBlock{
 	{header: "── Permissions ──────────────────────────────────────────────────────────", names: []string{cmdPermissions}},
 	{header: "── Memory ───────────────────────────────────────────────────────────────", names: []string{cmdLearn, cmdMemory, cmdForget, cmdPanel, cmdTasks, cmdTask}},
 	{header: "── Background agents ───────────────────────────────────────────────────", names: []string{cmdBg, cmdQueue}},
-	{header: "── Display ──────────────────────────────────────────────────────────────", names: []string{cmdColorize, cmdTheme, cmdThink, cmdTips, cmdHistory, cmdNotifications, cmdKeys}},
+	{header: "── Display ──────────────────────────────────────────────────────────────", names: []string{cmdColorize, cmdTheme, cmdThink, cmdTools, cmdTips, cmdHistory, cmdNotifications, cmdKeys}},
 	{header: "── Observability ────────────────────────────────────────────────────────", names: []string{cmdUsage, cmdMetrics, cmdOtel}},
 	{header: "── MCP Servers ───────────────────────────────────────────────────────────", names: []string{cmdMCP}},
 	{header: "── Workflow ───────────────────────────────────────────────────────────────", names: []string{cmdWorkflow}},
@@ -380,7 +385,7 @@ var helpBlocks = []helpBlock{
 
   Agent control
     Ctrl+C   interrupt current agent turn (or copy if selection is active)
-    Ctrl+T   toggle the most recent thinking block (the streaming one, if any)
+    Ctrl+T   toggle the most recent thinking block (the streaming one, if any) — twice quickly: fold all blocks
              reasoning renders as foldable blocks on their own background,
              folded by default — the header's line count updates live while
              streaming; click a ▸ header to toggle just that block (new blocks

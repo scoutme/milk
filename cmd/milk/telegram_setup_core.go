@@ -22,22 +22,32 @@ var (
 	telegramResolveChatID = resolveTelegramChatID
 )
 
-// setTelegramEnabledCfg toggles the oversight backend without touching the
-// stored credentials, saving the config. Enabling without credentials is an
-// error; the error text is what both hosts show to the user.
-func setTelegramEnabledCfg(cfg *config.Config, on bool, dir string) error {
+// setTelegramLevelCfg sets the oversight enable level — "on" (full), "lite"
+// (oversight on, tool notifications off) or "off" — without touching the
+// stored credentials, saving the config. Enabling at either level without
+// credentials is an error; the error text is what both hosts show to the
+// user. The level is a preset over the config's own knobs: on/lite write
+// notify_tools explicitly (true/false) so a stale value can never
+// contradict the chosen level; off clears the backend only, leaving the
+// knobs as they are for the next enable.
+func setTelegramLevelCfg(cfg *config.Config, level string, dir string) error {
 	ro := cfg.RemoteOversight
 	if ro == nil {
 		ro = &config.RemoteOversightConfig{}
 		cfg.RemoteOversight = ro
 	}
-	if on {
+	switch level {
+	case "on", "lite":
 		if ro.Telegram == nil || ro.Telegram.Token == "" || ro.Telegram.ChatID == 0 {
 			return fmt.Errorf("no Telegram credentials configured — run /setup telegram first")
 		}
 		ro.Backend = "telegram"
-	} else {
+		tools := level == "on"
+		ro.NotifyTools = &tools
+	case "off":
 		ro.Backend = ""
+	default:
+		return fmt.Errorf("unknown level %q — use on, lite or off", level)
 	}
 	if err := saveLocalOrGlobal(*cfg, dir); err != nil {
 		return fmt.Errorf("error saving config: %w", err)
@@ -83,6 +93,9 @@ func telegramStatusText(cfg config.Config) string {
 	state := "off"
 	if enabled {
 		state = "on"
+		if !ro.NotifyToolsEnabled() {
+			state = "lite"
+		}
 	}
 	fmt.Fprintf(&b, "%s Telegram oversight: %s\n", milkTag(), state)
 	if ro == nil || ro.Telegram == nil || ro.Telegram.Token == "" || ro.Telegram.ChatID == 0 {
@@ -92,7 +105,7 @@ func telegramStatusText(cfg config.Config) string {
 	fmt.Fprintf(&b, "  credentials: configured (chat_id: %d, token: %s)\n",
 		ro.Telegram.ChatID, telegramMaskToken(ro.Telegram.Token))
 	if !enabled {
-		b.WriteString("  enable with: /setup telegram on\n")
+		b.WriteString("  enable with: /setup telegram on|lite\n")
 	}
 	tools := "on"
 	if !ro.NotifyToolsEnabled() {

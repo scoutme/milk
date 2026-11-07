@@ -44,6 +44,7 @@ const cmdPermissions = "/permissions"
 const cmdAgent = "/agent"
 const cmdColorize = "/colorize"
 const cmdThink = "/think"
+const cmdTools = "/tools"
 const cmdTips = "/tips"
 const cmdQueue = "/queue"
 const cmdTheme = "/theme"
@@ -367,6 +368,7 @@ var promptFriendly = map[string]bool{
 var busySafeCommands = map[string]bool{
 	"/help":          true,
 	cmdThink:         true,
+	cmdTools:         true,
 	cmdTips:          true,
 	cmdQueue:         true,
 	cmdTheme:         true,
@@ -478,6 +480,11 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 		// reach the model's think-block fold state. This case is a no-op
 		// here; the TUI intercepts cmdThink before it reaches
 		// handleSlashCommand. Guard to prevent "unknown command" output.
+	case cmdTools:
+		// /tools is handled in handleSlashInput (commands.go) where it can
+		// reach the model's tool-block fold state — the tool-side mirror of
+		// /think. No-op guard here so nothing prints "unknown command",
+		// mirroring cmdThink.
 	case cmdKeys:
 		// Rendered by the TUI in handleSlashInput (commands.go); no-op here.
 	case cmdNotifications:

@@ -46,6 +46,16 @@ var indexMu sync.Mutex
 // Set to 0 to disable time-based expiry. Overridable from config at startup.
 var NeedExpiryDuration = 24 * time.Hour
 
+// NeedRestartGrace is how close to the session's last activity a load must be
+// to count as a RESUME rather than a fresh start: within the window the load
+// never touches need state — no fulfilled-clear, no expiry-clear, no staleness
+// change. Restarting a live session (rebuild+restart, crash loop, /restart)
+// must not damage the work in flight; only a session that genuinely paused
+// lets the housekeeping below run. The activity clock is Session.LastUsed
+// (stamped per turn and per need write); for files written before that field
+// existed, the session file's own mtime stands in.
+var NeedRestartGrace = 10 * time.Minute
+
 type IndexEntry struct {
 	ID       string    `json:"id"`
 	Name     string    `json:"name,omitempty"`
@@ -223,6 +233,19 @@ func Load(id string) (*Session, error) {
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
+	}
+	// Resume-vs-restart gate (see NeedRestartGrace): a load close to the
+	// session's last activity is a continuation — need state loads verbatim.
+	lastActive := s.LastUsed
+	if lastActive.IsZero() {
+		// Pre-field files: the store saves on activity, so the file's own
+		// mtime is the best available activity clock.
+		if fi, err := os.Stat(path); err == nil {
+			lastActive = fi.ModTime()
+		}
+	}
+	if !lastActive.IsZero() && time.Since(lastActive) <= NeedRestartGrace {
+		return &s, nil
 	}
 	// Clear CurrentNeed if it was already fulfilled before the session ended:
 	// if any escalation assistant turn occurred after CurrentNeedSetAt, the need

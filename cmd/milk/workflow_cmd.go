@@ -469,6 +469,16 @@ func workflowDisplaySend(send func(tea.Msg)) func(tea.Msg) {
 			send(workflowThinkChunkMsg{text: v.text})
 		case chunkMsg:
 			send(workflow.WorkflowChunkMsg{Text: v.text})
+		case toolCallStartMsg:
+			// The fold container is a main-transcript concept: a workflow
+			// step's tool call renders in the live view as the plain hint
+			// line the stream used to carry (hintText — hint + diff, the
+			// exact bytes printToolLine/toolHintText would have streamed).
+			send(workflow.WorkflowChunkMsg{Text: v.hintText})
+		case toolCallEndMsg:
+			// Outcome delivery is main-turn-only (completeToolBlock would
+			// no-op on an unknown id anyway — drop it explicitly, like the
+			// retraction/promotion pair above).
 		case retractMsg, reasoningPromotedMsg:
 		default:
 			send(msg)
