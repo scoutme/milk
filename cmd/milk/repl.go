@@ -974,6 +974,10 @@ type model struct {
 	// a brick redraw, not a content event.
 	memoryPerceptN int
 
+	// side-panel keyboard focus (issue #412): regionNone = the main area
+	// (transcript + input); transient view state, never persisted.
+	panelFocus panelRegion
+
 	// memory panel (in-place expansion mirrors into the tasks panel)
 	panelMemory        bool
 	memoryExpanded     string
@@ -2187,6 +2191,11 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			dragCmd = m.smoothScroll(&m.vp, scrollWheelLines)
 		}
 	case tea.MouseLeft:
+		// Focus follows the click (issue #412): pressing inside a visible
+		// panel makes it the keyboard target; pressing in the main area
+		// (transcript or input) returns focus there. Wheel scrolling is
+		// not a change of intent — it never moves focus.
+		m.panelFocus = region
 		if region != regionNone {
 			return m.handlePanelMouse(region, regionX, ev)
 		}
@@ -3946,10 +3955,27 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+t":
 		return m.handleCtrlT(), nil
 	case "pgup", "ctrl+u":
+		// Issue #412: while a side panel holds keyboard focus, paging
+		// scrolls that panel; main area (or no focus) keeps the
+		// transcript behavior unchanged.
+		if m.focusedPanel() != regionNone {
+			m.scrollFocusedPanel(-1)
+			return m, nil
+		}
 		m.vp.HalfPageUp()
 		return m, nil
 	case "pgdown", "ctrl+f":
+		if m.focusedPanel() != regionNone {
+			m.scrollFocusedPanel(1)
+			return m, nil
+		}
 		m.vp.HalfPageDown()
+		return m, nil
+	case "shift+pgup":
+		m.rotatePanelFocus(-1)
+		return m, nil
+	case "shift+pgdown", "shift+pgdn":
+		m.rotatePanelFocus(1)
 		return m, nil
 	}
 

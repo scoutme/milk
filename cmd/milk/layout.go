@@ -305,7 +305,7 @@ func (m *model) setViewportContent() {
 		m.txLinesCache = viewport.NormalizeLines(strings.Split(transcript+"\n"+sep, "\n"))
 	}
 	inputView := m.colorizeInput(m.ta.View())
-	if m.blurred {
+	if m.blurred || m.focusedPanel() != regionNone {
 		// Issue #367: an unfocused window renders the input area as
 		// inactive — no colors, no reverse-video cursor (nothing blinks
 		// in a backgrounded tab), fully dim. Rebuilt identically on
