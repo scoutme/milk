@@ -333,3 +333,81 @@ func TestRegionAt_ProjectAndGit(t *testing.T) {
 		t.Errorf("main area maps to %v, want regionNone", r)
 	}
 }
+
+// --- header (working tree) click ---
+
+func TestBuildGitPanelLines_HeaderIsWorktreeID(t *testing.T) {
+	lines, ids := buildGitPanelLines(gitRowsFixture(), "main", 2, "", gitPanelInner)
+	if len(lines) != 7 || ids[2] != worktreeID {
+		t.Errorf("header id = %q (lines=%d ids=%v), want %q at the header row", ids[2], len(lines), ids, worktreeID)
+	}
+
+	// States with no header line must never carry the sentinel: their ids
+	// all route to gitShow, which would reject "worktree" as a hash.
+	for _, tc := range []struct {
+		name   string
+		rows   []gitGraphLine
+		gitErr string
+	}{
+		{"loading", nil, ""},
+		{"error", nil, "not a git repository"},
+		{"no commits", []gitGraphLine{}, ""},
+	} {
+		_, ids := buildGitPanelLines(tc.rows, "main", 0, tc.gitErr, gitPanelInner)
+		for i, id := range ids {
+			if id == worktreeID {
+				t.Errorf("%s state: worktree sentinel at row %d without a header: %v", tc.name, i, ids)
+			}
+		}
+	}
+}
+
+func TestHandleGitPanelClick_WorktreeHeader(t *testing.T) {
+	dir := scratchRepo(t)
+	m := dragTestModel()
+	m.st.cwd = dir
+	m.gitLines, m.gitIDs = buildGitPanelLines(gitRowsFixture(), "main", 2, "", gitPanelInner)
+
+	idx := -1
+	for i, id := range m.gitIDs {
+		if id == worktreeID {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("worktree header id not found in %v", m.gitIDs)
+	}
+
+	// Clean tree: the click still answers, with the clean verdict.
+	if cmd := m.handleGitPanelClick(idx); cmd == nil || m.attached == nil {
+		t.Fatalf("clean-tree header click should attach, got cmd=%v attached=%v", cmd != nil, m.attached)
+	}
+	if m.attached.label != "working tree" {
+		t.Errorf("label = %q, want %q", m.attached.label, "working tree")
+	}
+	if snap := m.attached.buf.Snapshot(); !strings.Contains(snap, "working tree clean") {
+		t.Errorf("clean snapshot = %q", snap)
+	}
+
+	// Dirty it — modified tracked file AND an untracked one: the preview
+	// must carry the status lines (untracked included) and the HEAD diff.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := m.handleGitPanelClick(idx); cmd == nil || m.attached == nil {
+		t.Fatalf("dirty header click should attach")
+	}
+	snap := m.attached.buf.Snapshot()
+	if !strings.Contains(snap, "a.txt") {
+		t.Errorf("snapshot missing the status line:\n%s", snap)
+	}
+	if !strings.Contains(snap, "?? new.txt") {
+		t.Errorf("snapshot missing the untracked status line:\n%s", snap)
+	}
+	if !strings.Contains(snap, "+two") {
+		t.Errorf("snapshot missing the diff against HEAD:\n%s", snap)
+	}
+}

@@ -199,3 +199,73 @@ func TestProjectPanelStaleArmExpires(t *testing.T) {
 		t.Error("stale arm must not insert an @-mention")
 	}
 }
+
+// --- fileDiffBuffer: modified files preview as a diff ---
+
+func TestFileDiffBuffer_CleanModifiedUntrackedNonRepo(t *testing.T) {
+	dir := scratchRepo(t)
+
+	// Clean committed file → no diff: caller falls back to contents.
+	if buf, label := fileDiffBuffer(dir, "a.txt"); buf != nil || label != "" {
+		t.Errorf("clean file: buf=%v label=%q, want nil/empty for the contents fallback", buf, label)
+	}
+
+	// Modified → complete diff vs HEAD (staged + unstaged), label says diff.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf, label := fileDiffBuffer(dir, "a.txt")
+	if buf == nil || label != "diff a.txt" {
+		t.Fatalf("modified file: buf=%v label=%q, want a diff buffer labelled %q", buf != nil, label, "diff a.txt")
+	}
+	if snap := buf.Snapshot(); !strings.Contains(snap, "+two") || !strings.Contains(snap, "a.txt") {
+		t.Errorf("modified diff = %q, want the +two line and the path", snap)
+	}
+
+	// Untracked → whole-file added diff (git diff alone would show nothing).
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf, label = fileDiffBuffer(dir, "b.txt")
+	if buf == nil || label != "diff b.txt" {
+		t.Fatalf("untracked file: buf=%v label=%q", buf != nil, label)
+	}
+	if snap := buf.Snapshot(); !strings.Contains(snap, "/dev/null") || !strings.Contains(snap, "+fresh") {
+		t.Errorf("untracked diff = %q, want the /dev/null added form", snap)
+	}
+
+	// Not a repo → nil: the caller keeps the raw content preview.
+	if buf, _ := fileDiffBuffer(t.TempDir(), "a.txt"); buf != nil {
+		t.Error("non-repo cwd should fall back to contents, got a diff buffer")
+	}
+}
+
+func TestHandleProjectPanelClick_ModifiedFilePreviewsDiff(t *testing.T) {
+	dir := scratchRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := dragTestModel()
+	m.st.cwd = dir
+	m.projectFiles = []string{"a.txt"}
+	m.rebuildProjectTree()
+
+	idx := -1
+	for i, id := range m.projectIDs {
+		if id == "a.txt" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("a.txt row not found in ids %v", m.projectIDs)
+	}
+	if cmd := m.handleProjectPanelClick(idx); cmd == nil || m.attached == nil {
+		t.Fatalf("modified file click should attach a diff, got attached=%v", m.attached)
+	}
+	if m.attached.label != "diff a.txt" {
+		t.Errorf("attach label = %q, want %q", m.attached.label, "diff a.txt")
+	}
+	if snap := m.attached.buf.Snapshot(); !strings.Contains(snap, "+two") {
+		t.Errorf("preview = %q, want the diff content", snap)
+	}
+}

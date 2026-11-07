@@ -16,7 +16,8 @@ import (
 // Git graph panel (issue #206, ADR-0066): the repo's branch/commit graph,
 // lanes laid out in code from `git log` plumbing (see gitgraph.go), the
 // current branch and dirty count on top. Click a commit to preview its
-// summary and diff in the main area.
+// summary and diff in the main area, or the branch/status header itself for
+// the working tree's complete local state (status + diff vs HEAD).
 
 const gitPanelWidth = 33 // 32 inner + 1 right scrollbar column
 const gitPanelInner = 32
@@ -63,7 +64,10 @@ func buildGitPanelLines(rows []gitGraphLine, branch string, dirty int, gitErr st
 		head += dim(" clean")
 	}
 	lines = append(lines, head)
-	ids = append(ids, "")
+	// The header line is clickable too: worktreeID routes it to the working-
+	// tree preview instead of gitShow (handleGitPanelClick). Never hex, so it
+	// can't collide with a commit hash.
+	ids = append(ids, worktreeID)
 	lines = append(lines, "")
 	ids = append(ids, "")
 
@@ -98,8 +102,15 @@ func gitRowLine(r gitGraphLine, inner int) string {
 	return dim(r.Prefix+" ") + dim(r.Commit.Short) + " " + subject
 }
 
+// worktreeID marks the branch/status header line as clickable: its click
+// previews the working tree's complete local state (gitStatusShort + the
+// diff vs HEAD). Deliberately not hex — gitShow rejects it as a hash, so
+// the sentinel can never leak into a git command.
+const worktreeID = "worktree"
+
 // handleGitPanelClick previews the clicked commit's summary and diff in the
-// main area (attach view).
+// main area (attach view). The branch/status header (worktreeID) previews
+// the working tree's complete local state instead.
 func (m *model) handleGitPanelClick(lineIdx int) tea.Cmd {
 	if lineIdx < 0 || lineIdx >= len(m.gitIDs) {
 		return nil
@@ -107,6 +118,16 @@ func (m *model) handleGitPanelClick(lineIdx int) tea.Cmd {
 	hash := m.gitIDs[lineIdx]
 	if hash == "" {
 		return nil
+	}
+	if hash == worktreeID {
+		out, err := workingTreePreview(m.st.cwd)
+		if err != nil {
+			m.notify("git status failed: "+err.Error(), "")
+			return nil
+		}
+		buf := livebuf.New(gitShowMaxBytes + 1024)
+		buf.Append([]byte(out))
+		return m.startAttach(attachPreview, "", "working tree", buf)
 	}
 	out, err := gitShow(m.st.cwd, hash)
 	if err != nil {

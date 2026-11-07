@@ -19,8 +19,10 @@ import (
 // Project tree panel (issue #206, ADR-0066): the session cwd's file layout,
 // backed by the same git-file-list candidate index the @-file completion uses
 // (ADR-0057) so it never pays the walk-budget problem. Click a directory to
-// expand/collapse it, click a file to preview it in the main area, double-
-// click to insert an @-mention into the input.
+// expand/collapse it, click a file to preview it in the main area — as a
+// diff when the file has working-tree changes (modified/untracked in a git
+// repo), as raw contents otherwise — double-click to insert an @-mention
+// into the input.
 
 const projectPanelWidth = 33 // 32 inner + 1 right scrollbar column
 const projectPanelInner = 32
@@ -273,7 +275,9 @@ func (m *model) projectDirExpanded(dir string) bool {
 }
 
 // handleProjectPanelClick: a click on a directory row toggles its expansion;
-// a click on a file row previews the file in the main area, and a second
+// a click on a file row previews it in the main area — as a diff when the
+// file has working-tree changes (fileDiffBuffer), as contents otherwise —
+// and a second
 // click on the same file within 400ms inserts an @-mention into the input
 // (the memory panel's arm/act rhythm).
 func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
@@ -304,12 +308,43 @@ func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
 	m.lastTreeClickPath = path
 	m.lastTreeClickTime = now
 
+	// Preferred view: the file's diff when it has one (modified or untracked
+	// in a git repo). Clean files, non-repo cwds and git failures fall
+	// through to the content preview below — the diff is a bonus, never a
+	// requirement.
+	if dbuf, dlabel := fileDiffBuffer(m.st.cwd, path); dbuf != nil {
+		return m.startAttach(attachPreview, "", dlabel, dbuf)
+	}
 	buf, label := filePreviewBuffer(m.st.cwd, path)
 	if buf == nil {
 		m.notify("cannot preview "+path, "")
 		return nil
 	}
 	return m.startAttach(attachPreview, "", label, buf)
+}
+
+// fileDiffBuffer returns the file's working-tree diff when it has one: a
+// modified file previews as its complete diff vs HEAD (staged + unstaged),
+// an untracked file as a whole-file added diff, and everything else (clean
+// file, no git, not a repo, probe failure) returns nil so the caller keeps
+// the raw content preview. One status probe decides the branch.
+func fileDiffBuffer(cwd, rel string) (*livebuf.Buffer, string) {
+	st, err := gitStatusShort(cwd, rel)
+	if err != nil || strings.TrimSpace(st) == "" {
+		return nil, "" // clean, or git can't speak for this path
+	}
+	var out string
+	if strings.HasPrefix(strings.TrimSpace(st), "??") {
+		out, err = gitDiffNoIndex(cwd, rel)
+	} else {
+		out, err = gitDiffHEAD(cwd, rel)
+	}
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil, ""
+	}
+	buf := livebuf.New(gitShowMaxBytes + 1024)
+	buf.Append([]byte(out))
+	return buf, "diff " + rel
 }
 
 // filePreviewBuffer reads a file (capped) into an attach-able buffer. Returns
