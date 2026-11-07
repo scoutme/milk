@@ -174,12 +174,15 @@ var commandRegistry = []cmdSpec{
   /panel background      toggle the background-agents panel (right side) — also F3
   /panel workflow        toggle the workflow panel (right side) — also F4
   /panel project         toggle the project tree panel (right side) — also F5
-                         click a dir to expand/collapse, a file to preview it,
-                         double-click a file to insert an @-mention
+                         double-click a dir to expand/collapse, a file to
+                         preview it (as a diff when the file changed),
+                         triple-click a file to insert an @-mention
   /panel git             toggle the git graph panel (right side) — also F6
-                         click a commit to preview its summary and diff
-                         a press on a visible panel closes it; a press on a
-                         panel the width budget grouped (see
+                         double-click a commit to preview its summary and
+                         diff, or the branch/status header for the working
+                         tree's complete local state
+                         an F-key press on a visible panel closes it; an
+                         F-key press on a panel the width budget grouped (see
                          max_shown_panels) brings that panel to the top of
                          the group's strip instead of closing it, and a
                          click on a grouped tab does the same as its F-key

@@ -47,17 +47,12 @@ func TestHandleBackgroundPanelClick_DoubleClickAttaches(t *testing.T) {
 	job := spawnJobWithLiveContent(t, mgr, "investigate X", "distinctive job output")
 
 	// backgroundPanelLayout: line 0 title, line 1 blank, line 2 the "agents
-	// (1)" section header, line 3 the only job.
-	if cmd := m.handleBackgroundPanelClick(3); cmd != nil {
-		t.Fatalf("first click should only arm, not return a command")
-	}
-	if m.attached != nil {
-		t.Fatalf("expected no attach after a single click, got %+v", m.attached)
-	}
-
+	// (1)" section header, line 3 the only job. The handler is a pure action
+	// — the cadence (single = deferred focus, this attach on the double
+	// click without moving focus) lives in panelClickAction.
 	cmd := m.handleBackgroundPanelClick(3)
 	if m.attached == nil {
-		t.Fatal("expected attach after second click within 400ms")
+		t.Fatal("expected attach from the acting click")
 	}
 	if m.attached.kind != attachBackground || m.attached.jobID != job.ID {
 		t.Fatalf("attached = %+v, want kind=attachBackground jobID=%s", m.attached, job.ID)
@@ -101,16 +96,9 @@ func TestHandleWorkflowPanelClick_DoubleClickAttaches(t *testing.T) {
 	m.workflowState = &workflow.State{WorkflowName: "dev", Role: "designer"}
 	m.workflowState.LiveBuffer().Append([]byte("distinctive stage output"))
 
-	if cmd := m.handleWorkflowPanelClick(); cmd != nil {
-		t.Fatal("first click should only arm, not return a command")
-	}
-	if m.attached != nil {
-		t.Fatal("expected no attach after a single click")
-	}
-
 	cmd := m.handleWorkflowPanelClick()
 	if m.attached == nil {
-		t.Fatal("expected attach after second click within 400ms")
+		t.Fatal("expected attach from the acting click")
 	}
 	if m.attached.kind != attachWorkflow {
 		t.Fatalf("attached.kind = %v, want attachWorkflow", m.attached.kind)

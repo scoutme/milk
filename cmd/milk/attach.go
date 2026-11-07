@@ -328,13 +328,10 @@ func (m *model) handleAttachMouse(ev mouseEvent) (tea.Model, tea.Cmd) {
 	return m, dragCmd
 }
 
-// handleBackgroundPanelClick runs the background panel's click-for-attach
-// behavior (ADR-0047): a single click arms the row's job ID, and a second
-// click on the same job within 400ms attaches the live view to it — the
-// background-panel analogue of handleMemoryPanelClick, but attaching instead
-// of printing to the transcript. The "bg:" prefix keeps this click's arm/
-// trigger state from colliding with the memory panel's own IDs, since both
-// share the same m.lastPanelClickID field.
+// handleBackgroundPanelClick runs the background panel's action (ADR-0047):
+// a double click attaches the live view of the clicked job/shell row — the
+// cadence (single = deferred focus, this attach without moving focus) lives
+// in panelClickAction, so the handler is a pure action.
 func (m *model) handleBackgroundPanelClick(lineIdx int) tea.Cmd {
 	var jobs []local.Job
 	if m.agents.backgroundMgr != nil {
@@ -351,7 +348,6 @@ func (m *model) handleBackgroundPanelClick(lineIdx int) tea.Cmd {
 		return nil
 	}
 	row := rows[lineIdx]
-	var key string
 	var live *livebuf.Buffer
 	var label string
 	switch row.kind {
@@ -360,7 +356,7 @@ func (m *model) handleBackgroundPanelClick(lineIdx int) tea.Cmd {
 			return nil
 		}
 		j := jobs[row.jobIdx]
-		key, label, live = "bg:"+j.ID, fmt.Sprintf("%s (%s)", j.Label, j.Status), j.Live
+		label, live = fmt.Sprintf("%s (%s)", j.Label, j.Status), j.Live
 	case bgRowShell:
 		if row.shellIdx >= len(shells) {
 			return nil
@@ -370,41 +366,27 @@ func (m *model) handleBackgroundPanelClick(lineIdx int) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		key, label, live = "bgsh:"+s.ID, fmt.Sprintf("%s (%s)", s.Command, s.StatusLabel()), buf
+		label, live = fmt.Sprintf("%s (%s)", s.Command, s.StatusLabel()), buf
 	default:
 		return nil
 	}
-	now := time.Now()
-	if key == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-		m.lastPanelClickID = ""
-		if row.kind == bgRowShell {
-			return m.startAttach(attachShell, shells[row.shellIdx].ID, label, live)
-		}
-		return m.startAttach(attachBackground, jobs[row.jobIdx].ID, label, live)
+	if row.kind == bgRowShell {
+		return m.startAttach(attachShell, shells[row.shellIdx].ID, label, live)
 	}
-	m.lastPanelClickID = key
-	m.lastPanelClickTime = now
-	return nil
+	return m.startAttach(attachBackground, jobs[row.jobIdx].ID, label, live)
 }
 
 // handleWorkflowPanelClick is handleBackgroundPanelClick's workflow
-// counterpart. No per-row ID is needed since the TUI runs at most one active
-// workflow at a time (m.workflowState).
+// counterpart: a double click attaches the workflow's live buffer (the TUI
+// runs at most one active workflow, m.workflowState). Pure action — the
+// click cadence lives in panelClickAction.
 func (m *model) handleWorkflowPanelClick() tea.Cmd {
 	if m.workflowState == nil {
 		return nil
 	}
-	const key = "wf"
-	now := time.Now()
-	if key == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-		m.lastPanelClickID = ""
-		label := m.workflowState.WorkflowName
-		if label == "" {
-			label = m.workflowState.Task
-		}
-		return m.startAttach(attachWorkflow, "", label, m.workflowState.LiveBuffer())
+	label := m.workflowState.WorkflowName
+	if label == "" {
+		label = m.workflowState.Task
 	}
-	m.lastPanelClickID = key
-	m.lastPanelClickTime = now
-	return nil
+	return m.startAttach(attachWorkflow, "", label, m.workflowState.LiveBuffer())
 }

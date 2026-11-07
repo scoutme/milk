@@ -23,6 +23,8 @@ type keyMap struct {
 	focusPrev     key.Binding
 	focusNext     key.Binding
 	panelPaging   key.Binding
+	panelCursor   key.Binding
+	panelEnter    key.Binding
 	tipPrev       key.Binding
 	tipNext       key.Binding
 	dismissToasts key.Binding
@@ -52,9 +54,11 @@ func newKeyMap() keyMap {
 			panel("f5", "project", "project tree panel"),
 			panel("f6", "git", "git graph panel"),
 		},
-		focusPrev:     key.NewBinding(key.WithKeys("shift+pgup"), key.WithHelp("shift+pgup", "focus previous panel")),
-		focusNext:     key.NewBinding(key.WithKeys("shift+pgdown", "shift+pgdn"), key.WithHelp("shift+pgdown", "focus next panel")),
+		focusPrev:     key.NewBinding(key.WithKeys("shift+pgup", "shift+tab"), key.WithHelp("shift+pgup", "focus previous panel")),
+		focusNext:     key.NewBinding(key.WithKeys("shift+pgdown", "shift+pgdn", "tab"), key.WithHelp("shift+pgdown", "focus next panel")),
 		panelPaging:   key.NewBinding(key.WithKeys("pgup", "ctrl+u", "pgdown", "ctrl+f"), key.WithHelp("pgup/pgdn", "scroll focused panel")),
+		panelCursor:   key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("up/down", "move row cursor")),
+		panelEnter:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run row action")),
 		tipPrev:       key.NewBinding(key.WithKeys("alt+up"), key.WithHelp("alt+up", "previous tip")),
 		tipNext:       key.NewBinding(key.WithKeys("alt+down"), key.WithHelp("alt+down", "next tip")),
 		dismissToasts: key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "dismiss notifications")),
@@ -98,7 +102,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 // FullHelp implements help.KeyMap: one column per group.
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		append(k.panelBindings(), k.focusPrev, k.focusNext, k.panelPaging),
+		append(k.panelBindings(), k.focusPrev, k.focusNext, k.panelPaging, k.panelCursor, k.panelEnter),
 		{k.palette, k.tipPrev, k.tipNext, k.dismissToasts, k.thinkToggle},
 		{k.searchBack, k.searchForward, k.undo, k.redo, k.newline, k.interrupt},
 	}
@@ -111,5 +115,10 @@ func renderKeysHelp(width int) string {
 	h.SetWidth(width)
 	h.Styles = help.DefaultStyles(hasDarkBackground())
 	h.ShowAll = true
-	return h.FullHelpView(keys.FullHelp())
+	// The tab/shift+tab rotation aliases live in a footnote, not in the
+	// focus bindings' help cells: the help package drops whole columns
+	// when a cell widens past the width budget (TestKeysCommand pins the
+	// 100-col contract), and a note outside the table costs nothing.
+	return h.FullHelpView(keys.FullHelp()) + " " +
+		dim("tab/shift+tab also focus next/previous panel when nothing is completing (completion always wins)")
 }

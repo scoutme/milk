@@ -4016,10 +4016,23 @@ func resetExecutedKeysAfterStateChange(executedKeys map[string]bool, readOnlyCou
 func toolArgSummary(args map[string]any) string {
 	for _, key := range []string{"command", "path", "file_path", "url", "query", "pattern", "reason", "content"} {
 		if v, ok := args[key].(string); ok && v != "" {
-			return v
+			// Shape, not length: summaries feed one-row surfaces only —
+			// the `» hint line, oversight notifications, and (via the
+			// view callback) the TUI's fold header. A multi-line command
+			// (heredoc) must not produce a multi-line summary; the TUI
+			// contract is documented on cmd/milk's flattenSummary.
+			return flattenSummary(v)
 		}
 	}
 	return ""
+}
+
+// flattenSummary collapses embedded newlines into spaces (one-row summaries;
+// the cmd/milk twin carries the full contract comment).
+func flattenSummary(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 // dropOldestDroppableUnit removes the oldest droppable content from msgs for

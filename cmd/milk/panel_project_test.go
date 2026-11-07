@@ -122,7 +122,10 @@ func TestHandleProjectPanelClick_DirToggle(t *testing.T) {
 	}
 }
 
-func TestHandleProjectPanelClick_FilePreviewThenInsert(t *testing.T) {
+// The click cadence (panelClickAction): single defers focus with NO
+// preview, double previews while focus never moves, triple inserts the
+// @-mention the double click used to own.
+func TestPanelClickCadence_File_PreviewDouble_MentionTriple(t *testing.T) {
 	m := projectClickModel(t)
 	if err := os.WriteFile(filepath.Join(m.st.cwd, "README.md"), []byte("# hi\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -139,9 +142,21 @@ func TestHandleProjectPanelClick_FilePreviewThenInsert(t *testing.T) {
 		t.Fatalf("README.md row not found in ids %v", m.projectIDs)
 	}
 
-	cmd := m.handleProjectPanelClick(idx)
-	if cmd == nil || m.attached == nil {
-		t.Fatalf("single click should preview the file (attach), got attached=%v", m.attached)
+	// click1: nothing previews; focus is deferred behind the timer.
+	if cmd := m.panelClickAction(regionProject, idx); cmd == nil {
+		t.Fatal("click1 must arm the focus timer")
+	}
+	if m.attached != nil {
+		t.Error("single click must not preview")
+	}
+	if !m.panelClickPending.valid || m.panelFocus != regionNone {
+		t.Fatalf("click1: pending=%v focus=%v, want armed + regionNone", m.panelClickPending.valid, m.panelFocus)
+	}
+	gen1 := m.panelClickGen
+
+	// click2: the preview — and the deferred focus is abandoned.
+	if cmd := m.panelClickAction(regionProject, idx); cmd == nil || m.attached == nil {
+		t.Fatalf("double click should preview, got attached=%v", m.attached)
 	}
 	if m.attached.label != "file README.md" {
 		t.Errorf("attach label = %q", m.attached.label)
@@ -149,16 +164,25 @@ func TestHandleProjectPanelClick_FilePreviewThenInsert(t *testing.T) {
 	if snap := m.attached.buf.Snapshot(); !strings.Contains(snap, "# hi") {
 		t.Errorf("preview content = %q", snap)
 	}
-
-	// Double-click within 400ms inserts the @-mention.
-	m.handleProjectPanelClick(idx)
-	if !strings.Contains(m.ta.Value(), "@README.md") {
-		t.Errorf("double click should insert @-mention, textarea = %q", m.ta.Value())
+	if m.panelClickPending.valid {
+		t.Error("double click must consume the deferred focus")
 	}
-	// And the third click previews again (the arm state was consumed).
-	m.handleProjectPanelClick(idx)
-	if m.lastTreeClickPath != "README.md" {
-		t.Errorf("third click should re-arm preview, got %q", m.lastTreeClickPath)
+	if m.panelFocus != regionNone {
+		t.Errorf("double click must never move focus, got %v", m.panelFocus)
+	}
+	// The orphaned timer must not land focus later either.
+	nm, _ := m.Update(panelClickFocusMsg{gen: gen1})
+	if nm.(model).panelFocus != regionNone {
+		t.Error("stale focus timer must be ignored after a double click")
+	}
+
+	// click3: the @-mention.
+	m.panelClickAction(regionProject, idx)
+	if !strings.Contains(m.ta.Value(), "@README.md") {
+		t.Errorf("triple click should insert @-mention, textarea = %q", m.ta.Value())
+	}
+	if m.lastTreeClickPath != "" {
+		t.Errorf("triple click should consume the arm, got %q", m.lastTreeClickPath)
 	}
 }
 
@@ -182,9 +206,10 @@ func TestFilePreviewBuffer(t *testing.T) {
 	}
 }
 
-// TestProjectPanelStaleArmExpires: the double-click window is 400ms — a slow
-// second click is a fresh single click (preview), not an insert.
-func TestProjectPanelStaleArmExpires(t *testing.T) {
+// TestPanelClickCadence_SlowSecondClickIsFreshSingle: a second click after
+// the 400ms window is a fresh single click — no preview, no @-mention, a
+// newly armed (deferred) focus instead of the expired window's.
+func TestPanelClickCadence_SlowSecondClickIsFreshSingle(t *testing.T) {
 	m := projectClickModel(t)
 	idx := -1
 	for i, id := range m.projectIDs {
@@ -192,11 +217,21 @@ func TestProjectPanelStaleArmExpires(t *testing.T) {
 			idx = i
 		}
 	}
-	m.handleProjectPanelClick(idx)
-	m.lastTreeClickTime = time.Now().Add(-time.Second)
-	m.handleProjectPanelClick(idx)
-	if strings.Contains(m.ta.Value(), "@README.md") {
-		t.Error("stale arm must not insert an @-mention")
+	if idx < 0 {
+		t.Fatalf("README.md row not found in ids %v", m.projectIDs)
+	}
+	m.panelClickAction(regionProject, idx) // click1: armed
+	m.panelClickPending.at = time.Now().Add(-time.Second)
+
+	m.panelClickAction(regionProject, idx) // slow second click
+	if m.attached != nil {
+		t.Error("slow second click must not preview")
+	}
+	if strings.Contains(m.ta.Value(), "@README") {
+		t.Error("slow second click must not insert an @-mention")
+	}
+	if !m.panelClickPending.valid || m.panelClickPending.line != idx {
+		t.Errorf("slow second click should re-arm as a fresh single, pending=%+v", m.panelClickPending)
 	}
 }
 

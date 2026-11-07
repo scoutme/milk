@@ -33,7 +33,7 @@ func TestKeyMap_EveryBindingHasHelpAndKeys(t *testing.T) {
 
 func TestKeysCommand_PrintsShortcuts(t *testing.T) {
 	out := ansi.Strip(renderKeysHelp(100))
-	for _, want := range []string{"f1", "command palette", "alt+down", "ctrl+g"} {
+	for _, want := range []string{"f1", "command palette", "alt+down", "ctrl+g", "tab/shift+tab also focus"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("/keys output misses %q:\n%s", want, out)
 		}

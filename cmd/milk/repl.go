@@ -977,14 +977,28 @@ type model struct {
 	// side-panel keyboard focus (issue #412): regionNone = the main area
 	// (transcript + input); transient view state, never persisted.
 	panelFocus panelRegion
+	// panelCursorLine is the focused panel's row cursor: arrows move it
+	// (movePanelCursor), Enter runs its row's action (panelActivateRow),
+	// and it renders as the selection highlight. Transient view state like
+	// panelFocus — never persisted.
+	panelCursorLine int
+	// click cadence for the files and git panels: their single click defers
+	// focus to the double-click window (see panelClickAction); gen orphans
+	// the timer whenever the click is superseded.
+	panelClickPending pendingPanelClick
+	panelClickGen     uint64
+	// panelPressAt is when the current panel press went down: press and
+	// release must be close together (within panelDoubleClickWindow) for
+	// the release to count as a click at all — holding the button down
+	// is not a normal single click, and a drag (selection) never changes
+	// focus. See panelClickAction.
+	panelPressAt time.Time
 
 	// memory panel (in-place expansion mirrors into the tasks panel)
-	panelMemory        bool
-	memoryExpanded     string
-	panelOffset        int
-	mem                *memory.Store
-	lastPanelClickID   string
-	lastPanelClickTime time.Time
+	panelMemory    bool
+	memoryExpanded string
+	panelOffset    int
+	mem            *memory.Store
 
 	// tasks panel
 	panelTasks   bool
@@ -1686,7 +1700,9 @@ func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "tab", "shift+tab":
 		// Completion only edits the input buffer, so Tab cycling and hint
 		// commit are not trapped while busy — the same handleTabKey
-		// semantics as idle. Only Enter-as-submission is trapped.
+		// semantics as idle: completion when there is any, else panel
+		// focus rotation (the shift+pgup/pgdn alternative). Only
+		// Enter-as-submission is trapped.
 		dir := 1
 		if msg.String() == "shift+tab" {
 			dir = -1
@@ -2175,6 +2191,7 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if *p > 0 {
 				*p--
 			}
+			m.clampPanelCursorToView(region)
 		} else if m.attached != nil && !m.hasPendingPrompt() {
 			dragCmd = m.smoothScroll(&m.attached.vp, -scrollWheelLines)
 		} else {
@@ -2185,17 +2202,27 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if *p < m.panelMaxOffset(region, m.viewportHeight()) {
 				*p++
 			}
+			m.clampPanelCursorToView(region)
 		} else if m.attached != nil && !m.hasPendingPrompt() {
 			dragCmd = m.smoothScroll(&m.attached.vp, scrollWheelLines)
 		} else {
 			dragCmd = m.smoothScroll(&m.vp, scrollWheelLines)
 		}
 	case tea.MouseLeft:
-		// Focus follows the click (issue #412): pressing inside a visible
-		// panel makes it the keyboard target; pressing in the main area
-		// (transcript or input) returns focus there. Wheel scrolling is
-		// not a change of intent — it never moves focus.
-		m.panelFocus = region
+		// Focus follows the click (issue #412), uniformly: pressing inside
+		// ANY side panel defers focus to the double-click cadence
+		// (panelClickAction decides it at release — and only for a press+
+		// release close together: a long hold is not a click, a drag
+		// selection never changes focus; a double click runs the panel's
+		// action and must never move focus); pressing in the main area
+		// (transcript or input) returns focus there immediately and
+		// supersedes any pending deferred click — main has no double-click
+		// action to protect. Wheel scrolling is not a change of intent —
+		// it never moves focus.
+		if region == regionNone {
+			m.panelFocus = region
+			m.cancelPendingPanelClick()
+		}
 		if region != regionNone {
 			return m.handlePanelMouse(region, regionX, ev)
 		}
@@ -3245,6 +3272,16 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The Update wrapper re-arms the tick if toasts remain visible.
 		return m, nil
 
+	case panelClickFocusMsg:
+		// The double-click window passed with no second click: the deferred
+		// single click focuses its panel now (stale gens are ignored).
+		if m.panelClickPending.valid && msg.gen == m.panelClickPending.gen {
+			m.panelFocus = m.panelClickPending.region
+			m.panelCursorLine = m.panelClickPending.line
+			m.panelClickPending.valid = false
+		}
+		return m, nil
+
 	case dragResetMsg:
 		if !m.dragResetPending {
 			return m, nil // already cancelled by a release event
@@ -3782,6 +3819,21 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.quitPending = false
 	}
 
+	// Deferred click focus (files/git panels, panelClickAction): any key
+	// means the user moved on — land the pending focus before routing, so
+	// the key acts on the panel they just clicked, never the old focus.
+	m.flushPanelClickPending()
+
+	// Typing while a panel is focused hands the keyboard back to the main
+	// chat — the keystroke lands in the input (type-to-focus). Only
+	// printable text refocuses: editing keys (enter, arrows, backspace)
+	// stay panel-scoped.
+	if m.focusedPanel() != regionNone {
+		if s := msg.String(); s == "space" || (msg.Text != "" && s == msg.Text) {
+			m.panelFocus = regionNone
+		}
+	}
+
 	// ctrl+r search mode: intercept most keys.
 	if m.searching {
 		return m.handleSearchKey(msg)
@@ -3872,6 +3924,13 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.syncLayout()
 		return m, nil
 	case "enter":
+		// A focused panel's Enter is the row's double-click action on the
+		// cursor row — rows with items only — and it never submits input.
+		if region := m.focusedPanel(); region != regionNone {
+			cmd, _ := m.panelActivateRow(region, m.panelCursorLine)
+			m.syncLayout()
+			return m, cmd
+		}
 		// Tab-completion accept and arrow-hint commit live in
 		// acceptActiveCompletion so handleBusyKey uses the exact same
 		// semantics; only submission (handleEnter) is state-specific.
@@ -3882,6 +3941,11 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleEnter()
 	case "up":
+		if region := m.focusedPanel(); region != regionNone {
+			m.movePanelCursor(region, -1)
+			m.syncLayout()
+			return m, nil
+		}
 		if len(m.tabHints) > 0 {
 			m.hintIdx--
 			if m.hintIdx < 0 {
@@ -3902,6 +3966,11 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "down":
+		if region := m.focusedPanel(); region != regionNone {
+			m.movePanelCursor(region, 1)
+			m.syncLayout()
+			return m, nil
+		}
 		if len(m.tabHints) > 0 {
 			m.hintIdx++
 			if m.hintIdx >= len(m.tabHints) {
@@ -3947,6 +4016,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleShiftArrow(msg)
 	case "tab", "shift+tab":
+		// Completion when the token under the cursor has any, else panel
+		// focus rotation — one function decides for both worlds
+		// (handleTabKey).
 		dir := 1
 		if msg.String() == "shift+tab" {
 			dir = -1
@@ -4986,6 +5058,14 @@ func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agen
 		targetName = "escalation"
 		agentCfg = st.cfg.EscalationAgentConfig()
 		agentName = agentCfg.Name
+	}
+
+	// Route announcement (the TUI twin of ACP's announceRoute): when the
+	// turn enters escalation on its own — classifier, rules, confirmation,
+	// session state, auto-sticky or the availability fallback — say so in
+	// the transcript with the reason. One line per change, never per turn.
+	if note := routeChangeNote(st, rt, agentName); note != "" {
+		fmt.Fprintln(out, note)
 	}
 
 	// Idle watchdog (issue #305), replacing the old fixed one-shot timer:

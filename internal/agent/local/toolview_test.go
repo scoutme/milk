@@ -137,3 +137,14 @@ func TestToolHintText_MatchesPrintedLine(t *testing.T) {
 		}
 	}
 }
+
+// TestToolArgSummary_FlattensNewlines: one-row summaries at the source —
+// this is what the streamed `» hint, oversight notifications and the TUI's
+// fold header (through the view callback) all consume. A heredoc command
+// must not leak its newlines into any of them.
+func TestToolArgSummary_FlattensNewlines(t *testing.T) {
+	got := toolArgSummary(map[string]any{"command": "a\nb\r\nc"})
+	if got != "a b c" {
+		t.Fatalf("toolArgSummary = %q, want %q", got, "a b c")
+	}
+}

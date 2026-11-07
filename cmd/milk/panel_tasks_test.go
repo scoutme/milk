@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
@@ -140,11 +139,11 @@ func TestTasksPanelRows_ExpandCollapseInPlace(t *testing.T) {
 		t.Errorf("collapsed row not ellipsized: %q", plain)
 	}
 
-	// Double-click → expanded: full title present across wrapped lines.
-	m.handleTasksPanelClick(row)
+	// The action (pure): one toggle expands — full title present across
+	// wrapped lines.
 	m.handleTasksPanelClick(row)
 	if m.taskExpanded != task.ID {
-		t.Fatalf("double-click did not expand: taskExpanded=%q want %q", m.taskExpanded, task.ID)
+		t.Fatalf("double-click action did not expand: taskExpanded=%q want %q", m.taskExpanded, task.ID)
 	}
 	expanded, expIDs := taskPanelRows(ts, tasksPanelInner, m.taskExpanded)
 	if len(expIDs) != len(expanded) {
@@ -158,11 +157,10 @@ func TestTasksPanelRows_ExpandCollapseInPlace(t *testing.T) {
 		t.Errorf("expanded rows do not reconstruct the full title: %q", strings.Join(words, " "))
 	}
 
-	// Double-click again → collapsed.
-	m.handleTasksPanelClick(taskRowLineIndex(t, ts, m.taskExpanded, task.ID))
+	// One more toggle → collapsed.
 	m.handleTasksPanelClick(taskRowLineIndex(t, ts, m.taskExpanded, task.ID))
 	if m.taskExpanded != "" {
-		t.Errorf("second double-click did not collapse: taskExpanded=%q", m.taskExpanded)
+		t.Errorf("second toggle did not collapse: taskExpanded=%q", m.taskExpanded)
 	}
 }
 
@@ -198,22 +196,5 @@ func TestTasksPanelRows_IDsAligned(t *testing.T) {
 	}
 }
 
-// TestTasksPanelClick_StaleArmExpires: the double-click window is 400ms — a
-// slow second click re-arms instead of toggling (TestProjectPanelStaleArmExpires).
-func TestTasksPanelClick_StaleArmExpires(t *testing.T) {
-	m, ts := tasksPanelClickModel(t)
-	task, err := ts.Create("stale arm", nil)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	row := taskRowLineIndex(t, ts, "", task.ID)
-	m.handleTasksPanelClick(row) // arm
-	m.lastPanelClickTime = time.Now().Add(-500 * time.Millisecond)
-	m.handleTasksPanelClick(row) // stale → re-arm, no toggle
-	if m.taskExpanded != "" {
-		t.Errorf("stale second click toggled: taskExpanded=%q", m.taskExpanded)
-	}
-	if m.lastPanelClickID != "task:"+task.ID {
-		t.Errorf("stale second click did not re-arm: lastPanelClickID=%q", m.lastPanelClickID)
-	}
-}
+// (the stale-window case is machine-level now: panelClickAction owns the
+// 400ms cadence for every panel — see TestPanelClickCadence_*)

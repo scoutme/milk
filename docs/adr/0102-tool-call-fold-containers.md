@@ -20,9 +20,14 @@ inline-preview machinery.
 **Every main-turn tool call becomes a `toolBlock`** (`cmd/milk/toolblocks.go`),
 a sibling of `thinkBlock` spliced by the same display pass:
 
-- **Header** (truncated to one row — the ordinal hit-test counts complete
-  headers): `▸ bash · git status — 34 lines`, `· running` until the outcome
-  lands, `· error` on failure, `▾` while expanded. Folded by default; click
+- **Header** (one row by *construction*, not just by truncation — the
+  ordinal hit-test counts complete headers, and `toolHeaderRe`'s `.` cannot
+  span a newline, so a multi-line summary would mean an unmatchable, i.e.
+  unclickable and uncollapsible, block: summaries flatten newlines at both
+  producers and at `openToolBlock`, see `flattenSummary`; a heredoc command
+  is the regression case): `▸ bash · git status — 34 lines`, `· running`
+  until the outcome lands, `· error` on failure, `▾` while expanded. Folded
+  by default; click
   the header to toggle (`toolBlockAtLine` — disjoint pattern from
   `▸ thinking · N lines`, so each family's ordinal space sees only its own
   headers); `/tools expand|collapse|view` + bare `/tools` report, busy-safe,

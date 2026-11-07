@@ -33,6 +33,12 @@ type routedTurn struct {
 	// just consumed). noteTurnSucceeded uses it to keep the one-shot form
 	// from becoming auto-sticky — see there.
 	SingleTurnEscalate bool
+	// ForceSource names the forced-escalation flag that drove the decision
+	// ("one-shot /escalate <prompt>", "sticky escalation (/escalate)",
+	// "auto-sticky escalation") — the router reports all three as
+	// "--escalate flag"; routeChangeNote needs the honest label. "" when no
+	// force flag was active.
+	ForceSource string
 	// NeedsClaudeConsent is set when the turn is headed to the implicit
 	// Claude CLI default — a target the user never configured, whether via
 	// /escalate, the router, sticky escalation or a down primary — and they
@@ -133,6 +139,17 @@ func routeTurn(ctx context.Context, st *interactiveState, rtr *router.Router, in
 	// consumed below — noteTurnSucceeded needs to know a turn reached
 	// escalation this way (issue #188).
 	singleTurnEscalate := st.forceEscalate
+	// The honest label for whichever force flag is active (the router
+	// collapses all three into "--escalate flag").
+	forceSource := ""
+	switch {
+	case st.forceEscalate:
+		forceSource = "one-shot /escalate <prompt>"
+	case st.stickyEscalate:
+		forceSource = "sticky escalation (/escalate)"
+	case st.autoStickyEscalate:
+		forceSource = "auto-sticky escalation"
+	}
 
 	// Route first (fast); the per-agent idle watchdog is applied by the caller
 	// once the target is known. This timeout bounds only the routing/classifier
@@ -154,6 +171,9 @@ func routeTurn(ctx context.Context, st *interactiveState, rtr *router.Router, in
 	st.forcePrimary = false
 
 	rt := routedTurn{Decision: decision, Target: resolveTarget(decision.Target, localAvail, escalationAvail), SingleTurnEscalate: singleTurnEscalate}
+	if decision.Target == router.TargetEscalation && forceSource != "" {
+		rt.ForceSource = forceSource
+	}
 	switch {
 	case rt.Target == decision.Target:
 	case rt.Target == router.TargetEscalation:
@@ -173,6 +193,44 @@ func routeTurn(ctx context.Context, st *interactiveState, rtr *router.Router, in
 	rt.NeedsClaudeConsent = rt.Target == router.TargetEscalation && escalationAvail &&
 		st.cfg.EscalationAgentIsImplicit() && !st.claudeApproved
 	return rt, nil
+}
+
+// routeReason is the human-readable "why" behind a routed turn, in
+// precedence order: the availability fallback (the router's reason is
+// irrelevant — the target was chosen by liveness), the forced flag's honest
+// label, the router's own reason (classifier, rules, confirmation, session
+// state), and finally a neutral placeholder.
+func routeReason(rt routedTurn) string {
+	switch {
+	case rt.Fallback == "escalation":
+		return "primary unavailable"
+	case rt.ForceSource != "":
+		return rt.ForceSource
+	case rt.Decision.Reason != "":
+		return rt.Decision.Reason
+	}
+	return "routing decision"
+}
+
+// routeChangeNote returns the "[milk] …" transcript line announcing that a
+// turn is entering escalation on its own — the TUI twin of ACP's
+// announceRoute message — or "" when nothing should be said. One line when
+// the handling target enters escalation (or the reason changes while it
+// stays there): a sticky stretch is announced once, never per turn. Never
+// for the one-shot /escalate <prompt> (its transcript echo IS the
+// announcement) and never while leaving escalation. The state is recorded
+// either way — st holds what happened; the note is what was said.
+func routeChangeNote(st *interactiveState, rt routedTurn, agent string) string {
+	reason := routeReason(rt)
+	prevTarget, prevReason := st.lastRouteTarget, st.lastRouteReason
+	st.lastRouteTarget, st.lastRouteReason = rt.Target, reason
+	if rt.Target != router.TargetEscalation || rt.SingleTurnEscalate {
+		return ""
+	}
+	if prevTarget == router.TargetEscalation && prevReason == reason {
+		return ""
+	}
+	return "[milk] escalated to " + agent + ": " + reason
 }
 
 // clearRoutingPins drops every routing pin — explicit and automatic — so the

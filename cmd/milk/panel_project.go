@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -18,11 +17,12 @@ import (
 
 // Project tree panel (issue #206, ADR-0066): the session cwd's file layout,
 // backed by the same git-file-list candidate index the @-file completion uses
-// (ADR-0057) so it never pays the walk-budget problem. Click a directory to
-// expand/collapse it, click a file to preview it in the main area — as a
-// diff when the file has working-tree changes (modified/untracked in a git
-// repo), as raw contents otherwise — double-click to insert an @-mention
-// into the input.
+// (ADR-0057) so it never pays the walk-budget problem. Double-click a
+// directory to expand/collapse it, double-click a file to preview it in the
+// main area — as a diff when the file has working-tree changes
+// (modified/untracked in a git repo), as raw contents otherwise — triple-
+// click to insert an @-mention into the input (single click only focuses:
+// the uniform cadence, ADR-0066).
 
 const projectPanelWidth = 33 // 32 inner + 1 right scrollbar column
 const projectPanelInner = 32
@@ -274,12 +274,12 @@ func (m *model) projectDirExpanded(dir string) bool {
 	return strings.Count(dir, "/") == 1
 }
 
-// handleProjectPanelClick: a click on a directory row toggles its expansion;
-// a click on a file row previews it in the main area — as a diff when the
-// file has working-tree changes (fileDiffBuffer), as contents otherwise —
-// and a second
-// click on the same file within 400ms inserts an @-mention into the input
-// (the memory panel's arm/act rhythm).
+// handleProjectPanelClick acts on a project row directly: a directory row
+// toggles its expansion; a file row previews it in the main area — as a
+// diff when the file has working-tree changes (fileDiffBuffer), as contents
+// otherwise. The click cadence around it lives in panelClickAction (single
+// = deferred focus, this preview on double, @-mention on triple) — a direct
+// call is one action, so every test of the action itself stays simple.
 func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
 	if lineIdx < 0 || lineIdx >= len(m.projectIDs) {
 		return nil
@@ -298,15 +298,6 @@ func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
 	}
 
 	path := id
-	now := time.Now()
-	if path == m.lastTreeClickPath && now.Sub(m.lastTreeClickTime) <= 400*time.Millisecond {
-		m.lastTreeClickPath = ""
-		m.ta.InsertString("@" + path)
-		m.syncLayout()
-		return nil
-	}
-	m.lastTreeClickPath = path
-	m.lastTreeClickTime = now
 
 	// Preferred view: the file's diff when it has one (modified or untracked
 	// in a git repo). Clean files, non-repo cwds and git failures fall

@@ -104,6 +104,12 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev mouseEvent)
 
 	switch ev.Action {
 	case mousePress:
+		// Stamp the press: the release judges whether this pair is a click
+		// at all (press→release within panelDoubleClickWindow — holding the
+		// button down is not a normal single click). Lives here, not in
+		// repl.go's dispatch, so direct handlePanelMouse sequences (tests,
+		// future callers) are judged identically.
+		m.panelPressAt = time.Now()
 		if ev.Ctrl && m.panelSelRegion == region && m.panelSelAnchorLine >= 0 {
 			// Extend (or shrink) the existing selection to the clicked position,
 			// mirroring the transcript viewport's ctrl+click behavior.
@@ -159,35 +165,38 @@ func (m *model) handlePanelMouse(region panelRegion, regionX int, ev mouseEvent)
 			// background/workflow, attach to that job's/the workflow's live
 			// buffer (ADR-0047) instead of printing.
 			m.clearPanelSelection()
-			// Overflow tabs (issue #373, every theme per ADR-0098): the
-			// group column — the rightmost one — carries the strip of the
-			// grouped panels. Clicking a grouped tab moves that panel to
-			// the top of its group (stamp, never toggled closed); a click
-			// never closes anything (see handleBudgetTabClick).
-			if ev.Y == panelRowStart && lineIdx == 0 {
-				if tab := budgetTabAt(m.budgetTabGroupFor(region), panelWidth(region)-1, col); tab != regionNone {
-					dragCmd = m.handleBudgetTabClick(tab)
-					break
+			// Press and release must be close together for this to count
+			// as a click at all: holding the button down for long enough
+			// is not a normal single click, so it neither focuses nor
+			// acts.
+			if time.Since(m.panelPressAt) <= panelDoubleClickWindow {
+				// Overflow tabs (issue #373, every theme per ADR-0098): the
+				// group column — the rightmost one — carries the strip of the
+				// grouped panels. Clicking a grouped tab moves that panel to
+				// the top of its group (stamp, never toggled closed); a click
+				// never closes anything (see handleBudgetTabClick).
+				if ev.Y == panelRowStart && lineIdx == 0 {
+					if tab := budgetTabAt(m.budgetTabGroupFor(region), panelWidth(region)-1, col); tab != regionNone {
+						dragCmd = m.handleBudgetTabClick(tab)
+						break
+					}
 				}
-			}
-			switch region {
-			case regionMemory:
-				m.handleMemoryPanelClick(lineIdx)
-			case regionTasks:
-				m.handleTasksPanelClick(lineIdx)
-			case regionBackground:
-				dragCmd = m.handleBackgroundPanelClick(lineIdx)
-			case regionWorkflow:
-				dragCmd = m.handleWorkflowPanelClick()
-			case regionProject:
-				dragCmd = m.handleProjectPanelClick(lineIdx)
-			case regionGit:
-				dragCmd = m.handleGitPanelClick(lineIdx)
+				// Every panel routes through the one click cadence
+				// (panelClickAction): single = deferred focus, double =
+				// the panel's action without ever moving focus, triple =
+				// @-mention (project file rows).
+				dragCmd = m.panelClickAction(region, lineIdx)
 			}
 			break
 		}
 		m.panelSelEndLine = lineIdx
 		m.panelSelEndCol = col
+		// A real drag (selection) in any panel changes NOTHING focus-wise:
+		// it is not a click at all — press and release are not consistent
+		// (the movement IS the gesture), and holding the button down is
+		// judged at click-branch time anyway. Selecting text must never
+		// move the keyboard target; only a genuine, close-in-time click
+		// defers focus (panelClickAction), and only its double acts.
 		m.panelSelText = selectedText(m.panelSelLines(), m.panelSelAnchorLine, m.panelSelAnchorCol, m.panelSelEndLine, m.panelSelEndCol)
 		if cmd := m.copyOnSelectRelease(m.panelSelText); cmd != nil {
 			m.clearPanelSelection()
@@ -219,8 +228,10 @@ func (m *model) handleBudgetTabClick(region panelRegion) tea.Cmd {
 	return cmd
 }
 
-// handleMemoryPanelClick runs the memory panel's existing click-for-detail
-// behavior: double-click expands or collapses the content in place.
+// handleMemoryPanelClick runs the memory panel's action — double-click
+// expands or collapses the content in place. The cadence around it (single
+// = deferred focus, this toggle on the double click without moving focus)
+// lives in panelClickAction: handlers are pure actions.
 func (m *model) handleMemoryPanelClick(lineIdx int) {
 	_, ids := memoryPanelRows(m.mem, memoryPanelInner, m.currentSessionBricks(), m.memoryExpanded)
 	if lineIdx < 0 || lineIdx >= len(ids) {
@@ -230,24 +241,17 @@ func (m *model) handleMemoryPanelClick(lineIdx int) {
 	if id == "" {
 		return
 	}
-	now := time.Now()
-	if id == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-		if m.memoryExpanded == id {
-			m.memoryExpanded = ""
-		} else {
-			m.memoryExpanded = id
-		}
-		m.lastPanelClickID = ""
+	if m.memoryExpanded == id {
+		m.memoryExpanded = ""
 	} else {
-		m.lastPanelClickID = id
-		m.lastPanelClickTime = now
+		m.memoryExpanded = id
 	}
 }
 
-// handleTasksPanelClick runs the tasks panel's click behavior: double-click
-// expands or collapses the task title in place (memory-panel semantics). The
-// arm key is prefixed "task:" so task IDs can never collide with the memory
-// percept IDs sharing m.lastPanelClickID (the "bg:" precedent in attach.go).
+// handleTasksPanelClick runs the tasks panel's action: double-click
+// expands or collapses the task title in place (memory-panel semantics).
+// Pure action — the cadence (single = deferred focus, double = toggle
+// without moving focus) lives in panelClickAction.
 func (m *model) handleTasksPanelClick(lineIdx int) {
 	_, ids := taskPanelRows(m.taskStore, tasksPanelInner, m.taskExpanded)
 	if lineIdx < 0 || lineIdx >= len(ids) {
@@ -257,18 +261,10 @@ func (m *model) handleTasksPanelClick(lineIdx int) {
 	if id == "" {
 		return
 	}
-	key := "task:" + id
-	now := time.Now()
-	if key == m.lastPanelClickID && now.Sub(m.lastPanelClickTime) <= 400*time.Millisecond {
-		if m.taskExpanded == id {
-			m.taskExpanded = ""
-		} else {
-			m.taskExpanded = id
-		}
-		m.lastPanelClickID = ""
+	if m.taskExpanded == id {
+		m.taskExpanded = ""
 	} else {
-		m.lastPanelClickID = key
-		m.lastPanelClickTime = now
+		m.taskExpanded = id
 	}
 }
 

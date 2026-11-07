@@ -483,8 +483,16 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 
 	bg := m.panelRowBg(region)
 
+	// The focused panel's keyboard cursor row wears the selection
+	// highlight — the same reverse-video look a drag selection paints, so
+	// the row the arrows are on reads as "the one you're on".
+	cursorRow := -1
+	if m.focusedPanel() == region && m.panelCursorLine >= *offset && m.panelCursorLine < *offset+len(lines) {
+		cursorRow = m.panelCursorLine - *offset
+	}
+
 	var rows []string
-	for _, line := range lines {
+	for i, line := range lines {
 		// Never let a line outgrow the panel (issue #212): an over-wide row
 		// would push the scrollbar column out of the visible area. Builders
 		// wrap/truncate their own content — this clamp is the guarantee that
@@ -492,6 +500,10 @@ func (m *model) renderSidePanel(region panelRegion, h int) string {
 		line = ansi.Truncate(line, inner, "…")
 		if lineW := ansi.StringWidth(ansi.Strip(line)); lineW < inner {
 			line += strings.Repeat(" ", inner-lineW)
+		}
+		if i == cursorRow {
+			rows = append(rows, sgr.Highlight(line, 0, inner, selectionOn, selectionOff))
+			continue
 		}
 		rows = append(rows, sgr.WithBackground(line, bg))
 	}

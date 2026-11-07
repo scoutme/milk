@@ -162,8 +162,10 @@ func TestPgUpPgDn_RouteToFocusedPanel(t *testing.T) {
 	}
 }
 
-// TestClickSetsFocus_WheelDoesNot: left press moves focus (panel in, main
-// out); wheel scrolling is not a change of intent and never moves it.
+// TestClickSetsFocus_WheelDoesNot: a press in the main area focuses it
+// immediately; a press in a panel defers focus to the click cadence (the
+// timer lands it); wheel scrolling is not a change of intent and never
+// moves focus.
 func TestClickSetsFocus_WheelDoesNot(t *testing.T) {
 	m := newTestModelForPanels(t)
 	m.width, m.height = 400, 40
@@ -189,8 +191,18 @@ func TestClickSetsFocus_WheelDoesNot(t *testing.T) {
 		m.handleMouse(mouseEvent{X: x, Y: y, Button: tea.MouseLeft, Action: mousePress}.msg())
 	}
 	press(memX)
+	if m.focusedPanel() != regionNone {
+		t.Fatalf("panel press must defer focus (focus=%v)", m.focusedPanel())
+	}
+	m.handleMouse(mouseEvent{X: memX, Y: y, Button: tea.MouseLeft, Action: mouseRelease}.msg())
+	if !m.panelClickPending.valid {
+		t.Fatal("the release should arm the deferred click")
+	}
+	gen := m.panelClickGen
+	nm, _ := m.Update(panelClickFocusMsg{gen: gen}) // the window passes
+	m = nm.(model)
 	if m.focusedPanel() != regionMemory {
-		t.Fatalf("click in memory panel: focus = %v, want memory", m.focusedPanel())
+		t.Fatalf("deferred focus = %v, want memory", m.focusedPanel())
 	}
 	press(mainX)
 	if m.focusedPanel() != regionNone {
@@ -314,5 +326,63 @@ func TestFocusBgCode_OffThemeStillDeclaresATint(t *testing.T) {
 
 	if got := focusBgCode(); got == "" || !strings.HasPrefix(got, "\033[48;2;") {
 		t.Fatalf("focusBgCode() on theme off = %q, want a truecolor tint", got)
+	}
+}
+
+// TestTabKey_CompletionWinsElseRotates: tab/shift+tab are the focus-rotation
+// alternative (the mouse-free twin of shift+pgup/pgdown) — but completion
+// ALWAYS wins when the token under the cursor has completions: the cycling
+// key becomes the rotation key only when cycling has no answer. Bare Tab is
+// free at the terminal level (tab switching lives on Ctrl+Tab), so the
+// alternative costs no chord.
+func TestTabKey_CompletionWinsElseRotates(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.width = 400
+	m.panelMemory, m.panelTasks = true, true
+
+	// Empty input: tab rotates forward from main into the first panel.
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model) // handleKey is a value receiver: focus lives in the returned model
+	if got := m.focusedPanel(); got != regionMemory {
+		t.Fatalf("tab with empty input: focus = %v, want memory (rotation)", got)
+	}
+
+	// From a focused panel, tab keeps rotating onward.
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if got := m.focusedPanel(); got != regionTasks {
+		t.Fatalf("tab from memory: focus = %v, want tasks", got)
+	}
+
+	// shift+tab walks back the other way.
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m = next.(model)
+	if got := m.focusedPanel(); got != regionMemory {
+		t.Fatalf("shift+tab from tasks: focus = %v, want memory", got)
+	}
+
+	// Completion wins: a completable token completes and focus does NOT move.
+	m.panelFocus = regionNone
+	m.ta.SetValue("/pan")
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if got := m.focusedPanel(); got != regionNone {
+		t.Fatalf("completion must not rotate: focus = %v, want main", got)
+	}
+	if !strings.HasPrefix(m.ta.Value(), "/panel") {
+		t.Fatalf("tab on completable input = %q, want it completed to /panel…", m.ta.Value())
+	}
+
+	// Free text with no completions falls through to rotation. Any typed
+	// keystroke clears both the cycling state and the inline hints in real
+	// use (SetValue bypasses both), so clear them here exactly as a
+	// keystroke would — otherwise the leftover hint would commit instead.
+	m.tabMatches = nil
+	m.hintIdx = -1
+	m.ta.SetValue("hello world")
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if got := m.focusedPanel(); got != regionMemory {
+		t.Fatalf("tab with non-completable text: focus = %v, want memory (rotation)", got)
 	}
 }

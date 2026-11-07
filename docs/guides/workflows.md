@@ -115,6 +115,8 @@ ESCALATION_WAITING   → user passes --primary → back to ROUTING
 - **`/escalate <prompt>` / `/primary <prompt>`** is a single-turn override; normal routing resumes after.
 - **Auto-sticky**: when the router escalates *without* an explicit `/escalate`, milk automatically keeps subsequent turns on the escalation agent (`<agent> (sticky)`) to avoid the cold-start context penalty on every turn. A one-shot `/escalate <prompt>` turns exactly one turn into an escalation turn and never becomes auto-sticky. Cleared by `/primary` or a single-turn override. Disable globally with `"sticky_escalation": false`; explicit pinning is unaffected by this setting.
 
+Whenever a turn **enters escalation on its own** — model classifier, rules match, confirmation, `ESCALATION_WAITING`, auto-sticky, or the primary being unavailable — the transcript gets a `[milk]` line saying so with the reason (`[milk] escalated to <agent>: model classifier`). One line per change, never per turn: a sticky stretch is announced once, and a turn that changes *why* it escalates gets one fresh line. The one-shot `/escalate <prompt>` is silent (its transcript echo *is* the announcement), and leaving escalation is never announced. The ACP host announces the same transitions to its client (`→ now handled by …`).
+
 ### Context handoff
 
 When promoting from primary to escalation, milk formats the local conversation as a plain transcript and hands it to the escalation agent so it can orient itself with no separate setup step:
