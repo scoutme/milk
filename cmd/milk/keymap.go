@@ -120,5 +120,5 @@ func renderKeysHelp(width int) string {
 	// when a cell widens past the width budget (TestKeysCommand pins the
 	// 100-col contract), and a note outside the table costs nothing.
 	return h.FullHelpView(keys.FullHelp()) + " " +
-		dim("tab/shift+tab also focus next/previous panel when nothing is completing (completion always wins)")
+		dim("tab/shift+tab also focus next/previous panel when there is nothing to complete under the cursor — inside completion context (hints or an @-token showing) they never rotate, even with no candidates")
 }

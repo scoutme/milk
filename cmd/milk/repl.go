@@ -1713,9 +1713,10 @@ func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "tab", "shift+tab":
 		// Completion only edits the input buffer, so Tab cycling and hint
 		// commit are not trapped while busy — the same handleTabKey
-		// semantics as idle: completion when there is any, else panel
-		// focus rotation (the shift+pgup/pgdn alternative). Only
-		// Enter-as-submission is trapped.
+		// semantics as idle: completion whenever there is any (and
+		// completion-context no-op rather than rotation when the build is
+		// momentarily empty), rotation only outside any completion context.
+		// Only Enter-as-submission is trapped.
 		dir := 1
 		if msg.String() == "shift+tab" {
 			dir = -1
@@ -4029,8 +4030,10 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleShiftArrow(msg)
 	case "tab", "shift+tab":
-		// Completion when the token under the cursor has any, else panel
-		// focus rotation — one function decides for both worlds
+		// Completion when the token under the cursor has any — and whenever
+		// completion context (inline hints / @-token) is live, even if the
+		// build is momentarily empty; rotation only for genuinely
+		// non-completable input — one function decides for both worlds
 		// (handleTabKey).
 		dir := 1
 		if msg.String() == "shift+tab" {

@@ -260,9 +260,9 @@ func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.rotatePanelFocus(1)
 		return m, nil
 	case "tab", "shift+tab":
-		// Same rule as everywhere: completion wins when there is any, else
-		// focus rotation (handleTabKey decides — attached input state can't
-		// create completions, so this is rotation in practice).
+		// Same rule as everywhere (handleTabKey owns it): completion first,
+		// rotation only outside any completion context — the guard lives in
+		// one place so idle, busy and attached can't drift.
 		dir := 1
 		if msg.String() == "shift+tab" {
 			dir = -1
