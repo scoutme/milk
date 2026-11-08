@@ -25,6 +25,7 @@ cmd/milk/dispatch.go          # runPrimary / runEscalation — role-specific ses
 cmd/milk/interactive.go       # slash commands, tab completion, prompt label
 cmd/milk/permask.go           # permission-ask layer: TUI prompt queue, session allow-all/deny-all mode, three-source answers, timed defaults (ADR-0052)
 cmd/milk/fileindex.go         # @-file completion: cached candidate index (git ls-files / pruned walk), in-memory ranking (ADR-0057)
+cmd/milk/plugins_host.go      # plugin startup wiring (ADR-0104): Agent Plugins discovery (~/.milk/plugins + .milk/plugins), runtime MCP seam, skill catalog seeding, /plugins
 cmd/milk/sessionmgmt_core.go  # host-neutral session-management core: /sessions /new /clear /resume /drop ops + shared list renderer, used by TUI, CLI and ACP
 cmd/milk/ansi.go              # ANSI color helpers and spinner
 cmd/milk/panel_memory.go      # right-side memory panel (content-driven open, toggle /panel memory; state persistence ADR-0078)
@@ -81,6 +82,7 @@ internal/vp/                  # forked bubbles viewport (MIT, ADR-0088): deferre
 internal/livebuf/             # thread-safe byte-capped text buffer for live background-job/workflow output (ADR-0047)
 internal/memory/              # Percept store + NREM consolidation (~/.milk/memory/)
 internal/mcpauth/             # native MCP OAuth: RFC 9728/8414 discovery, RFC 7591 DCR, PKCE, token store (~/.milk/mcp_oauth/)
+internal/plugin/              # Agent Plugins v1.0.0 loader (ADR-0104): plugin.json/mcp.json validation + §4.1 containment, Agent Skills discovery, ${PLUGIN_*} expansion, milk MCP mapping
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 cmd/showcase/                 # `task showcase:record` (calibrate → demo/demo.tape → GIF) + `task showcase:run` (-verify: same beats asserted, PASS/FAIL, -beats subset), from demo/showcase.yaml (issue #387, ADR-0099)
 demo/                          # showcase: showcase.yaml (the beat manifest, single source of truth) + generated demo.tape (replayable as-is; edit the manifest, not the tape)

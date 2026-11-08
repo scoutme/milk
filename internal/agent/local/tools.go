@@ -520,6 +520,9 @@ func schemas(mem *memory.Store, otelDir string, sess *session.Session, toolAgent
 	if mem != nil {
 		base = append(base, memory.Schemas()...)
 	}
+	if sc := skillToolSchema(); sc != nil {
+		base = append(base, sc)
+	}
 	base = filterTools(base, limits)
 
 	if otelDir != "" {
@@ -823,6 +826,8 @@ func dispatchTool(ctx context.Context, name, argsJSON string, sess *session.Sess
 		return runBashOutput(args)
 	case "kill_bash":
 		return runKillBash(ctx, args)
+	case "skill":
+		return runSkill(args)
 	case "find_files":
 		return runFindFiles(ctx, args, cwd)
 	case "project_map":

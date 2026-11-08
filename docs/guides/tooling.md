@@ -286,6 +286,42 @@ The MCP client emits to `~/.milk/otel/`:
 
 ---
 
+## Plugins (Agent Plugins v1)
+
+milk is a conformant client for the [Agent Plugins Specification
+v1.0.0](https://agent-plugins.org/specification) ([ADR-0104](../adr/0104-agent-plugins-v1.md)).
+A plugin is a directory with a `plugin.json` manifest and, optionally,
+`skills/*/SKILL.md` (Agent Skills) and `mcp.json` (MCP servers).
+
+Drop a directory in either root (loaded at startup):
+
+- **user:** `~/.milk/plugins/<plugin>/`
+- **project:** `<repo>/.milk/plugins/<plugin>/`
+
+`git clone` into one of those directories works today and remains supported
+(the hand-made path). Per [ADR-0104](../adr/0104-agent-plugins-v1.md) Part II,
+a distribution layer is specified on top: `milk plugins add <owner/repo>`
+(install by URL/slug, fetched over HTTPS without git), `marketplace add` /
+`install <name>@<marketplace>` over the ecosystem's `marketplace.json`
+catalogs, and `shim` for packages that lack portable manifests. `/plugins` lists what loaded, its components, and every
+validation warning (unknown manifest fields, skipped skills/servers, disabled
+components); a broken component never blocks the rest of the plugin.
+
+**Skills** reach the model through the `skill` tool with progressive
+disclosure: the tool description advertises each skill's `name` +
+`description` only; `skill(name)` returns the SKILL.md body (re-read from
+disk at activation, 64 KB cap). The tool is absent when no skills are
+installed and honors `included_tools`/`excluded_tools` like every base tool.
+
+**MCP servers** are namespaced `plugin.<plugin>.<server>` and join every
+assigned agent's server list without ever being written to `config.json`
+(assign with `extensions["dev.milkai.milk"].mcp_assign`, default all agents;
+`disable_skills: true` hides a plugin's skills). `stdio` servers run with the
+configured `env` overlay, optional `cwd`, and the spec's reserved
+`PLUGIN_ROOT`/`PLUGIN_DATA` variables (`PLUGIN_DATA` = `~/.milk/plugin-data/<name>`,
+persistent across updates); `streamable-http` maps to milk's http transport.
+Legacy `sse` servers are skipped with a report.
+
 ## Tool batch dispatch (barrier model)
 
 When an agent emits a batch of tool calls in a single turn, milk executes it in **call order** under a barrier model ([ADR-0062](../adr/0062-tool-batch-barrier-dispatch.md)):

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -255,6 +256,12 @@ func (c *Client) Connect(ctx context.Context) (retErr error) {
 // connect-timeout context; ctx is used only for the handshake round-trips.
 func (c *Client) connectStdio(ctx context.Context) error {
 	cmd := exec.CommandContext(context.Background(), c.cfg.Command, c.cfg.Args...)
+	if c.cfg.Cwd != "" {
+		cmd.Dir = c.cfg.Cwd
+	}
+	if len(c.cfg.Env) > 0 || c.cfg.PluginRoot != "" {
+		cmd.Env = stdioEnv(os.Environ(), c.cfg.Env, c.cfg.PluginRoot, c.cfg.PluginData)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("mcp %q: stdin pipe: %w", c.cfg.Name, err)
@@ -650,7 +657,20 @@ func (c *Client) newHTTPRequest(ctx context.Context, body []byte) (*http.Request
 		req.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
 	c.applyAuth(ctx, req)
+	c.applyConfiguredHeaders(req)
 	return req, nil
+}
+
+// applyConfiguredHeaders attaches the server's configured fixed headers
+// (Agent Plugins §7.2.1) without overwriting anything the client already
+// set: client-generated protocol and authorization headers take precedence
+// over configured ones with the same case-insensitive name (§7.2.1).
+func (c *Client) applyConfiguredHeaders(req *http.Request) {
+	for k, v := range c.cfg.Headers {
+		if req.Header.Get(k) == "" {
+			req.Header.Set(k, v)
+		}
+	}
 }
 
 // doHTTP sends body to the MCP endpoint. For OAuth-authenticated servers, a
@@ -883,6 +903,7 @@ func (c *Client) Close(ctx context.Context) {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Session-Id", sid)
 	c.applyAuth(ctx, req)
+	c.applyConfiguredHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return

@@ -62,6 +62,7 @@ const cmdBash = "/bash"
 const cmdBg = "/bg"
 const cmdNotifications = "/notifications"
 const cmdKeys = "/keys"
+const cmdPlugins = "/plugins"
 
 var slashCommands = registryNames()
 
