@@ -103,6 +103,10 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		m.appendTranscript("\n" + renderKeysHelp(m.vpWidth()) + "\n")
 		return m, nil
 	}
+	if cmd == cmdPlugins {
+		m.appendTranscript(handlePluginsCmd())
+		return m, nil
+	}
 	if cmd == cmdNotifications {
 		return m.handleNotificationsCmd(strings.TrimSpace(rest)), nil
 	}

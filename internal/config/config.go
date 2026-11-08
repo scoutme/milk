@@ -1115,6 +1115,28 @@ type MCPServerConfig struct {
 	// Args are the command-line arguments passed to Command.
 	// Only used when Transport == "stdio".
 	Args []string `json:"args,omitempty"`
+
+	// Env overlays the subprocess environment for stdio servers (§9.1 of the
+	// Agent Plugins spec when the entry comes from a plugin: configured env
+	// overlays the base environment). Same-name entries replace base values.
+	Env map[string]string `json:"env,omitempty"`
+
+	// Cwd is the subprocess working directory for stdio servers. Empty means
+	// the client's default. Set by plugin loading after containment checks.
+	Cwd string `json:"cwd,omitempty"`
+
+	// Headers are fixed HTTP headers sent when connecting to a remote server
+	// (Agent Plugins §7.2.1 remote variant). Client-generated headers
+	// (protocol, auth) take precedence over same-name entries.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// PluginRoot and PluginData carry the Agent Plugins §9.1 reserved
+	// variables for plugin-derived stdio servers: the launcher sets
+	// PLUGIN_ROOT and PLUGIN_DATA into the subprocess environment after the
+	// configured Env overlay, replacing same-name entries. Never persisted
+	// (derived from the plugin install location at load time).
+	PluginRoot string `json:"-"`
+	PluginData string `json:"-"`
 }
 
 // IsEnabled reports whether this MCP server entry is enabled.
@@ -2585,9 +2607,6 @@ func (c Config) EffectiveMCPServers(agentName string) []MCPServerConfig {
 			break
 		}
 	}
-	if len(refs) == 0 {
-		return nil
-	}
 
 	// Build a fast lookup of top-level MCP server configs.
 	byName := make(map[string]MCPServerConfig, len(c.MCPServers))
@@ -2603,7 +2622,29 @@ func (c Config) EffectiveMCPServers(agentName string) []MCPServerConfig {
 		}
 		result = append(result, ms)
 	}
+	// Runtime-provided plugin servers (set once at startup via
+	// SetPluginMCPServers) join the effective list for every assigned agent;
+	// they are derived from installed plugins and never persisted to config.
+	if pluginMCPServers != nil {
+		for _, ms := range pluginMCPServers(agentName) {
+			if ms.IsEnabled() {
+				result = append(result, ms)
+			}
+		}
+	}
 	return result
+}
+
+// pluginMCPServers, when set, appends plugin-derived MCP servers to every
+// agent's effective list. The hook is process-wide and read-only after
+// startup; it exists so installed plugins contribute servers without the
+// entries ever being persisted into the user's config.json.
+var pluginMCPServers func(agentName string) []MCPServerConfig
+
+// SetPluginMCPServers installs the plugin server provider (called once by the
+// host at startup, before agents are built). Passing nil clears it.
+func SetPluginMCPServers(f func(agentName string) []MCPServerConfig) {
+	pluginMCPServers = f
 }
 
 // UpsertMCPServer normalises sc (auth="none" → "") and writes it into

@@ -178,6 +178,11 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s warning: %s\n", milkTag(), startupWarning)
 	}
 
+	// Installed plugins (Agent Plugins v1): discover, register MCP servers
+	// with the runtime config seam, seed the skill catalog. Load-time only —
+	// new plugins take effect on the next start (plugins_host.go).
+	initPlugins()
+
 	// Apply CLI overrides for agent selection.
 	if flagAgent != "" {
 		cfg.Agent = flagAgent

@@ -302,6 +302,7 @@ var commandRegistry = []cmdSpec{
   /bg start <task>       spawn a background agent to research <task>
   /bg stop <id>          terminate a running background agent`},
 	{name: cmdKeys, hosts: hostTUI, desc: "list the keyboard shortcuts", help: `  /keys                        list the keyboard shortcuts (panels, navigation, input)`},
+	{name: cmdPlugins, hosts: hostTUI, desc: "list installed plugins", help: `  /plugins                     list installed plugins (skills, MCP servers) and their warnings`},
 	{name: cmdNotifications, hosts: hostTUI, desc: "show or clear the notification history", hint: "[list [<count>]|clear]", help: `  /notifications               show last 20 notifications (timestamps + hints)
   /notifications list          show the full notification history, unfiltered
   /notifications list <count>  show the last <count> notifications
@@ -365,7 +366,7 @@ var helpBlocks = []helpBlock{
 	{header: "── Background agents ───────────────────────────────────────────────────", names: []string{cmdBg, cmdQueue}},
 	{header: "── Display ──────────────────────────────────────────────────────────────", names: []string{cmdColorize, cmdTheme, cmdThink, cmdTools, cmdTips, cmdHistory, cmdNotifications, cmdKeys}},
 	{header: "── Observability ────────────────────────────────────────────────────────", names: []string{cmdUsage, cmdMetrics, cmdOtel}},
-	{header: "── MCP Servers ───────────────────────────────────────────────────────────", names: []string{cmdMCP}},
+	{header: "── MCP Servers ───────────────────────────────────────────────────────────", names: []string{cmdMCP, cmdPlugins}},
 	{header: "── Workflow ───────────────────────────────────────────────────────────────", names: []string{cmdWorkflow}},
 	{header: "── Direct bash ───────────────────────────────────────────────────────────", names: []string{cmdBash}},
 	{header: "── Server ────────────────────────────────────────────────────────────────", names: []string{cmdServer}},
