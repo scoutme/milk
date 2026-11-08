@@ -131,6 +131,40 @@ func TestPanelTyping_RefocusesMainAndLandsInInput(t *testing.T) {
 	}
 }
 
+// Text-editing keys mean text-editing intent: like typing, they hand focus
+// to the input — with the key included, so the edit applies immediately.
+func TestPanelEditingKeys_RefocusInput(t *testing.T) {
+	// backspace: focus hands over AND the buffer loses a char.
+	m, _ := cursorTestModel(t, 1)
+	m.ta.InsertString("hello")
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	mm := next.(model)
+	if mm.focusedPanel() != regionNone {
+		t.Error("backspace must bring focus to the main chat")
+	}
+	if mm.ta.Value() != "hell" {
+		t.Errorf("backspace must edit the input it just focused, got %q", mm.ta.Value())
+	}
+
+	// delete (the Canc key): same handoff — at the end of the buffer the
+	// value cannot shrink, but focus must move.
+	m2, _ := cursorTestModel(t, 1)
+	m2.ta.InsertString("hi")
+	next2, _ := m2.handleKey(tea.KeyPressMsg{Code: tea.KeyDelete})
+	mm2 := next2.(model)
+	if mm2.focusedPanel() != regionNone {
+		t.Error("delete must bring focus to the main chat")
+	}
+
+	// ctrl+h (the backspace alias): same handoff.
+	m3, _ := cursorTestModel(t, 1)
+	next3, _ := m3.handleKey(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+	mm3 := next3.(model)
+	if mm3.focusedPanel() != regionNone {
+		t.Error("ctrl+h must bring focus to the main chat")
+	}
+}
+
 func TestPanelCursor_StaysVisibleOnPaging(t *testing.T) {
 	m, _ := cursorTestModel(t, 40) // long content — the panel overflows
 	h := m.viewportHeight()

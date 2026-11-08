@@ -261,3 +261,34 @@ func TestProjectChangesRow_PreviewsWorkingTree(t *testing.T) {
 		t.Errorf("changes row leaked into the @-mention path tracker: %q", m2.lastTreeClickPath)
 	}
 }
+
+// The attach view swallows unrelated keys, but the text-editing keys hand
+// focus to the input like everywhere else (type-to-focus parity).
+func TestAttachView_EditingKeysHandFocusToInput(t *testing.T) {
+	m, _ := previewAttachModel(t) // tasks panel open AND focused
+	if m.focusedPanel() != regionTasks {
+		t.Fatalf("fixture: focus = %v, want tasks", m.focusedPanel())
+	}
+	m.ta.InsertString("abc")
+
+	next, _ := m.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	mm := next.(model)
+	if mm.focusedPanel() != regionNone {
+		t.Error("backspace in the attach view must hand focus to the input")
+	}
+	if mm.ta.Value() != "ab" {
+		t.Errorf("the keystroke must land on the input it focused, got %q", mm.ta.Value())
+	}
+
+	// An unrelated key keeps the view's swallowing behavior.
+	m2, _ := previewAttachModel(t)
+	m2.ta.InsertString("abc")
+	next2, _ := m2.handleAttachKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	mm2 := next2.(model)
+	if mm2.focusedPanel() != regionTasks {
+		t.Error("unrelated keys must not touch focus (attach stays swallowing)")
+	}
+	if mm2.ta.Value() != "abc" {
+		t.Errorf("unrelated keys must not reach the input, got %q", mm2.ta.Value())
+	}
+}

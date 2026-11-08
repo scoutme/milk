@@ -3839,11 +3839,15 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.flushPanelClickPending()
 
 	// Typing while a panel is focused hands the keyboard back to the main
-	// chat — the keystroke lands in the input (type-to-focus). Only
-	// printable text refocuses: editing keys (enter, arrows, backspace)
-	// stay panel-scoped.
+	// chat — the keystroke lands in the input (type-to-focus). The
+	// text-editing keys (backspace, delete, ctrl+h) signal the same
+	// intent — they are meaningless on a row — and hand focus over too,
+	// the key included, so the edit applies to the input the moment focus
+	// arrives. Keys that act ON the panel (enter = row action, arrows =
+	// row cursor, paging) stay panel-scoped.
 	if m.focusedPanel() != regionNone {
-		if s := msg.String(); s == "space" || (msg.Text != "" && s == msg.Text) {
+		if s := msg.String(); s == "space" || (msg.Text != "" && s == msg.Text) ||
+			s == "backspace" || s == "delete" || s == "ctrl+h" {
 			m.panelFocus = regionNone
 		}
 	}

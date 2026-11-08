@@ -93,8 +93,10 @@ from rules on that field:
   (the armed queue confirm clears with it); the queue keeps Enter whenever
   focus is on the input (every pending prompt/wizard is still routed
   ahead of the busy handler, so a real modal always keeps Enter) — and
-  typing any text hands focus
-  straight back to the input, keystroke included (type-to-focus),
+  typing any text, or pressing a text-editing key (backspace, delete,
+  ctrl+h), hands focus
+  straight back to the input, keystroke included (type-to-focus — editing
+  keys mean editing intent everywhere, attach view included),
   F1–F6 still toggle (bring-to-front for
   grouped panels per issue #373 — toggling a *visible* panel closes it, which
   also drops a focused panel and heals via rule 4). The same navigation
