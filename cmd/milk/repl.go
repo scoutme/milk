@@ -1607,12 +1607,25 @@ func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// press.
 		return m.handleCtrlC()
 	case "enter", "ctrl+m":
-		// Enter-as-accept (tab completion / arrow-hint selection) is not a
-		// submission, so it is not trapped while busy — only Enter below,
-		// which would send the buffer as a prompt, is. Completion only
-		// edits the input buffer, safe to use mid-turn.
+		// Enter-as-accept (tab completion / arrow-hint selection) and
+		// Enter-as-row-action (a focused panel) are both operations on
+		// the view, not submissions — they are not trapped while busy.
+		// Only the Enter below, which would send the buffer as a prompt,
+		// is. Completion only edits the input buffer, safe mid-turn.
 		armed := m.busyEnterArmed
 		m.busyEnterArmed = false
+		// The focused panel's Enter runs the cursor row's double-click
+		// action — same panel-first order as idle handleKey, same
+		// never-submits contract. Disarming above is deliberate: the
+		// gesture was consumed by the panel, so no stale armed Enter
+		// can queue text later once focus is back on main. (Every
+		// pending prompt/wizard is routed before handleBusyKey in
+		// Update, so a real modal always keeps Enter.)
+		if region := m.focusedPanel(); region != regionNone {
+			cmd, _ := m.panelActivateRow(region, m.panelCursorLine)
+			m.syncLayout()
+			return m, cmd
+		}
 		var accepted bool
 		m, accepted = m.acceptActiveCompletion()
 		if accepted {

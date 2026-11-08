@@ -311,17 +311,41 @@ func thinkSurfaceRow(row string) bool {
 	return sgr.LastBackground(row, func(bg string) bool { return bg == thinkBgParams }) != ""
 }
 
+// foldHeaderStyleRow is the *header's* own paint on top of the surface: dim
+// on the classic surface, italic + the header token on a modern one. Bodies
+// share the surface but not this signature — the distinction is what keeps
+// header-shaped text quoted inside an *expanded body* (a model output that
+// documents the header format — this session's own greps printed several)
+// from counting toward the block ordinal and skewing every click below it.
+// The pattern check stays the family discriminator; this only says "a real
+// container header row, not body text". Off-TTY paintLines is a no-op, so the
+// caller skips this gate exactly like the surface one.
+func foldHeaderStyleRow(row string) bool {
+	if !thinkSurfaceRow(row) {
+		return false
+	}
+	if th.modern {
+		return strings.Contains(row, "\033[3m") &&
+			(strings.Contains(row, tkAccent.sgrFg()) || strings.Contains(row, tkMuted.sgrFg()))
+	}
+	return strings.Contains(row, ansiDim)
+}
+
 // thinkHeaderCount reports how many fold headers one render row of the wrapped
 // transcript carries (0 or 1 in practice). Two conditions must hold:
 //
 //   - the row carries a *complete* header, not just the prefix — ordinary
 //     transcript text that mentions "▸ thinking · " without a line count never
 //     counts, so it cannot skew the ordinal below; and
-//   - the row paints the thinking surface — the render-time signature of a
-//     fold container. The markdown reflow (colorizeFull) can glue a
+//   - the row paints the thinking surface *in the header's own signature*
+//     (foldHeaderStyleRow: dim-classic / accent-or-muted italic-modern) —
+//     not merely the surface. The markdown reflow (colorizeFull) can glue a
 //     container's header onto a neighbouring line ("intro text▸ thinking · 2
 //     lines"), and that row still carries the surface background, so glued
-//     headers keep counting; an answer that merely quotes the header format
+//     headers keep counting; and body rows — which also carry the surface —
+//     holding quoted header-shaped text (an expanded container quoting the
+//     format, model output documenting it) do NOT count, no matter how
+//     complete the quoted header looks. An answer that merely quotes the header format
 //     carries no surface and never does.
 //
 // Reasoning text is model output, not adversarial input, and the worst case is
@@ -331,7 +355,7 @@ func thinkHeaderCount(row string) int {
 	// The surface check only exists in the painted render: paintLines is a
 	// no-op off-TTY, where every row is plain and the pattern is all there is
 	// (and nothing is clickable anyway).
-	if isTTY && !thinkSurfaceRow(row) {
+	if isTTY && !foldHeaderStyleRow(row) {
 		return 0
 	}
 	return len(thinkHeaderRe.FindAllString(ansi.Strip(row), -1))

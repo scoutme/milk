@@ -178,3 +178,59 @@ func TestPanelCursor_RenderHighlight(t *testing.T) {
 		t.Errorf("exactly one row must wear the cursor highlight, got %d:\n%q", hi, out)
 	}
 }
+
+// Busy-state twin of the Enter contract: while a turn runs, the busy
+// disposition (ADR-0083 queue hint / double-Enter queue) must not eat the
+// focused panel's Enter — it is the row's double-click action, a view
+// operation like completion-accept. The queue disposition keeps its own
+// Enter the moment focus is back on main (control below).
+func TestBusyPanelEnter_RunsRowActionNotQueue(t *testing.T) {
+	m, ts := cursorTestModel(t, 2)
+	task, err := ts.Create("expand me while busy", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.busy = true
+	m.ta.SetValue("do not queue me")
+	m.panelCursorLine = taskRowLineIndex(t, ts, "", task.ID)
+	m.busyEnterArmed = true // an armed queue gesture must not survive the panel
+
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	nm := next.(model)
+
+	if nm.taskExpanded != task.ID {
+		t.Errorf("busy Enter must run the row action, expanded %q", nm.taskExpanded)
+	}
+	if len(nm.st.queuedPrompts) != 0 {
+		t.Errorf("busy panel Enter must not queue, got %d", len(nm.st.queuedPrompts))
+	}
+	if nm.busyHint != "" {
+		t.Errorf("busy panel Enter must not set the queue hint, got %q", nm.busyHint)
+	}
+	if nm.ta.Value() != "do not queue me" {
+		t.Errorf("busy panel Enter must not touch the input, ta=%q", nm.ta.Value())
+	}
+	if nm.busyEnterArmed {
+		t.Error("the panel consumed the Enter gesture — busyEnterArmed must clear")
+	}
+}
+
+// Control: without a focused panel the busy disposition is untouched —
+// first Enter arms the queue hint, second Enter queues (ADR-0083).
+func TestBusyEnter_NoPanelFocus_KeepsQueueDisposition(t *testing.T) {
+	m, _ := cursorTestModel(t, 1)
+	m.busy = true
+	m.panelFocus = regionNone
+	m.ta.SetValue("queue me")
+
+	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	nm := next.(model)
+	if !nm.busyEnterArmed || !strings.Contains(nm.busyHint, "Enter again") {
+		t.Fatalf("first busy Enter must arm the queue hint, armed=%v hint=%q", nm.busyEnterArmed, nm.busyHint)
+	}
+	next2, _ := nm.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	nm2 := next2.(model)
+	if len(nm2.st.queuedPrompts) != 1 || nm2.st.queuedPrompts[0].text != "queue me" {
+		t.Errorf("second Enter must queue, got %#v", nm2.st.queuedPrompts)
+	}
+}

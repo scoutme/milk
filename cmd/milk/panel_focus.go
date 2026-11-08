@@ -258,7 +258,9 @@ func (m *model) panelClickAction(region panelRegion, lineIdx int) tea.Cmd {
 		// @-mention — a click-only gesture (keyboard activation never
 		// arms it).
 		if region == regionProject {
-			if id := m.projectRowID(lineIdx); id != "" && !strings.HasPrefix(id, "d:") {
+			// The changes-summary row is a preview target, not a path — it
+			// must never be recorded for the triple-click @-mention dance.
+			if id := m.projectRowID(lineIdx); id != "" && !strings.HasPrefix(id, "d:") && id != changesRowID {
 				m.lastTreeClickPath = id
 				m.lastTreeClickTime = now
 			}
