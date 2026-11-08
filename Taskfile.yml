@@ -168,7 +168,7 @@ tasks:
       - site:build
 
   site:deploy:
-    desc: Deploy website to FTP (requires FTP_PASS env var)
+    desc: Deploy website to FTP (requires FTP_HOST, FTP_USER, FTP_PASS env vars)
     cmds:
       - python3 scripts/deploy-ftp.py
     deps:

@@ -5,8 +5,6 @@ import ftplib
 import os
 import sys
 
-HOST = "ftp.milkai.dev"
-USER = "2657051@aruba.it"
 REMOTE = "/www.milkai.dev"
 LOCAL = "website/site"
 
@@ -32,18 +30,21 @@ def upload_dir(ftp, local_dir, remote_dir):
 
 
 def main():
+    host = os.environ.get("FTP_HOST", "")
+    user = os.environ.get("FTP_USER", "")
     password = os.environ.get("FTP_PASS", "")
-    if not password:
-        print("Error: FTP_PASS env var required.", file=sys.stderr)
+    missing = [k for k, v in (("FTP_HOST", host), ("FTP_USER", user), ("FTP_PASS", password)) if not v]
+    if missing:
+        print(f"Error: {', '.join(missing)} env var(s) required.", file=sys.stderr)
         sys.exit(1)
 
     if not os.path.isdir(LOCAL):
         print(f"Error: '{LOCAL}' not found. Run 'task site:build' first.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Connecting to {HOST} as {USER}...")
-    ftp = ftplib.FTP(HOST)
-    ftp.login(USER, password)
+    print(f"Connecting to {host} as {user}...")
+    ftp = ftplib.FTP(host)
+    ftp.login(user, password)
     ftp.set_pasv(True)
     # Force binary mode for all transfers
     ftp.voidcmd("TYPE I")
@@ -51,7 +52,7 @@ def main():
     print(f"Uploading {LOCAL}/ → {REMOTE}")
     count = upload_dir(ftp, LOCAL, REMOTE)
     ftp.quit()
-    print(f"Done. {count} files uploaded to {HOST}{REMOTE}")
+    print(f"Done. {count} files uploaded to {host}{REMOTE}")
 
 
 if __name__ == "__main__":
