@@ -116,14 +116,22 @@ func TestMCP_StdioExpansionAndCwd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The loader resolves the root (§4.1 containment): PLUGIN_ROOT expands to
+	// the *resolved* path. On macOS t.TempDir() is /var/… which is a symlink to
+	// /private/var/… — resolve expectations the same way (identity elsewhere).
+	// PLUGIN_DATA expands to the data root as configured (not symlink-resolved).
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		wantRoot = root
+	}
 	st := p.MCP.Servers["srv"].Stdio
 	if st == nil {
 		t.Fatal("server must load")
 	}
-	if st.Command != filepath.Join(root, "bin", "tool") {
+	if st.Command != filepath.Join(wantRoot, "bin", "tool") {
 		t.Errorf("command: %q", st.Command)
 	}
-	wantArgs := []string{"--config", filepath.Join(root, "config.json"), filepath.Join(data, "my-plugin", "cache"), "${NOPE}"}
+	wantArgs := []string{"--config", filepath.Join(wantRoot, "config.json"), filepath.Join(data, "my-plugin", "cache"), "${NOPE}"}
 	for i, w := range wantArgs {
 		if st.Args[i] != w {
 			t.Errorf("args[%d] = %q, want %q", i, st.Args[i], w)
@@ -132,10 +140,10 @@ func TestMCP_StdioExpansionAndCwd(t *testing.T) {
 	if st.Env["DATA"] != filepath.Join(data, "my-plugin", "x") {
 		t.Errorf("env DATA: %q", st.Env["DATA"])
 	}
-	if st.Env["LITERAL"] != "has "+root+" text" {
+	if st.Env["LITERAL"] != "has "+wantRoot+" text" {
 		t.Errorf("env LITERAL: %q", st.Env["LITERAL"])
 	}
-	if st.Cwd != filepath.Join(root, "bin") {
+	if st.Cwd != filepath.Join(wantRoot, "bin") {
 		t.Errorf("cwd: %q", st.Cwd)
 	}
 	// Unknown placeholders stay literal (§9.2).
