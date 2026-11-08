@@ -222,7 +222,10 @@ func tintBlock(content string, width int, bg string) string {
 // convention), then detaches; ctrl+c copies the attach selection; everything
 // else is swallowed — this is a read-only view, not an input surface, and
 // arrow keys in particular stay reserved for input-history navigation
-// elsewhere in the TUI, never repurposed here for scrolling.
+// elsewhere in the TUI, never repurposed here for scrolling. One deliberate
+// exception, matching the focused panels' type-to-focus rule (ADR-0103): the
+// text-editing keys (backspace, delete, ctrl+h) are *input* intent, never
+// view navigation — they hand focus to the input and apply there.
 func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -310,6 +313,13 @@ func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	case "backspace", "delete", "ctrl+h":
+		// Same handoff rule as the focused panels (type-to-focus): these
+		// keys only mean text editing, never view navigation — forward to
+		// handleKey so they hand focus to the input (if a panel held it)
+		// and apply the edit in the same keystroke. Every other key keeps
+		// the attach view's swallowing behavior.
+		return m.handleKey(msg)
 	}
 	return m, nil
 }

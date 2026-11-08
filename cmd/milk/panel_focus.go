@@ -21,8 +21,9 @@ import (
 // elsewhere (#367's render path). The focused panel also carries a row
 // cursor: arrows walk it (renderSidePanel paints it as the selection
 // highlight), Enter runs the cursor row's action — the double-click action,
-// rows with items only (panelActivateRow) — and typing any text hands focus
-// straight back to the input, keystroke included. Focus is transient view
+// rows with items only (panelActivateRow) — and typing any text, or pressing
+// a text-editing key (backspace, delete, ctrl+h), hands focus straight back
+// to the input, keystroke included. Focus is transient view
 // state: never persisted, never toasts, never moves layout.
 
 // focusedPanel returns the side panel that currently owns keyboard
