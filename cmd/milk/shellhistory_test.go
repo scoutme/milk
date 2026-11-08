@@ -268,12 +268,7 @@ func TestBangModeTransitions_ResetHistoryIndex(t *testing.T) {
 		m.ta.SetValue("echo hi")
 		next, _ := m.handleEnter()
 		nm := next.(model)
-		t.Cleanup(func() {
-			if nm.ptyPane != nil {
-				_ = nm.ptyPane.cmd.Process.Kill()
-				_, _ = nm.ptyPane.cmd.Process.Wait()
-			}
-		})
+		t.Cleanup(func() { killPaneBounded(t, nm.ptyPane) })
 		if nm.bangMode {
 			t.Error("bang mode should be off after submit")
 		}

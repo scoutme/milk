@@ -21,12 +21,7 @@ func TestHandleBusyKey_BangExecutesImmediately(t *testing.T) {
 
 	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := next.(model)
-	t.Cleanup(func() {
-		if nm.ptyPane != nil {
-			_ = nm.ptyPane.cmd.Process.Kill()
-			_, _ = nm.ptyPane.cmd.Process.Wait()
-		}
-	})
+	t.Cleanup(func() { killPaneBounded(t, nm.ptyPane) })
 
 	if nm.ptyPane == nil {
 		t.Fatal("expected launchPTYPane to run (ptyPane set), got nil")
@@ -49,12 +44,7 @@ func TestHandleBusyKey_BangModeRePrepended(t *testing.T) {
 
 	next, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := next.(model)
-	t.Cleanup(func() {
-		if nm.ptyPane != nil {
-			_ = nm.ptyPane.cmd.Process.Kill()
-			_, _ = nm.ptyPane.cmd.Process.Wait()
-		}
-	})
+	t.Cleanup(func() { killPaneBounded(t, nm.ptyPane) })
 
 	if nm.ptyPane == nil {
 		t.Fatal("expected launchPTYPane to run once \"!\" was re-prepended")
