@@ -90,6 +90,14 @@ func (m *model) startAttach(kind attachKind, jobID, label string, buf *livebuf.B
 		vp:    viewport.New(viewport.WithWidth(m.vpWidth()), viewport.WithHeight(m.viewportHeight())),
 	}
 	m.syncAttachedContent()
+	// Static previews open at the TOP: syncAttachedContent's sticky-bottom
+	// rule exists for LIVE buffers (job output follows the newest line), but
+	// its atBottom capture reads true on a brand-new empty viewport — so a
+	// fresh preview would otherwise open already scrolled to its END (the
+	// tail of a diff, not its start). Live kinds keep the sticky rule.
+	if kind == attachPreview {
+		m.attached.vp.GotoTop()
+	}
 	obs.Debug("attach.start", "kind", kind.String(), "job", jobID, "label", label)
 	return attachRefreshTick()
 }
@@ -239,6 +247,69 @@ func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.syncAttachedContent()
 			return m, copyFeedbackClearCmd()
 		}
+	// Panel navigation stays available while a preview owns the main area
+	// (the panels stay visible — keyboard parity with the mouse, which
+	// dispatches panel clicks ahead of the attach view). Mirrors handleKey
+	// exactly so the two paths can't drift: rotation, the row cursor, the
+	// row's action (a new preview simply replaces this one), and paging of
+	// the focused panel.
+	case "shift+pgup":
+		m.rotatePanelFocus(-1)
+		return m, nil
+	case "shift+pgdown", "shift+pgdn":
+		m.rotatePanelFocus(1)
+		return m, nil
+	case "tab", "shift+tab":
+		// Same rule as everywhere: completion wins when there is any, else
+		// focus rotation (handleTabKey decides — attached input state can't
+		// create completions, so this is rotation in practice).
+		dir := 1
+		if msg.String() == "shift+tab" {
+			dir = -1
+		}
+		return m.handleTabKey(dir), nil
+	case "up", "down":
+		if region := m.focusedPanel(); region != regionNone {
+			delta := 1
+			if msg.String() == "up" {
+				delta = -1
+			}
+			m.movePanelCursor(region, delta)
+			m.syncLayout()
+			return m, nil
+		}
+		// Main focus: the attached content IS the visible main viewport —
+		// line-scroll it the way the transcript would.
+		if msg.String() == "up" {
+			m.attached.vp.ScrollUp(1)
+		} else {
+			m.attached.vp.ScrollDown(1)
+		}
+		return m, nil
+	case "pgup", "ctrl+u":
+		if m.focusedPanel() != regionNone {
+			m.scrollFocusedPanel(-1)
+			return m, nil
+		}
+		m.attached.vp.HalfPageUp()
+		return m, nil
+	case "pgdown", "ctrl+f":
+		if m.focusedPanel() != regionNone {
+			m.scrollFocusedPanel(1)
+			return m, nil
+		}
+		m.attached.vp.HalfPageDown()
+		return m, nil
+	case "enter":
+		// The focused panel's Enter is its row's action (the double-click
+		// twin) — with a preview open it opens the next one. Main focus
+		// stays a no-op: there is no submittable input in this view.
+		if region := m.focusedPanel(); region != regionNone {
+			cmd, _ := m.panelActivateRow(region, m.panelCursorLine)
+			m.syncLayout()
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }

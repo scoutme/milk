@@ -164,6 +164,46 @@ func renderHunk(b *strings.Builder, h hunk) {
 	}
 }
 
+// ColorizeUnified colorizes git's unified-diff text with the exact palette
+// renderHunk uses for transcript edit previews — additions green, deletions
+// red, context and metadata (file headers, hunk headers, stat blocks) dim —
+// so every diff-shaped surface reads as one family: tool results in the
+// transcript, file previews from the project panel, the working-tree
+// preview. It expects UNCOLORED git output: a line already starting with an
+// escape (a user's color.diff=always) passes through untouched, as does text
+// carrying no diff marker at all.
+func ColorizeUnified(s string) string {
+	if !strings.Contains(s, "diff --git") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if l == "" || strings.HasPrefix(l, "\x1b") {
+			continue
+		}
+		switch {
+		// Headers and metadata before the +/− rules: "--- a/x" and
+		// "+++ b/x" would otherwise read as deletions/additions.
+		case strings.HasPrefix(l, "+++ "), strings.HasPrefix(l, "--- "),
+			strings.HasPrefix(l, "diff --git "), strings.HasPrefix(l, "index "),
+			strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "new file"),
+			strings.HasPrefix(l, "deleted file"), strings.HasPrefix(l, "similarity "),
+			strings.HasPrefix(l, "rename "), strings.HasPrefix(l, "Binary files"),
+			strings.HasPrefix(l, "\\ No newline"):
+			lines[i] = ansiDim + l + ansiReset
+		case strings.HasPrefix(l, "+"):
+			lines[i] = ansiGreen + l + ansiReset
+		case strings.HasPrefix(l, "-"):
+			lines[i] = ansiRed + l + ansiReset
+		case strings.HasPrefix(l, " "):
+			// renderHunk dims context the same way; the raw git line
+			// already carries the leading space.
+			lines[i] = ansiDim + l + ansiReset
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func splitLines(s string) []string {
 	lines := strings.Split(s, "\n")
 	// Drop the trailing empty element from a final newline.

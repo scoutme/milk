@@ -30,6 +30,11 @@ a sibling of `thinkBlock` spliced by the same display pass:
   by default; click
   the header to toggle (`toolBlockAtLine` — disjoint pattern from
   `▸ thinking · N lines`, so each family's ordinal space sees only its own
+  headers, *and* gated on the header's own paint via `foldHeaderStyleRow` —
+  expanded bodies share the fold surface, so output that quotes the header
+  format (this repo's own greps print several) never counts toward the
+  ordinal: the regression was "click block 3 → block 5 toggled", +2 for the
+  two quoted headers sitting above it)
   headers); `/tools expand|collapse|view` + bare `/tools` report, busy-safe,
   TUI-only.
 - **Body** = pretty-printed input, and once the outcome lands, a blank line

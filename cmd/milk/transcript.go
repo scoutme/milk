@@ -19,6 +19,46 @@ import (
 // is O(last turn) not O(transcript), so a higher threshold is affordable.
 const colorizeLineThresh = 32
 
+// isMilkAnnotation reports whether a write is a [milk] transcript annotation
+// — the plain raw form (dimmed at render by dimMilkAnnotationRows) or milk's
+// own pre-styled tag — as opposed to streamed content that merely mentions
+// the tag further in. Only a LEADING tag counts: what gets separated is where
+// the line starts, never mid-string mentions.
+func isMilkAnnotation(text string) bool {
+	if text == "" {
+		return false
+	}
+	if strings.HasPrefix(text, "[milk] ") || strings.HasPrefix(text, legacyAnnotationPrefix) {
+		return true
+	}
+	if text[0] != 0x1b { // styled forms start at the escape, nothing else
+		return false
+	}
+	plain := ansi.Strip(text)
+	return strings.HasPrefix(plain, "[milk] ") || strings.HasPrefix(plain, legacyAnnotationPrefix)
+}
+
+// separateMilkNote keeps [milk] annotations standalone blocks in the buffer:
+// when the tail is mid-line (a streamed response in progress — chunks carry no
+// trailing newline), a leading newline closes that line first, and the note is
+// closed with a newline of its own so whatever streams next starts fresh. The
+// separation is also what keeps coloring stable: dimMilkAnnotationRows only
+// styles a tag that begins a row, and a note glued into a partial row inherits
+// whatever SGR run was open there. Plain content passes through untouched —
+// chunk-splitting ordinary output must never gain newlines.
+func (m *model) separateMilkNote(text string) string {
+	if !isMilkAnnotation(text) {
+		return text
+	}
+	if m.transcript.Len() > 0 && !strings.HasSuffix(m.transcript.String(), "\n") {
+		text = "\n" + text
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return text
+}
+
 // appendTranscript adds regular (non-reasoning) text to the transcript and
 // refreshes the viewport. Sticky-bottom: only auto-scrolls when already at the bottom.
 // A streaming thinking block ends at regular content: the block closes and
@@ -26,7 +66,7 @@ const colorizeLineThresh = 32
 // model thought" and "what the model said" is structural, not an escape pair.
 func (m *model) appendTranscript(text string) {
 	m.closeOpenThinkBlock()
-	m.transcript.WriteString(text)
+	m.transcript.WriteString(m.separateMilkNote(text))
 	if m.ready {
 		atBottom := m.vp.AtBottom()
 		m.setViewportContent()
@@ -43,7 +83,7 @@ func (m *model) appendTranscript(text string) {
 // the viewport immediately instead.
 func (m *model) appendTranscriptStreamed(text string) {
 	m.closeOpenThinkBlock()
-	m.transcript.WriteString(text)
+	m.transcript.WriteString(m.separateMilkNote(text))
 	m.syncViewportThrottled()
 }
 

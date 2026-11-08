@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/scoutme/milk/internal/diff"
 )
 
 // Git data fetch and code-laid commit-graph layout for the git panel
@@ -321,13 +324,23 @@ func gitStatusShort(cwd, path string) (string, error) {
 	return string(out), err
 }
 
-// gitDiffHEAD renders the complete working-tree-vs-HEAD diff (staged and
-// unstaged alike), scoped to one path when path is set. Same presentation
-// flags and cap as gitShow so previews look consistent across click targets.
-func gitDiffHEAD(cwd, path string) (string, error) {
+// gitDiffHEAD renders the working-tree-vs-HEAD diff (staged and unstaged
+// alike), scoped to one path when path is set. unified > 0 passes -U<n>:
+// file previews ask for a huge value so the diff carries the whole file —
+// every unchanged line present, changes marked — while the working-tree
+// summary keeps the default context. --color=never keeps the output plain
+// for diff.ColorizeUnified (a user's color.diff=always would hide the +/−
+// markers behind their own escapes and defeat the transcript palette). Same
+// presentation flags and cap as gitShow so previews look consistent across
+// click targets.
+func gitDiffHEAD(cwd, path string, unified int) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
 	defer cancel()
-	args := []string{"--no-optional-locks", "-C", cwd, "diff", "--stat", "--patch", "--find-renames", "HEAD"}
+	args := []string{"--no-optional-locks", "-C", cwd, "diff", "--color=never", "--stat", "--patch", "--find-renames"}
+	if unified > 0 {
+		args = append(args, fmt.Sprintf("--unified=%d", unified))
+	}
+	args = append(args, "HEAD")
 	if path != "" {
 		args = append(args, "--", path)
 	}
@@ -345,7 +358,7 @@ func gitDiffHEAD(cwd, path string) (string, error) {
 func gitDiffNoIndex(cwd, rel string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitGraphTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "diff", "--no-index", "--stat", "--patch", "--", "/dev/null", rel)
+	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "diff", "--color=never", "--no-index", "--stat", "--patch", "--", "/dev/null", rel)
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -384,10 +397,14 @@ func workingTreePreview(cwd string) (string, error) {
 	var b strings.Builder
 	b.WriteString(st)
 	b.WriteString("\n")
-	if patch, perr := gitDiffHEAD(cwd, ""); perr == nil {
+	if patch, perr := gitDiffHEAD(cwd, "", 0); perr == nil {
 		if strings.TrimSpace(patch) != "" {
 			b.WriteString("\n")
-			b.WriteString(patch)
+			// The patch wears the transcript's diff palette; the status
+			// list above stays plain (it is a file-level verdict, not a
+			// diff). Default context here — this surface is the project
+			// summary; single-file previews carry the whole file.
+			b.WriteString(diff.ColorizeUnified(patch))
 		}
 	} else {
 		msg := perr.Error()

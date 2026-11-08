@@ -83,11 +83,22 @@ from rules on that field:
   cursor: `↑`/`↓` walk the focused panel's rows (the cursor row wears the
   selection highlight, scrolling follows), `Enter` runs the cursor row's
   action — the exact double-click action, rows with items only, never
-  submitting input (`panelActivateRow`) — and typing any text hands focus
+  submitting input (`panelActivateRow`), **in both states**: while a turn
+  runs the busy queue disposition (ADR-0083) yields Enter to the focused
+  panel exactly as it yields completion-accept, consuming the gesture
+  (the armed queue confirm clears with it); the queue keeps Enter whenever
+  focus is on the input (every pending prompt/wizard is still routed
+  ahead of the busy handler, so a real modal always keeps Enter) — and
+  typing any text hands focus
   straight back to the input, keystroke included (type-to-focus),
   F1–F6 still toggle (bring-to-front for
   grouped panels per issue #373 — toggling a *visible* panel closes it, which
-  also drops a focused panel and heals via rule 4).
+  also drops a focused panel and heals via rule 4). The same navigation
+  stays live while the attach view (ADR-0047) owns the main area — a
+  preview must not freeze the panels the mouse already reaches:
+  `handleAttachKey` mirrors `handleKey` for rotation, the row cursor, the
+  row's action and paging (with main focus, pgup/pgdn page the attached
+  content itself), and Esc still detaches.
 - The `/keys` help gains a column for the three bindings; the raw switch cases
   in `handleKey` stay the implementation (registry entries are display-only,
   per the keymap's own convention).

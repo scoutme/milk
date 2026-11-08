@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/scoutme/milk/internal/diff"
 	"github.com/scoutme/milk/internal/livebuf"
 	"github.com/scoutme/milk/internal/session"
 )
@@ -19,13 +20,21 @@ import (
 // backed by the same git-file-list candidate index the @-file completion uses
 // (ADR-0057) so it never pays the walk-budget problem. Double-click a
 // directory to expand/collapse it, double-click a file to preview it in the
-// main area — as a diff when the file has working-tree changes
-// (modified/untracked in a git repo), as raw contents otherwise — triple-
+// main area — as a full-file diff when the file has working-tree changes
+// (modified/untracked in a git repo), whole file present with its changes in
+// the transcript's green/red palette, as raw contents otherwise — triple-
 // click to insert an @-mention into the input (single click only focuses:
 // the uniform cadence, ADR-0066).
 
 const projectPanelWidth = 33 // 32 inner + 1 right scrollbar column
 const projectPanelInner = 32
+
+// fileDiffFullContext is the -U value for single-file previews: large enough
+// that git never truncates context, so the preview shows the whole file —
+// every unchanged line, with the changes marked in the transcript's green/red
+// — instead of only the hunks around them. The 128 KB output cap still bounds
+// pathological files.
+const fileDiffFullContext = 999999
 
 // projectTreeMaxLines caps the rendered tree; huge repos get a truncation
 // note instead of an unbounded panel.
@@ -96,7 +105,7 @@ func buildProjectTreeLines(files []string, truncated bool, expanded map[string]b
 	}
 	if len(changes) > 0 {
 		lines = append(lines, changesSummaryLine(changes, inner))
-		ids = append(ids, "")
+		ids = append(ids, changesRowID)
 	}
 
 	root := &treeNode{dir: true}
@@ -274,8 +283,16 @@ func (m *model) projectDirExpanded(dir string) bool {
 	return strings.Count(dir, "/") == 1
 }
 
+// changesRowID makes the project panel's top changes-summary line clickable:
+// its action is the working tree's complete local state (status + diff vs
+// HEAD) — the ONLY project-wide preview in the panels' vocabulary. Deliberately
+// a prefix no real path carries (project file ids are bare relative paths, dir
+// ids are "d:…"), so it can't collide with a file row.
+const changesRowID = "wt:"
+
 // handleProjectPanelClick acts on a project row directly: a directory row
-// toggles its expansion; a file row previews it in the main area — as a
+// toggles its expansion; the changes-summary row previews the working tree;
+// a file row previews it in the main area — as a
 // diff when the file has working-tree changes (fileDiffBuffer), as contents
 // otherwise. The click cadence around it lives in panelClickAction (single
 // = deferred focus, this preview on double, @-mention on triple) — a direct
@@ -287,6 +304,18 @@ func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
 	id := m.projectIDs[lineIdx]
 	if id == "" {
 		return nil
+	}
+	if id == changesRowID {
+		// The changes-summary line owns the project-wide diff — file rows
+		// never do (they stay scoped to their own path, below).
+		out, err := workingTreePreview(m.st.cwd)
+		if err != nil {
+			m.notify("git status failed: "+err.Error(), "")
+			return nil
+		}
+		buf := livebuf.New(gitShowMaxBytes + 1024)
+		buf.Append([]byte(out))
+		return m.startAttach(attachPreview, "", "working tree", buf)
 	}
 	if dir, ok := strings.CutPrefix(id, "d:"); ok {
 		if m.projectExpanded == nil {
@@ -315,10 +344,12 @@ func (m *model) handleProjectPanelClick(lineIdx int) tea.Cmd {
 }
 
 // fileDiffBuffer returns the file's working-tree diff when it has one: a
-// modified file previews as its complete diff vs HEAD (staged + unstaged),
-// an untracked file as a whole-file added diff, and everything else (clean
-// file, no git, not a repo, probe failure) returns nil so the caller keeps
-// the raw content preview. One status probe decides the branch.
+// modified file previews as its complete diff vs HEAD (staged + unstaged)
+// with FULL context — the whole file is shown, unchanged lines dim, changes
+// in the transcript's green/red palette (diff.ColorizeUnified); an untracked
+// file as a whole-file added diff; and everything else (clean file, no git,
+// not a repo, probe failure) returns nil so the caller keeps the raw content
+// preview. One status probe decides the branch.
 func fileDiffBuffer(cwd, rel string) (*livebuf.Buffer, string) {
 	st, err := gitStatusShort(cwd, rel)
 	if err != nil || strings.TrimSpace(st) == "" {
@@ -328,11 +359,12 @@ func fileDiffBuffer(cwd, rel string) (*livebuf.Buffer, string) {
 	if strings.HasPrefix(strings.TrimSpace(st), "??") {
 		out, err = gitDiffNoIndex(cwd, rel)
 	} else {
-		out, err = gitDiffHEAD(cwd, rel)
+		out, err = gitDiffHEAD(cwd, rel, fileDiffFullContext)
 	}
 	if err != nil || strings.TrimSpace(out) == "" {
 		return nil, ""
 	}
+	out = diff.ColorizeUnified(out)
 	buf := livebuf.New(gitShowMaxBytes + 1024)
 	buf.Append([]byte(out))
 	return buf, "diff " + rel

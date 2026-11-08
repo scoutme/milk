@@ -58,9 +58,13 @@ content-determined, therefore "deterministic", amount:
   the one on screen.
 - **Structural hit-testing.** `thinkHeaderCount` counts *complete* headers
   ("▸/▾ thinking · N lines", streaming variant) anywhere in a row — glued
-  headers included — and only on rows that paint the thinking surface (the
-  render-time signature of a fold container; pattern-only off-TTY where the
-  paint is a no-op and nothing is clickable). `thinkBlockAtLine` is the
+  headers included — and only on rows carrying **the header's own paint**
+  (`foldHeaderStyleRow`: the surface *plus* the signature — dim-classic,
+  accent-or-muted italic-modern; bodies share the surface but not the
+  signature, so header-shaped text quoted inside an expanded container never
+  counts — the tool-side "click block 3 → block 5 toggled" regression;
+  pattern-only off-TTY where the paint is a no-op and nothing is clickable).
+  `thinkBlockAtLine` is the
   ordinal of those counts. The line-start prefix helper (`isThinkHeaderLine`)
   remains only as a plain-text predicate for tests.
 
@@ -78,8 +82,9 @@ content-determined, therefore "deterministic", amount:
   (`panelRowScreen`, `attachRowScreen`, `attachClick(m, x, contentRow)`)
   instead of baking in "screen row 2 is content row 0".
 - Residual, accepted (as before): reasoning text is model output, not
-  adversarial input — a quoted *complete* header that also paints the
-  thinking surface could still shift the ordinal; the worst case is a
+  adversarial input — a quoted *complete* header that also carries the
+  header's exact SGR signature (raw escapes in output) could still shift the
+  ordinal; the worst case is a
   mis-targeted fold toggle.
 
 ## Verification

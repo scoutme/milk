@@ -31,9 +31,11 @@ import (
 //     pins against the turn-boundary tidy (/tools expand opts out, exactly
 //     like /think expand).
 //   - Clicking a header toggles that block (toolBlockAtLine — same ordinal
-//     argument as thinkBlockAtLine, same accepted residual: a quoted,
-//     surface-painted header could mis-target a toggle; reasoning and tool
-//     summaries are not adversarial input).
+//     argument as thinkBlockAtLine, gated on the header's own paint via
+//     foldHeaderStyleRow so header-shaped text quoted inside an expanded
+//     body never counts toward the ordinal; the accepted residual is only a
+//     quote that carries the exact header SGR signature — summaries and
+//     outputs are not adversarial input).
 //   - The header truncates to the viewport width so it is always one row —
 //     the ordinal hit-test counts complete headers per row and a wrapped
 //     header would never complete its first row.
@@ -200,12 +202,15 @@ func (m *model) renderToolBlock(b *toolBlock) string {
 var toolHeaderRe = regexp.MustCompile(`[▸▾] .+ — [0-9]+ lines?( · running| · error)?`)
 
 // toolHeaderCount reports how many tool fold headers one render row carries.
-// Same argument as thinkHeaderCount: a complete header, and the fold surface
-// as the container signature (so a model that merely quotes a header format
-// without the surface never counts; off-TTY — paintLines no-op — the surface
-// check is skipped, mirroring the think side).
+// Same argument as thinkHeaderCount: a complete header, *and* the header's
+// own paint on the surface (foldHeaderStyleRow) — the container signature.
+// A quote without the paint never counts off-TTY; on a surface-painted body
+// row (an expanded container holding output that quotes the format), the
+// paint signature separates header from body so quoted headers can't skew
+// the ordinal below them. Off-TTY — paintLines no-op — the check is skipped,
+// mirroring the think side.
 func toolHeaderCount(row string) int {
-	if isTTY && !thinkSurfaceRow(row) {
+	if isTTY && !foldHeaderStyleRow(row) {
 		return 0
 	}
 	return len(toolHeaderRe.FindAllString(ansi.Strip(row), -1))
