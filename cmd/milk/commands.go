@@ -992,7 +992,7 @@ func (m model) handleForgetCmd(pat string) model {
 			candidates = m.mem.FindByIDPrefix(idPat)
 		}
 		if len(candidates) == 0 {
-			candidates = m.mem.List(memory.ListOpts{Pattern: pat})
+			candidates = m.mem.List(memory.ListOpts{Pattern: pat, AllSessions: true})
 		}
 	}
 
