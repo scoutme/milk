@@ -9,6 +9,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildTabMatchesMode_BangSuppressesSlashKeepsPaths(t *testing.T) {
@@ -42,6 +43,15 @@ func TestBuildTabMatchesMode_BangSuppressesSlashKeepsPaths(t *testing.T) {
 	// but as PLAIN paths: "@" is milk's trigger, the shell reads it literally.
 	repo := gitRepo(t)
 	writeFiles(t, repo, "docs/acp-session-resume-plan.md", "main.go")
+	// The @-index builds asynchronously (fileindex.go get/runBuild) and a
+	// lookup only waits fileIndexTabWait on the very first build — a starved
+	// -race runner can answer mid-build with an empty snapshot (CI: macOS,
+	// 2026-11-08: "bang @-path matches = [], want the plain indexed file").
+	// Warm the index with a generous wait first so the assertions below run
+	// against a built snapshot and stay timing-independent.
+	if indexFor(repo).get(5*time.Second) == nil {
+		t.Fatal("file index did not build for the fixture repo")
+	}
 	res := buildTabMatchesMode("look at @sess", repo, lookup, true)
 	if len(res.matches) != 1 || res.matches[0] != "docs/acp-session-resume-plan.md" {
 		t.Errorf("bang @-path matches = %v, want the plain indexed file", res.matches)
