@@ -77,7 +77,10 @@ func buildCmdVariants() map[string][]cmdVariant {
 // then moves to the next/previous command. For @-paths: cycles the flat list.
 // The bool reports whether the key was consumed by completion: false means the
 // token under the cursor has no completions at all, and the caller
-// (handleTabKey) then treats the key as the panel-focus rotation alternative.
+// (handleTabKey) then applies the panel-focus rotation fallback — but only
+// outside completion context (visible inline hints / @-token under the
+// cursor), where a Tab with no buildable candidates is a no-op instead of
+// stealing focus from the completion.
 func (m model) handleTab(dir int) (model, bool) {
 	fullInput := m.ta.Value()
 	lines := strings.Split(fullInput, "\n")
@@ -852,7 +855,17 @@ func (m model) handleTabKey(dir int) model {
 	m, handled := m.handleTab(dir)
 	m.syncLayout()
 	if !handled {
-		m.rotatePanelFocus(dir)
+		// Completion context owns Tab: while inline hints or an @-token sit
+		// under the cursor — the user is IN command/path completion — Tab
+		// must never fall through to focus rotation, even when the build
+		// itself has no candidates right now (empty parameter namespace,
+		// @-index first build still running, bang-mode trailing space).
+		// Rotation stays for genuinely non-completable input (empty buffer,
+		// free text) and remains reachable on shift+pgup/pgdn or a click
+		// from anywhere.
+		if len(m.tabHints) == 0 && !m.onAtToken() {
+			m.rotatePanelFocus(dir)
+		}
 	}
 	return m
 }

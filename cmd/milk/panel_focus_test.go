@@ -376,9 +376,12 @@ func TestTabKey_CompletionWinsElseRotates(t *testing.T) {
 	// Free text with no completions falls through to rotation. Any typed
 	// keystroke clears both the cycling state and the inline hints in real
 	// use (SetValue bypasses both), so clear them here exactly as a
-	// keystroke would — otherwise the leftover hint would commit instead.
+	// keystroke would — otherwise the leftover hint would keep completion
+	// context alive and commit (or now, with the completion-context guard,
+	// no-op) instead of rotating.
 	m.tabMatches = nil
 	m.hintIdx = -1
+	m.setHints(nil)
 	m.ta.SetValue("hello world")
 	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = next.(model)

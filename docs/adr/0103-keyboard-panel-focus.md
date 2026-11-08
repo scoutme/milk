@@ -34,8 +34,12 @@ from rules on that field:
    the way back out). Panels the width budget hides are not in the sequence —
    only what is actually rendered may be focused (ADR-0089). **`tab`/`shift+tab`
    are rotation aliases whenever the token under the cursor has no
-   completions** — completion always wins (the cycling key doubles as rotation
-   only when cycling has no answer, `handleTabKey`), and bare Tab is free at
+   completions *and no completion context is live*** — completion always wins
+   (the cycling key doubles as rotation only when cycling has no answer,
+   `handleTabKey`), and while inline hints or an `@`-token sit under the cursor
+   a Tab with no buildable candidates is a **no-op**, never a focus steal (user
+   report, 2026-11-08: parameter-value and @-index-cold positions were rotating
+   focus mid-completion) — bare Tab is free at
    the terminal level (terminal tab-switching lives on Ctrl+Tab and friends),
    so the alias costs no chord.
 2. **Paging follows focus** — `pgup`/`pgdown` (and `ctrl+u`/`ctrl+f`) page the
