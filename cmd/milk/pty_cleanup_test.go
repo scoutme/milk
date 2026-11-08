@@ -17,7 +17,7 @@ import (
 // killed every test in that run and reported only the hang.
 //
 // The contract here is deliberately different: an un-reaped child surfaces
-// as evidence on THIS test (loud t.Errorf, 3s bound) instead of poisoning
+// as evidence on THIS test (loud t.Errorf, 10s bound — SIGKILL cannot be caught, so reap delay is pure runner starvation: the 3s bound fired on exactly that (run 42496586217, 3.02s) and turned starvation into a red; the disease was unbounded (9 minutes, package-wide), the cure stays bounded but must outlast a starved scheduling gap) instead of poisoning
 // the whole package — a slow or wedged child must never be able to hold the
 // suite hostage.
 func killPaneBounded(t *testing.T, state *ptyPaneState) {
@@ -33,7 +33,7 @@ func killPaneBounded(t *testing.T, state *ptyPaneState) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Errorf("pty child survived SIGKILL for 3s — unbounded Process.Wait here previously hung the macOS CI package (run 42430317832)")
+	case <-time.After(10 * time.Second):
+		t.Errorf("pty child survived SIGKILL for 10s — unbounded Process.Wait here previously hung the macOS CI package (run 42430317832); a 3s bound fired on starved runners (run 42496586217)")
 	}
 }
