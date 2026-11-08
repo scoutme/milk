@@ -72,7 +72,7 @@ func Schemas() []map[string]any {
 			"type": "function",
 			"function": map[string]any{
 				"name":        "forget_memory",
-				"description": "Delete stored memories by ID, ID prefix, or description/pattern. id accepts a percept ID (leading '#' optional), an ID prefix, or a one-match description; ids deletes several such targets in one call; pattern deletes every percept whose content contains the substring. At least one of id/ids/pattern is required. Returns an error when a target doesn't resolve or is ambiguous — in that case nothing is deleted.",
+				"description": "Delete stored memories by ID, ID prefix, or description/pattern. id accepts a percept ID (leading '#' optional), an ID prefix, or a one-match description; ids deletes several such targets in one call; pattern deletes every percept whose content contains the substring. All lookups span every live session file in the store, not just the current session's. At least one of id/ids/pattern is required. Returns an error when a target doesn't resolve or is ambiguous — in that case nothing is deleted.",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -94,6 +94,8 @@ func Schemas() []map[string]any {
 // substring matched against every percept). Lookup order mirrors the /forget
 // slash command: "#"-prefixed and hex-looking values are ID/prefix lookups
 // first (FindByIDPrefix), with a content-match fallback for plain values.
+// Every lookup — id, ids, and pattern alike — spans all live session files,
+// not just the current session's slice.
 // id/ids entries must resolve to exactly one percept each; pattern deletes
 // every match (that is the batch path).
 //
@@ -146,7 +148,7 @@ func DispatchForgetMemory(_ context.Context, store *Store, argsJSON string) stri
 		add(matches)
 	}
 	if pattern != "" {
-		matches := store.List(ListOpts{Pattern: pattern})
+		matches := store.List(ListOpts{Pattern: pattern, AllSessions: true})
 		if len(matches) == 0 {
 			problems = append(problems, fmt.Sprintf("no percepts match pattern %q", pattern))
 		}
@@ -205,7 +207,7 @@ func resolveForgetTarget(store *Store, spec string) ([]Percept, error) {
 			return nil, fmt.Errorf("percept %s not found", q)
 		}
 	}
-	matches := store.List(ListOpts{Pattern: q})
+	matches := store.List(ListOpts{Pattern: q, AllSessions: true})
 	switch len(matches) {
 	case 0:
 		return nil, fmt.Errorf("percept %q not found (no ID prefix or content match)", spec)

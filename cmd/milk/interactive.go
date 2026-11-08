@@ -843,7 +843,7 @@ func execMemoryShow(pat string, st *interactiveState) string {
 	if strings.HasPrefix(pat, "#") {
 		percepts = st.mem.FindByIDPrefix(pat[1:])
 	} else {
-		percepts = st.mem.List(memory.ListOpts{Pattern: pat})
+		percepts = st.mem.List(memory.ListOpts{Pattern: pat, AllSessions: true})
 	}
 	if len(percepts) == 0 {
 		return milkTag() + " no percepts match " + fmt.Sprintf("%q", pat)

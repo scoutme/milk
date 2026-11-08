@@ -29,6 +29,9 @@ type Store struct {
 	globalPath  string
 	sessionPath string // empty when no session scope
 	sessionID   string
+	// dir is the store directory; sibling session files live here and are
+	// scanned fresh for forget-family lookups (see siblingSessionPaths).
+	dir string
 
 	global  storeFile
 	session storeFile
@@ -68,6 +71,7 @@ func NewStoreParams(baseDir, sessionID string, p Params) (*Store, error) {
 		globalPath:  filepath.Join(baseDir, "global.json"),
 		archivePath: filepath.Join(baseDir, "global-archive.jsonl"),
 		sessionID:   sessionID,
+		dir:         baseDir,
 		params:      p.normalized(),
 		clock:       time.Now,
 	}
@@ -114,6 +118,45 @@ func (s *Store) saveFile(path string, src storeFile) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// siblingSessionPaths lists live sibling session files: every *.json in the
+// store directory except global.json and this store's own session file. The
+// glob runs fresh on each call, so a session file created after this Store
+// opened is visible too ("live" = not archived; global-archive.jsonl is
+// never matched, and saveFile's .tmp names do not end in .json).
+func (s *Store) siblingSessionPaths() []string {
+	matches, err := filepath.Glob(filepath.Join(s.dir, "*.json"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range matches {
+		if p == s.globalPath || p == s.sessionPath {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// loadSiblingPercepts reads every sibling session file fresh — never a
+// cached copy: another milk process may own that session and rewrite it.
+// Unreadable or unparseable files are skipped; a broken sibling must never
+// block a lookup of what the other files can still read. Caller must hold
+// s.mu — these reads are rare by construction (forget, /forget,
+// /memory show, related_to resolution), never per-turn paths.
+func (s *Store) loadSiblingPercepts() []Percept {
+	var out []Percept
+	for _, path := range s.siblingSessionPaths() {
+		var f storeFile
+		if err := s.loadFile(path, &f); err != nil {
+			continue
+		}
+		out = append(out, f.Percepts...)
+	}
+	return out
 }
 
 // RecordOutcome describes what a Record/RecordGlobal call did (ADR-0053).
@@ -441,6 +484,19 @@ func (s *Store) AddEdge(fromID, toID string, rel Relation) error {
 
 	fromGlobal, fromOK := s.findPerceptLocked(fromID)
 	_, toOK := s.findPerceptLocked(toID)
+	if !toOK {
+		// The target may live in another session's file (related_to resolves
+		// across the whole live store). Existence is all the edge needs:
+		// application stays file-local — this edge is stored with the
+		// from-percept's file and fires events only against that file's
+		// endpoints, so a foreign target contributes provenance only.
+		for _, p := range s.loadSiblingPercepts() {
+			if p.ID == toID {
+				toOK = true
+				break
+			}
+		}
+	}
 	if !fromOK {
 		return fmt.Errorf("percept %s not found (edge source)", fromID)
 	}
@@ -495,6 +551,12 @@ type ListOpts struct {
 	Producer string   // filter by producer, "" means all
 	Consumer Consumer // filter by consumer visibility; ConsumerAll ("") means no filter
 	Pattern  string   // case-insensitive substring
+	// AllSessions widens the pool to every live session file (fresh reads):
+	// lookup-family callers only — forget_memory, /forget, /memory show and
+	// related_to resolution. list_memory, recall injection and the memory
+	// panel keep the loaded pool on purpose: they shape context, and a cold
+	// session's percepts are neither this agent's view nor worth injecting.
+	AllSessions bool
 }
 
 // List returns Percepts matching opts, ordered by weight desc.
@@ -508,14 +570,25 @@ func (s *Store) List(opts ListOpts) []Percept {
 		pool = append(pool, s.global.Percepts...)
 	case "session":
 		pool = append(pool, s.session.Percepts...)
+		if opts.AllSessions {
+			pool = append(pool, s.loadSiblingPercepts()...)
+		}
 	default:
 		pool = append(pool, s.global.Percepts...)
 		pool = append(pool, s.session.Percepts...)
+		if opts.AllSessions {
+			pool = append(pool, s.loadSiblingPercepts()...)
+		}
 	}
 
 	lower := strings.ToLower(opts.Pattern)
+	seen := make(map[string]bool)
 	var out []Percept
 	for _, p := range pool {
+		if seen[p.ID] {
+			continue
+		}
+		seen[p.ID] = true
 		if opts.MinW > 0 && p.W < opts.MinW {
 			continue
 		}
@@ -574,18 +647,58 @@ func (s *Store) Delete(id string) (bool, error) {
 			}
 		}
 	}
+	// Sibling fallback: forget-family lookups resolve IDs across the whole
+	// live store, so the target may live in another session's file. Re-read
+	// the owning file at delete time (never a cached copy), remove the
+	// percept, and write back with the same atomic tmp+rename as every store
+	// write. A concurrently-running owning session can still overwrite this
+	// from its in-memory copy — the same residual as any two concurrent
+	// writers, not a new one. Edges referencing the percept are left in
+	// place, exactly as on the loaded path: forgetting one side is the
+	// documented way to resolve a live relation (operations.md, Edges).
+	for _, path := range s.siblingSessionPaths() {
+		var f storeFile
+		if err := s.loadFile(path, &f); err != nil {
+			continue
+		}
+		idx := -1
+		for i, p := range f.Percepts {
+			if p.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		f.Percepts = append(f.Percepts[:idx], f.Percepts[idx+1:]...)
+		return true, s.saveFile(path, f)
+	}
 	return false, nil
 }
 
 // FindByIDPrefix returns all Percepts whose ID starts with the given prefix (case-insensitive).
+//
+// The search spans the whole live store: global, this session, and every
+// sibling session file (fresh reads). Percepts in another session's file are
+// unreachable from the tools otherwise — forgetting one used to require
+// resuming that session or editing the file by hand.
 func (s *Store) FindByIDPrefix(prefix string) []Percept {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	lower := strings.ToLower(prefix)
+	seen := make(map[string]bool)
 	var out []Percept
 	for _, p := range s.allPercepts() {
 		if strings.HasPrefix(strings.ToLower(p.ID), lower) {
+			seen[p.ID] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range s.loadSiblingPercepts() {
+		if strings.HasPrefix(strings.ToLower(p.ID), lower) && !seen[p.ID] {
+			seen[p.ID] = true
 			out = append(out, p)
 		}
 	}
