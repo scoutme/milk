@@ -149,3 +149,28 @@ func TestCommandBuildPrompt_OnlyAllowedToolsRun(t *testing.T) {
 		t.Errorf("undeclared snippet must stay literal: %q", got)
 	}
 }
+
+// TestCommandExpand_WordBoundaryAndDangerousFlags (review W1): the colon
+// form of Bash(...) authorizes a COMMAND word sequence — a prefix-adjacent
+// token must not ride along ("git difffoo" under Bash(git diff:*)); and
+// write/exec-class flags are refused even inside a genuine match, because
+// "static + no metacharacters" does not make `git diff --output=<file>`
+// harmless. Both cases must stay literal (the model runs them itself).
+func TestCommandExpand_WordBoundaryAndDangerousFlags(t *testing.T) {
+	c, _ := parseCommand("---\nallowed-tools: Bash(echo hi:*)\ndescription: d\n---\nx: !`echo hiX`", "x")
+	if got := c.BuildPrompt(""); !strings.Contains(got, "x: !`echo hiX`") {
+		t.Errorf("prefix-adjacent token must stay literal: %q", got)
+	}
+
+	c2, _ := parseCommand("---\nallowed-tools: Bash(echo:*)\ndescription: d\n---\nx: !`echo pwn --output=/tmp/x`", "x")
+	if got := c2.BuildPrompt(""); !strings.Contains(got, "x: !`echo pwn --output=/tmp/x`") {
+		t.Errorf("dangerous-flag snippet must stay literal: %q", got)
+	}
+
+	// Control: the boundary must not over-tighten the author's bare-* form —
+	// Bash(echo ON*) is an explicit fuzzy stem and "echo ONE" still expands.
+	c3, _ := parseCommand("---\nallowed-tools: Bash(echo ON*)\ndescription: d\n---\nx: !`echo ONE`", "x")
+	if got := c3.BuildPrompt(""); !strings.Contains(got, "x: ONE") {
+		t.Errorf("bare-* form must keep string-prefix semantics: %q", got)
+	}
+}

@@ -136,16 +136,16 @@ const expansionTimeout = 5 * time.Second
 // ($ARGUMENTS, or appended when the template doesn't reference it), then the
 // dynamic-context snippets expanded.
 //
-// Expansion safety (the deliberate design line): a !`…` snippet runs only
-// when (a) the command declares a Bash(...) allowed-tools entry whose prefix
-// it matches (the author's own whitelist — installation is the user's
-// consent) and (b) the snippet is a single static command with no shell
-// metacharacters (no ; | & ` $ ( ) < > newline) — prefix matching a snippet
-// like `git diff; rm -rf ~` against `git diff:*` would otherwise authorize
-// arbitrary pipelines. Non-qualifying snippets stay in the prompt VERBATIM —
-// the model runs them itself with its own tools — and are never executed.
-// Failure (timeout, error) also leaves the snippet literal: context
-// gathering never fails the command.
+// Expansion safety (the deliberate design line, honest scope — see
+// expandSnippet): a !`…` snippet runs only when (a) the command declares a
+// Bash(...) allowed-tools entry it matches (the author's whitelist) and
+// (b) the snippet is a single static command with no shell metacharacters
+// (no ; | & ` $ ( ) < > newline) and no write/exec-class flag. Non-
+// qualifying snippets stay in the prompt VERBATIM — the model runs them
+// itself with its own tools — and are never executed. Failure (timeout,
+// error) also leaves the snippet literal: context gathering never fails the
+// command. A declared whitelist can still be destructive: installation is
+// the consent boundary (ADR-0104 Part IV).
 func (c Command) BuildPrompt(args string) string {
 	body := c.Body
 	if strings.Contains(body, "$ARGUMENTS") {
@@ -179,10 +179,17 @@ func (c Command) BuildPrompt(args string) string {
 }
 
 // expandSnippet runs one qualified snippet or returns the literal form.
+//
+// Safety (review W1, honest scope): the metacharacter cut blocks command
+// CHAINING, and dangerousFlags blocks the obvious write/exec flag shapes —
+// but a declared whitelist can still be destructive (git config --global …
+// fits Bash(git:*)). The consent boundary is the author's declared
+// allowed-tools plus the user's decision to install the plugin (ADR-0104
+// Part IV): milk does not sandbox snippets, and does not claim to.
 func (c Command) expandSnippet(snippet string) string {
 	literal := "!`" + snippet + "`"
 	trimmed := strings.TrimSpace(snippet)
-	if trimmed == "" || !c.snippetAllowed(trimmed) || hasShellMetachars(trimmed) {
+	if trimmed == "" || !c.snippetAllowed(trimmed) || hasShellMetachars(trimmed) || hasDangerousFlag(trimmed) {
 		return literal
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), expansionTimeout)
@@ -202,18 +209,58 @@ func (c Command) expandSnippet(snippet string) string {
 }
 
 // snippetAllowed matches the snippet against the command's declared
-// Bash(...) allowed-tools prefixes (Claude's `Bash(git diff:*)` shape: the
-// part before ":*"/":" is the authorized command prefix).
+// Bash(...) allowed-tools entries (review W1, grounded in Claude's two
+// spellings):
+//   - Bash(git diff:*)  — the ":*" (colon) form: the stem is a COMMAND word
+//     sequence, so the snippet must be exactly the stem or the stem plus a
+//     space ("git diff" ✓, "git diff HEAD~1" ✓, "git difffoo" ✗);
+//   - Bash(echo ON*)    — the bare "*" form: the author wrote an explicit
+//     fuzzy stem, so a plain string prefix matches ("echo ONE" ✓);
+//   - Bash(tool)        — exact match only.
 func (c Command) snippetAllowed(snippet string) bool {
 	for _, tool := range c.AllowedTools {
 		rest, ok := strings.CutPrefix(tool, "Bash(")
 		if !ok {
 			continue
 		}
-		pattern := strings.TrimSuffix(strings.TrimSuffix(rest, ")"), "*")
-		pattern = strings.TrimSuffix(pattern, ":")
-		pattern = strings.TrimSpace(pattern)
-		if pattern != "" && strings.HasPrefix(snippet, pattern) {
+		pattern := strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+		switch {
+		case strings.HasSuffix(pattern, ":*"):
+			stem := strings.TrimSuffix(pattern, ":*")
+			if stem != "" && (snippet == stem || strings.HasPrefix(snippet, stem+" ")) {
+				return true
+			}
+		case strings.HasSuffix(pattern, "*"):
+			stem := strings.TrimSuffix(pattern, "*")
+			if stem != "" && strings.HasPrefix(snippet, stem) {
+				return true
+			}
+		default:
+			if pattern != "" && snippet == pattern {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dangerousFlags are flag shapes that turn an otherwise read-looking command
+// into file writes or program execution even with no shell metacharacters
+// (review W1): `git diff --output=<file>` writes a file; --exec /
+// --upload-pack / --receive-pack / --separate-git-dir run or install
+// programs. The list is BEST-EFFORT and says so: it stops the obvious
+// smuggling shapes, it cannot make a declared whitelist non-destructive
+// (git config --global … still fits Bash(git:*)). The real consent boundary
+// is the author's declared whitelist plus the user's decision to install
+// the plugin — documented at these exact words in ADR-0104 Part IV.
+var dangerousFlags = []string{
+	"--output", "--exec", "--upload-pack", "--receive-pack",
+	"--separate-git-dir", "--template",
+}
+
+func hasDangerousFlag(s string) bool {
+	for _, f := range dangerousFlags {
+		if strings.Contains(s, f) {
 			return true
 		}
 	}

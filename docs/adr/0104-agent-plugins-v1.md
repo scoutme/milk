@@ -253,12 +253,18 @@ and the extraction surface keeps the directory next to `agents/`.
   the arguments append when the template never references it), then Claude's
   dynamic-context `!`…`` snippets — executed **only** when the snippet
   matches the command's own `Bash(…)` allowed-tools prefix **and** contains
-  no shell metacharacters (`;|&\`$()<>` and newlines), so a prefix whitelist
-  can never authorize a smuggled pipeline. Everything else — undeclared,
-  metachar'd, failed, timed out (5 s, 8 KB output cap) — stays in the prompt
-  **verbatim** for the model to run with its own tools: context gathering
-  never fails the command and never executes beyond the author's own
-  declaration (installing the plugin is the consent).
+  no shell metacharacters and no write/exec-class flag (--output, --exec,
+  --upload-pack, --receive-pack, --separate-git-dir, --template). The `:*`
+  command form of Bash(…) matches at word boundaries (Bash(git diff:*)
+  never authorizes `git difffoo`); the bare-`*` form is the author's
+  explicit fuzzy stem and keeps string-prefix semantics. Everything else —
+  undeclared, metachar'd, flag'd, failed, timed out (5 s, 8 KB output
+  cap) — stays in the prompt **verbatim** for the model to run with its
+  own tools. **Honest scope (review W1)**: these cuts stop command chaining
+  and the obvious smuggling shapes; they cannot make a declared whitelist
+  non-destructive (`git config --global …` fits `Bash(git:*)`). The consent
+  boundary is the author's declaration plus the user's decision to install
+  the plugin — milk does not sandbox snippets and does not claim to.
 - **Surfaces**: help block, tab completion (hint = `argument-hint`), ACP
   advertising with the derived-or-frontmatter description, `/plugins` detail
   counts, and hot reload with the rest of the store.
