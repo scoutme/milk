@@ -342,7 +342,7 @@ func (m *model) statusAgent() string {
 		if len(cmd) > 40 {
 			cmd = cmd[:37] + "…"
 		}
-		return frame + " " + dim("[sh: "+cmd+"]") + "  " + dim("keys forwarded · Ctrl+C = ^C · Ctrl+D = EOF")
+		return frame + " " + dim("[sh: "+cmd+"]") + "  " + dim("keys forwarded · Ctrl+C = ^C · Ctrl+C ×2 = force-kill · Ctrl+D = EOF")
 	}
 	if m.searching {
 		label := "reverse-i-search"

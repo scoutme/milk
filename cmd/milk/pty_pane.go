@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -27,7 +28,17 @@ type ptyPaneState struct {
 	scrollback []string
 	// pending is 1 when a ptyOutputMsg is already queued; prevents flooding.
 	pending int32
+	// lastCtrlC stamps the most recent Ctrl+C forwarded into the pane; a
+	// second press inside ptyCtrlCKillWindow escalates to forceKillPTYPane.
+	// Touched on the UI goroutine only (handlePTYKey runs there).
+	lastCtrlC time.Time
 }
+
+// ptyCtrlCKillWindow is the double-press window of the pane's force-kill
+// escape: the first Ctrl+C is forwarded as ^C like any terminal; a second
+// one this soon after means the child is not responding to interrupts and
+// the user wants out of the pane.
+const ptyCtrlCKillWindow = 2 * time.Second
 
 // launchPTYPane starts shellCmd inside a PTY and wires the output reader.
 func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
@@ -104,7 +115,7 @@ func (m model) launchPTYPane(shellCmd string) (tea.Model, tea.Cmd) {
 			}
 		}
 		waitErr := cmd.Wait()
-		return directBashDoneMsg{err: waitErr}
+		return directBashDoneMsg{err: waitErr, pane: state}
 	}
 
 	return m, tea.Batch(spinnerTick(), readCmd)
@@ -164,10 +175,68 @@ func (m model) handlePTYKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.dismissToasts) && m.dismissToasts() {
 		return m, nil
 	}
-	if raw := ptyKeyToBytes(msg); len(raw) > 0 {
+	raw := ptyKeyToBytes(msg)
+	// Ctrl+C is forwarded as ^C (the status bar says so) — but ^C alone can
+	// be swallowed: network-stuck FTP clients, task runners trapping SIGINT,
+	// raw-mode tools reading 0x03 as data. Update gives the pane top
+	// key-dispatch priority, so milk's own Ctrl+C stack never runs while a
+	// pane is up — such a child would trap the user in the pane forever. A
+	// second Ctrl+C inside the window escalates to forceKillPTYPane, the
+	// pane's escape hatch (advertised in the status bar).
+	if len(raw) == 1 && raw[0] == 0x03 {
+		now := time.Now()
+		if !m.ptyPane.lastCtrlC.IsZero() && now.Sub(m.ptyPane.lastCtrlC) <= ptyCtrlCKillWindow {
+			return m.forceKillPTYPane(), nil
+		}
+		m.ptyPane.lastCtrlC = now
+	}
+	if len(raw) > 0 {
 		m.ptyPane.ptm.Write(raw) //nolint:errcheck
 	}
 	return m, nil
+}
+
+// forceKillPTYPane is the pane's escape hatch (the status bar's
+// "Ctrl+C ×2 = force-kill"): SIGKILL the child's whole process group, close
+// the master fd, and tear the pane's state down right here instead of
+// waiting for the read goroutine. The eager teardown is deliberate — the
+// waiter's cmd.Wait may never return (a descendant leaked the slave fd, or
+// the child is wedged in an unkillable state), and the user must get back
+// to milk either way. A late directBashDoneMsg from the orphaned waiter is
+// ignored by identity — see its handler.
+func (m model) forceKillPTYPane() tea.Model {
+	p := m.ptyPane
+	if p == nil {
+		return m
+	}
+	// Snapshot before the kill: the transcript gets the same hand-off a
+	// normal exit produces, plus an explicit reason for the stop.
+	out := m.ptySnapshot()
+	m.appendTranscript(fmt.Sprintf("%s direct-bash force-killed: %s\n", milkTag(), p.shellCmd))
+	if out != "" {
+		m.appendTranscript(dimLines(out))
+		m.currentTurnChars += int64(len(out))
+	}
+	// Mirror directBashDoneMsg's busy bookkeeping: never clobber a turn that
+	// was already running when the bang launched (issue #128) — queue the
+	// output for that turn's next prompt instead of only the transcript.
+	concurrentTurn := m.directBashConcurrentTurn
+	m.directBashConcurrentTurn = false
+	if !concurrentTurn {
+		m.busy = false
+		m.cancelTurn = nil
+		m.busyHint = ""
+	}
+	if out != "" && concurrentTurn && m.st != nil && m.st.sess != nil {
+		m.st.sess.PendingBangOutput = append(m.st.sess.PendingBangOutput,
+			fmt.Sprintf("[direct command %q force-killed — output:\n%s]\n", p.shellCmd, out))
+	}
+	killPTYProcessGroup(p.cmd)
+	_ = p.ptm.Close()
+	m.ptyPane = nil
+	m.refreshPrompt()
+	m.syncLayout()
+	return m
 }
 
 // ptyKeyToBytes converts a bubbletea KeyMsg to the raw byte sequence the

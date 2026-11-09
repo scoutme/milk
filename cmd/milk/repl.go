@@ -354,6 +354,13 @@ type startWorkflowFromToolMsg struct{ ws *local.WorkflowStartSignal }
 type directBashDoneMsg struct {
 	err     error
 	logPath string // path to script(1) typescript; empty when using PTY pane
+	// pane identifies the PTY pane whose read goroutine produced this
+	// message; nil on the no-PTY fallback paths. The handler skips the
+	// message when it no longer matches the active pane: forceKillPTYPane
+	// tears a pane's state down eagerly, so its orphaned waiter's message —
+	// or a previous pane's arriving after a new one launched — must never
+	// close the pane that is on screen now.
+	pane *ptyPaneState
 }
 
 // ptyOutputMsg is sent by the PTY read goroutine whenever new bytes have been
@@ -2974,6 +2981,12 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case directBashDoneMsg:
+		// Identity guard (see the field's comment): the pane this waiter
+		// belonged to was force-killed and already cleaned up — or a newer
+		// pane replaced it. Either way its state is not ours to touch.
+		if msg.pane != nil && msg.pane != m.ptyPane {
+			return m, nil
+		}
 		concurrentTurn := m.directBashConcurrentTurn
 		m.directBashConcurrentTurn = false
 		if !concurrentTurn {
