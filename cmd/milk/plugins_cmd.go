@@ -16,7 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -247,12 +249,14 @@ func runMarketplaceAction(tokens []string, opts pluginsActionOpts) (string, bool
 		if err := os.MkdirAll(ctxPaths.marketplaces, 0o755); err != nil {
 			return "", false, err
 		}
-		name := strings.TrimSuffix(filepath.Base(src.Repo+src.URL), ".git")
-		if src.Repo == "" && src.URL == "" && src.Package != "" {
-			name = src.Package
-		}
+		name := marketplaceDirName(src)
 		dest := filepath.Join(ctxPaths.marketplaces, name)
-		_ = os.RemoveAll(dest)
+		// Refuse before touching anything (review W5): the old flow
+		// RemoveAll'd the destination BEFORE fetching — a collision or a
+		// failed fetch destroyed the previous registration outright.
+		if _, err := os.Stat(dest); err == nil {
+			return "", false, fmt.Errorf("marketplace %s already registered (%s) — remove that directory to re-register", name, dest)
+		}
 		warns, err := plugin.FetchTo(context.Background(), pluginsHTTP, src, dest)
 		if err != nil {
 			return "", false, err
@@ -884,3 +888,24 @@ func (p pluginPaths) installsMust() *plugin.Installs { return p.installs() }
 // pluginsActionMsg would never arrive. FetchTo's own 2-minute default only
 // covers nil clients; the action layer must pass THIS one.
 var pluginsHTTP = &http.Client{Timeout: 2 * time.Minute}
+
+// marketplaceDirName derives the snapshot directory for `marketplace add`
+// (review W5): unique per SOURCE, never per basename. The old name —
+// filepath.Base of the repo-or-URL — collapsed "a/tools" and "b/tools" onto
+// one directory and silently deleted the loser, and gave URL sources names
+// like "plugin.zip".
+func marketplaceDirName(src plugin.Source) string {
+	switch src.Kind {
+	case plugin.SourceGitHub:
+		return strings.ReplaceAll(src.Repo, "/", "-")
+	case plugin.SourceNPM:
+		return strings.NewReplacer("/", "-", "@", "").Replace(src.Package)
+	}
+	base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(
+		path.Base(src.URL), ".gz"), ".tgz"), ".zip"), ".tar")
+	host := src.URL
+	if u, err := url.Parse(src.URL); err == nil {
+		host = u.Host
+	}
+	return strings.ReplaceAll(host, ":", "-") + "-" + base
+}
