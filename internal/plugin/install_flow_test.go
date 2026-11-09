@@ -253,3 +253,36 @@ func TestInstallFromDir_RelativeMarketplaceSource(t *testing.T) {
 		t.Errorf("record = %+v", in.Records["my-plugin"])
 	}
 }
+
+// TestInstall_BookkeepingFailureIsDistinctAndNonDestructive (review W4):
+// when the plugin lands but plugin-installs.json cannot be written, the
+// error must SAY SO ("bookkeeping") and the install must survive — before
+// the fix the raw write error came back with no hint that the plugin itself
+// had installed. The swap itself is rename-aside (never delete-then-rename),
+// so a failed rename restores the previous install instead of destroying it.
+func TestInstall_BookkeepingFailureIsDistinctAndNonDestructive(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "plugin.json"),
+		[]byte(`{"$schema":"`+SchemaPlugin+`","name":"bk","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pluginsDir := t.TempDir()
+	dataRoot := t.TempDir()
+	// Installs.Path is a DIRECTORY: Save's WriteFile must fail.
+	blocker := t.TempDir()
+	in := &Installs{Path: blocker, Records: map[string]InstallRecord{}}
+
+	p, _, err := InstallFromDir(src, "test", Source{Kind: SourceRelative, Path: "./x"}, pluginsDir, dataRoot, in)
+	if err == nil {
+		t.Fatal("bookkeeping failure must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "bookkeeping") {
+		t.Fatalf("error must name bookkeeping as the failing half, got: %v", err)
+	}
+	if p == nil {
+		t.Fatal("the plugin half succeeded and must be reported (p != nil)")
+	}
+	if _, statErr := os.Stat(filepath.Join(pluginsDir, "bk", "plugin.json")); statErr != nil {
+		t.Fatalf("installed plugin must survive a bookkeeping failure: %v", statErr)
+	}
+}

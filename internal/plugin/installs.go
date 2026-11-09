@@ -159,14 +159,25 @@ func finishStaged(staging, origin string, src Source, pluginsDir, dataRoot strin
 	}
 	name := p.Manifest.Name
 	target := filepath.Join(pluginsDir, name)
-	_ = os.RemoveAll(target)
-	if err := os.Rename(staging, target); err != nil {
+	// Rename-aside swap (review W4): never delete-then-rename — a failed
+	// rename must leave the previous install in place, not destroy it.
+	trash := target + fmt.Sprintf(".old-%d", os.Getpid())
+	_ = os.RemoveAll(trash)
+	if err := os.Rename(target, trash); err != nil && !os.IsNotExist(err) {
 		return nil, warns, err
 	}
+	if err := os.Rename(staging, target); err != nil {
+		_ = os.Rename(trash, target) // restore the previous install
+		return nil, warns, err
+	}
+	_ = os.RemoveAll(trash)
 	if in != nil {
 		in.record(src, origin, name, p.Manifest.Version, shimmed)
 		if err := in.Save(); err != nil {
-			return nil, warns, err
+			// The plugin half succeeded: say which half failed. The
+			// install stays (it is on disk and will load next start); only
+			// its bookkeeping row is missing.
+			return p, warns, fmt.Errorf("installed %s %s, but bookkeeping failed: %w", name, p.Manifest.Version, err)
 		}
 	}
 	// Reload from the final location (paths baked into the first load point
