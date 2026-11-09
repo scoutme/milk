@@ -12,6 +12,13 @@ import (
 // switch ") shows its inline hint, but the value build has no candidates
 // (empty namespace) — before the guard, handleTab returned !handled and the
 // focus rotated away mid-completion.
+//
+// Scope note (second user report, same day): the completion contract holds
+// while the MAIN area holds focus — the only state typing can actually
+// produce (type-to-focus means completion context implies main focus; these
+// fixtures manufacture it with SetValue, which bypasses both). With a panel
+// focused, Tab/Shift+Tab rotate outright regardless of leftover context —
+// pinned separately by TestTabKey_PanelFocus_OwnsTabEvenWithCompletionContext.
 
 func TestTabKey_CompletionContextNeverRotates(t *testing.T) {
 	m := newTestModelForPanels(t)
@@ -31,11 +38,11 @@ func TestTabKey_CompletionContextNeverRotates(t *testing.T) {
 		{"tab", tea.KeyPressMsg{Code: tea.KeyTab}},
 		{"shift+tab", tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}},
 	} {
-		m.panelFocus = regionMemory
+		m.panelFocus = regionNone
 		next, _ := m.handleKey(dir.msg)
 		got := next.(model)
-		if got.focusedPanel() != regionMemory {
-			t.Errorf("%s in completion context: focus moved to %v — Tab must not rotate while hints are visible",
+		if got.focusedPanel() != regionNone {
+			t.Errorf("%s in completion context: focus moved to %v — Tab must not rotate on the input",
 				dir.name, got.focusedPanel())
 		}
 	}
@@ -47,10 +54,10 @@ func TestTabKey_CompletionContextNeverRotates(t *testing.T) {
 	m.hintIdx = -1
 	m.ta.SetValue("cat @nosuchfile")
 	m.setHints(nil)
-	m.panelFocus = regionTasks
+	m.panelFocus = regionNone
 	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
-	if got := next.(model); got.focusedPanel() != regionTasks {
-		t.Errorf("@-token Tab: focus moved to %v — path completion context must not rotate", got.focusedPanel())
+	if got := next.(model); got.focusedPanel() != regionNone {
+		t.Errorf("@-token Tab: focus moved to %v — path completion context must not rotate on the input", got.focusedPanel())
 	}
 
 	// Control 1: genuinely non-completable input still rotates (no hints).

@@ -78,12 +78,12 @@ func userJobLabel(task string) string {
 // errUserJobUnavailable is userJobPlanFor's "nothing to fork from" error.
 var errUserJobUnavailable = errors.New(userJobUnavailableMsg)
 
-// bgAgentCandidates lists the configured agents a user-started job can run
-// on: the inference-server-backed ones (claude-cli and subprocess agents have
-// no Manager to fork from).
+// bgAgentCandidates lists the agents a user-started job can run on: the
+// inference-server-backed ones from config and installed plugins
+// (claude-cli and subprocess agents have no Manager to fork from).
 func bgAgentCandidates(cfg config.Config) []string {
 	var names []string
-	for _, ac := range cfg.Agents {
+	for _, ac := range cfg.ConfiguredAgents() {
 		if !ac.IsExternalProcess() {
 			names = append(names, ac.Name)
 		}

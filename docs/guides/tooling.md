@@ -108,7 +108,7 @@ Per-agent opt-in formatter/compiler feedback right in the edit result: set `post
 
 ## Agent-as-Tool
 
-Any agent in the `agents` list can be exposed as a callable tool to any other agent via the global `agent_tools` list (or per-agent `tools` overrides). When enabled, milk synthesises an OpenAI function-schema for each peer agent and injects it alongside the built-in tools; the calling agent invokes a peer by name as it would any other tool call. The peer agent receives the caller's prompt and returns a text result fed back as a tool result — **no session state is shared** between peer calls; each call is a stateless, fresh first-turn for the peer.
+Any agent in the `agents` list can be exposed as a callable tool to any other agent via the global `agent_tools` list (or per-agent `tools` overrides). When enabled, milk synthesises an OpenAI function-schema for each peer agent and injects it alongside the built-in tools; the calling agent invokes a peer by name as it would any other tool call. The peer agent receives the caller's prompt and returns a text result fed back as a tool result — **no session state is shared** between peer calls; each call is a stateless, fresh first-turn for the peer. **Agents shipped by installed plugins are exposed by default** without any `agent_tools` entry (their frontmatter description is the tool description; `extensions["dev.milkai.milk"].expose_as_tool: false` opts out) — see [Plugins](#plugins-agent-plugins-v1).
 
 ### `agent_tools` field
 
@@ -291,19 +291,42 @@ The MCP client emits to `~/.milk/otel/`:
 milk is a conformant client for the [Agent Plugins Specification
 v1.0.0](https://agent-plugins.org/specification) ([ADR-0104](../adr/0104-agent-plugins-v1.md)).
 A plugin is a directory with a `plugin.json` manifest and, optionally,
-`skills/*/SKILL.md` (Agent Skills) and `mcp.json` (MCP servers).
+`skills/*/SKILL.md` (Agent Skills) and `mcp.json` (MCP servers) — the
+portable component set — plus two de-facto Claude directories milk reads as
+client behavior: `agents/*.md` (subagents → agent-as-tool peers, config
+entry synthesized in memory, never persisted) and `commands/*.md` (custom
+slash commands: registered into help/completion/ACP like built-ins, and at
+dispatch the template expands `$ARGUMENTS` plus Claude's `!`…`` context
+snippets — executed only when the command's own `Bash(…)` allowed-tools
+prefix declares them, static (no shell metacharacters) and bounded; anything
+else stays verbatim for the model to run itself).
 
 Drop a directory in either root (loaded at startup):
 
 - **user:** `~/.milk/plugins/<plugin>/`
 - **project:** `<repo>/.milk/plugins/<plugin>/`
 
-`git clone` into one of those directories works today and remains supported
-(the hand-made path). Per [ADR-0104](../adr/0104-agent-plugins-v1.md) Part II,
-a distribution layer is specified on top: `milk plugins add <owner/repo>`
-(install by URL/slug, fetched over HTTPS without git), `marketplace add` /
-`install <name>@<marketplace>` over the ecosystem's `marketplace.json`
-catalogs, and `shim` for packages that lack portable manifests. `/plugins` lists what loaded, its components, and every
+Install without git (the distribution layer, [ADR-0104](../adr/0104-agent-plugins-v1.md) Part II):
+
+- **`milk plugins add <owner/repo | https://… | npm:pkg>`** — one command, no clone: fetched over HTTPS archive endpoints, with only the plugin surface extracted (`plugin.json`, `mcp.json`, `skills/`, `mcp/`, `scripts/`, `LICENSE`, `.claude-plugin/`) — assets and other-client layouts stay out of the install. A bare `<name>` also resolves through a registered catalog when it appears in exactly one (several → an explicit `name@mkt` error)
+- **`milk plugins marketplace add <owner/repo>`** + **`milk plugins install <name>@<marketplace>`** — the ecosystem's `marketplace.json` catalogs (`.claude-plugin/marketplace.json` or root), with the familiar names; `github`/`git-subdir`/`url`/`archive`/`npm` sources, `ref`/`sha` pins, and `command` sources rejected (no code runs at install time). `<marketplace>` matches the catalog's own `name` (as published docs type it) or the snapshot directory `marketplace add` created — unknown keys list what's registered; `update` re-installs relative sources from their snapshot
+- **`milk plugins update [name]` / `remove <name>` / `list` / `details <name>`** — bookkeeping in `~/.milk/plugin-installs.json` (source, pin, shim flag); `remove` preserves `PLUGIN_DATA`
+- **`milk plugins shim <dir>`** — writes portable manifests into a `.claude-plugin/` package (create-only); installs shim automatically when the package predates the portable layout
+
+The same suite runs inside the TUI as **`/plugins <subcommand>`** (one
+shared action layer, [ADR-0104](../adr/0104-agent-plugins-v1.md)): fetch
+actions announce themselves, run off the UI loop, and a mutation
+(install/update/remove) **reloads the plugin set in place** — skills and MCP
+assignment are live immediately, no restart. The **bare `/plugins`** renders
+the loader view and then opens a **browse flyover** over the registered
+catalogs' entries: ↑↓ move, type to filter, **Enter installs** the chosen
+`name@marketplace` through that same suite path (echoed to the transcript as
+a replayable command), Esc cancels — and deliberately **no timed default**:
+browsing never installs anything by itself. With no registered entries it
+stays the view plus a `/plugins marketplace add <owner/repo>` hint.
+
+`git clone` into the directories above still works (the hand-made path).
+`/plugins` lists what loaded, its components, and every
 validation warning (unknown manifest fields, skipped skills/servers, disabled
 components); a broken component never blocks the rest of the plugin.
 
@@ -321,6 +344,19 @@ configured `env` overlay, optional `cwd`, and the spec's reserved
 `PLUGIN_ROOT`/`PLUGIN_DATA` variables (`PLUGIN_DATA` = `~/.milk/plugin-data/<name>`,
 persistent across updates); `streamable-http` maps to milk's http transport.
 Legacy `sse` servers are skipped with a report.
+
+**Agents** shipped as `agents/*.md` (the ecosystem's de-facto subagent
+format, read as client behavior — [ADR-0104](../adr/0104-agent-plugins-v1.md)
+Part III) become **agent-as-tool peers by default**: the entry clones your
+primary's transport (plugins carry no credentials; frontmatter `model:` may
+name a configured agent instead), the body becomes its system prompt, the
+description becomes the tool schema description, and the Claude `tools:`
+whitelist maps onto milk's `limits.included_tools` (`Read→read_file`,
+`Glob→find_files`, …; unmapped names warn and drop). They appear in
+`/agent list` marked `(plugin)` — read-only, shadowed by any config entry
+with the same name — plus completions, the background-agent picker and
+workflow roles; `extensions["dev.milkai.milk"].expose_as_tool: false`
+keeps one resolvable without exposing it as a tool.
 
 ## Tool batch dispatch (barrier model)
 

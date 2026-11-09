@@ -2647,6 +2647,68 @@ func SetPluginMCPServers(f func(agentName string) []MCPServerConfig) {
 	pluginMCPServers = f
 }
 
+// PluginAgentSet is the runtime-provided plugin agent bundle (ADR-0104 Part
+// III): synthesized entries for agents/*.md shipped by installed plugins,
+// plus their default agent-as-tool exposure. Installed once at startup (and
+// re-installed by /plugins hot reload); never persisted — a config save can
+// never fossilize plugin content, the same contract as SetPluginMCPServers.
+type PluginAgentSet struct {
+	Agents []AgentConfig    // resolution: joins effectiveAgents under the collision rule (user config wins)
+	Tools  []AgentToolEntry // exposure: seeds EffectiveToolAgents (plugin agents are exposed by default)
+}
+
+// pluginAgentSet, when set, contributes plugin-shipped agents to every
+// resolution path. The hook is process-wide and read-only between reloads.
+var pluginAgentSet func() PluginAgentSet
+
+// SetPluginAgents installs the plugin agent provider (nil clears).
+func SetPluginAgents(f func() PluginAgentSet) {
+	pluginAgentSet = f
+}
+
+// IsPluginAgent reports whether name belongs to a runtime plugin agent —
+// read-only surfaces (/agent list marker, ActiveAgent guard) use it to tell
+// plugin-owned entries apart from editable config entries.
+func IsPluginAgent(name string) bool {
+	if pluginAgentSet == nil {
+		return false
+	}
+	for _, a := range pluginAgentSet().Agents {
+		if strings.EqualFold(a.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginAgentsFiltered returns the plugin agents that do not collide with a
+// user-configured entry (or the built-in claude) — user config always wins.
+func pluginAgentsFiltered(c Config) []AgentConfig {
+	if pluginAgentSet == nil {
+		return nil
+	}
+	set := pluginAgentSet()
+	if len(set.Agents) == 0 {
+		return nil
+	}
+	has := func(n string) bool {
+		for _, a := range c.Agents {
+			if strings.EqualFold(a.Name, n) {
+				return true
+			}
+		}
+		return strings.EqualFold(n, "claude")
+	}
+	out := make([]AgentConfig, 0, len(set.Agents))
+	for _, a := range set.Agents {
+		if a.Name == "" || has(a.Name) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // UpsertMCPServer normalises sc (auth="none" → "") and writes it into
 // cfg.MCPServers: replacing the entry whose Name matches case-insensitively,
 // or appending sc as a new entry. Returns true when an existing entry was
@@ -2676,9 +2738,24 @@ func UpsertMCPServer(cfg *Config, sc MCPServerConfig) bool {
 //   - entries whose Agent name is not found in effectiveAgents()
 //   - entries where !IsEnabled()
 func (c Config) EffectiveToolAgents(callerName string) []AgentToolEntry {
-	// Start with a copy of the global list.
-	result := make([]AgentToolEntry, len(c.AgentTools))
-	copy(result, c.AgentTools)
+	// Plugin agents are exposed as tools by default (ADR-0104 Part III): seed
+	// their synthesized entries first, then the global list. An explicit
+	// global entry with the same agent name wins at seed time (config is
+	// authoritative), so a name can never appear twice.
+	result := make([]AgentToolEntry, 0, len(c.AgentTools)+4)
+	if pluginAgentSet != nil {
+		global := make(map[string]bool, len(c.AgentTools))
+		for _, te := range c.AgentTools {
+			global[strings.ToLower(te.Agent)] = true
+		}
+		for _, te := range pluginAgentSet().Tools {
+			if te.Agent == "" || !te.IsEnabled() || global[strings.ToLower(te.Agent)] {
+				continue
+			}
+			result = append(result, te)
+		}
+	}
+	result = append(result, c.AgentTools...)
 
 	// Find caller's per-agent config and apply overrides.
 	for _, ac := range c.Agents {
@@ -2728,12 +2805,30 @@ func (c Config) EffectiveToolAgents(callerName string) []AgentToolEntry {
 // if no entry named "claude" already exists. This ensures there is always a
 // claude-cli agent available without requiring it to be in every config file.
 func (c Config) effectiveAgents() []AgentConfig {
-	for _, a := range c.Agents {
+	out := append([]AgentConfig(nil), c.Agents...)
+	// Runtime plugin agents (ADR-0104 Part III) join resolution — after user
+	// entries so collision-losing plugins can never shadow config, and before
+	// the implicit claude default.
+	out = append(out, pluginAgentsFiltered(c)...)
+	for _, a := range out {
 		if strings.EqualFold(a.Name, "claude") {
-			return c.Agents
+			return out
 		}
 	}
-	return append(c.Agents, defaultCLIAgent())
+	return append(out, defaultCLIAgent())
+}
+
+// AllAgents is the full resolution set: user config, runtime plugin agents,
+// and the built-in claude-cli default — exactly what AgentByName and the
+// tool-agent dispatcher resolve against.
+func (c Config) AllAgents() []AgentConfig { return c.effectiveAgents() }
+
+// ConfiguredAgents is the enumerable set: user config plus plugin agents,
+// without the implicit claude default — what /agent list and completions
+// offer. A plugin agent that collides with config is absent (config wins).
+func (c Config) ConfiguredAgents() []AgentConfig {
+	out := append([]AgentConfig(nil), c.Agents...)
+	return append(out, pluginAgentsFiltered(c)...)
 }
 
 // ActiveAgent returns the resolved AgentConfig to use as the primary agent.
@@ -2751,7 +2846,10 @@ func (c Config) ActiveAgent() AgentConfig {
 		}
 	}
 	for _, a := range agents {
-		if !a.IsExternalProcess() {
+		// A plugin agent can never become primary by fallback: it is a
+		// plugin-owned runtime entry whose transport was cloned at install
+		// (an explicit cfg.Agent name still honours it below).
+		if !a.IsExternalProcess() && !IsPluginAgent(a.Name) {
 			return a
 		}
 	}

@@ -1082,6 +1082,9 @@ type model struct {
 	// pending "which agent runs this background job?" question
 	pendingBgAgent *bgAgentWizardState
 
+	// pending bare /plugins marketplace browse (flyover, install on enter)
+	pendingPluginBrowse *pluginBrowseState
+
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
 
@@ -1360,6 +1363,9 @@ type model struct {
 
 	// pendingUpdate is non-nil when an update is available but not yet installed.
 	pendingUpdate *updater.Release
+	// pluginsBusy is true while a /plugins distribution action runs on its
+	// goroutine — one at a time, so two fetches never race the bookkeeping.
+	pluginsBusy bool
 	// updateInstalling is true while /update install is downloading+applying.
 	updateInstalling bool
 	// updateProgress tracks download bytes for the progress indicator.
@@ -2694,6 +2700,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingTool != nil {
 			return m.handleAgentToolWizardKey(msg)
 		}
+		if m.pendingPluginBrowse != nil {
+			return m.handlePluginBrowseKey(msg)
+		}
 		if m.pendingBgAgent != nil {
 			return m.handleBgAgentWizardKey(msg)
 		}
@@ -3710,6 +3719,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pluginsActionMsg:
+		return m.handlePluginsActionMsg(msg)
+
 	case errMsg:
 		m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), msg.err))
 		return m, nil
@@ -3911,6 +3923,17 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.clearPanelSelection()
 			return m, nil
 		}
+		// A focused panel's esc returns keyboard focus to the main view —
+		// the keyboard twin of clicking back into the transcript. Layers
+		// peel one at a time (the selections above get first refusal), and
+		// the surfaces that route ahead of this handler keep their own esc
+		// contracts (attach detaches only after its selection/focus are
+		// clear; prompts, wizards and the palette cancel).
+		if m.focusedPanel() != regionNone {
+			m.panelFocus = regionNone
+			m.syncLayout()
+			return m, nil
+		}
 	case "ctrl+c":
 		return m.handleCtrlC()
 	case "ctrl+d":
@@ -4034,11 +4057,12 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleShiftArrow(msg)
 	case "tab", "shift+tab":
-		// Completion when the token under the cursor has any — and whenever
-		// completion context (inline hints / @-token) is live, even if the
-		// build is momentarily empty; rotation only for genuinely
-		// non-completable input — one function decides for both worlds
-		// (handleTabKey).
+		// Three cases, one function (handleTabKey): a focused panel owns
+		// the key outright (navigation); on the input, completion whenever
+		// the token under the cursor has any — and whenever completion
+		// context (inline hints / @-token) is live, even if the build is
+		// momentarily empty; rotation only for genuinely non-completable
+		// input. (Kept in sync: handleTabKey's contract comment.)
 		dir := 1
 		if msg.String() == "shift+tab" {
 			dir = -1

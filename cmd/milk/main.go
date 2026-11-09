@@ -127,6 +127,7 @@ func init() {
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(eval.Command())
+	rootCmd.AddCommand(newPluginsCmd())
 }
 
 // applyConfigRoot points milk's state root at dir when set (the --config-root
@@ -181,7 +182,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// Installed plugins (Agent Plugins v1): discover, register MCP servers
 	// with the runtime config seam, seed the skill catalog. Load-time only —
 	// new plugins take effect on the next start (plugins_host.go).
-	initPlugins()
+	initPlugins(cfg)
 
 	// Apply CLI overrides for agent selection.
 	if flagAgent != "" {

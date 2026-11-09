@@ -44,7 +44,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s warning: %s\n", milkTag(), recovered.Error())
 	}
 
-	initPlugins() // installed plugins: MCP servers + skills (plugins_host.go)
+	initPlugins(cfg) // installed plugins: MCP servers + skills + agents (plugins_host.go)
 
 	obsShutdown := initObs(cfg)
 	defer obsShutdown(context.Background()) //nolint:errcheck

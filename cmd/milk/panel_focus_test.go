@@ -389,3 +389,97 @@ func TestTabKey_CompletionWinsElseRotates(t *testing.T) {
 		t.Fatalf("tab with non-completable text: focus = %v, want memory (rotation)", got)
 	}
 }
+
+// TestTabKey_PanelFocus_OwnsTabEvenWithCompletionContext pins the panel-focus
+// rule: while a side panel holds keyboard focus, Tab/Shift+Tab are panel
+// navigation outright — stale completion context (hints left over from when
+// focus was on the input) belongs to the input and must neither be committed
+// nor block the rotation. The paired control — main focus, completion wins —
+// is TestTabKey_CompletionWinsElseRotates.
+func TestTabKey_PanelFocus_OwnsTabEvenWithCompletionContext(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.width = 400
+	m.panelMemory = true
+
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if m.focusedPanel() != regionMemory {
+		t.Fatalf("setup: focus = %v want memory", m.focusedPanel())
+	}
+
+	// Stale completion context from an earlier typing session on main:
+	// an uncommitted hint selection (typing would have cleared both —
+	// SetValue shortcuts don't).
+	m.setHints([]string{"/panel memory"})
+	m.hintIdx = 0
+	m.ta.SetValue("/pan")
+
+	// shift+tab with the panel focused rotates back to main — it must not
+	// commit the hint and must not become the completion-context no-op.
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m = next.(model)
+	if m.focusedPanel() != regionNone {
+		t.Fatalf("shift+tab with panel focus: focus = %v want main (rotation owns Tab)", m.focusedPanel())
+	}
+	if m.hintIdx != 0 || m.ta.Value() != "/pan" {
+		t.Fatalf("panel-owned Tab touched input state: value=%q hintIdx=%d want untouched",
+			m.ta.Value(), m.hintIdx)
+	}
+
+	// The control: back on main, that same context owns the key — the
+	// active hint commits instead of rotating (completion wins on main).
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if m.focusedPanel() != regionNone {
+		t.Fatalf("control: main focus with live completion must not rotate: focus = %v", m.focusedPanel())
+	}
+	if m.ta.Value() != "/panel memory" {
+		t.Fatalf("control: hint should commit on main: value = %q", m.ta.Value())
+	}
+}
+
+// TestEsc_PanelFocus_ReturnsToMain pins esc's layered peel on the main path:
+// selections clear first (one layer per press), then a focused panel returns
+// focus to the main view — idle and busy alike (handleBusyKey forwards esc to
+// the same handler).
+func TestEsc_PanelFocus_ReturnsToMain(t *testing.T) {
+	m := newTestModelForPanels(t)
+	m.width = 400
+	m.panelMemory = true
+
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(model)
+	if m.focusedPanel() != regionMemory {
+		t.Fatalf("setup: focus = %v want memory", m.focusedPanel())
+	}
+
+	// A panel selection peels first: cleared, focus survives the press.
+	m.panelSelRegion = regionMemory
+	m.panelSelAnchorLine = 2
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(model)
+	if m.panelSelAnchorLine >= 0 {
+		t.Fatalf("esc should clear the panel selection first, anchor=%d", m.panelSelAnchorLine)
+	}
+	if m.focusedPanel() != regionMemory {
+		t.Fatalf("focus = %v, want memory still (selection had priority)", m.focusedPanel())
+	}
+
+	// Second press returns focus to the main view.
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(model)
+	if m.focusedPanel() != regionNone {
+		t.Fatalf("focus = %v want main after esc", m.focusedPanel())
+	}
+
+	// Busy: handleBusyKey's tail forwards esc to the same handler, so a
+	// focused panel returns to main mid-turn too.
+	next, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab}) // focus memory again
+	m = next.(model)
+	m.busy = true
+	bNext, _ := m.handleBusyKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = bNext.(model)
+	if m.focusedPanel() != regionNone {
+		t.Fatalf("busy esc: focus = %v want main", m.focusedPanel())
+	}
+}

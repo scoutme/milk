@@ -239,3 +239,27 @@ func TestParamNamespacesCoverHelpPlaceholders(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildTabMatches_ValuePluginsName(t *testing.T) {
+	// /plugins <name> positions complete installed plugin names (records ∪
+	// drop-in dirs — nsPlugin's provider reads those live), and the
+	// "<name>@<mkt>" token must not manufacture a literal "@<mkt>" candidate
+	// (parseSigPosition only reads literal alternatives after "|").
+	lookup := fakeLookup(map[string][]string{nsPlugin: {"demo", "other"}})
+
+	res := buildTabMatches("/plugins details ", ".", lookup)
+	if !res.valueMode || !stringSlicesEqual(res.matches, []string{"demo", "other"}) {
+		t.Errorf("/plugins details → %+v, want value mode [demo other]", res)
+	}
+	if res.nsLabel != nsPlugin {
+		t.Errorf("nsLabel = %q, want %q", res.nsLabel, nsPlugin)
+	}
+	res = buildTabMatches("/plugins remove d", ".", lookup)
+	if !res.valueMode || !stringSlicesEqual(res.matches, []string{"demo"}) {
+		t.Errorf("/plugins remove d → %+v, want [demo]", res)
+	}
+	res = buildTabMatches("/plugins install ", ".", lookup)
+	if !res.valueMode || !stringSlicesEqual(res.matches, []string{"demo", "other"}) {
+		t.Errorf("/plugins install → %+v, must be value mode with plugin names and no @<mkt> literal", res)
+	}
+}

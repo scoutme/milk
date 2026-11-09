@@ -69,7 +69,7 @@ func TestInitPlugins_EndToEnd(t *testing.T) {
 	write("mcp.json", `{"$schema": "`+plugin.SchemaMCP+`", "mcpServers": {
 		"tools": {"type": "stdio", "command": "true"}}}`)
 
-	initPlugins()
+	initPlugins(config.Config{})
 
 	cfg := config.Config{Agents: []config.AgentConfig{
 		{Name: "primary"},

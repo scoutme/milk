@@ -139,6 +139,35 @@ func TestHandleAttachKey_EscDetaches(t *testing.T) {
 	}
 }
 
+// TestHandleAttachKey_EscReturnsPanelFocusBeforeDetach pins esc's layered
+// peel in the attach view: a focused panel gets its focus back first (the
+// preview stays attached), and only a main-focused esc detaches — the same
+// selection → focus → detach order as the main path.
+func TestHandleAttachKey_EscReturnsPanelFocusBeforeDetach(t *testing.T) {
+	m := attachTestModel()
+	m.width = 300
+	m.panelMemory = true
+	m.panelFocus = regionMemory
+	mgr := local.NewManager(context.Background(), 1)
+	job := spawnJobWithLiveContent(t, mgr, "job", "content")
+	m.attached = &attachState{kind: attachBackground, jobID: job.ID, buf: job.Live}
+
+	updated, _ := m.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	mm := updated.(model)
+	if mm.attached == nil {
+		t.Fatal("focus-return esc must not detach the preview")
+	}
+	if mm.panelFocus != regionNone {
+		t.Fatalf("focus = %v want main after first esc", mm.panelFocus)
+	}
+
+	// Second press, now main-focused: detach (the documented contract).
+	updated, _ = mm.handleAttachKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if updated.(model).attached != nil {
+		t.Fatal("second esc (main focus) must detach")
+	}
+}
+
 func TestHandleAttachKey_OtherKeysAreSwallowed(t *testing.T) {
 	m := dragTestModel()
 	mgr := local.NewManager(context.Background(), 1)
