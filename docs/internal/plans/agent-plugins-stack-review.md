@@ -206,3 +206,32 @@ folded into the `feat(plugin)` branch before it goes up.
 Phase 1 verified: `internal/plugin` + full `cmd/milk` suites green locally at
 each step. Phase 2 (S1–S3 hardening) and Phase 3 (S4–S5 cleanup) are [ ] —
 not started.
+
+## Progress log — Phase 2
+
+- [x] **S1** — `68b2bc1`: tar extraction materializes kept payloads in ONE extra
+  scan (was k+1 decompressions), and `readBounded` pins the size contract.
+  **Review correction, honestly recorded**: the silent-truncation mechanism was
+  a phantom — archive readers enforce declared sizes (the red attempt proved a
+  smaller-declared header *cuts* the payload at declared, it cannot smuggle
+  more), so the detectable classes (payload-beyond-declared, stream-ends-early)
+  live at the wrapper layer and are unit-pinned; the security direction that
+  matters (no bytes beyond declared) holds at reader level and is now asserted.
+- [x] **S2** — `68b2bc1`: `archiveEndpoint` matches `net/url` Host exactly,
+  https-only. Red: `http://github.com/…` fetched in the clear,
+  `https://evil.com/github.com/…` spoofed GitHub by substring.
+- [x] **S3** — `853676e`: rune-safe `firstBodyLine` truncation
+  (`strings.ToValidUTF8`). Red: split byte visible in the derived description.
+
+## Progress log — Phase 3
+
+- [x] **S4** — `87139b1`: plugins_cmd.go split by face (shared action layer /
+  plugins_cli.go / plugins_tui.go); the package-level `handlePluginsCmd` view
+  renderer renamed `renderPluginsView` (the model-method name collision the
+  review flagged). Behavior-identical: full cmd/milk suite green.
+- [x] **S5** — `c3ec7d5`: immutable `[]cmdSpec` snapshot in an atomic.Value for
+  the per-keystroke `registryNames` readers; `setPluginCommands` is the single
+  writer. Existing flip tests pin coherence.
+
+All phases complete. Branch: `feat/agent-plugins-stack` — `996e1f7` = the
+reviewed PRE state, one commit per fix after it.
