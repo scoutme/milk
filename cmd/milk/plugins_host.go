@@ -349,10 +349,10 @@ func lookupPluginSlash(name string) (pluginSlashCmd, bool) {
 	return pluginSlashCmd{}, false
 }
 
-// handlePluginsCmd renders /plugins: the loaded plugins with their
+// renderPluginsView renders /plugins: the loaded plugins with their
 // components, and every collected warning (discovery failures, invalid
 // entries, skipped skills/servers — the spec's SHOULD-report surface).
-func handlePluginsCmd() string {
+func renderPluginsView() string {
 	pluginsMu.RLock()
 	defer pluginsMu.RUnlock()
 	if len(plugins) == 0 && len(pluginLog) == 0 {

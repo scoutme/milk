@@ -156,7 +156,7 @@ func TestPluginsActionRun_TUIEndToEnd(t *testing.T) {
 
 	// The reload happened inside the handler: the loader view lists it,
 	// skill included.
-	view := handlePluginsCmd()
+	view := renderPluginsView()
 	if !strings.Contains(view, "demo") || !strings.Contains(view, "skills: ship") {
 		t.Errorf("loader view after install reload:\n%s", view)
 	}
@@ -190,7 +190,7 @@ func TestPluginsActionRun_TUIEndToEnd(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(state, "plugins", "demo")); !os.IsNotExist(err) {
 		t.Errorf("install dir must be gone after remove (stat err=%v)", err)
 	}
-	if view := handlePluginsCmd(); !strings.Contains(view, "none installed") {
+	if view := renderPluginsView(); !strings.Contains(view, "none installed") {
 		t.Errorf("loader view after remove reload:\n%s", view)
 	}
 }
