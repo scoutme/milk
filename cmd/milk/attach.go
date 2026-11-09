@@ -234,6 +234,14 @@ func (m model) handleAttachKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.syncAttachedContent()
 			return m, nil
 		}
+		// Layered peel mirrors the main path: a focused panel returns its
+		// focus first (the preview stays attached), and only a main-focused
+		// esc detaches the view.
+		if m.focusedPanel() != regionNone {
+			m.panelFocus = regionNone
+			m.syncLayout()
+			return m, nil
+		}
 		m.detachAttach()
 		m.syncLayout()
 	case "ctrl+c":

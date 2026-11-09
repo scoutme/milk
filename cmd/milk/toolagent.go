@@ -14,11 +14,13 @@ import (
 	"github.com/scoutme/milk/internal/memory"
 )
 
-// findAgentByName looks up an agent config by name in cfg.Agents.
-// Name comparison is case-insensitive, matching the convention in ActiveAgent.
+// findAgentByName looks up an agent config by name across everything milk can
+// resolve (user config, runtime plugin agents, the built-in claude-cli
+// default — config.AllAgents). Name comparison is case-insensitive, matching
+// the convention in ActiveAgent.
 func findAgentByName(cfg config.Config, name string) (config.AgentConfig, bool) {
 	lower := strings.ToLower(name)
-	for _, ac := range cfg.Agents {
+	for _, ac := range cfg.AllAgents() {
 		if strings.ToLower(ac.Name) == lower {
 			return ac, true
 		}

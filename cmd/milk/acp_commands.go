@@ -51,7 +51,7 @@ func acpCommandTable() []acpCommand {
 			return out, dispatch
 		}
 	}
-	return []acpCommand{
+	tbl := []acpCommand{
 		{name: cmdWorkflow, runTurn: acpWorkflowCmd},
 		{name: cmdSessions, run: acpSessionsCmd},
 		{name: cmdNew, run: acpNewCmd},
@@ -83,6 +83,14 @@ func acpCommandTable() []acpCommand {
 		{name: cmdUpdate, runTurn: acpUpdate},
 		{name: "/help", run: acpHelp},
 	}
+	// Plugin commands (ADR-0104 Part IV) join the ACP surface through the
+	// same viaTUI binding: recognized, advertised (acpAdvertisedCommands
+	// iterates this table) and dispatched by the same lookup loop — one
+	// code path with the static entries, backed by the runtime store.
+	for _, s := range pluginSlashSpecs() {
+		tbl = append(tbl, acpCommand{name: s.name, run: viaTUI(s.name)})
+	}
+	return tbl
 }
 
 // acpSpec returns the registry entry for a binding's name. The binding

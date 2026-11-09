@@ -33,15 +33,9 @@ from rules on that field:
    rotation is the only keyboard path *back* to the input area (and shift+pgup
    the way back out). Panels the width budget hides are not in the sequence —
    only what is actually rendered may be focused (ADR-0089). **`tab`/`shift+tab`
-   are rotation aliases whenever the token under the cursor has no
-   completions *and no completion context is live*** — completion always wins
-   (the cycling key doubles as rotation only when cycling has no answer,
-   `handleTabKey`), and while inline hints or an `@`-token sit under the cursor
-   a Tab with no buildable candidates is a **no-op**, never a focus steal (user
-   report, 2026-11-08: parameter-value and @-index-cold positions were rotating
-   focus mid-completion) — bare Tab is free at
-   the terminal level (terminal tab-switching lives on Ctrl+Tab and friends),
-   so the alias costs no chord.
+   are aliases whenever the main area holds focus and the token under the cursor has nothing to complete** — completion always wins on the input (the cycling key doubles as rotation only when cycling has no answer, `handleTabKey`), and while inline hints or an `@`-token sit under the cursor a Tab with no buildable candidates is a **no-op**, never a focus steal (user report, 2026-11-08: parameter-value and @-index-cold positions were rotating focus mid-completion). **While a panel holds focus, `tab`/`shift+tab` rotate outright** — completion context belongs to the input, and typing would have handed focus back anyway (user report, second round: "if focus is on panels, tab must be read for panels navigation"). Bare Tab is free at
+  the terminal level (terminal tab-switching lives on Ctrl+Tab and friends),
+  so the alias costs no chord.
 2. **Paging follows focus** — `pgup`/`pgdown` (and `ctrl+u`/`ctrl+f`) page the
    focused panel's own offset (half the panel height, clamped exactly like the
    wheel: `[0, panelMaxOffset]`) or the transcript when main is focused — the
@@ -75,6 +69,15 @@ from rules on that field:
      output (pinned by test). Typing still lands in the input; the dim says
      where paging will go.
 
+6. **Esc returns focus to main, one layer per press** — after any active
+   selection clears (textarea, transcript, panel — in routing order), a
+   focused panel's Esc sets focus back to `regionNone`. The attach view
+   peels identically: attach selection → focused panel's focus → detach, so
+   Esc gets the user out of the *surface* they are in before it leaves it.
+   Busy and idle share the branch (`handleBusyKey` tails into `handleKey`),
+   and every real modal (prompts, wizards, palette) still routes ahead with
+   its own Esc contract.
+
 ## Consequences
 
 - Keyboard parity is complete without any new mode: `shift+` rotation,
@@ -104,7 +107,9 @@ from rules on that field:
   preview must not freeze the panels the mouse already reaches:
   `handleAttachKey` mirrors `handleKey` for rotation, the row cursor, the
   row's action and paging (with main focus, pgup/pgdn page the attached
-  content itself), and Esc still detaches.
+  content itself), and Esc peels one layer per press — the attach selection,
+  then a focused panel's focus, and only then the detach (same order as the
+  main path).
 - The `/keys` help gains a column for the three bindings; the raw switch cases
   in `handleKey` stay the implementation (registry entries are display-only,
   per the keymap's own convention).

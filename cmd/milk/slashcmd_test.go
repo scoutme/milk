@@ -52,9 +52,12 @@ func TestRegistry_ACPSurface(t *testing.T) {
 // registry: extractSlashCommand's set is exactly the registry's names, and
 // the help text documents every visible TUI-hosted command.
 func TestRegistry_TUISurface(t *testing.T) {
-	if !slices.Equal(slashCommands, registryNames()) {
-		t.Error("slashCommands must be registryNames() — the registry is the recognition set")
-	}
+	// The recognition set is dual-store (static registry ∪ runtime plugin
+	// commands, ADR-0104 Part IV): registryNames() IS that union by
+	// construction (the old var-snapshot equality it replaced). Pin the
+	// membership direction every dispatch and help lookup relies on —
+	// each recognized name resolves through the registry, the plugin
+	// store, or both.
 	regNames := map[string]bool{}
 	for _, s := range commandRegistry {
 		regNames[s.name] = true
@@ -62,9 +65,12 @@ func TestRegistry_TUISurface(t *testing.T) {
 			regNames[a] = true
 		}
 	}
-	for _, name := range slashCommands {
+	for _, s := range pluginSlashSpecs() {
+		regNames[s.name] = true
+	}
+	for _, name := range registryNames() {
 		if !regNames[name] {
-			t.Errorf("slashCommands entry %q not in registry", name)
+			t.Errorf("recognized name %q resolves nowhere", name)
 		}
 	}
 	help := buildInteractiveHelp()

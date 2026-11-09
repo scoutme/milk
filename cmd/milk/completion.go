@@ -577,7 +577,7 @@ func (m *model) rebuildInlineHints() {
 
 	if last == "/" || isSlashCmdToken(last) {
 		var hints []string
-		for _, cmd := range slashCommands {
+		for _, cmd := range registryNames() {
 			if last != "/" && !strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(last)) {
 				continue
 			}
@@ -844,9 +844,21 @@ func (m model) acceptActiveCompletion() (model, bool) {
 // panel-focus rotation alternative — tab/shift+tab are the mouse-free twin
 // of shift+pgup/shift+pgdown (bare Tab is free at the terminal level: tab
 // switching lives on Ctrl+Tab and friends, so no chord is taken). The rule
-// that keeps both worlds honest: completion ALWAYS wins — cycling only stops
-// being the answer when there is nothing to complete.
+// that keeps both worlds honest, in priority order: a focused panel owns the
+// key outright (navigation — completion context belongs to the input);
+// otherwise completion ALWAYS wins on the input — cycling only stops being
+// the answer when there is nothing to complete.
 func (m model) handleTabKey(dir int) model {
+	// A focused panel owns Tab/Shift+Tab outright: while keyboard focus is
+	// on a side panel the user is navigating panels, and any completion
+	// context (inline hints / @-token left over from when focus was on the
+	// input — typing would have handed focus back anyway) belongs to the
+	// input. Completion wins only when the main area holds focus.
+	if m.focusedPanel() != regionNone {
+		m.rotatePanelFocus(dir)
+		m.syncLayout()
+		return m
+	}
 	if dir > 0 && m.hintIdx >= 0 && len(m.tabMatches) == 0 {
 		m.commitHintSelection()
 		m.syncLayout()
@@ -855,10 +867,12 @@ func (m model) handleTabKey(dir int) model {
 	m, handled := m.handleTab(dir)
 	m.syncLayout()
 	if !handled {
-		// Completion context owns Tab: while inline hints or an @-token sit
-		// under the cursor — the user is IN command/path completion — Tab
-		// must never fall through to focus rotation, even when the build
-		// itself has no candidates right now (empty parameter namespace,
+		// Completion context owns Tab ON THE INPUT: while inline hints or an
+		// @-token sit under the cursor — the user is IN command/path
+		// completion — Tab must never fall through to focus rotation (the
+		// focused-panel guard above already returned, so "here" means main),
+		// even when the build itself has no candidates right now (empty
+		// parameter namespace,
 		// @-index first build still running, bang-mode trailing space).
 		// Rotation stays for genuinely non-completable input (empty buffer,
 		// free text) and remains reachable on shift+pgup/pgdn or a click
@@ -1041,7 +1055,7 @@ func buildTabMatchesMode(input, cwd string, lookup paramLookup, bangMode bool) t
 
 	// Top-level slash command prefix completion. e.g. "/mem" → ["/memory", …]
 	var matches []string
-	for _, cmd := range slashCommands {
+	for _, cmd := range registryNames() {
 		if strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(last)) {
 			matches = append(matches, cmd)
 		}

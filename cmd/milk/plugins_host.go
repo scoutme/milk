@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
@@ -50,7 +51,7 @@ var (
 //
 // PLUGIN_DATA (Agent Plugins §9.1) lives at <state root>/plugin-data/<name>,
 // created on demand when a stdio server launches, preserved across updates.
-func initPlugins() {
+func initPlugins(cfg config.Config) {
 	cwd, _ := os.Getwd()
 	stateRoot, _ := config.Dir()
 	dataRoot := filepath.Join(stateRoot, "plugin-data")
@@ -74,13 +75,103 @@ func initPlugins() {
 		loaded = append(loaded, lp)
 	}
 
+	// Runtime plugin agents (ADR-0104 Part III): synthesized entries cloned
+	// from this config's primary (plugins ship behavior, never credentials),
+	// installed through the same never-persisted seam as the MCP servers.
+	// Warnings land in the discovery report so /plugins shows them.
+	agentSet, agentWarns := buildPluginAgentSet(cfg, loaded)
+	log = append(log, agentWarns...)
+
+	// Plugin slash commands (ADR-0104 Part IV): the command store derives
+	// here too, so mutations (/plugins add/remove, drop-ins) re-register
+	// alongside everything else.
+	cmds, cmdWarns := buildPluginSlashCmds(loaded)
+	log = append(log, cmdWarns...)
+	setPluginCommands(cmds)
+
 	pluginsMu.Lock()
 	plugins = loaded
 	pluginLog = log
 	pluginsMu.Unlock()
 
 	config.SetPluginMCPServers(pluginServersForAgent)
+	config.SetPluginAgents(func() config.PluginAgentSet { return agentSet })
 	seedSkillCatalog()
+}
+
+// buildPluginAgentSet synthesizes config entries for every agent shipped by an
+// installed plugin (ADR-0104 Part III). Transport, auth and limits are cloned
+// from a template agent — the primary by default, or the configured agent a
+// frontmatter `model:` names — because plugins carry no credentials. The
+// agent's body becomes Prompt (in-memory only; the seam never persists).
+// The frontmatter description rides as the default agent-as-tool exposure,
+// which the extensions["dev.milkai.milk"].expose_as_tool flag can disable.
+// A name colliding with a configured agent is skipped: user config wins.
+func buildPluginAgentSet(cfg config.Config, loaded []loadedPlugin) (config.PluginAgentSet, []string) {
+	var set config.PluginAgentSet
+	var warns []string
+	primary := cfg.ActiveAgent()
+	seen := map[string]bool{}
+	configured := func(n string) bool {
+		for _, a := range cfg.Agents {
+			if strings.EqualFold(a.Name, n) {
+				return true
+			}
+		}
+		return strings.EqualFold(n, "claude")
+	}
+	for _, lp := range loaded {
+		ext := lp.plugin.Manifest.Extensions[pluginNamespace]
+		expose := true
+		if ext != nil {
+			if b, ok := ext["expose_as_tool"].(bool); ok {
+				expose = b
+			}
+		}
+		for _, pa := range lp.plugin.Agents {
+			if seen[strings.ToLower(pa.Name)] {
+				warns = append(warns, fmt.Sprintf("agent %s: duplicate plugin agent name — skipped", pa.Name))
+				continue
+			}
+			seen[strings.ToLower(pa.Name)] = true
+			if configured(pa.Name) {
+				warns = append(warns, fmt.Sprintf("agent %s: collides with a configured agent — kept from config, plugin copy skipped", pa.Name))
+				delete(seen, strings.ToLower(pa.Name)) // resolution sees the config entry; not a plugin agent
+				continue
+			}
+
+			tmpl := primary
+			if pa.Model != "" {
+				if named, ok := cfg.AgentByName(pa.Model); ok {
+					tmpl = named
+				} else {
+					warns = append(warns, fmt.Sprintf("agent %s: frontmatter model %q is not a configured agent — running on primary", pa.Name, pa.Model))
+				}
+			}
+			if tmpl.Name == "" && tmpl.URL == "" {
+				warns = append(warns, fmt.Sprintf("agent %s: no primary configured to inherit transport from — registered but not runnable", pa.Name))
+			}
+
+			ac := tmpl // struct copy: URL/provider/auth/TLS/AWS/limits inherited
+			ac.Name = pa.Name
+			ac.Prompt = pa.Body // replaces any template prompt: the agent IS its persona
+			ac.PromptFile = ""
+			ac.Tools = nil // the template's per-agent tool overrides are not the plugin's business
+			if len(pa.MilkTools) > 0 {
+				lim := config.AgentLimits{}
+				if tmpl.Limits != nil {
+					lim = *tmpl.Limits
+				}
+				lim.IncludedTools = pa.MilkTools
+				ac.Limits = &lim
+			}
+			set.Agents = append(set.Agents, ac)
+			if expose {
+				set.Tools = append(set.Tools, config.AgentToolEntry{Agent: pa.Name, Description: pa.Description})
+			}
+		}
+	}
+	return set, warns
 }
 
 // pluginServersForAgent is the config seam: plugin-derived MCP servers for
@@ -144,10 +235,124 @@ func seedSkillCatalog() {
 	local.SetSkillCatalog(entries)
 }
 
-// handlePluginsCmd renders /plugins: the loaded plugins with their
+// ---- Plugin slash commands (ADR-0104 Part IV) ----
+//
+// commands/*.md is the second de-facto component type milk reads (after
+// agents/): each becomes a real slash command — registered into the same
+// surfaces every built-in command uses (recognition, completion, /help, ACP
+// advertising) but kept in its OWN runtime store instead of mutating
+// commandRegistry, so ACP goroutines reading the static registry never race
+// a TUI-side hot reload. Readers (specFor, registryNames, the help builder,
+// the ACP table) consult both stores.
+
+type pluginSlashCmd struct {
+	pluginName string
+	cmd        plugin.Command
+	spec       cmdSpec
+}
+
+var (
+	pluginCmdsMu sync.RWMutex
+	pluginCmds   []pluginSlashCmd
+	// pluginSpecsCache is the immutable []cmdSpec snapshot the per-keystroke
+	// readers load (review S5): registryNames walks it on every completion
+	// keypress, so it must not take a lock or rebuild — setPluginCommands
+	// is the single writer and refreshes the snapshot eagerly.
+	pluginSpecsCache atomic.Value // []cmdSpec
+)
+
+// buildPluginSlashCmds derives collision-checked specs from the loaded
+// plugins. Collisions — against commandRegistry (names + aliases) or
+// another plugin's command — are dropped with a report: built-ins always
+// win, first plugin wins among themselves.
+func buildPluginSlashCmds(loaded []loadedPlugin) ([]pluginSlashCmd, []string) {
+	builtin := make(map[string]bool, len(commandRegistry))
+	for _, s := range commandRegistry {
+		builtin[strings.ToLower(s.name)] = true
+		for _, a := range s.aliases {
+			builtin[strings.ToLower(a)] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []pluginSlashCmd
+	var warns []string
+	for _, lp := range loaded {
+		for _, c := range lp.plugin.Commands {
+			name := "/" + c.Name
+			key := strings.ToLower(name)
+			if builtin[key] || seen[key] {
+				warns = append(warns, fmt.Sprintf("plugin %s: command %s collides with an existing command — skipped", lp.plugin.Name(), name))
+				continue
+			}
+			seen[key] = true
+			sig := name
+			if c.ArgumentHint != "" {
+				sig += " " + c.ArgumentHint
+			}
+			out = append(out, pluginSlashCmd{
+				pluginName: lp.plugin.Name(),
+				cmd:        c,
+				spec: cmdSpec{
+					name:  name,
+					hosts: hostBoth,
+					desc:  c.Description, // always non-empty: loadCommands derives a fallback
+					hint:  c.ArgumentHint,
+					help:  fmt.Sprintf("  %-24s %s", sig, c.Description),
+				},
+			})
+		}
+	}
+	return out, warns
+}
+
+// setPluginCommands replaces the store (startup and every hot reload —
+// removals drop their commands with everything else) and refreshes the
+// spec snapshot in one step.
+func setPluginCommands(cmds []pluginSlashCmd) {
+	pluginCmdsMu.Lock()
+	pluginCmds = cmds
+	pluginCmdsMu.Unlock()
+	pluginSpecsCache.Store(pluginSpecsBuild())
+}
+
+func pluginSpecsBuild() []cmdSpec {
+	pluginCmdsMu.RLock()
+	defer pluginCmdsMu.RUnlock()
+	out := make([]cmdSpec, len(pluginCmds))
+	for i, pc := range pluginCmds {
+		out[i] = pc.spec
+	}
+	return out
+}
+
+// pluginSlashSpecs returns the specs for the dual-store readers — a pure
+// snapshot load (review S5), with a build fallback for reads that happen
+// before any setPluginCommands call (tests, early startup).
+func pluginSlashSpecs() []cmdSpec {
+	if v := pluginSpecsCache.Load(); v != nil {
+		return v.([]cmdSpec)
+	}
+	out := pluginSpecsBuild()
+	pluginSpecsCache.Store(out)
+	return out
+}
+
+// lookupPluginSlash resolves a command name against the plugin store.
+func lookupPluginSlash(name string) (pluginSlashCmd, bool) {
+	pluginCmdsMu.RLock()
+	defer pluginCmdsMu.RUnlock()
+	for _, pc := range pluginCmds {
+		if pc.spec.name == name {
+			return pc, true
+		}
+	}
+	return pluginSlashCmd{}, false
+}
+
+// renderPluginsView renders /plugins: the loaded plugins with their
 // components, and every collected warning (discovery failures, invalid
 // entries, skipped skills/servers — the spec's SHOULD-report surface).
-func handlePluginsCmd() string {
+func renderPluginsView() string {
 	pluginsMu.RLock()
 	defer pluginsMu.RUnlock()
 	if len(plugins) == 0 && len(pluginLog) == 0 {
@@ -171,6 +376,20 @@ func handlePluginsCmd() string {
 				names = append(names, s.Name)
 			}
 			fmt.Fprintf(&b, "    skills: %s\n", strings.Join(names, ", "))
+		}
+		if len(p.Agents) > 0 {
+			names := make([]string, 0, len(p.Agents))
+			for _, a := range p.Agents {
+				names = append(names, a.Name)
+			}
+			fmt.Fprintf(&b, "    agents: %s\n", strings.Join(names, ", "))
+		}
+		if len(p.Commands) > 0 {
+			names := make([]string, 0, len(p.Commands))
+			for _, c := range p.Commands {
+				names = append(names, "/"+c.Name)
+			}
+			fmt.Fprintf(&b, "    commands: %s\n", strings.Join(names, ", "))
 		}
 		switch {
 		case p.MCPDisabled:

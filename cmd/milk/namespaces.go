@@ -1,8 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/scoutme/milk/internal/plugin"
 	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/workflow"
 )
@@ -25,6 +29,7 @@ const (
 	nsPanel    = "panel"
 	nsWorkflow = "workflow"
 	nsSession  = "session"
+	nsPlugin   = "plugin" // installed plugin names (records ∪ drop-in dirs)
 )
 
 // nsByPlaceholder maps the text inside <...> to a name space.
@@ -47,6 +52,11 @@ var nsByCmdScoped = map[string]string{
 	cmdMCP + " name":      nsMCP,
 	cmdPanel + " name":    nsPanel,
 	cmdWorkflow + " name": nsWorkflow,
+	// Every <name> under /plugins means an installed plugin (details, remove,
+	// and install's name half — the marketplace's entry names are not wired:
+	// an install target is qualified by @<mkt>, which the parser attributes to
+	// the same position; typing it is intentional).
+	cmdPlugins + " name": nsPlugin,
 }
 
 // freeTextParams lists placeholder texts that are intentionally completed as
@@ -73,6 +83,9 @@ var freeTextParams = map[string]bool{
 	"n":                true, // /tips pick <n> — a tip number, printed by /tips pick
 	"text":             true, // /tips pick <text> — substring match over the tip pool
 	"query":            true, // /tips search <query> — substring match over the tip pool
+	"ref":              true, // /plugins add <ref> — owner/repo | URL | npm:pkg (pins carry --ref/--sha)
+	"dir":              true, // /plugins shim <dir> — a path to a package tree
+	"mkt":              true, // /plugins install …@<mkt> — marketplace id (attributed to the <name>@<mkt> token)
 }
 
 // namespaceForParam returns the name space a <placeholder> refers to for the
@@ -236,9 +249,11 @@ func parseSigPosition(cmd, tok string, out *paramExpectation) {
 		if ns := namespaceForParam(cmd, inner); ns != "" {
 			out.namespaces = append(out.namespaces, ns)
 		}
-		rest := strings.TrimPrefix(w[gt+1:], "|")
-		rest = strings.TrimSuffix(rest, "]")
-		if rest != "" {
+		// Literal alternatives only follow a "|" (e.g. "<agent>|global]").
+		// Anything else after ">" is a token suffix — "<name>@<mkt>" must
+		// not manufacture a literal "@<mkt>" candidate.
+		if rest, ok := strings.CutPrefix(w[gt+1:], "|"); ok {
+			rest = strings.TrimSuffix(rest, "]")
 			for _, alt := range strings.Split(rest, "|") {
 				if alt = strings.TrimSpace(alt); alt != "" {
 					out.literals = append(out.literals, alt)
@@ -427,7 +442,7 @@ func (m model) paramLookup(ns string) []string {
 	switch ns {
 	case nsAgent:
 		var out []string
-		for _, a := range cfg.Agents {
+		for _, a := range cfg.ConfiguredAgents() {
 			if a.Name != "" {
 				out = append(out, a.Name)
 			}
@@ -480,6 +495,28 @@ func (m model) paramLookup(ns string) []string {
 			return nil
 		}
 		return reg.Names()
+	case nsPlugin:
+		// Live installed-plugin names from the canonical locations: the
+		// bookkeeping records plus hand-installed drop-in dirs (details
+		// works on both, remove on records). No cache to drift.
+		seen := map[string]bool{}
+		var out []string
+		if in, err := plugin.LoadInstalls(paths().installsFile); err == nil {
+			for name := range in.Records {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+		if entries, err := os.ReadDir(filepath.Join(paths().plugins)); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && !seen[e.Name()] {
+					seen[e.Name()] = true
+					out = append(out, e.Name())
+				}
+			}
+			sort.Strings(out)
+		}
+		return out
 	case nsSession:
 		// Live session refs for the cwd (plan D2): short IDs — what the
 		// listings show — plus names. /resume and /drop accept either.

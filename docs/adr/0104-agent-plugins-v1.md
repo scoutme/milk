@@ -118,6 +118,11 @@ milk plugins shim <dir>                             # write portable manifests
   an implicit single-plugin marketplace — fetch, shim if needed, install.
 - Install ids are `name@marketplace` (Claude's convention); bare `name`
   resolves when unambiguous.
+- `<marketplace>` resolves on **both keys**: the catalog's own `name` (what
+  published docs type — `minicut@minicut`) and the snapshot directory
+  `marketplace add` created (the source's repo basename) — the two axes are
+  named differently and both must land on the same snapshot. An unknown key
+  lists what's registered; same-name collisions name every candidate.
 
 **No-clone fetching (milk's one deliberate divergence).** Distribution units
 are fetched over plain HTTPS — a git binary is never invoked and no history
@@ -156,12 +161,117 @@ marketplace never removes its plugins. `update` re-resolves the source (honoring
 `.milk/plugins/` stays drop-in-only (no bookkeeping) — that is the hand-made
 path, and `git clone` there remains fully supported.
 
+**Two faces, one action layer.** Every action is a single function: the
+`milk plugins …` CLI prints its report, and the TUI's `/plugins …` suite
+runs the same function off the UI loop (fetches are network-bound), delivers
+the report to the transcript, and — after a mutation — re-runs discovery in
+place, so a plugin installed from the TUI is live immediately (skill catalog,
+MCP seam, registry swap — no restart). The hosts execute one implementation
+and cannot drift; a second operation is refused while one is in flight.
+**Bare `/plugins` is the browse face of the same layer**: it prints the
+installed view as the record and opens the palette-style flyover over every
+registered catalog's entries (↑↓/type-to-filter, Enter dispatches
+`install <name>@<marketplace>` through the suite); labels disambiguate to
+`name@dir` across colliding catalogs and the install key is always the
+snapshot directory (unique by construction). It deliberately arms **no
+timed default** — the bg-agent picker's 60s auto-answer shape would mean
+silence could install software, so browsing only ever acts on an explicit
+Enter.
+
 **Trust posture.** Installing is trust-by-user (the same trust as editing
 `config.json`): stdio MCP servers execute local commands, so every install is
 user-initiated and inspectable — no background fetching, no auto-update.
 `/plugins` surfaces what a plugin brings (skills, servers, extension keys)
 and every loader report; a future ADR-0052-style consent gate is the recorded
 escape hatch if plugins ever arrive through unattended paths.
+
+### Part III — Agents: a de-facto directory, read as client behavior
+
+Claude Code plugins can ship subagents as `agents/<name>.md`. The portable
+spec's component set deliberately does **not** include them — §3 defines a
+Component as "a skill or MCP server entry" — so milk reads `agents/` as
+**client behavior** under §4.1 containment: the same posture as reading
+`.claude-plugin/` for shimming (one unmodified plugin works across clients),
+and the extraction surface keeps the directory next to `skills/`.
+
+The frontmatter is Claude's subagent shape (`name`, `description`, `tools`,
+`model`); the body becomes the agent's system prompt; the description becomes
+the agent-as-tool schema description.
+
+- **Bare names, config wins.** `code-reviewer` resolves exactly as Claude
+  names it. A name colliding with a configured agent (or `claude`) drops the
+  plugin copy at the seam with a report — config is authoritative.
+- **Transport is inherited.** Plugins ship behavior, never credentials: the
+  synthesized entry clones the primary's endpoint/auth/TLS — or the
+  configured agent `model:` names, Claude-style; an unknown `model:` warns
+  and falls back to the primary. The body becomes `Prompt` **in memory
+  only**: the `SetPluginAgents` seam is never persisted (same contract as
+  `SetPluginMCPServers`; a config save can never fossilize plugin content).
+- **Invocation is agent-as-tool, on by default.** A plugin agent joins the
+  resolution set *and* the exposure list — stateless fresh turns, the cycle
+  guard, invoker-scoped memory and the retry wrapper all apply unchanged.
+  `extensions["dev.milkai.milk"].expose_as_tool: false` keeps the agent
+  resolvable (background jobs, workflow roles, completions) without exposing
+  it as a tool. The frontmatter `tools:` whitelist maps onto
+  `limits.included_tools` through a Claude→milk name table
+  (`Read→read_file`, `Grep→grep`, `Glob→find_files`, `Bash→bash`,
+  `Write→write_file`, `Edit→edit_file`, `MultiEdit→multiedit`,
+  `WebFetch→web_fetch`); unmapped names warn and drop — a whitelist entry
+  that resolves to nothing would silently strand the agent. An absent
+  `tools:` means no restriction (full default tool set).
+- **Surfaces**: `/agent list` marks entries `(plugin)` (read-only — edits
+  belong to the plugin, and a config entry with the same name shadows it);
+  completions, the bg-agent picker and workflow roles all offer them; the
+  startup availability probe needs no extra ping (the inherited endpoint was
+  already probed with the primary).
+
+### Part IV — Commands: the second de-facto component type
+
+Claude Code plugins can ship custom slash commands as `commands/<name>.md`
+(`description`, `argument-hint`, `allowed-tools` frontmatter + a prompt
+template body). Same conformance posture as Part III: commands are not a
+portable component type, so milk reads `commands/` as **client behavior**
+under §4.1 — immediate children only (nested `commands/git/commit.md` warns
+and skips, the skills rule), frontmatter-absent files are prose (silent),
+and the extraction surface keeps the directory next to `agents/`.
+
+- **Registration is dual-store, never a shared-slice mutation.** Specs live
+  in a runtime store under `pluginsMu`; `specFor`, `registryNames` (the
+  recognition set — the old `slashCommands` init-var became a per-read
+  `registryNames()`, so completion and `extractSlashCommand` see installs
+  live) and `buildInteractiveHelp` (a final live `── Plugins ──` block; /help
+  renders a fresh build) consult static ∪ store. `commandRegistry` itself is
+  never written — ACP goroutines reading the static table race nothing.
+- **Collisions**: built-ins always win; first plugin wins among themselves —
+  each drop reports into `/plugins`.
+- **Dispatch** is the host-neutral default branch of `handleSlashCommand`:
+  the built prompt returns through the existing `dispatch` seam — TUI
+  `dispatchAgent`, ACP `viaTUI` (plugin specs join `acpCommandTable`, so
+  advertising and dispatch ride the same store) — and busy input queues as a
+  raw slash line upstream, exactly like every built-in command.
+- **Prompt building** (`Command.BuildPrompt`): `$ARGUMENTS` substitutes (or
+  the arguments append when the template never references it), then Claude's
+  dynamic-context `!`…`` snippets — executed **only** when the snippet
+  matches the command's own `Bash(…)` allowed-tools prefix **and** contains
+  no shell metacharacters and no write/exec-class flag (--output, --exec,
+  --upload-pack, --receive-pack, --separate-git-dir, --template). The `:*`
+  command form of Bash(…) matches at word boundaries (Bash(git diff:*)
+  never authorizes `git difffoo`); the bare-`*` form is the author's
+  explicit fuzzy stem and keeps string-prefix semantics. Everything else —
+  undeclared, metachar'd, flag'd, failed, timed out (5 s, 8 KB output
+  cap) — stays in the prompt **verbatim** for the model to run with its
+  own tools. **Honest scope (review W1)**: these cuts stop command chaining
+  and the obvious smuggling shapes; they cannot make a declared whitelist
+  non-destructive (`git config --global …` fits `Bash(git:*)`). The consent
+  boundary is the author's declaration plus the user's decision to install
+  the plugin — milk does not sandbox snippets and does not claim to.
+- **Surfaces**: help block, tab completion (hint = `argument-hint`), ACP
+  advertising with the derived-or-frontmatter description, `/plugins` detail
+  counts, and hot reload with the rest of the store.
+- Deliberately out: nested command directories, `$1`-style positional args
+  (only `$ARGUMENTS`), and Claude's `allowed-tools` affecting the model
+  mid-turn (v1 scopes it to expansion; a command runs as a normal user turn
+  under the session's own permission rules).
 
 ## Consequences
 
@@ -174,10 +284,20 @@ escape hatch if plugins ever arrive through unattended paths.
   format is an interchange, the runtime is 100% Agent Plugins. If a neutral
   marketplace format emerges (the spec TSC spans Amazon, Cursor, Microsoft,
   OpenAI, Vercel), accepting it is a new fetcher, not a redesign.
-- Plugins load at startup; editing a plugin's `mcp.json`/manifest takes
-  effect on restart (skill bodies, conversely, are re-read per activation).
+- Plugins load at startup; the suite's install/update/remove actions
+  **hot-reload** the set in place (the shared action layer re-runs discovery
+  after a mutation, on both hosts). Hand edits to a plugin's
+  `manifest`/`mcp.json` on disk still take effect on restart (no filesystem
+  watcher); skill bodies are re-read per activation.
   Distribution commands (`add`, `install`, `update`, `remove`) mutate the
   plugin roots and are effective on the next restart.
+- Plugins can ship **agents** (`agents/*.md`, the ecosystem's de-facto
+  subagent format) — synthesized config entries behind a never-persisted
+  seam, exposed as agent-as-tool by default. The portable core still claims
+  only skills and MCP (§3), so conformance is unchanged. Agent prompt edits
+  land on restart, and a tool-agent runner caches its built prompt at first
+  call — a mid-session `/plugins` reload refreshes resolution, not runners
+  already cached for that session.
 - milk claims conformance for **both** component types with **stdio +
   streamable-http** MCP transports; `sse` is the only declared-but-unsupported
   piece, skipped per spec §11.3 rule 4.

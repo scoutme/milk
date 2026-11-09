@@ -64,8 +64,6 @@ const cmdNotifications = "/notifications"
 const cmdKeys = "/keys"
 const cmdPlugins = "/plugins"
 
-var slashCommands = registryNames()
-
 // initWizardState tracks state for the /config init TUI wizard.
 type initWizardState struct {
 	step    initWizardStep
@@ -355,7 +353,7 @@ func extractSlashCommand(input string) (cmd, rest string, found bool) {
 	if len(words) > 0 && words[0] == "/config-init" {
 		words = append([]string{cmdConfig, "init"}, words[1:]...)
 	}
-	if len(words) == 0 || !strings.HasPrefix(words[0], "/") || !slices.Contains(slashCommands, words[0]) {
+	if len(words) == 0 || !strings.HasPrefix(words[0], "/") || !slices.Contains(registryNames(), words[0]) {
 		return "", input, false
 	}
 	return words[0], strings.Join(words[1:], " "), true
@@ -516,6 +514,14 @@ func handleSlashCommand(cmd, prompt string, st *interactiveState) (exit bool, di
 	case cmdUpdate:
 		// Handled in repl.go (needs model state for install dispatch). No-op here.
 	default:
+		// Plugin slash commands (ADR-0104 Part IV): their prompt is built
+		// at dispatch time ($ARGUMENTS substitution + whitelisted !`…`
+		// expansion), and the returned dispatch submits it exactly like
+		// /escalate's — host-neutral, so ACP gets the same behavior via
+		// its viaTUI table entries.
+		if pc, ok := lookupPluginSlash(cmd); ok {
+			return false, pc.cmd.BuildPrompt(prompt), ""
+		}
 		output = fmt.Sprintf("unknown command %q — type /help", cmd)
 	}
 	return false, "", output
@@ -530,7 +536,7 @@ func execNonPromptCmd(cmd, prompt string, st *interactiveState) string {
 	}
 	switch cmd {
 	case "/help":
-		fmt.Fprint(&out, renderHelp(interactiveHelp, 0))
+		fmt.Fprint(&out, renderHelp(buildInteractiveHelp(), 0))
 	case cmdPaste:
 		fmt.Fprint(&out, milkTag()+" probing clipboard for non-text content (image, PDF, …)")
 	}

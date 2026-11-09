@@ -2,7 +2,9 @@
 // (https://agent-plugins.org/specification): directory-based plugin packages
 // with a root plugin.json manifest and two portable component types —
 // Agent Skills (skills/*/SKILL.md, https://agentskills.io/specification) and
-// MCP servers (mcp.json).
+// MCP servers (mcp.json) — plus two de-facto directory types read as client
+// behavior (ADR-0104 Parts III/IV): agents/*.md subagents and
+// commands/*.md slash commands.
 //
 // The package is host-neutral: it validates and loads a plugin with the
 // spec's failure isolation (a broken component never blocks independent
@@ -34,7 +36,9 @@ type Plugin struct {
 	DataDir  string // client-managed PLUGIN_DATA dir for this instance (§9.1)
 	Manifest Manifest
 	Skills   []Skill
-	MCP      *MCPFile // nil when the plugin has no mcp.json
+	Agents   []Agent   // de-facto agents/*.md subagent definitions (ADR-0104 Part III)
+	Commands []Command // de-facto commands/*.md slash commands (ADR-0104 Part IV)
+	MCP      *MCPFile  // nil when the plugin has no mcp.json
 
 	// MCPDisabled is set when mcp.json exists but is invalid as a whole
 	// (§7.2.2 rule 2): MCP is disabled for the plugin, other components live.
@@ -93,6 +97,14 @@ func Load(root, dataRoot string) (*Plugin, error) {
 	// Skills (§6, §7.1): missing location is fine, wrong kind invalidates
 	// only the component type (§6.2, §4.1 boundary 2).
 	p.loadSkills()
+
+	// Agents (de-facto agents/*.md — client behavior, ADR-0104 Part III):
+	// same per-directory boundary and §11.3 isolation as skills.
+	p.loadAgents()
+
+	// Commands (de-facto commands/*.md — Claude custom slash commands, the
+	// second de-facto component type, ADR-0104 Part IV): same boundaries.
+	p.loadCommands()
 
 	// MCP (§7.2): same component-type boundary; per-entry failures skip the
 	// entry only (§7.2.2 rules 3-5).

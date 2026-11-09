@@ -162,9 +162,10 @@ func agentPickerAnswer(entries []paletteEntry, typed string, sel int) string {
 	return typed
 }
 
-// agentPickerOpen reports whether an agent-choice step needs the flyover.
+// agentPickerOpen reports whether a choice step needs the flyover: the
+// agent questions or the bare /plugins marketplace browse.
 func (m *model) agentPickerOpen() bool {
-	if m.pendingBgAgent != nil {
+	if m.pendingBgAgent != nil || m.pendingPluginBrowse != nil {
 		return true
 	}
 	w := m.pendingWorkflowWizard
@@ -215,6 +216,14 @@ func (m *model) renderAgentPicker(boxWidth int) string {
 		sel = w.sel
 		title = lipgloss.NewStyle().Bold(true).Render("background agent") +
 			dim("  ↑↓ choose · enter accept · type to filter · esc cancel")
+	case m.pendingPluginBrowse != nil:
+		// Before the workflow case below: agentPickerOpen() covers this state
+		// too, and that case dereferences the wizard state.
+		w := m.pendingPluginBrowse
+		entries = browseEntries(w.choices)
+		sel = w.sel
+		title = lipgloss.NewStyle().Bold(true).Render("install from marketplaces") +
+			dim("  ↑↓ choose · enter install · type to filter · esc cancel")
 	case m.agentPickerOpen():
 		w := m.pendingWorkflowWizard
 		role := w.roles[w.roleIdx]
@@ -239,7 +248,11 @@ func (m *model) renderAgentPicker(boxWidth int) string {
 		lines = append(lines, paletteRow(filtered[i], inner, i == sel))
 	}
 	if len(filtered) == 0 {
-		lines = append(lines, dim("no agent matches"))
+		if m.pendingPluginBrowse != nil {
+			lines = append(lines, dim("no marketplace matches"))
+		} else {
+			lines = append(lines, dim("no agent matches"))
+		}
 	}
 	if w := m.pendingBgAgent; w != nil && !w.disarmed && !w.deadline.IsZero() {
 		secs := int(time.Until(w.deadline).Seconds() + 0.999)

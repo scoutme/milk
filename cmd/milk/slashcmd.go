@@ -302,7 +302,17 @@ var commandRegistry = []cmdSpec{
   /bg start <task>       spawn a background agent to research <task>
   /bg stop <id>          terminate a running background agent`},
 	{name: cmdKeys, hosts: hostTUI, desc: "list the keyboard shortcuts", help: `  /keys                        list the keyboard shortcuts (panels, navigation, input)`},
-	{name: cmdPlugins, hosts: hostTUI, desc: "list installed plugins", help: `  /plugins                     list installed plugins (skills, MCP servers) and their warnings`},
+	{name: cmdPlugins, hosts: hostTUI, desc: "list installed plugins, browse marketplaces, or run the distribution suite", hint: "[add|marketplace|install|list|details|update|remove|shim]", help: `  /plugins                     installed view + browse flyover: install from registered marketplaces
+  /plugins add <ref>           install by reference (owner/repo | https://… | npm:pkg), no clone; --ref/--sha pin
+  /plugins marketplace add <ref>  register a catalog (the marketplace.json interchange)
+  /plugins marketplace list    registered catalogs
+  /plugins install <name>@<mkt>  install from a registered marketplace
+  /plugins list                installed plugins (records + hand-installed drop-ins)
+  /plugins details <name>      install record and loaded components
+  /plugins update [name]       refetch from recorded sources (all when bare)
+  /plugins remove <name>       uninstall (PLUGIN_DATA preserved)
+  /plugins shim <dir>          write portable manifests into a .claude-plugin/ package
+  mutations reload the plugin set in place — no restart`},
 	{name: cmdNotifications, hosts: hostTUI, desc: "show or clear the notification history", hint: "[list [<count>]|clear]", help: `  /notifications               show last 20 notifications (timestamps + hints)
   /notifications list          show the full notification history, unfiltered
   /notifications list <count>  show the last <count> notifications
@@ -319,7 +329,9 @@ var commandRegistry = []cmdSpec{
 	{name: "/quit", hosts: hostTUI, desc: "quit (alias for /exit)"},
 }
 
-// specFor returns the registry entry for a command name (or alias).
+// specFor returns the registry entry for a command name (or alias) — the
+// static registry first, then the runtime plugin-command store (ADR-0104
+// Part IV), so one lookup serves both stores everywhere.
 func specFor(name string) (cmdSpec, bool) {
 	for _, s := range commandRegistry {
 		if s.name == name {
@@ -331,17 +343,26 @@ func specFor(name string) (cmdSpec, bool) {
 			}
 		}
 	}
+	if pc, ok := lookupPluginSlash(name); ok {
+		return pc.spec, true
+	}
 	return cmdSpec{}, false
 }
 
 // registryNames returns every executable name — canonical names in registry
 // order plus aliases. This is the recognition set for extractSlashCommand and
 // the tab-completion cycle (slashCommands).
+// registryNames returns every executable name — canonical names in registry
+// order, aliases inline, plus the runtime plugin commands (the recognition
+// set is dual-store: static registry ∪ installed plugin commands).
 func registryNames() []string {
-	names := make([]string, 0, len(commandRegistry))
+	names := make([]string, 0, len(commandRegistry)+8)
 	for _, s := range commandRegistry {
 		names = append(names, s.name)
 		names = append(names, s.aliases...)
+	}
+	for _, s := range pluginSlashSpecs() {
+		names = append(names, s.name)
 	}
 	return names
 }
@@ -466,6 +487,20 @@ func buildInteractiveHelp() string {
 		if blk.note != "" {
 			b.WriteByte('\n')
 			b.WriteString(blk.note)
+		}
+	}
+	// Plugin commands (ADR-0104 Part IV) form a live final block: the store
+	// is runtime-extensible, so /help grows and shrinks with installs while
+	// the static blocks — and the cached interactiveHelp string the
+	// cmdVariants init reads — stay untouched ("Routing" and "Plugins" are
+	// both 7 chars, so the header keeps the exact table width).
+	if specs := pluginSlashSpecs(); len(specs) > 0 {
+		b.WriteString("\n\n── Plugins ──────────────────────────────────────────────────────────────")
+		for _, s := range specs {
+			if s.help != "" {
+				b.WriteByte('\n')
+				b.WriteString(s.help)
+			}
 		}
 	}
 	return b.String()

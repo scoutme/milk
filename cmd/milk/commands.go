@@ -104,8 +104,11 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if cmd == cmdPlugins {
-		m.appendTranscript(handlePluginsCmd())
-		return m, nil
+		// Bare /plugins renders the loader view synchronously; a
+		// subcommand runs the shared distribution action layer off the
+		// update loop (plugins_cmd.go) and reports back via
+		// pluginsActionMsg with a live reload after mutations.
+		return m.handlePluginsCmd(strings.TrimSpace(rest))
 	}
 	if cmd == cmdNotifications {
 		return m.handleNotificationsCmd(strings.TrimSpace(rest)), nil
@@ -157,7 +160,10 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m.handleRestartCmd(strings.TrimSpace(rest))
 	}
 	if cmd == "/help" {
-		output := renderHelp(interactiveHelp, m.vpWidth())
+		// /help renders a FRESH build every time: the static blocks are
+		// cheap to assemble and the plugin-command block (ADR-0104 Part IV)
+		// is runtime-extensible — a cached string would go stale on install.
+		output := renderHelp(buildInteractiveHelp(), m.vpWidth())
 		m.colorizeForce = true
 		m.appendTranscript(output + "\n")
 		return m, nil
@@ -1190,10 +1196,11 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 	return m, nil
 }
 
-// execAgentList formats all configured agent backends, marking the active
-// primary agent with "P" and the active escalation agent with "E".
+// execAgentList formats all agents milk can offer — config entries plus
+// runtime plugin agents — marking the active primary agent with "P" and the
+// active escalation agent with "E"; plugin-owned entries are tagged (plugin).
 func execAgentList(st *interactiveState) string {
-	agents := st.cfg.Agents
+	agents := st.cfg.ConfiguredAgents()
 	if len(agents) == 0 {
 		agents = []config.AgentConfig{st.cfg.ActiveAgent()}
 	}
@@ -1221,6 +1228,9 @@ func execAgentList(st *interactiveState) string {
 			provider = "local"
 		}
 		fmt.Fprintf(&b, "[%s] %s  %s  %s  [%s]", marker, bold(a.Name), dim(a.URL), dim(a.Model), provider)
+		if config.IsPluginAgent(a.Name) {
+			b.WriteString("  (plugin)")
+		}
 		if i < len(agents)-1 {
 			b.WriteByte('\n')
 		}

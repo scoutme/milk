@@ -69,7 +69,7 @@ func TestInitPlugins_EndToEnd(t *testing.T) {
 	write("mcp.json", `{"$schema": "`+plugin.SchemaMCP+`", "mcpServers": {
 		"tools": {"type": "stdio", "command": "true"}}}`)
 
-	initPlugins()
+	initPlugins(config.Config{})
 
 	cfg := config.Config{Agents: []config.AgentConfig{
 		{Name: "primary"},
@@ -92,7 +92,7 @@ func TestInitPlugins_EndToEnd(t *testing.T) {
 	}
 
 	// /plugins render mentions the plugin and its components.
-	out := handlePluginsCmd()
+	out := renderPluginsView()
 	for _, want := range []string{"demo", "ship", "mcp: tools", "assigned agents: primary"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("/plugins output missing %q:\n%s", want, out)
