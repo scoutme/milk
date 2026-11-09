@@ -173,3 +173,36 @@ suite + `-race` on `cmd/milk` + `internal/plugin`, gofmt/vet clean.
 PR packaging (unchanged from the pre-review plan): split by concern —
 `feat(plugin)` (the theme) and `fix(tui)` (focus/Esc batch) — with Phase 1
 folded into the `feat(plugin)` branch before it goes up.
+
+
+---
+
+## Progress log
+
+- [x] **C1** — `ee9b67b`: parse-time validation (before the owner/repo shorthand can
+  claim `../x`) + `plugin.ResolveRelative` at both install joins. Red→green on
+  both levels; the red run also exposed the shorthand-swallow (`./beta` parsed
+  as GitHub repo).
+- [x] **W1** — `25bd781`: **refined from the plan** — the word-boundary rule now
+  applies to the `:*` command form only; the bare-`*` form keeps string-prefix
+  semantics (Claude's explicit fuzzy stem — `Bash(echo ON*)` legitimately
+  expands `echo ONE`, pinned). Dangerous-flag deny-list + honest-scope pass on
+  code + ADR. Red→green with the pre-fix matcher executing both hazards.
+- [x] **W2** — `fd0d7ea`: shared `pluginsHTTP` (2 min) at all four call sites,
+  DefaultClient deliberately unbounded in the test so the mechanism is what's
+  proven. Red captured the bug in miniature: the first run hung the test
+  harness until the fixture's handler was made Close-aware.
+- [x] **W3** — `baf4954`: yaml.v3 frontmatter (scalar + list `allowed-tools`,
+  `[scope]` hint round-trip), invalid YAML warns-and-skips. Red reproduced the
+  review's exact complaint (`allowed-tools = []`).
+- [x] **W4** — `e29e309`: rename-aside swap (restore-on-failure), distinct
+  "installed …, but bookkeeping failed" error, plugin half kept + returned.
+- [x] **W5** — `0e798dd`: per-source snapshot names (`owner-repo` / host-base),
+  refuse-before-fetch. **Deviation from "refuse/rename", deliberate**: refuse
+  only — with unique slugs a collision cannot come from a different source and
+  there is no marketplace-update command (re-register = remove first). Existing
+  old-name snapshots keep resolving via the dir-alias key.
+
+Phase 1 verified: `internal/plugin` + full `cmd/milk` suites green locally at
+each step. Phase 2 (S1–S3 hardening) and Phase 3 (S4–S5 cleanup) are [ ] —
+not started.
