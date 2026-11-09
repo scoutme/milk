@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/scoutme/milk/internal/agent/local"
 	"github.com/scoutme/milk/internal/config"
@@ -253,6 +254,11 @@ type pluginSlashCmd struct {
 var (
 	pluginCmdsMu sync.RWMutex
 	pluginCmds   []pluginSlashCmd
+	// pluginSpecsCache is the immutable []cmdSpec snapshot the per-keystroke
+	// readers load (review S5): registryNames walks it on every completion
+	// keypress, so it must not take a lock or rebuild — setPluginCommands
+	// is the single writer and refreshes the snapshot eagerly.
+	pluginSpecsCache atomic.Value // []cmdSpec
 )
 
 // buildPluginSlashCmds derives collision-checked specs from the loaded
@@ -300,21 +306,34 @@ func buildPluginSlashCmds(loaded []loadedPlugin) ([]pluginSlashCmd, []string) {
 }
 
 // setPluginCommands replaces the store (startup and every hot reload —
-// removals drop their commands with everything else).
+// removals drop their commands with everything else) and refreshes the
+// spec snapshot in one step.
 func setPluginCommands(cmds []pluginSlashCmd) {
 	pluginCmdsMu.Lock()
 	pluginCmds = cmds
 	pluginCmdsMu.Unlock()
+	pluginSpecsCache.Store(pluginSpecsBuild())
 }
 
-// pluginSlashSpecs returns the specs for the dual-store readers.
-func pluginSlashSpecs() []cmdSpec {
+func pluginSpecsBuild() []cmdSpec {
 	pluginCmdsMu.RLock()
 	defer pluginCmdsMu.RUnlock()
 	out := make([]cmdSpec, len(pluginCmds))
 	for i, pc := range pluginCmds {
 		out[i] = pc.spec
 	}
+	return out
+}
+
+// pluginSlashSpecs returns the specs for the dual-store readers — a pure
+// snapshot load (review S5), with a build fallback for reads that happen
+// before any setPluginCommands call (tests, early startup).
+func pluginSlashSpecs() []cmdSpec {
+	if v := pluginSpecsCache.Load(); v != nil {
+		return v.([]cmdSpec)
+	}
+	out := pluginSpecsBuild()
+	pluginSpecsCache.Store(out)
 	return out
 }
 
