@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"unicode/utf8"
 )
 
 const commandFixture = `---
@@ -198,5 +200,19 @@ func TestParseCommand_YAMLListAllowedTools(t *testing.T) {
 	// loader warns; silent acceptance would ship a half-parsed command).
 	if _, ok := parseCommand("---\ndescription: [unterminated\n---\nbody\n", "x"); ok {
 		t.Error("invalid YAML frontmatter must not parse as a command")
+	}
+}
+
+// TestFirstBodyLine_RuneSafeTruncation (review S3): the description fallback
+// truncates at ~70 bytes and must never split a UTF-8 rune (a derived
+// description ending in an invalid byte renders as U+FFFD garbage).
+func TestFirstBodyLine_RuneSafeTruncation(t *testing.T) {
+	long := strings.Repeat("é", 50) // 100 bytes; byte 69 lands mid-rune
+	got := firstBodyLine(long)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation split a rune: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated line should end in …, got %q", got)
 	}
 }

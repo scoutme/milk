@@ -86,7 +86,9 @@ func firstBodyLine(body string) string {
 			continue
 		}
 		if len(t) > 72 {
-			t = t[:69] + "…"
+			// Rune-safe truncation (review S3): cutting mid-rune leaves an
+			// invalid byte that renders as U+FFFD garbage in descriptions.
+			t = strings.ToValidUTF8(t[:69], "") + "…"
 		}
 		return t
 	}
