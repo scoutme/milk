@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Command is one de-facto commands/*.md slash-command component (Claude
@@ -58,7 +60,11 @@ func (p *Plugin) loadCommands() {
 		cmd, ok := parseCommand(string(raw), strings.TrimSuffix(name, ".md"))
 		if !ok {
 			// No frontmatter → prose file, not a command: silent (skills
-			// set the precedent).
+			// set the precedent). Frontmatter present but unparseable is
+			// a half-shipped command — say so (review W3).
+			if hasFrontmatter(raw) {
+				p.warnf("%s: invalid YAML frontmatter — skipped", rel)
+			}
 			continue
 		}
 		if cmd.Description == "" {
@@ -88,38 +94,80 @@ func firstBodyLine(body string) string {
 }
 
 // parseCommand splits frontmatter and body (shared splitFrontmatter) and
-// reads the three supported fields; unknown frontmatter is tolerated
-// (report-and-continue is the frontmatter norm across components).
+// reads the three supported fields through YAML (review W3 — the previous
+// line parser silently produced zero allowed tools for the common
+// `allowed-tools:\n  - …` list spelling). Unknown keys are ignored
+// (report-and-continue is the frontmatter norm across components); invalid
+// YAML returns false so the loader can warn (frontmatter present) or pass
+// the file as prose (frontmatter absent).
 func parseCommand(text, stem string) (Command, bool) {
 	fm, body, ok := splitFrontmatter(text)
 	if !ok {
 		return Command{}, false
 	}
+	var fields map[string]any
+	if err := yaml.Unmarshal([]byte(fm), &fields); err != nil {
+		return Command{}, false
+	}
 	c := Command{Name: stem, Body: strings.TrimSpace(body)}
-	for _, rawLine := range strings.Split(fm, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, val, found := strings.Cut(line, ":")
-		if !found {
-			continue
-		}
-		val = strings.TrimSpace(val)
+	for key, raw := range fields {
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "description":
-			c.Description = val
-		case "argument-hint":
-			c.ArgumentHint = val
-		case "allowed-tools":
-			for _, item := range strings.Split(val, ",") {
-				if item = strings.TrimSpace(item); item != "" {
-					c.AllowedTools = append(c.AllowedTools, item)
-				}
+			if s, isStr := raw.(string); isStr {
+				c.Description = s
 			}
+		case "argument-hint":
+			c.ArgumentHint = yamlHintString(raw)
+		case "allowed-tools":
+			c.AllowedTools = yamlToolsList(raw)
 		}
 	}
 	return c, true
+}
+
+// yamlHintString normalizes argument-hint: a scalar stays verbatim; a YAML
+// list re-renders bracketed (so the common unquoted `argument-hint: [scope]`
+// round-trips to the literal "[scope]" the line parser produced).
+func yamlHintString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, it := range t {
+			if s, isStr := it.(string); isStr {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			return "[" + strings.Join(parts, ", ") + "]"
+		}
+	}
+	return ""
+}
+
+// yamlToolsList normalizes allowed-tools: the scalar form splits on commas
+// (Claude's one-line spelling), the list form takes the items as-is.
+func yamlToolsList(v any) []string {
+	var out []string
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	switch t := v.(type) {
+	case string:
+		for _, item := range strings.Split(t, ",") {
+			add(item)
+		}
+	case []any:
+		for _, it := range t {
+			if s, isStr := it.(string); isStr {
+				add(s)
+			}
+		}
+	}
+	return out
 }
 
 // maxCommandBytes caps one command file (the same 64 KB class as the skill

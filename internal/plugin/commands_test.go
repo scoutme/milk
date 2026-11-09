@@ -174,3 +174,29 @@ func TestCommandExpand_WordBoundaryAndDangerousFlags(t *testing.T) {
 		t.Errorf("bare-* form must keep string-prefix semantics: %q", got)
 	}
 }
+
+// TestParseCommand_YAMLListAllowedTools (review W3): the common Claude
+// YAML-list spelling of allowed-tools must parse like the scalar form —
+// before the fix the line-based parser read `key: value` only and a list
+// silently produced zero allowed tools (no expansion, no report).
+func TestParseCommand_YAMLListAllowedTools(t *testing.T) {
+	c, ok := parseCommand("---\ndescription: d\nargument-hint: [scope]\nallowed-tools:\n  - Bash(echo ON*)\n  - Bash(false:*)\n---\nx: !`echo ONE`\n", "x")
+	if !ok {
+		t.Fatal("YAML-list frontmatter must parse as a command")
+	}
+	if len(c.AllowedTools) != 2 {
+		t.Fatalf("allowed-tools = %v, want 2 entries", c.AllowedTools)
+	}
+	if got := c.BuildPrompt(""); !strings.Contains(got, "x: ONE") {
+		t.Errorf("list-declared snippet must expand: %q", got)
+	}
+	if c.ArgumentHint != "[scope]" {
+		t.Errorf("argument-hint = %q, want the literal [scope] round-trip", c.ArgumentHint)
+	}
+
+	// Invalid YAML with frontmatter present = not prose: refused (the
+	// loader warns; silent acceptance would ship a half-parsed command).
+	if _, ok := parseCommand("---\ndescription: [unterminated\n---\nbody\n", "x"); ok {
+		t.Error("invalid YAML frontmatter must not parse as a command")
+	}
+}
