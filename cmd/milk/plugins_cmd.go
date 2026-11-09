@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -56,7 +57,7 @@ func pluginsActionRun(tokens []string, opts pluginsActionOpts) (string, bool, er
 		ctxPaths := paths()
 		if src, aerr := plugin.ParseAddRef(tokens[1]); aerr == nil {
 			src.Ref, src.SHA = opts.ref, opts.sha
-			p, warns, err := plugin.InstallPlugin(context.Background(), http.DefaultClient, src, tokens[1],
+			p, warns, err := plugin.InstallPlugin(context.Background(), pluginsHTTP, src, tokens[1],
 				ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
 			if err != nil {
 				return "", false, err
@@ -252,7 +253,7 @@ func runMarketplaceAction(tokens []string, opts pluginsActionOpts) (string, bool
 		}
 		dest := filepath.Join(ctxPaths.marketplaces, name)
 		_ = os.RemoveAll(dest)
-		warns, err := plugin.FetchTo(context.Background(), http.DefaultClient, src, dest)
+		warns, err := plugin.FetchTo(context.Background(), pluginsHTTP, src, dest)
 		if err != nil {
 			return "", false, err
 		}
@@ -452,7 +453,7 @@ func installFromEntry(ep plugin.MarketPlugin, snapDir, origin string, ctxPaths p
 		}
 		return plugin.InstallFromDir(srcDir, origin, ep.Source, ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
 	}
-	return plugin.InstallPlugin(context.Background(), http.DefaultClient, ep.Source,
+	return plugin.InstallPlugin(context.Background(), pluginsHTTP, ep.Source,
 		origin, ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
 }
 
@@ -480,7 +481,7 @@ func updateInstalledPlugin(ctxPaths pluginPaths, name string, in *plugin.Install
 		}
 		return plugin.InstallFromDir(srcDir, rec.Origin, src, ctxPaths.plugins, ctxPaths.data, in)
 	}
-	return plugin.UpdatePlugin(context.Background(), http.DefaultClient, name,
+	return plugin.UpdatePlugin(context.Background(), pluginsHTTP, name,
 		ctxPaths.plugins, ctxPaths.data, in)
 }
 
@@ -876,3 +877,10 @@ func (p pluginPaths) installs() *plugin.Installs {
 }
 
 func (p pluginPaths) installsMust() *plugin.Installs { return p.installs() }
+
+// pluginsHTTP is the one HTTP client every distribution fetch runs on
+// (review W2): bounded so a stalled peer can never wedge the TUI — the
+// action goroutine would otherwise hold the pluginsBusy latch forever and
+// pluginsActionMsg would never arrive. FetchTo's own 2-minute default only
+// covers nil clients; the action layer must pass THIS one.
+var pluginsHTTP = &http.Client{Timeout: 2 * time.Minute}
