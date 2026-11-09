@@ -37,6 +37,20 @@ func resolveWithin(root, rel string) (string, error) {
 	return resolvedTarget, nil
 }
 
+// ResolveRelative joins a marketplace-relative source path onto its snapshot
+// root and returns the absolute path, refusing anything that escapes root —
+// the install-path containment behind ParseMarketplaceSource's parse-time
+// check (review C1): both catalog entries and bookkeeping records land here,
+// so a poisoned path can never copy outside the snapshot. Symlink-aware via
+// contains() (§4.1 rule 3 at install time).
+func ResolveRelative(root, rel string) (string, error) {
+	target := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(rel, "./")))
+	if !contains(root, target) {
+		return "", fmt.Errorf("relative source %q escapes the marketplace root", rel)
+	}
+	return target, nil
+}
+
 // contains reports whether candidate is root or inside root after symlink
 // resolution. Used for free-form paths (e.g. an expanded cwd) that are not
 // required to carry the "./" prefix. Neither side needs to exist yet (the

@@ -446,9 +446,11 @@ func registeredEntry(marketplaces, entryName string) (plugin.MarketPlugin, strin
 // path previously dropped them) come back for the report.
 func installFromEntry(ep plugin.MarketPlugin, snapDir, origin string, ctxPaths pluginPaths) (*plugin.Plugin, []string, error) {
 	if ep.Source.Kind == plugin.SourceRelative {
-		return plugin.InstallFromDir(
-			filepath.Join(snapDir, filepath.FromSlash(strings.TrimPrefix(ep.Source.Path, "./"))),
-			origin, ep.Source, ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
+		srcDir, err := plugin.ResolveRelative(snapDir, ep.Source.Path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return plugin.InstallFromDir(srcDir, origin, ep.Source, ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
 	}
 	return plugin.InstallPlugin(context.Background(), http.DefaultClient, ep.Source,
 		origin, ctxPaths.plugins, ctxPaths.data, ctxPaths.installs())
@@ -472,9 +474,11 @@ func updateInstalledPlugin(ctxPaths pluginPaths, name string, in *plugin.Install
 			return nil, nil, fmt.Errorf("update %s: %w", name, err)
 		}
 		src := plugin.Source{Kind: plugin.SourceRelative, Path: rec.Path}
-		return plugin.InstallFromDir(
-			filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(rec.Path, "./"))),
-			rec.Origin, src, ctxPaths.plugins, ctxPaths.data, in)
+		srcDir, err := plugin.ResolveRelative(dir, rec.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("update %s: %w", name, err)
+		}
+		return plugin.InstallFromDir(srcDir, rec.Origin, src, ctxPaths.plugins, ctxPaths.data, in)
 	}
 	return plugin.UpdatePlugin(context.Background(), http.DefaultClient, name,
 		ctxPaths.plugins, ctxPaths.data, in)

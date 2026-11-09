@@ -97,3 +97,30 @@ func TestSource_CanonicalPin(t *testing.T) {
 		t.Errorf("canonical with sha = %q", got)
 	}
 }
+
+// TestParseMarketplaceSource_RelativePathContainment (review C1): a
+// marketplace-relative source must stay inside the marketplace root —
+// ".."-anywhere and absolute paths are refused at parse time, the same rule
+// the git-subdir object form already enforced (source.go). Before the fix
+// these parsed as plain Relative sources and the install joined them onto
+// the snapshot dir uncontained — a crafted marketplace.json could copy
+// arbitrary host directories into the plugin tree.
+func TestParseMarketplaceSource_RelativePathContainment(t *testing.T) {
+	for _, tc := range []struct{ raw, why string }{
+		{`"../escape"`, "parent segment"},
+		{`"./x/../../y"`, "mid-path parent"},
+		{`"x/../y"`, "cleanable parent"},
+		{`"/etc"`, "absolute unix"},
+		{`"a..b/c"`, "dot-dot substring (same rule as git-subdir)"},
+	} {
+		if _, err := ParseMarketplaceSource(json.RawMessage(tc.raw)); err == nil {
+			t.Errorf("source %s (%s) must be refused", tc.raw, tc.why)
+		}
+	}
+	if _, err := ParseMarketplaceSource(json.RawMessage(`"./plugins/x"`)); err != nil {
+		t.Errorf("plain relative must parse: %v", err)
+	}
+	if _, err := ParseMarketplaceSource(json.RawMessage(`"plugins/x"`)); err != nil {
+		t.Errorf("bare relative must parse: %v", err)
+	}
+}

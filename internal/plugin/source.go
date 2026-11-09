@@ -3,6 +3,7 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -92,6 +93,9 @@ func ParseAddRef(s string) (Source, error) {
 	if repo, ok := githubRepoFromURL(s); ok {
 		return Source{Kind: SourceGitHub, Repo: repo}, nil
 	}
+	if strings.Contains(s, "..") || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "/") {
+		return Source{}, fmt.Errorf("unrecognized plugin reference %q (want owner/repo, https://…, or npm:pkg)", s)
+	}
 	if repoShorthand.MatchString(s) && !strings.Contains(s, "://") {
 		return Source{Kind: SourceGitHub, Repo: s}, nil
 	}
@@ -131,14 +135,18 @@ func ParseMarketplaceSource(raw json.RawMessage) (Source, error) {
 		switch {
 		case s == "":
 			return Source{}, fmt.Errorf("source: empty string")
-		case strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../"):
-			return Source{Kind: SourceRelative, Path: s}, nil
 		case strings.Contains(s, "://"):
 			return ParseAddRef(s)
+		case strings.HasPrefix(s, ".") || strings.HasPrefix(s, "/") || strings.Contains(s, "..") || filepath.IsAbs(s):
+			// Relative spellings — including hostile ones — reach the
+			// validator before the owner/repo shorthand can claim them
+			// ("../x" and "./x" both match repoShorthand: dots are legal
+			// repo chars). Valid ones parse as Relative, the rest error.
+			return parseRelativeSource(s)
 		case repoShorthand.MatchString(s):
 			return Source{Kind: SourceGitHub, Repo: s}, nil
 		default:
-			return Source{Kind: SourceRelative, Path: s}, nil
+			return parseRelativeSource(s)
 		}
 	}
 	obj, err := decodeObject(raw, "source")
@@ -202,4 +210,16 @@ func ParseMarketplaceSource(raw json.RawMessage) (Source, error) {
 	out.Ref = opt("ref")
 	out.SHA = opt("sha")
 	return out, nil
+}
+
+// parseRelativeSource validates a marketplace-relative source path (review
+// C1): it must be relative and must not contain ".." anywhere — the exact
+// rule the git-subdir object form already enforced above, now applied to
+// every relative spelling. Install-time containment is enforced again by
+// ResolveRelative (defense in depth: a poisoned record can carry any path).
+func parseRelativeSource(p string) (Source, error) {
+	if strings.HasPrefix(p, "/") || filepath.IsAbs(p) || strings.Contains(p, "..") {
+		return Source{}, fmt.Errorf("source: relative path %q must stay inside the marketplace root (no .., not absolute)", p)
+	}
+	return Source{Kind: SourceRelative, Path: p}, nil
 }
