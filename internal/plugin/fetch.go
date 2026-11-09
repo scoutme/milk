@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -98,21 +99,28 @@ func archiveEndpoint(src Source) (string, error) {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	switch {
-	case strings.Contains(src.URL, "github.com/"):
+	u, perr := url.Parse(src.URL)
+	if perr != nil || u.Host == "" {
+		return "", fmt.Errorf("git-subdir: cannot read a host from %q", src.URL)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("git-subdir: only https URLs are supported (got %q)", src.URL)
+	}
+	switch u.Host {
+	case "github.com":
 		repo, ok := githubRepoFromURL(strings.TrimSuffix(src.URL, ".git"))
 		if !ok {
 			return "", fmt.Errorf("git-subdir: cannot read owner/repo from %q", src.URL)
 		}
 		return "https://api.github.com/repos/" + repo + "/tarball/" + ref, nil
-	case strings.Contains(src.URL, "gitlab.com/"):
+	case "gitlab.com":
 		// GitLab's universal pattern: /-/archive/<ref>/<name>-<ref>.tar.gz
 		trimmed := strings.TrimSuffix(strings.TrimPrefix(src.URL, "https://"), ".git")
 		trimmed = strings.TrimSuffix(trimmed, "/")
 		name := path.Base(trimmed)
 		return "https://" + trimmed + "/-/archive/" + ref + "/" + name + "-" + ref + ".tar.gz", nil
 	}
-	return "", fmt.Errorf("no archive endpoint known for %q — clone it into ~/.milk/plugins manually (ADR-0104: milk never runs git)", src.URL)
+	return "", fmt.Errorf("git-subdir: unsupported host %q — no archive endpoint known (clone it into ~/.milk/plugins manually; ADR-0104: milk never runs git)", u.Host)
 }
 
 func httpGet(ctx context.Context, client *http.Client, url, accept string) ([]byte, error) {
@@ -207,14 +215,15 @@ func commonWrapper(names []string) string {
 	return first + "/"
 }
 
-// entry is one normalized archive file ready to keep.
+// entry is one normalized archive file kept into the install.
 type entry struct {
 	rel  string
-	open func() (io.ReadCloser, int64, error)
+	blob []byte // materialized payload, size-checked against its header
 }
 
 func extractFiltered(data []byte, dest string) ([]string, error) {
 	var entries []entry
+	skipped := 0
 	if isZip(data) {
 		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
@@ -239,21 +248,41 @@ func extractFiltered(data []byte, dest string) ([]string, error) {
 		}
 		strip := commonWrapper(names)
 		for _, k := range kept {
-			f := k.f
 			rel := strings.TrimPrefix(k.rel, strip)
 			if rel == "" || rel == k.rel && strip != "" {
 				continue
 			}
-			entries = append(entries, entry{rel: rel, open: func() (io.ReadCloser, int64, error) {
-				rc, err := f.Open()
-				return rc, int64(f.UncompressedSize64), err
-			}})
+			if !keepSurface(rel) {
+				skipped++
+				continue
+			}
+			// Materialize only surface-kept entries (review S1): one read
+			// per kept file — never the asset payload the filter exists to
+			// skip — and never the k full-archive decompressions the lazy
+			// tar path used to do.
+			rc, err := k.f.Open()
+			if err != nil {
+				return nil, err
+			}
+			declared := int64(k.f.UncompressedSize64)
+			blob, err := readBounded(rc, declared)
+			rc.Close()
+			if err != nil {
+				return nil, fmt.Errorf("archive entry %q: %w", k.f.Name, err)
+			}
+			entries = append(entries, entry{rel: rel, blob: blob})
 		}
 	} else {
-		var kept []struct {
+		// tar: pass 1 scans names/headers (one decompression), pass 2 is
+		// ONE more scan materializing just the surface-kept payloads —
+		// the previous lazy path re-decompressed the whole archive per
+		// kept entry (k+1 passes, pathological exactly when the filter
+		// exists: big archives with few kept files).
+		type th struct {
 			rel string
 			hdr *tar.Header
 		}
+		var kept []th
 		var names []string
 		if err := eachTar(data, func(hdr *tar.Header, r io.Reader) error {
 			rel := normEntry(hdr.Name)
@@ -261,39 +290,42 @@ func extractFiltered(data []byte, dest string) ([]string, error) {
 				return nil
 			}
 			names = append(names, rel)
-			h := *hdr
-			kept = append(kept, struct {
-				rel string
-				hdr *tar.Header
-			}{rel, &h})
+			kept = append(kept, th{rel, hdr})
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 		strip := commonWrapper(names)
+		want := map[string]string{} // archive entry name -> final rel
 		for _, k := range kept {
 			rel := strings.TrimPrefix(k.rel, strip)
 			if rel == "" || (rel == k.rel && strip != "") {
 				continue
 			}
-			hdr := k.hdr
-			entries = append(entries, entry{rel: rel, open: func() (io.ReadCloser, int64, error) {
-				pr, pw := io.Pipe()
-				go func() {
-					pw.CloseWithError(eachTarOne(data, hdr.Name, pw))
-				}()
-				return pr, hdr.Size, nil
-			}})
+			if !keepSurface(rel) {
+				skipped++
+				continue
+			}
+			want[k.hdr.Name] = rel
+		}
+		if err := eachTar(data, func(hdr *tar.Header, r io.Reader) error {
+			rel, ok := want[hdr.Name]
+			if !ok {
+				return nil
+			}
+			blob, err := readBounded(r, hdr.Size)
+			if err != nil {
+				return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
+			}
+			entries = append(entries, entry{rel: rel, blob: blob})
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 	}
 
 	var warns []string
-	skipped := 0
 	for _, e := range entries {
-		if !keepSurface(e.rel) {
-			skipped++
-			continue
-		}
 		rel := filepath.FromSlash(e.rel)
 		target := filepath.Join(dest, rel)
 		if !contains(dest, target) {
@@ -302,21 +334,7 @@ func extractFiltered(data []byte, dest string) ([]string, error) {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return nil, err
 		}
-		rc, size, err := e.open()
-		if err != nil {
-			return nil, err
-		}
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-		if err != nil {
-			rc.Close()
-			return nil, err
-		}
-		_, err = io.Copy(f, io.LimitReader(rc, size+1))
-		rc.Close()
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
+		if err := os.WriteFile(target, e.blob, 0o644); err != nil {
 			return nil, err
 		}
 	}
@@ -324,6 +342,21 @@ func extractFiltered(data []byte, dest string) ([]string, error) {
 		warns = append(warns, fmt.Sprintf("skipped %d archive entries outside the plugin surface (assets, other-client layouts, scaffolding)", skipped))
 	}
 	return warns, nil
+}
+
+// readBounded reads one entry's payload capped at declared+1 bytes and
+// refuses size lies (review S1): a header declaring fewer bytes than the
+// payload carries — or a stream ending early — is an error, never a silent
+// truncation.
+func readBounded(r io.Reader, declared int64) ([]byte, error) {
+	blob, err := io.ReadAll(io.LimitReader(r, declared+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(blob)) != declared {
+		return nil, fmt.Errorf("size mismatch: header declares %d bytes, payload is %d", declared, len(blob))
+	}
+	return blob, nil
 }
 
 // eachTar runs fn over every regular tar entry of the in-memory archive.
@@ -354,15 +387,6 @@ func eachTar(data []byte, fn func(hdr *tar.Header, r io.Reader) error) error {
 // eachTarOne streams exactly one entry's content into w (second-pass reads
 // are per entry — the archive is in memory, so this is cheap and keeps the
 // two-pass layout simple).
-func eachTarOne(data []byte, name string, w io.Writer) error {
-	return eachTar(data, func(hdr *tar.Header, r io.Reader) error {
-		if hdr.Name != name {
-			return nil
-		}
-		_, err := io.Copy(w, r)
-		return err
-	})
-}
 
 func isZip(data []byte) bool {
 	return len(data) > 3 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4

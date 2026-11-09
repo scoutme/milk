@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fmt"
 )
 
 // rewriteTransport sends every request to a test server — the fetchers
@@ -205,5 +207,95 @@ func TestArchiveEndpoints(t *testing.T) {
 	}
 	if _, err := archiveEndpoint(Source{Kind: SourceGitSubdir, URL: "https://codeberg.org/a/b"}); err == nil {
 		t.Error("unknown host must report loudly, never fall back to git")
+	}
+}
+
+// TestExtractFiltered_TarSizeLieCannotSmuggleBytes (review S1, corrected):
+// a header declaring FEWER bytes than its payload cannot smuggle extra
+// bytes through — tar/zip readers enforce the declared size — so the
+// surviving artifact is exactly the declared prefix, and the wrapper's own
+// contract (readBounded) rejects the mismatch classes a reader can pass
+// through: truncation and a declared size the payload does not reach.
+func TestExtractFiltered_TarSizeLieCannotSmuggleBytes(t *testing.T) {
+	dest := t.TempDir()
+	if _, err := extractFiltered(lyingTarGzip(t), dest); err != nil {
+		t.Fatalf("reader-enforced size lie should extract the declared prefix, got: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("payload must be cut at the declared 5 bytes, got %q", got)
+	}
+}
+
+func TestReadBounded_SizeContract(t *testing.T) {
+	if _, err := readBounded(strings.NewReader("hello world"), 5); err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Errorf("payload beyond the declared size must trip the +1 byte, got: %v", err)
+	}
+	if _, err := readBounded(strings.NewReader("hello"), 11); err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Errorf("stream ending early must trip the contract, got: %v", err)
+	}
+	if b, err := readBounded(strings.NewReader("hello"), 5); err != nil || string(b) != "hello" {
+		t.Errorf("exact payload must pass, got %q / %v", b, err)
+	}
+}
+
+// lyingTarGzip builds a tar.gz with one surface entry whose header declares
+// Size=5 while the payload is 11 bytes ("hello world"); the header checksum
+// is recomputed so the lie passes the reader.
+func lyingTarGzip(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	body := []byte("hello world")
+	if err := tw.WriteHeader(&tar.Header{Name: "wrap/plugin.json", Mode: 0o644, Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	copy(raw[124:136], []byte("00000000005\x00")) // Size = 5
+	for i := 148; i < 156; i++ {
+		raw[i] = ' '
+	}
+	var sum int64
+	for _, b := range raw[:512] {
+		sum += int64(b)
+	}
+	copy(raw[148:156], []byte(fmt.Sprintf("%06o\x00 ", sum)))
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return gz.Bytes()
+}
+
+// TestArchiveEndpoint_HostAndHTTPS (review S2): host matching must be exact
+// (net/url Host, not substring) and only https fetches are supported — a
+// substring match on "github.com/" let "https://evil.com/github.com/a/b"
+// pretend to be GitHub, and plain http URLs fetched in the clear.
+func TestArchiveEndpoint_HostAndHTTPS(t *testing.T) {
+	if _, err := archiveEndpoint(Source{Kind: SourceGitSubdir, URL: "http://github.com/a/b", Path: "./x"}); err == nil {
+		t.Error("plain http must be refused")
+	} else if !strings.Contains(err.Error(), "https") {
+		t.Errorf("http refusal should say https, got: %v", err)
+	}
+	if _, err := archiveEndpoint(Source{Kind: SourceGitSubdir, URL: "https://evil.com/github.com/a/b", Path: "./x"}); err == nil {
+		t.Error("substring host spoof must be refused")
+	} else if !strings.Contains(err.Error(), "host") {
+		t.Errorf("spoof refusal should name the host, got: %v", err)
+	}
+	if ep, err := archiveEndpoint(Source{Kind: SourceGitSubdir, URL: "https://github.com/a/b", Path: "./x"}); err != nil || !strings.Contains(ep, "api.github.com/repos/a/b/tarball") {
+		t.Errorf("real github URL must map to its archive endpoint, got %q / %v", ep, err)
 	}
 }
