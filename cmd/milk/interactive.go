@@ -74,6 +74,12 @@ type initWizardState struct {
 	// process cwd. Set by initWizardStart, so a sandboxed/foreign session
 	// dir writes .milk/config.json in the right place.
 	cwd string
+	// scope is where the committed config is saved: "local"/"global", or ""
+	// while unanswered. The scope step (mirroring the CLI's "Apply to
+	// local?" prompt) fills it; a host may preselect it from /config init
+	// local|global or `milk config init --local|--global`, in which case the
+	// question is skipped.
+	scope string
 	// limits step
 	contextWindowTokens int // context_window_tokens (0 = not set); message_budget_chars/
 	// max_tool_iterations are auto-derived from this by AgentMessageBudget/
@@ -118,6 +124,7 @@ const (
 	initStepRunCmd                            // tuning: run_cmd (local provider only)
 	initStepLimits                            // tuning: context_window_tokens (proposes a models.dev catalog match)
 	initStepAgentTools                        // tuning: which agents to enable as tools
+	initStepScope                             // where to save: local project vs global (CLI's "Apply to local?")
 	initStepOpenConfig                        // ask whether to open config in editor
 	initStepDone
 )
@@ -279,9 +286,17 @@ type interactiveState struct {
 	lastRouteReason string
 	cwd             string
 	cfg             config.Config
-	mem             *memory.Store
-	cs              *claudesettings.Store // Claude project settings (permissions persistence)
-	program         *tea.Program          // set after tea.NewProgram, before Run
+	// saveScope is the explicit config-save scope for the current slash
+	// command family — "local"/"global" from a --local/--global token
+	// (takeScopeFlag), or "" for the auto-detected default. Set when
+	// /config, /agent or /mcp parse their arguments and consumed by the
+	// config saves those commands trigger — including a later wizard
+	// commit, which is why it lives here instead of being threaded through
+	// every step handler.
+	saveScope string
+	mem       *memory.Store
+	cs        *claudesettings.Store // Claude project settings (permissions persistence)
+	program   *tea.Program          // set after tea.NewProgram, before Run
 
 	// toolFutures caches per-tool answer channels created by OnToolUse as soon
 	// as each tool call is detected in the stream. The user is asked immediately
@@ -1243,7 +1258,7 @@ func runToolScopeOp(toolName, scopeSeg string, st *interactiveState, op toolScop
 	for _, sc := range scopes {
 		msgs = append(msgs, op.apply(toolName, sc, st))
 	}
-	if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+	if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 		msgs = append(msgs, fmt.Sprintf("%s %s tool-agent %q (config save failed: %v)", milkTag(), op.past, toolName, err))
 	}
 	return strings.Join(msgs, "\n")
@@ -1420,6 +1435,12 @@ func findAgentIdx(cfg config.Config, agentName string) int {
 // execMCP dispatches /mcp <verb> [args] subcommands.
 // toolSets is the live runtime map of agent-name → *mcp.ToolSet; may be nil.
 func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet) string {
+	// Explicit save scope (--local/--global). Host-neutral entry, so ACP and
+	// direct execMCP callers land the same way; only overwrite when a flag is
+	// present, since handleMCPCmd may have already stripped and recorded it.
+	if rest, scope := takeScopeFlag(sub); scope != "" {
+		sub, st.saveScope = rest, scope
+	}
 	parts := strings.Fields(sub)
 	if len(parts) == 0 {
 		return execMCPList("", st, toolSets)
@@ -1628,7 +1649,7 @@ func execMCPAdd(rest string, st *interactiveState) string {
 		Timeout:   fields["timeout"],
 	}
 	updated := config.UpsertMCPServer(&st.cfg, entry)
-	if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+	if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 		return fmt.Sprintf("%s added MCP server %q (config save failed: %v)", milkTag(), name, err)
 	}
 	verb := "added"
@@ -1666,7 +1687,7 @@ func execMCPRemove(name string, st *interactiveState) string {
 	if !removeMCPServer(&st.cfg, name) {
 		return fmt.Sprintf("%s MCP server %q not found", milkTag(), name)
 	}
-	if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+	if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 		return fmt.Sprintf("%s removed MCP server %q (config save failed: %v)", milkTag(), name, err)
 	}
 	return fmt.Sprintf("%s MCP server %q removed", milkTag(), name)
@@ -1683,7 +1704,7 @@ func execMCPSetEnabled(name string, enabled bool, st *interactiveState) string {
 	if !enabled {
 		verb = "disabled"
 	}
-	if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+	if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 		return fmt.Sprintf("%s %s MCP server %q (config save failed: %v)", milkTag(), verb, name, err)
 	}
 	return fmt.Sprintf("%s MCP server %q %s", milkTag(), name, verb)
@@ -1848,7 +1869,7 @@ func execMCPAssign(rest string, assign bool, st *interactiveState) string {
 		}
 	}
 	if changed {
-		if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+		if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 			msgs = append(msgs, fmt.Sprintf("%s %sed %s (config save failed: %v)", milkTag(), verb, quotedNames(servers), err))
 		}
 	}

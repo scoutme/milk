@@ -11,8 +11,10 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/modelsdev"
 )
 
@@ -77,7 +79,7 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		return initStepTuning
 	case initStepTuning:
 		if !st.tuning {
-			return initStepOpenConfig
+			return initStepScope
 		}
 		if p == "local" || p == "" {
 			return initStepRunCmd
@@ -88,6 +90,8 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepLimits:
 		return initStepAgentTools
 	case initStepAgentTools:
+		return initStepScope
+	case initStepScope:
 		return initStepOpenConfig
 	}
 	return initStepDone
@@ -444,6 +448,11 @@ func initWizardPrompt(st *initWizardState) string {
 			milkTag() + " tune now? " + dim("[y/N]") + ": "
 	case initStepAgentTools:
 		return milkTag() + " enable any agents as tools? Enter agent names (comma-separated), or leave blank / type 'default' to skip: "
+	case initStepScope:
+		return milkTag() + " " + lbl + bold("Where should this config live?") + "\n" +
+			dim("         local:  "+filepath.Join(config.LocalConfigDir, "config.json")+" in this project — overrides the global config here") + "\n" +
+			dim("         global: "+config.DirLabel()+"/config.json — every project") + "\n" +
+			milkTag() + " apply to local? " + dim("[Y/n]") + ": "
 	case initStepOpenConfig:
 		return milkTag() + " open config in editor now? [y/N]: "
 	}

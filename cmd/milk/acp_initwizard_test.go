@@ -76,7 +76,7 @@ func TestACPInit_FormDialogsDriveWizard(t *testing.T) {
 		t.Fatal("the form flow must finish the wizard inside the /init turn")
 	}
 	names := acpElicitedNames(*reqs)
-	want := []string{"provider", "url", "model", "escalation", "tuning"}
+	want := []string{"provider", "url", "model", "escalation", "tuning", "scope"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("elicited fields = %v, want %v", names, want)
 	}
@@ -154,7 +154,7 @@ func TestACPInit_FormSecretStepInChatThenResumes(t *testing.T) {
 		t.Fatal("wizard must be done after the remaining dialogs")
 	}
 	names = acpElicitedNames(*reqs)
-	if strings.Join(names, ",") != "provider,url,model,escalation,tuning" {
+	if strings.Join(names, ",") != "provider,url,model,escalation,tuning,scope" {
 		t.Fatalf("elicited fields = %v, want the resumed tail after the credential answer", names)
 	}
 	for _, r := range *reqs {
@@ -269,8 +269,8 @@ func TestACPInit_ChoiceClicksDriveWizard(t *testing.T) {
 	if as.pendingInit != nil {
 		t.Fatal("the choice flow must finish the wizard inside the /init turn")
 	}
-	if len(*reqs) != 5 {
-		t.Fatalf("choice prompts = %d, want one per step (5)", len(*reqs))
+	if len(*reqs) != 6 {
+		t.Fatalf("choice prompts = %d, want one per step (6)", len(*reqs))
 	}
 	first := (*reqs)[0]
 	if !strings.Contains(first.Title, "which AI answers") {
@@ -325,8 +325,8 @@ func TestACPInit_ChoiceCustomFallsToTypedInput(t *testing.T) {
 	if got := as.st.cfg.ActiveAgent().URL; got != "http://localhost:9999" {
 		t.Errorf("committed URL = %q, want the typed answer", got)
 	}
-	if len(*reqs) != 5 {
-		t.Errorf("choice prompts = %d, want the URL step asked once (typed escape) with 4 clicks around it", len(*reqs))
+	if len(*reqs) != 6 {
+		t.Errorf("choice prompts = %d, want the URL step asked once (typed escape) with 5 clicks around it", len(*reqs))
 	}
 }
 

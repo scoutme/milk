@@ -247,10 +247,13 @@ A skin restyles chrome only — header, status bar, turn labels, panel titles, s
 |---|---|
 | `/config` | Print current config JSON in the transcript |
 | `/config show` | The same, annotated per field `[global]`/`[local]`/`[default]` (merging a local `.milk/config.json` when present) |
-| `/config init` | Run the interactive setup wizard (alias: `/init`) |
+| `/config init` | Run the interactive setup wizard (alias: `/init`); like the CLI it asks where to save — project-local `.milk/config.json` or global. `local`/`global` preselects the answer and skips the question |
+| `/config init empty [local\|global]` | Skip the wizard: create just the minimal empty config file (`{}`) — the no-questions bootstrap for a project-local override (default scope: local) |
 | `/config open` | Open `~/.milk/config.json` in the configured editor |
 
-Same commands on the CLI as `milk config`, `milk config init`, `milk config show`, `milk config open`. Editor selection uses `config_editors` (see below).
+Same commands on the CLI as `milk config`, `milk config init` (`--empty` for the no-wizard bootstrap; `--local`/`--global` pick the save scope instead of the prompt), `milk config show`, `milk config open`. Editor selection uses `config_editors` (see below).
+
+The CLI's `--local`/`--global` config-save flags are spelled as `--local`/`--global` tokens on the TUI's config-writing commands (`/agent add|remove|switch|tool …`, `/mcp add|remove|assign|unassign …`); without them a save goes to the project-local config when one exists, else global.
 
 **`milk otel`** manages observability settings — see [docs/guides/operations.md — Observability](../guides/operations.md#observability).
 

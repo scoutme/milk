@@ -60,6 +60,7 @@ var (
 	flagEscalation   string        // --escalation-agent: override escalation agent name
 	flagLocal        bool          // --local: write to .milk/config.json (project-local)
 	flagGlobal       bool          // --global: write to ~/.milk/config.json (global)
+	flagEmpty        bool          // --empty (config init): write the minimal empty config file, no wizard
 	flagOutputFormat string        // --output-format: text|json|stream-json for one-shot prompts
 	flagTurnTimeout  time.Duration // --turn-timeout: hard wall-clock budget for one-shot turns (<=0 disables)
 	flagConfigRoot   string        // --config-root: alternate milk state root instead of ~/.milk
@@ -2322,8 +2323,12 @@ func perceptsForAgent(cfg config.Config, mem *memory.Store, prompt string, forEs
 }
 
 // runInitWizard runs the CLI-mode init wizard, writes ~/.milk/config.json,
-// and prints next-step guidance on success.
+// and prints next-step guidance on success. With --empty the wizard is
+// skipped entirely: just the minimal empty config file (ADR-0045 §4a).
 func runInitWizard() error {
+	if flagEmpty {
+		return runConfigInitEmptyCLI()
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	ask := func(prompt string) string {
 		fmt.Print(prompt)
@@ -2487,7 +2492,7 @@ func runInitWizard() error {
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Print config as JSON (milk config open | init for more)",
+	Short: "Print config as JSON (milk config init --empty | open for more)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigPrint()
 	},
@@ -2497,13 +2502,18 @@ func init() {
 	configCmd.PersistentFlags().BoolVar(&flagLocal, "local", false, "Write to .milk/config.json in the current directory (project-local)")
 	configCmd.PersistentFlags().BoolVar(&flagGlobal, "global", false, "Write to the global config (state root's config.json, default)")
 
-	configCmd.AddCommand(&cobra.Command{
+	configInitCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Interactive setup wizard — configure primary and escalation agents",
+		Long: "Interactive setup wizard — configure primary and escalation agents.\n" +
+			"With --empty: skip the wizard and just create the minimal empty config file ({}) —\n" +
+			"the no-questions bootstrap for a project-local override (default scope local; --global for the global config).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runInitWizard()
 		},
-	})
+	}
+	configInitCmd.Flags().BoolVar(&flagEmpty, "empty", false, "Skip the wizard — write a minimal empty config file ({})")
+	configCmd.AddCommand(configInitCmd)
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "open",
 		Short: "Open config in $EDITOR or system default editor",
@@ -2814,6 +2824,35 @@ func saveConfigForScopeForced(cfg config.Config, scope string) error {
 		}
 	}
 	return config.SaveScopeInForced(cfg, scope, "")
+}
+
+// runConfigInitEmptyCLI implements `milk config init --empty`: create the
+// minimal empty config file without the wizard. The default scope is local —
+// the command's purpose is bootstrapping a project-local override (ADR-0045
+// §4a); --global targets the global config instead.
+func runConfigInitEmptyCLI() error {
+	scope := "local"
+	if flagGlobal && !flagLocal {
+		scope = "global"
+	}
+	path, err := config.SaveEmptyConfigIn(scope, "")
+	if errors.Is(err, config.ErrConfigFileExists) {
+		return fmt.Errorf("%s already exists — edit it with 'milk config open', or delete it first", path)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("empty %s config written to %s\n", scope, path)
+	fmt.Println()
+	fmt.Println("next steps:")
+	fmt.Println("  milk config open                  — edit it (unset fields inherit from the global config)")
+	if scope == "local" {
+		fmt.Println("  milk config agent add … --local   — add a project-specific agent")
+	} else {
+		fmt.Println("  milk config agent add …           — add an agent to the global config")
+	}
+	fmt.Println("  milk                              — start the TUI")
+	return nil
 }
 
 // ensureLocalConfig creates .milk/config.json under dir ("" = process cwd)

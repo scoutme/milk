@@ -286,7 +286,7 @@ func (m model) commitAddAgent(ac config.AgentConfig) model {
 	if isFirst {
 		m.st.cfg.Agent = ac.Name
 	}
-	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
+	if err := saveScoped(m.st.cfg, activeConfigDir(m.st), m.st.saveScope); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -675,7 +675,7 @@ func (m model) commitAddMCP(sc config.MCPServerConfig) model {
 	if updated {
 		verb = "updated"
 	}
-	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
+	if err := saveScoped(m.st.cfg, activeConfigDir(m.st), m.st.saveScope); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s error saving config: %v\n", milkTag(), err))
 		return m
 	}
@@ -734,9 +734,18 @@ func copilotHostname(u string) string {
 
 // handleConfigInitCmd starts the /config init (/init) TUI wizard. The shared
 // core in initwizard_core.go owns the state and the banner+first prompt; the
-// TUI's per-Enter answer handling is handleInitWizardKey below.
-func (m model) handleConfigInitCmd() (tea.Model, tea.Cmd) {
+// TUI's per-Enter answer handling is handleInitWizardKey below. args:
+// "empty [local|global]" bootstraps the minimal config file without the
+// wizard; "local" / "global" preselects where the wizard's result is saved —
+// the slash-command spelling of `milk config init --local|--global`.
+func (m model) handleConfigInitCmd(args string) (tea.Model, tea.Cmd) {
+	empty, scope := parseInitArgs(args)
+	if empty {
+		m.appendTranscript(runConfigInitEmpty(scope, activeConfigDir(m.st)) + "\n")
+		return m, nil
+	}
 	st, banner := initWizardStart(activeConfigDir(m.st))
+	st.scope = scope
 	m.pendingInit = st
 	m.appendTranscript(banner + initWizardRule() + initWizardPrompt(st))
 	m.ta.Reset()
@@ -1213,7 +1222,7 @@ func (m model) commitSwitchAgent(st *switchAgentState) (model, tea.Cmd) {
 	case "escalation":
 		m.st.cfg.EscalationAgent = name
 	}
-	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
+	if err := saveScoped(m.st.cfg, activeConfigDir(m.st), m.st.saveScope); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s warning: could not persist switch: %v\n", milkTag(), err))
 	}
 

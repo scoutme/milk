@@ -160,6 +160,7 @@ func TestACPInitWizard_ConfiguresSessionWithoutRestart(t *testing.T) {
 		{stubURL, "model name"},
 		{"test-model", "escalation agent?"},
 		{"n", "tune now"},
+		{"n", "apply to local"},
 		{"n", "config written to"},
 	}
 	for i, s := range steps {
@@ -184,7 +185,7 @@ func TestACPInitWizard_ConfiguresSessionWithoutRestart(t *testing.T) {
 		t.Errorf("st.cfg agent URL = %q, want %q", got, stubURL)
 	}
 
-	// The config really hit disk (global scope — no local config in cwd).
+	// The config really hit disk (global scope — the scope question answered n).
 	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".milk", "config.json"))
 	if err != nil {
 		t.Fatalf("reading written config: %v", err)
