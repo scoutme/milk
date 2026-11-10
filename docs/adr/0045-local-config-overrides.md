@@ -3,6 +3,10 @@
 - **Status:** accepted
 - **Date:** 2026-09-15
 - **Updated:** 2026-09-25 — aligned with implementation (agents merge-by-name, init --local full wizard)
+- **Updated:** 2026-11-10 — added the no-wizard bootstrap (`milk config init --empty` /
+  `/config init empty`, §4a) and scope parity: the init wizard asks the §4 scope
+  question on every surface (TUI, ACP, CLI), `local`/`global` args and
+  `--local`/`--global` tokens preselect it on the TUI's config-writing commands
 
 ## Context
 
@@ -134,10 +138,14 @@ milk config mcp add name=foo url=http://... --global
 When no `.milk/config.json` exists yet, the user needs a way to bootstrap one.
 Several entry points:
 
-- **`milk config init --local`** creates a minimal `.milk/config.json` containing
-  only `{}` (empty object — all fields inherit from global). The user can then
-  run further `milk config` commands to populate it, or open it in their editor.
-  The `.milk/` directory is created if needed.
+- **`milk config init --empty`** (TUI/ACP: `/config init empty [local|global]`)
+  creates a minimal `.milk/config.json` containing only `{}` (empty object — all
+  fields inherit from global) — the no-wizard bootstrap. The default scope is
+  local (the command's purpose); `--global` targets the global config instead,
+  and an existing file is never overwritten. The user can then run further
+  `milk config` commands to populate it, or open it in their editor. The
+  `.milk/` directory is created if needed. (`milk config init --local` runs the
+  full wizard with the scope preselected, per the 2026-09-25 amendment.)
 
 - **Any `milk config` command with the scope prompt** (Decision #4): when the
   user answers "Y" (local) but no local config exists yet, milk creates

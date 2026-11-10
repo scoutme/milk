@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,6 +100,47 @@ func saveLocalIn(cfg Config, dir string, force bool) error {
 		setPersistGuard(false) // the forced write put a real config on disk
 	}
 	return nil
+}
+
+// ErrConfigFileExists is returned by SaveEmptyConfigIn when the target config
+// file already exists: an empty init is a bootstrap, never a reset.
+var ErrConfigFileExists = errors.New("config file already exists")
+
+// SaveEmptyConfigIn writes a minimal empty-object config ("{}") at the given
+// scope — "local" → <dir>/.milk/config.json (see LocalConfigPathIn for the
+// empty-dir rule), anything else → the state root's config.json — and returns
+// the path written. It is the no-wizard bootstrap for a project-local override
+// (ADR-0045 §4a): an empty local config overrides nothing, so every field
+// keeps inheriting from the global config until commands (or the user) fill
+// it in. Refuses to touch an existing file (ErrConfigFileExists) — this
+// creates, never overwrites. The write is atomic and lock-serialized, and
+// clears the persist guard (#404): an explicit bootstrap puts a real config
+// on disk, like the init wizard's rebuild.
+func SaveEmptyConfigIn(scope, dir string) (string, error) {
+	var p string
+	if scope == "local" {
+		var err error
+		if p, err = LocalConfigPathIn(dir); err != nil {
+			return "", err
+		}
+	} else {
+		d, err := Dir()
+		if err != nil {
+			return "", err
+		}
+		p = filepath.Join(d, "config.json")
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p, ErrConfigFileExists
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return p, err
+	}
+	if err := writeConfigFile(p, []byte("{}\n"), "created", false); err != nil {
+		return p, err
+	}
+	setPersistGuard(false)
+	return p, nil
 }
 
 // DeepMerge merges src into dst using the following rules:

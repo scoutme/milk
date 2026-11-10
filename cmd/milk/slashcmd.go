@@ -209,7 +209,8 @@ var commandRegistry = []cmdSpec{
   /agent tool enable <tool> [for <agent>|global]  enable a tool-agent entry
   /agent tool disable <tool> [for <agent>|global]  disable a tool-agent entry
   /agent tool add <tool> description=<desc> [for <agent>|global]  add a new tool-agent entry
-  /agent tool remove <tool> [for <agent>|global]  remove a tool-agent entry`},
+  /agent tool remove <tool> [for <agent>|global]  remove a tool-agent entry
+                         (writes accept --local or --global — save to the project or the global config)`},
 	{name: cmdTheme, hosts: hostTUI, desc: "switch the TUI skin (off = original look)", hint: "[off|supermilk]", help: `  /theme                 show the active theme
   /theme off             original look (default)
   /theme supermilk       milk-white skin, soft ink, hairlines`},
@@ -248,9 +249,13 @@ var commandRegistry = []cmdSpec{
   /setup telegram status  show current Telegram oversight status`},
 	{name: cmdConfig, hosts: hostBoth, desc: "print the config, run the setup wizard, or open the config file", hint: "[show|init|open]", help: `  /config                print the current config (merged global + local overrides)
   /config show           print the merged config tagged [global]/[local]/[default]
-  /config init           run the setup wizard (configure primary + escalation agents)
+  /config init [local|global]   run the setup wizard (configure primary + escalation agents);
+                         local/global = where to save (project .milk/config.json or global; else asked)
+  /config init empty [local|global]  create the minimal config file ({}) with no questions —
+                         the bootstrap for a project-local override (default scope: local)
   /config open           open config in $EDITOR / system default editor`},
-	{name: cmdInit, hosts: hostBoth, desc: "run the setup wizard (alias for /config init)", help: `  /init                  alias for /config init — run the setup wizard`},
+	{name: cmdInit, hosts: hostBoth, desc: "run the setup wizard (alias for /config init)", help: `  /init                  alias for /config init — run the setup wizard
+                         (same args: [empty] [local|global])`},
 	{name: cmdOpen, hosts: hostTUI, desc: "open any file in $EDITOR (agent can also call the open_file tool)", hint: "<file>", help: `  /open <file>           open any file in $EDITOR (agent can also call the open_file tool)`},
 	{name: cmdMCP, hosts: hostTUI, desc: "list and manage MCP servers", hint: "[list|add|remove <name>|enable <name>|disable <name>|tools [<name>]|reconnect [<name>]|assign|unassign|auth <name>]", help: `  /mcp                   list configured MCP servers and their status
   /mcp list [<agent>]    list MCP servers for an agent (default: primary)
@@ -264,7 +269,8 @@ var commandRegistry = []cmdSpec{
   /mcp reconnect [<name>]  reset dead server(s) so they retry on next use
   /mcp assign <server> for <agent>   add server to agent's mcp_servers list
   /mcp unassign <server> for <agent>  remove server from agent's list
-  /mcp auth <name>       run OAuth authorization flow for an MCP server`},
+  /mcp auth <name>       run OAuth authorization flow for an MCP server
+                         (writes accept --local or --global — save to the project or the global config)`},
 	// No help lines: /update predates the registry and is executable but
 	// undocumented in the TUI help text (pre-existing gap; see the
 	// known-undocumented pin in slashcmd_test.go).

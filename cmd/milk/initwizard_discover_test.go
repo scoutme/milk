@@ -58,7 +58,7 @@ func TestInitWizardFlow_PickingAFoundKeyWritesAnEnvPointer(t *testing.T) {
 	}, claudeAuthState{})
 	pinClaudeOnPath(t, false)
 
-	st, banner := initWizardStart("")
+	st, banner := initWizardStart(t.TempDir())
 	if strings.Contains(banner, "nothing found") {
 		t.Errorf("banner = %q, must not claim nothing was found", banner)
 	}
@@ -81,8 +81,9 @@ func TestInitWizardFlow_PickingAFoundKeyWritesAnEnvPointer(t *testing.T) {
 	if strings.Contains(res.Prompt, "API key") || !strings.Contains(res.Prompt, "escalation agent?") {
 		t.Fatalf("after the model: %q, want escalation (the key question is skipped)", res.Prompt)
 	}
-	initWizardApply(st, "", opts) // escalation → default n (no claude CLI)
-	res = initWizardApply(st, "", opts)
+	initWizardApply(st, "", opts)       // escalation → default n (no claude CLI)
+	initWizardApply(st, "", opts)       // tuning → skip → the save-scope question
+	res = initWizardApply(st, "", opts) // scope → local (default) → commit
 	if res.Committed == nil {
 		t.Fatalf("result = %+v, want the config committed", res)
 	}

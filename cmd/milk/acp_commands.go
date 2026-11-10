@@ -161,32 +161,43 @@ func acpHelp(*acpSession, string) (string, string) {
 // when the client supports them, otherwise one chat prompt per answer while
 // as.pendingInit is set.
 func acpConfig(as *acpSession, rest string) (string, string) {
-	switch sub := strings.ToLower(strings.TrimSpace(rest)); sub {
-	case "":
+	switch sub := strings.ToLower(strings.TrimSpace(rest)); {
+	case sub == "":
 		out, err := renderConfigJSON(activeConfigDir(as.st))
 		if err != nil {
 			return milkTag() + " error: " + err.Error(), ""
 		}
 		return out, ""
-	case "show":
+	case sub == "show":
 		out, err := renderConfigShow(activeConfigDir(as.st))
 		if err != nil {
 			return milkTag() + " error: " + err.Error(), ""
 		}
 		return out, ""
-	case "open":
+	case sub == "open":
 		return acpConfigOpen(activeConfigDir(as.st)), ""
-	case "init":
-		return acpStartInitWizard(as), ""
+	case sub == "init" || strings.HasPrefix(sub, "init "):
+		return acpInitRun(as, strings.TrimSpace(rest[len("init"):])), ""
 	}
-	return milkTag() + " usage: /config | /config show | /config init | /config open", ""
+	return milkTag() + " usage: /config | /config show | /config init [empty] [local|global] | /config open", ""
 }
 
 // acpInit implements /init — the wizard's original name, kept as an alias of
 // /config init in both hosts (it is in slashCommands too, so extractSlashCommand
-// recognizes it over ACP and in the TUI).
-func acpInit(as *acpSession, _ string) (string, string) {
-	return acpStartInitWizard(as), ""
+// recognizes it over ACP and in the TUI). Same optional args as /config init.
+func acpInit(as *acpSession, rest string) (string, string) {
+	return acpInitRun(as, rest), ""
+}
+
+// acpInitRun runs /config init with its optional args over ACP: "empty
+// [local|global]" bootstraps the minimal config file without the wizard;
+// "local"/"global" preselects where the wizard's result is saved.
+func acpInitRun(as *acpSession, args string) string {
+	empty, scope := parseInitArgs(args)
+	if empty {
+		return runConfigInitEmpty(scope, activeConfigDir(as.st))
+	}
+	return acpStartInitWizard(as, scope)
 }
 
 // acpStartInitWizard starts the setup wizard and drives it as far as this
@@ -194,12 +205,13 @@ func acpInit(as *acpSession, _ string) (string, string) {
 // choice prompts inside this turn (see runInitDialogs), typed chat answers
 // in later turns for whatever remains (as.pendingInit) — every question
 // carrying what 'default' means for it, so no empty turn is ever needed.
-func acpStartInitWizard(as *acpSession) string {
+func acpStartInitWizard(as *acpSession, scope string) string {
 	// One wizard at a time: runTurn has already cancelled a pending
 	// telegram wizard for this slash command; keep the invariant even if a
 	// future call path skips that block.
 	as.pendingTelegram = nil
 	st, banner := initWizardStart(activeConfigDir(as.st))
+	st.scope = scope
 	text, done := as.runInitDialogs(as.currentCtx(), st)
 	if !done {
 		as.pendingInit = st

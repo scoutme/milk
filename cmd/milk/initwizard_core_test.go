@@ -60,7 +60,7 @@ func TestInitWizardApply_LocalProviderFlow(t *testing.T) {
 	stubWizardModels(t, nil, errors.New("no server"))
 	pinClaudeOnPath(t, true)
 
-	st, banner := initWizardStart("")
+	st, banner := initWizardStart(t.TempDir())
 	if !strings.Contains(banner, "setup wizard") || !strings.Contains(banner, "primary") || !strings.Contains(banner, "applied at once") {
 		t.Fatalf("banner = %q, want the setup banner explaining primary/escalation and hot reload", banner)
 	}
@@ -75,7 +75,8 @@ func TestInitWizardApply_LocalProviderFlow(t *testing.T) {
 		{"", "model name"},                     // blank URL → the local default
 		{"qwen2.5-coder", "escalation agent?"}, // → escalation
 		{"", "tune now"},                       // blank → Claude on PATH → yes; → tuning gate
-		{"", "config written to"},              // blank → no tuning → commit + summary
+		{"", "apply to local"},                 // blank → no tuning → the save-scope question
+		{"", "config written to"},              // blank → local (default) → commit + summary
 	}
 	var res initWizardResult
 	for i, s := range steps {
@@ -122,7 +123,7 @@ func TestInitWizardApply_TuningGate(t *testing.T) {
 	t.Setenv("MILK_CONFIG_ROOT", t.TempDir())
 	stubWizardModels(t, nil, errors.New("no server"))
 
-	st, _ := initWizardStart("")
+	st, _ := initWizardStart(t.TempDir())
 	opts := localWizardOpts(2)
 	for _, in := range []string{"1", "", "m", "n"} { // provider, url, model, escalation
 		initWizardApply(st, in, opts)
@@ -139,7 +140,11 @@ func TestInitWizardApply_TuningGate(t *testing.T) {
 	if !strings.Contains(res.Prompt, "agents as tools") && !strings.Contains(res.Prompt, "enable any agents") {
 		t.Fatalf("after limits: prompt = %q, want the agent-tools question (2 agents configured)", res.Prompt)
 	}
-	res = initWizardApply(st, "", opts)
+	res = initWizardApply(st, "", opts) // blank agent tools → the save-scope question
+	if !strings.Contains(res.Prompt, "apply to local") {
+		t.Fatalf("after agent tools: prompt = %q, want the save-scope question", res.Prompt)
+	}
+	res = initWizardApply(st, "", opts) // scope → local (default) → commit
 	if !res.Done || res.Committed == nil {
 		t.Fatalf("result = %+v, want Done + committed", res)
 	}
@@ -158,7 +163,7 @@ func TestInitWizardApply_BearerFlow(t *testing.T) {
 	stubWizardModels(t, nil, errors.New("no server"))
 	pinClaudeOnPath(t, false)
 
-	st, _ := initWizardStart("")
+	st, _ := initWizardStart(t.TempDir())
 	opts := localWizardOpts(0)
 
 	initWizardApply(st, "2", opts) // provider → bearer → URL
@@ -175,7 +180,8 @@ func TestInitWizardApply_BearerFlow(t *testing.T) {
 		t.Fatalf("after API key: prompt = %q, want the escalation question defaulting to no (claude CLI missing)", res.Prompt)
 	}
 	initWizardApply(st, "", opts)       // escalation → default (n)
-	res = initWizardApply(st, "", opts) // tuning → skip → commit
+	initWizardApply(st, "", opts)       // tuning → skip → the save-scope question
+	res = initWizardApply(st, "", opts) // scope → local (default) → commit
 	if !res.Done || res.Committed == nil {
 		t.Fatalf("result = %+v, want Done + committed", res)
 	}
@@ -198,12 +204,13 @@ func TestInitWizardApply_ClaudeCLIPrimarySkipsEscalation(t *testing.T) {
 	t.Setenv("MILK_CONFIG_ROOT", t.TempDir())
 	stubWizardModels(t, nil, errors.New("no server"))
 
-	st, _ := initWizardStart("")
+	st, _ := initWizardStart(t.TempDir())
 	res := initWizardApply(st, "4", localWizardOpts(0))
 	if !strings.Contains(res.Prompt, "tune now") {
 		t.Fatalf("claude-cli primary: prompt = %q, want the tuning gate (no URL, model or escalation)", res.Prompt)
 	}
-	res = initWizardApply(st, "", localWizardOpts(0))
+	initWizardApply(st, "", localWizardOpts(0))       // tuning → skip → the save-scope question
+	res = initWizardApply(st, "", localWizardOpts(0)) // scope → local (default) → commit
 	if res.Committed == nil || res.Committed.EscalationAgent != "" || res.Committed.Agent != "claude" {
 		t.Fatalf("result = %+v, want claude as the only agent with no escalation", res)
 	}
@@ -242,14 +249,15 @@ func TestInitWizardApply_OpenEditorQuestionTUI(t *testing.T) {
 	t.Setenv("MILK_CONFIG_ROOT", t.TempDir())
 	stubWizardModels(t, nil, errors.New("no server"))
 
-	st, _ := initWizardStart("")
+	st, _ := initWizardStart(t.TempDir())
 	opts := initWizardOpts{NumAgents: 1, OfferOpenEditor: true}
 
-	initWizardApply(st, "1", opts)        // provider
-	initWizardApply(st, "", opts)         // URL → default
-	initWizardApply(st, "m", opts)        // model
-	initWizardApply(st, "n", opts)        // escalation
-	res := initWizardApply(st, "n", opts) // tuning → commit + editor question
+	initWizardApply(st, "1", opts)       // provider
+	initWizardApply(st, "", opts)        // URL → default
+	initWizardApply(st, "m", opts)       // model
+	initWizardApply(st, "n", opts)       // escalation
+	initWizardApply(st, "n", opts)       // tuning → skip → the save-scope question
+	res := initWizardApply(st, "", opts) // scope → local (default) → commit + editor question
 	if res.Committed == nil {
 		t.Fatalf("res = %+v, want the config committed at the editor step", res)
 	}

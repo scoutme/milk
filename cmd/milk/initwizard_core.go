@@ -81,7 +81,7 @@ func initWizardStart(cwd string) (*initWizardState, string) {
 	}
 	return st, milkTag() + " setup wizard — a few questions and you're talking to an agent\n" +
 		dim("  primary = your everyday AI (cheap, fast) · escalation = a stronger one for hard tasks\n"+
-			"  saved to "+config.DirLabel()+"/config.json and applied at once · Enter takes the default · Esc cancels\n") + banner
+			"  saved where you choose: "+filepath.Join(config.LocalConfigDir, "config.json")+" (this project) or "+config.DirLabel()+"/config.json (everywhere) — applied at once · Enter takes the default · Esc cancels\n") + banner
 }
 
 // initWizardCancelWord reports whether a plain answer aborts the wizard. The
@@ -256,6 +256,19 @@ func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts
 			st.toolAgentNames = splitCommaNames(answer)
 		}
 
+	case initStepScope:
+		// Same options and default as the CLI's "Apply to local? [Y/n]"
+		// prompt: y/local → project-local, n/global → global, blank = y.
+		switch strings.ToLower(answer) {
+		case "", "y", "yes", "local":
+			st.scope = "local"
+		case "n", "no", "global":
+			st.scope = "global"
+		default:
+			out.WriteString(milkTag() + " invalid choice — enter y (local) or n (global)\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+		}
+
 	case initStepLimits:
 		v := 0
 		if answer == "" {
@@ -283,7 +296,13 @@ func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts
 	// Skip the agent-tools step when the config has only one agent
 	// (no peer agents to expose as tools yet).
 	if st.step == initStepAgentTools && opts.NumAgents <= 1 {
-		st.step = initStepOpenConfig
+		st.step = initStepScope
+	}
+	// A preselected scope (/config init local|global, `milk config init
+	// --local|--global`) skips the question — the CLI flag's spelling of
+	// skipping its own prompt.
+	if st.step == initStepScope && st.scope != "" {
+		st.step = initWizardNextStep(st)
 	}
 
 	var committed *config.Config
@@ -345,9 +364,16 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 			Description: "Specialist agent. Describe its capabilities here.",
 		})
 	}
+	// The scope step decided where this setup lives (the same options as the
+	// CLI's "Apply to local?" prompt); a preselected scope skips the question
+	// but lands the same way.
+	scope := st.scope
+	if scope == "" {
+		scope = preferredSaveScope(st.cwd)
+	}
 	// Explicit recovery path (#404): the wizard rebuilt config from the
 	// user's answers, so it writes even after a failed load.
-	if err := saveLocalOrGlobalForced(cfg, st.cwd); err != nil {
+	if err := saveForcedScope(cfg, scope, st.cwd); err != nil {
 		return cfg, "", err
 	}
 
@@ -358,7 +384,7 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 	if st.cwd != "" {
 		scopeLabel = filepath.Join(st.cwd, config.LocalConfigDir, "config.json")
 	}
-	if !config.HasLocalConfigIn(st.cwd) {
+	if scope != "local" {
 		if dir, err := config.Dir(); err == nil {
 			scopeLabel = filepath.Join(dir, "config.json")
 		} else {
@@ -543,6 +569,12 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 			f.Options = append(f.Options, initWizardChoice{Value: n, Label: n})
 		}
 		return f
+	case initStepScope:
+		return initWizardField{Name: "scope", Label: "where should this config live?", Kind: "select", Default: "local",
+			Options: []initWizardChoice{
+				{"local", "local project — " + filepath.Join(config.LocalConfigDir, "config.json") + " (overrides global here)"},
+				{"global", "global — " + config.DirLabel() + "/config.json (every project)"},
+			}}
 	}
 	return initWizardField{}
 }

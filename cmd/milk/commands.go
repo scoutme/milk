@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -123,8 +125,9 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 		return m.handleConfigCmd(strings.TrimSpace(rest))
 	}
 	if cmd == cmdInit {
-		// /init is the alias for /config init.
-		return m.handleConfigInitCmd()
+		// /init is the alias for /config init (same args: [empty]
+		// [local|global]).
+		return m.handleConfigInitCmd(strings.TrimSpace(rest))
 	}
 	if cmd == cmdOpen {
 		return m.handleOpenCmd(rest)
@@ -1030,6 +1033,8 @@ func (m model) handleForgetCmd(pat string) model {
 // /mcp add with missing required fields launches an interactive wizard; all other
 // subcommands are stateless and delegate directly to the exec* helpers.
 func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
+	// Explicit save scope (--local/--global — the CLI flags' spelling).
+	arg, m.st.saveScope = takeScopeFlag(arg)
 	parts := strings.Fields(arg)
 	if len(parts) == 0 {
 		m.appendTranscript(execMCP("", m.st, m.agents.mcpToolSets) + "\n")
@@ -1158,6 +1163,9 @@ func (m model) handleMCPAuth(serverName string) (model, tea.Cmd) {
 
 // handleAgentCmd handles `/agent [list|switch <name>|add [key=val ...]]`.
 func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
+	// Explicit save scope (--local/--global — the CLI flags' spelling);
+	// consumed by this family's config saves, including later wizard commits.
+	arg, m.st.saveScope = takeScopeFlag(arg)
 	// Re-read config so externally added providers are visible.
 	if fresh, err := config.Load(); err == nil {
 		// Preserve the in-session active selection if the user hasn't changed it.
@@ -1305,13 +1313,101 @@ func saveLocalOrGlobal(cfg config.Config, dir string) error {
 // commit only (#404). Every other saveLocalOrGlobal call site is an explicit
 // user action but still refuses to write a config the process failed to load.
 func saveLocalOrGlobalForced(cfg config.Config, dir string) error {
-	scope := preferredSaveScope(dir)
+	return saveForcedScope(cfg, preferredSaveScope(dir), dir)
+}
+
+// saveForcedScope writes cfg to an explicit scope ("local"/"global") for dir
+// ("" = process cwd), bypassing the persist guard — the init wizard's commit
+// only (#404). When saving to local, ensures the .milk/config.json file
+// exists first.
+func saveForcedScope(cfg config.Config, scope, dir string) error {
 	if scope == "local" {
 		if err := ensureLocalConfig(dir); err != nil {
 			return fmt.Errorf("creating local config: %w", err)
 		}
 	}
 	return config.SaveScopeInForced(cfg, scope, dir)
+}
+
+// saveScoped saves cfg at an explicit scope ("local"/"global") for dir. An
+// empty scope falls back to saveLocalOrGlobal's auto-detect. This is where
+// the CLI's --local/--global flags land on TUI/ACP paths (takeScopeFlag).
+func saveScoped(cfg config.Config, dir, scope string) error {
+	if scope == "" {
+		return saveLocalOrGlobal(cfg, dir)
+	}
+	if scope == "local" {
+		if err := ensureLocalConfig(dir); err != nil {
+			return fmt.Errorf("creating local config: %w", err)
+		}
+	}
+	return config.SaveScopeIn(cfg, scope, dir)
+}
+
+// scopeFlagPattern matches an explicit config-save scope token in a slash
+// command's arguments — the TUI/ACP spelling of the CLI's --local/--global
+// flags on `milk config …`. Only whole tokens count: the flag must start at a
+// word boundary, so a key=value argument whose value merely looks like one
+// (name=--global) is left alone. The leading separator is captured so
+// replacing a match glues the remaining text back together unchanged.
+var scopeFlagPattern = regexp.MustCompile(`(?i)(^|\s)--(local|global)\b`)
+
+// takeScopeFlag strips --local/--global from a slash command's arguments and
+// returns the remaining arguments plus the scope ("local"/"global"; "" = none
+// given → auto-detect as usual). The last flag wins. Each match takes its
+// leading separator with it, so the remaining text keeps its exact spacing —
+// quoted key=value arguments survive intact.
+func takeScopeFlag(args string) (string, string) {
+	scope := ""
+	for _, m := range scopeFlagPattern.FindAllStringSubmatch(args, -1) {
+		scope = strings.ToLower(m[2])
+	}
+	rest := strings.TrimSpace(scopeFlagPattern.ReplaceAllString(args, ""))
+	return rest, scope
+}
+
+// parseInitArgs parses the optional arguments of /config init and its CLI
+// twin: an "empty" mode word (skip the wizard, write the minimal config file)
+// and a scope word ("local"/"global", with or without leading dashes) that
+// preselects where the config is saved — the slash-command spelling of
+// `milk config init --local|--global`. Unrecognized words are ignored (the
+// wizard's own answers are never passed here).
+func parseInitArgs(args string) (empty bool, scope string) {
+	for _, tok := range strings.Fields(args) {
+		switch strings.ToLower(strings.TrimLeft(tok, "-")) {
+		case "empty":
+			empty = true
+		case "local":
+			scope = "local"
+		case "global":
+			scope = "global"
+		}
+	}
+	return empty, scope
+}
+
+// runConfigInitEmpty bootstraps the minimal empty config file at scope
+// (default "local" — the command's purpose is a project-local override) and
+// returns the user-facing message. Host-neutral: the TUI's /config init empty,
+// the ACP server's, and the CLI's `milk config init --empty` all report the
+// same thing. dir resolves the local scope ("" = process cwd).
+func runConfigInitEmpty(scope, dir string) string {
+	if scope == "" {
+		scope = "local"
+	}
+	path, err := config.SaveEmptyConfigIn(scope, dir)
+	if errors.Is(err, config.ErrConfigFileExists) {
+		return fmt.Sprintf("%s %s already exists — edit it with /config open, or delete it first", milkTag(), path)
+	}
+	if err != nil {
+		return fmt.Sprintf("%s error creating empty config: %v", milkTag(), err)
+	}
+	fill := "/agent add --local · /mcp add --local"
+	if scope == "global" {
+		fill = "/agent add · /mcp add"
+	}
+	return fmt.Sprintf("%s empty %s config created at %s\n%s unset fields inherit from the global config — edit it with /config open, or fill it with %s",
+		milkTag(), scope, path, milkTag(), fill)
 }
 
 // execAgentRemove removes the named agent from config.
@@ -1328,7 +1424,7 @@ func execAgentRemove(name string, st *interactiveState) string {
 	case agentRemoveNotFound:
 		return fmt.Sprintf("%s no agent named %q", milkTag(), name)
 	default:
-		if err := saveLocalOrGlobal(st.cfg, activeConfigDir(st)); err != nil {
+		if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
 			return fmt.Sprintf("%s error saving config: %v", milkTag(), err)
 		}
 		return fmt.Sprintf("%s agent %q removed", milkTag(), removed)
@@ -1389,16 +1485,12 @@ func execBash(sub string, st *interactiveState) string {
 	}
 }
 
-// handleConfigCmd dispatches /config, /config init, /config open.
+// handleConfigCmd dispatches /config, /config init [empty] [local|global],
+// /config open, /config show.
 func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
-	switch strings.ToLower(sub) {
-	case "init":
-		return m.handleConfigInitCmd()
-	case "open":
-		return m.handleConfigOpenCmd()
-	case "show":
-		return m.handleConfigShowCmd()
-	case "":
+	lower := strings.ToLower(strings.TrimSpace(sub))
+	switch {
+	case lower == "":
 		out, err := renderConfigJSON(activeConfigDir(m.st))
 		if err != nil {
 			m.appendTranscript(fmt.Sprintf("%s error: %v\n", milkTag(), err))
@@ -1407,8 +1499,14 @@ func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 		m.colorizeForce = true
 		m.appendTranscript(out)
 		return m, nil
+	case lower == "show":
+		return m.handleConfigShowCmd()
+	case lower == "open":
+		return m.handleConfigOpenCmd()
+	case lower == "init" || strings.HasPrefix(lower, "init "):
+		return m.handleConfigInitCmd(strings.TrimSpace(sub[len("init"):]))
 	default:
-		m.appendTranscript(milkTag() + " usage: /config | /config show | /config init | /config open\n")
+		m.appendTranscript(milkTag() + " usage: /config | /config show | /config init [empty] [local|global] | /config open\n")
 		return m, nil
 	}
 }

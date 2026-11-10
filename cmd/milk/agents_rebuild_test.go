@@ -48,7 +48,8 @@ func TestHandleInitWizardKey_CommitRebuildsRunners(t *testing.T) {
 	answer(srv.URL)      // server URL
 	answer("mock-model") // model
 	answer("n")          // escalation: no
-	answer("n")          // optional tuning: no — this answer commits the config
+	answer("n")          // optional tuning: no
+	answer("n")          // save scope: global — this answer commits the config
 
 	if !m.hasInferenceAgent {
 		t.Error("the wizard commit must mark an inference agent as configured")
