@@ -539,10 +539,14 @@ type permRequestMsg struct {
 }
 
 // permDismissMsg withdraws a permission prompt whose answer came from
-// somewhere else (remote oversight won the race — see readLineCtx). respCh is
-// used only for identity: the racing ask already stopped reading it.
+// somewhere else (remote oversight won the race, or the timed answer fired —
+// ADR-0052). respCh is used only for identity: the racing ask already stopped
+// reading it. note says who resolved it (recorded on ctx by askPermission /
+// askUserQuestion — see permDismissNoteKey); empty keeps the generic
+// "(answered elsewhere)" wording.
 type permDismissMsg struct {
 	respCh chan string
+	note   string
 }
 
 // notifyMsg is tuiHost's Notify bridge (events.Host) — sent from a turn's own
@@ -649,29 +653,52 @@ func (r *tuiInputReader) readLineLabeled(prompt, label string) (string, error) {
 // bounded background ask hit its deadline — the prompt is withdrawn via
 // permDismissMsg and the error returned. respCh is buffered so a just-in-time
 // answer that nobody reads any more can never block the UI goroutine.
+//
+// Two rules keep the transcript honest for a user who *does* answer in the
+// TUI: a prompt whose ask was already resolved before it was ever shown is
+// never flashed at all (ctx checked up front), and an answer landing in the
+// same instant as the cancellation WINS the tie — only an unanswered
+// withdrawal prints the (reasoned) note (permDismissNoteKey).
 func (r *tuiInputReader) readLineCtx(ctx context.Context, prompt, label, autoDefault string, autoAt time.Time) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err // ask already resolved — never flash an unanswerable prompt
+	}
 	respCh := make(chan string, 1)
 	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh, autoDefault: autoDefault, autoAt: autoAt})
 	select {
 	case s := <-respCh:
 		return s, nil
 	case <-ctx.Done():
-		r.send(permDismissMsg{respCh: respCh})
+		select { // just-in-time answer: it is a real answer — no note
+		case s := <-respCh:
+			return s, nil
+		default:
+		}
+		r.send(permDismissMsg{respCh: respCh, note: dismissNoteFrom(ctx)})
 		return "", ctx.Err()
 	}
 }
 
 // readLineFreeText is readLineCtx for an ask_user question prompt: same
 // bridge, but the prompt is free text (no y/n, no bulk keys) and a timed ask
-// resolves with silence rather than an autoDefault string.
+// resolves with silence rather than an autoDefault string — under the same
+// never-flash / answer-wins-tie rules as readLineCtx.
 func (r *tuiInputReader) readLineFreeText(ctx context.Context, prompt, label string, autoAt time.Time) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err // ask already resolved — never flash an unanswerable prompt
+	}
 	respCh := make(chan string, 1)
 	r.send(permRequestMsg{prompt: prompt, label: label, respCh: respCh, autoAt: autoAt, freeText: true})
 	select {
 	case s := <-respCh:
 		return s, nil
 	case <-ctx.Done():
-		r.send(permDismissMsg{respCh: respCh})
+		select { // just-in-time answer wins the tie — no note
+		case s := <-respCh:
+			return s, nil
+		default:
+		}
+		r.send(permDismissMsg{respCh: respCh, note: dismissNoteFrom(ctx)})
 		return "", ctx.Err()
 	}
 }
@@ -1940,10 +1967,16 @@ func (m *model) afterPermResolved() {
 // came from somewhere else (remote oversight won the race, or the timed
 // answer fired — ADR-0052), so the TUI doesn't sit on a question whose
 // answer has already been applied. The displayed prompt gets a one-line note
-// so the transcript stays honest about what happened.
+// saying who resolved it (recorded on the ask's ctx — permWithdrawNote),
+// falling back to the generic "(answered elsewhere)" so the transcript stays
+// honest about what happened.
 func (m model) handlePermDismiss(msg permDismissMsg) (tea.Model, tea.Cmd) {
 	if m.pendingPerm != nil && m.pendingPerm.respCh == msg.respCh {
-		m.appendTranscript(dim("(answered elsewhere)") + "\n")
+		note := msg.note
+		if note == "" {
+			note = "answered elsewhere"
+		}
+		m.appendTranscript(dim("("+note+")") + "\n")
 		m.pendingPerm = nil
 		m.dequeueNextPerm()
 		m.afterPermResolved()
