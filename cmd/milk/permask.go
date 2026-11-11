@@ -184,6 +184,54 @@ func stickySetter(setMode func(sessionPermMode), note func(string)) func(bool) {
 	}
 }
 
+// permDismissNoteKey carries the ask's resolving source (a note string) onto
+// the direct surface's context so a withdrawn prompt can say *who* answered
+// instead of the vague "(answered elsewhere)" (ADR-0052's honest-transcript
+// rule). askPermission/askUserQuestion write the note before cancel() — the
+// Done channel read by the surface carries the happens-before edge.
+type permDismissNoteKey struct{}
+
+// permWithdrawNote is the withdrawal reason for a permission prompt: who
+// resolved the ask and what it applied. Empty src keeps the generic wording.
+func permWithdrawNote(src permSource, allow bool) string {
+	act := "deny"
+	if allow {
+		act = "allow"
+	}
+	switch src {
+	case permSrcRemote:
+		return "answered via remote oversight"
+	case permSrcRemoteTimeout:
+		return "remote oversight timed out — " + act + " applied"
+	case permSrcDefault:
+		return "timed answer — " + act + " applied"
+	default:
+		return ""
+	}
+}
+
+// questionWithdrawNote is permWithdrawNote for an ask_user question: silence
+// resolves as "no answer", never as a default.
+func questionWithdrawNote(src permSource) string {
+	switch src {
+	case permSrcRemote:
+		return "answered via remote oversight"
+	case permSrcDefault:
+		return "no answer in time"
+	default:
+		return ""
+	}
+}
+
+// dismissNoteFrom reads the resolving source's note the ask layer recorded on
+// ctx before cancelling (permDismissNoteKey) — "" keeps the generic wording.
+func dismissNoteFrom(ctx context.Context) string {
+	if s, ok := ctx.Value(permDismissNoteKey{}).(*string); ok {
+		return *s
+	}
+	return ""
+}
+
 // askPermission races the direct surface and remote oversight and returns the
 // first real answer plus its source. direct may be nil (no local surface); n
 // may be nil or oversight.Noop (no remote surface). With no surface at all
@@ -210,6 +258,11 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 	// ask.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The withdrawal note is written before cancel() on every resolution path:
+	// the direct surface reads it after observing ctx.Done() (see
+	// readLineCtx's permDismissMsg).
+	var note string
+	ctx = context.WithValue(ctx, permDismissNoteKey{}, &note)
 	type result struct {
 		allow bool
 		src   permSource
@@ -254,11 +307,14 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 	}
 	select {
 	case res := <-ch:
+		note = permWithdrawNote(res.src, res.allow)
 		return res.allow, res.src
 	case <-ctx.Done():
 		// External cancellation (a job's context ended) — resolve with the
 		// policy default rather than block forever. The direct surface's
-		// ctx-aware prompt is withdrawn by its own ctx handling.
+		// ctx-aware prompt is withdrawn by its own ctx handling. No note is
+		// recorded here: the direct side can observe this Done before the
+		// write below would land, so it keeps the generic fallback wording.
 		return p.def, permSrcDefault
 	}
 }
@@ -280,6 +336,10 @@ func askUserQuestion(ctx context.Context, n oversight.Notifier, req oversight.In
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// See askPermission: the withdrawal note is recorded before cancel() so the
+	// direct surface can say who answered.
+	var note string
+	ctx = context.WithValue(ctx, permDismissNoteKey{}, &note)
 	type result struct {
 		answer string
 		ok     bool
@@ -326,9 +386,12 @@ func askUserQuestion(ctx context.Context, n oversight.Notifier, req oversight.In
 	}
 	select {
 	case res := <-ch:
+		note = questionWithdrawNote(res.src)
 		return res.answer, res.ok, res.src
 	case <-ctx.Done():
 		// External cancellation (a job's context ended) — nobody answered.
+		// No note recorded (see askPermission's ctx.Done path): the generic
+		// fallback wording applies.
 		return "", false, permSrcDefault
 	}
 }
