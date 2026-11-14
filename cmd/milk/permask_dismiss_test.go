@@ -37,8 +37,9 @@ func (instantAnswerRemote) AskInput(context.Context, oversight.InputRequest) (st
 	return "choice", true
 }
 
-// instantSilentRemote never replies: with remoteTimeoutResolves (foreground)
-// its timeout action resolves the ask.
+// instantSilentRemote models the backend firing its timeout with no reply:
+// (PermTimeout, false) — under foregroundAskPolicy (remoteTimeoutResolves)
+// that timeout action IS the ask's answer.
 type instantSilentRemote struct{ oversight.Noop }
 
 func (instantSilentRemote) AskPermission(context.Context, oversight.PermRequest) (oversight.PermDecision, bool) {
@@ -199,9 +200,9 @@ func TestAskPermission_DismissNoteSaysWhoAnswered(t *testing.T) {
 			wantNote: "answered via remote oversight",
 		},
 		{
-			name:     "remote timed out (policy opts in)",
+			name:     "remote timed out (the foreground fuse)",
 			n:        instantSilentRemote{},
-			p:        askPolicy{remoteTimeoutResolves: true}, // not the fg policy anymore
+			p:        foregroundAskPolicy,
 			allow:    false,
 			src:      permSrcRemoteTimeout,
 			wantNote: "remote oversight timed out — deny applied",
@@ -288,14 +289,16 @@ func (r recordingRemote) AskPermission(_ context.Context, req oversight.PermRequ
 	return oversight.PermAllow, true
 }
 
-// TestForegroundPolicy_SilenceNeverResolvesLivePrompt: the interactive
-// policy must not let remote-side silence resolve an ask (the report: a TUI
-// prompt the user was answering got withdrawn with "(answered elsewhere)"
-// after the backend's timeout), and the backend must be told to hold its
-// prompt slot accordingly — SilenceResolves mirrors the policy opt-in.
-func TestForegroundPolicy_SilenceNeverResolvesLivePrompt(t *testing.T) {
-	if foregroundAskPolicy.remoteTimeoutResolves {
-		t.Fatal("foreground asks must not resolve on remote silence")
+// TestForegroundPolicy_RemoteTimeoutResolves: the configured permission
+// timeout is a feature (perm_timeout_secs / timeout_action) — the interactive
+// policy must keep resolving unanswered asks with the remote's timeout action
+// (it is the prompt's visible fuse now, never an invisible one), and the
+// backend must be told to fire its timeout for that policy. Background asks
+// are the opposite: their SilenceResolves=false keeps the remote prompt slot
+// held — remote silence there belongs to the deadline's timed answer.
+func TestForegroundPolicy_RemoteTimeoutResolves(t *testing.T) {
+	if !foregroundAskPolicy.remoteTimeoutResolves {
+		t.Fatal("foreground asks must honour the remote timeout (configured feature)")
 	}
 
 	cases := []struct {
@@ -303,9 +306,9 @@ func TestForegroundPolicy_SilenceNeverResolvesLivePrompt(t *testing.T) {
 		p      askPolicy
 		wantIf bool
 	}{
-		{name: "foreground", p: foregroundAskPolicy, wantIf: false},
+		{name: "foreground", p: foregroundAskPolicy, wantIf: true},
 		{name: "background", p: bgAskPolicy(config.Config{}, permOverrides{}), wantIf: false},
-		{name: "opt-in", p: askPolicy{remoteTimeoutResolves: true}, wantIf: true},
+		{name: "hold (no opt-in)", p: askPolicy{}, wantIf: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,17 +325,59 @@ func TestForegroundPolicy_SilenceNeverResolvesLivePrompt(t *testing.T) {
 	}
 }
 
-// TestAskPermission_ForegroundSilentRemote_DirectAnswerWins: with the
-// interactive policy, a remote surface that never replies must leave the ask
-// open for the direct (TUI) answer instead of resolving it with the timeout
-// action.
-func TestAskPermission_ForegroundSilentRemote_DirectAnswerWins(t *testing.T) {
+// holdingRemote never replies and never times out on its own (its Silence
+// branch holds, like the backend for a background ask): the ask stays open
+// until the direct surface or the ask's own end.
+type holdingRemote struct{ oversight.Noop }
+
+func (holdingRemote) AskPermission(ctx context.Context, _ oversight.PermRequest) (oversight.PermDecision, bool) {
+	<-ctx.Done()
+	return oversight.PermTimeout, false
+}
+
+// TestAskPermission_ForegroundTimeoutResolvesUnansweredAsk: with the
+// interactive policy, a remote surface that reached its timeout resolves the
+// unanswered ask with the timeout action — the configured feature, with its
+// honest attribution.
+func TestAskPermission_ForegroundTimeoutResolvesUnansweredAsk(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		n     oversight.Notifier
+		allow bool
+		src   permSource
+	}{
+		{name: "timeout action deny", n: instantSilentRemote{}, allow: false, src: permSrcRemoteTimeout},
+		{name: "timeout action allow", n: timeoutAllowRemote{}, allow: true, src: permSrcRemoteTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			direct := func(ctx context.Context) bool { <-ctx.Done(); return false } // never answers
+			allow, src := askPermission(context.Background(), tc.n,
+				oversight.PermRequest{ToolName: "bash"}, direct, foregroundAskPolicy)
+			if allow != tc.allow || src != tc.src {
+				t.Fatalf("got (%v, %s), want (%v, %s)", allow, src, tc.allow, tc.src)
+			}
+		})
+	}
+}
+
+// timeoutAllowRemote is instantSilentRemote with timeout_action=allow.
+type timeoutAllowRemote struct{ oversight.Noop }
+
+func (timeoutAllowRemote) AskPermission(context.Context, oversight.PermRequest) (oversight.PermDecision, bool) {
+	return oversight.PermAllow, false
+}
+
+// TestAskPermission_ForegroundDirectAnswerWinsBeforeTheTimeout: before the
+// remote's timeout fires, a remote that has not answered must leave the ask
+// open for the direct (TUI) answer — the timeout is the fuse at the END of
+// the window, not a race it wins early.
+func TestAskPermission_ForegroundDirectAnswerWinsBeforeTheTimeout(t *testing.T) {
 	direct := func(ctx context.Context) bool {
 		// The TUI prompt is answered a moment after the ask starts.
 		time.Sleep(20 * time.Millisecond)
 		return true
 	}
-	allow, src := askPermission(context.Background(), instantSilentRemote{},
+	allow, src := askPermission(context.Background(), holdingRemote{},
 		oversight.PermRequest{ToolName: "bash"}, direct, foregroundAskPolicy)
 	if !allow || src != permSrcDirect {
 		t.Fatalf("got (%v, %s), want the direct answer (true, %s)", allow, src, permSrcDirect)

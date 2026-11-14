@@ -307,11 +307,11 @@ already granted, matches `bash_allowed_patterns`, or skip-permissions is on.
   that a workflow role or a tool-agent entry builds separately from the
   session's primary/escalation agents.
 - **Remote oversight races along.** When `remote_oversight` is configured,
-  the backend's allow/deny is asked in parallel with the client and the
-  first answer wins — the TUI's rule. Remote silence never withdraws a live
-  client prompt: the backend holds its prompt slot until the ask ends
-  (`timeout_action` applies only where an ask policy opts into
-  remote-timeout resolution). The remote side is serialized process-wide:
+  the backend's allow/deny (or its `timeout_action` on timeout) is asked in
+  parallel with the client and the first answer wins — the TUI's rule. The
+  client's permission prompt carries the same countdown to that timeout the
+  backend will fire at (`auto-… in …`), so an unanswered dialog announces
+  when the default applies. The remote side is serialized process-wide:
   the Telegram backend has a single prompt slot, so concurrent sessions
   queue their remote asks instead of stealing each other's.
 

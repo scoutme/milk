@@ -325,9 +325,12 @@ func (as *acpSession) flushRemoteInputs() {
 // askPermissionWithOversight is the local agent's permission callback over
 // ACP: the client is asked via session/request_permission (as before —
 // makeLocalPermAsk's prompt text, now shared in permAskPrompt) under the
-// foreground policy — direct input and remote oversight, no timed answer.
-// The session allow-all/deny-all mode (issue #302) answers first (policy),
-// and a client's "Always allow"/"Always deny" choice sets it.
+// foreground policy — direct input and remote oversight, no ask deadline.
+// Remote-side silence applies the remote's timeout_action after
+// perm_timeout_secs (foregroundAskPolicy) and the client's prompt carries
+// the same fuse countdown (foregroundFuse). The session allow-all/deny-all
+// mode (issue #302) answers first (policy), and a client's "Always allow"/
+// "Always deny" choice sets it.
 func (as *acpSession) askPermissionWithOversight(tool, summary string) bool {
 	as.mu.Lock()
 	ov := as.permOverrides
@@ -336,13 +339,17 @@ func (as *acpSession) askPermissionWithOversight(tool, summary string) bool {
 	p.sticky = stickySetter(as.setSessionPermMode, func(note string) {
 		as.host.Notify(events.Notification{Text: note})
 	})
+	fuse, fuseAllow := foregroundFuse(as.notifier(), as.cfg.RemoteOversight)
+	prompt, autoDefault, autoAt := foregroundPrompt(tool, summary, fuse, fuseAllow)
 	allow, _ := askPermission(context.Background(), as.notifier(),
 		oversight.PermRequest{ToolName: tool, Input: summary},
 		func(ctx context.Context) bool {
 			outcome, _ := as.host.RequestPermission(ctx, events.PermissionRequest{
-				Prompt:  permAskPrompt(tool, summary),
-				Tool:    tool,
-				Summary: summary,
+				Prompt:      prompt,
+				Tool:        tool,
+				Summary:     summary,
+				AutoDefault: autoDefault,
+				AutoAt:      autoAt,
 			})
 			if outcome.Always {
 				mode := sessionPermDenyAll

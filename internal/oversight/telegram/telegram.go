@@ -790,6 +790,13 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 	case <-ctx.Done():
 		return quiet()
 	case <-time.After(n.cfg.PermTimeout):
+		// Wire-tie: an answer landing on the direct surface in the very
+		// instant the timer fires (ctx already done when this case is
+		// evaluated) wins it — withdraw quietly instead of posting a
+		// timeout notice that would contradict the answer.
+		if ctx.Err() != nil {
+			return quiet()
+		}
 		action := "Denied (timeout)"
 		if n.cfg.TimeoutAction == "allow" {
 			action = "Allowed (timeout)"
@@ -822,10 +829,11 @@ func parsePermReply(reply string, allowAlways bool) oversight.PermDecision {
 // AskInput sends an ask_user question and waits for a free-text reply via the
 // background poll loop — the same single prompt slot as AskPermission (the
 // caller serializes remote asks; see cmd/milk's oversight ask mutex). The
-// reply is the answer exactly as typed. Silence (cfg.PermTimeout or ctx) is
-// not an answer: answered is false and the caller keeps waiting on its other
-// surfaces or the timed answer — unlike permissions, questions have no
-// timeout action.
+// reply is the answer exactly as typed. Silence (ctx) is not an answer:
+// answered is false and the caller keeps waiting on its other surfaces or
+// the timed answer — unlike permissions, questions have no timeout action
+// and never release the prompt slot early (a late reply must land on this
+// question, not fall through to the chat-input callback).
 func (n *Notifier) AskInput(ctx context.Context, req oversight.InputRequest) (string, bool) {
 	// Same as AskPermission: the indicator must say "waiting for you", not
 	// "typing…", for the whole ask.
