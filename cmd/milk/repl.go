@@ -1872,7 +1872,7 @@ func (m *model) dequeueNextPerm() {
 	next := m.permQueue[0]
 	m.permQueue = m.permQueue[1:]
 	m.pendingPerm = &next
-	m.appendTranscript(next.prompt)
+	m.appendTranscript(permDisplayPrompt(next))
 	m.ta.Reset()
 	m.leadingPasted = false
 	m.syncLayout()
@@ -1920,7 +1920,7 @@ func (m model) handlePermRequest(msg permRequestMsg) (tea.Model, tea.Cmd) {
 		m.permInputStash = &v
 	}
 	m.pendingPerm = &msg
-	m.appendTranscript(msg.prompt)
+	m.appendTranscript(permDisplayPrompt(msg))
 	m.ta.Reset()
 	m.leadingPasted = false
 	m.syncLayout()
@@ -4912,6 +4912,10 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		ctx, cancel := context.WithTimeout(context.Background(), st.cfg.EffectiveBackgroundAgentTimeout())
 		defer cancel()
 		p := bgAskPolicy(st.cfg, st.permOverridesNow())
+		// Never promise more countdown than the ctx will give (see
+		// clampAskDeadline): with a short background-agent timeout the
+		// status bar must not count past the ask's actual end.
+		p.deadline = clampAskDeadline(p.deadline, ctx)
 		p.sticky = stickySetter(st.setSessionPermMode, func(note string) {
 			localHost.Notify(events.Notification{Text: note})
 		})
@@ -4938,6 +4942,10 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		ctx, cancel := context.WithTimeout(ctx, st.cfg.EffectiveBackgroundAgentTimeout())
 		defer cancel()
 		p := bgAskPolicy(st.cfg, st.permOverridesNow())
+		// The job's own deadline may expire before the configured question
+		// timeout — clamp so the countdown the user sees is the one that
+		// will actually fire (clampAskDeadline).
+		p.deadline = clampAskDeadline(p.deadline, ctx)
 		note := autoNoteQuestion(p.deadline)
 		if jobID != "" {
 			note = "job " + jobID + " — " + note

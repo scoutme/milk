@@ -750,8 +750,9 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 
 	n.send(strings.Join(lines, "\n"))
 
-	select {
-	case reply := <-ch:
+	// finish maps a real reply onto its decision and posts the matching
+	// chat confirmation.
+	finish := func(reply string) (oversight.PermDecision, bool) {
 		dec := parsePermReply(reply, req.AllowAlways)
 		switch dec {
 		case oversight.PermAllow:
@@ -764,19 +765,41 @@ func (n *Notifier) AskPermission(ctx context.Context, req oversight.PermRequest)
 			n.sendAsync("🚫 Denied")
 		}
 		return dec, true
-	case <-time.After(n.cfg.PermTimeout):
-	case <-ctx.Done():
 	}
+	// quiet withdraws on cancellation — the ask resolved on another surface
+	// (the TUI or ACP prompt was answered): that surface shows its own
+	// outcome, so posting the timeout notice here would contradict it (it
+	// used to fire on every TUI-side answer).
+	quiet := func() (oversight.PermDecision, bool) { return oversight.PermTimeout, false }
 
-	action := "Denied (timeout)"
-	if n.cfg.TimeoutAction == "allow" {
-		action = "Allowed (timeout)"
+	if !req.SilenceResolves {
+		// Silence is not an answer for this ask (ADR-0052): hold the single
+		// prompt slot until a reply or the ask's end — no internal timeout,
+		// no timeout notice, and a late reply still answers the ask instead
+		// of falling through to the chat-input callback.
+		select {
+		case reply := <-ch:
+			return finish(reply)
+		case <-ctx.Done():
+			return quiet()
+		}
 	}
-	n.sendAsync(fmt.Sprintf("⏱ %s", action))
-	if n.cfg.TimeoutAction == "allow" {
-		return oversight.PermAllow, false
+	select {
+	case reply := <-ch:
+		return finish(reply)
+	case <-ctx.Done():
+		return quiet()
+	case <-time.After(n.cfg.PermTimeout):
+		action := "Denied (timeout)"
+		if n.cfg.TimeoutAction == "allow" {
+			action = "Allowed (timeout)"
+		}
+		n.sendAsync(fmt.Sprintf("⏱ %s", action))
+		if n.cfg.TimeoutAction == "allow" {
+			return oversight.PermAllow, false
+		}
+		return oversight.PermTimeout, false
 	}
-	return oversight.PermTimeout, false
 }
 
 // parsePermReply maps a permission reply onto its decision (issue #302 for
@@ -838,13 +861,17 @@ func (n *Notifier) AskInput(ctx context.Context, req oversight.InputRequest) (st
 
 	n.send(strings.Join(lines, "\n"))
 
+	// Hold until a reply or the ask's end: questions have no timeout action
+	// and silence is never an answer (ADR-0052). An internal timeout here
+	// would release the single prompt slot while the question is still
+	// open, so a later reply would fall through to the chat-input callback
+	// and be injected as a typed message.
 	select {
 	case reply := <-ch:
 		return reply, true
-	case <-time.After(n.cfg.PermTimeout):
 	case <-ctx.Done():
+		return "", false
 	}
-	return "", false
 }
 
 // send sends a MarkdownV2-formatted message synchronously, ignoring errors.

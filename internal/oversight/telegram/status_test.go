@@ -214,7 +214,7 @@ func TestBusyStatus_Lifecycle(t *testing.T) {
 	askDone := make(chan struct{})
 	go func() {
 		defer close(askDone)
-		_, _ = n.AskPermission(context.Background(), oversight.PermRequest{ToolName: "bash", Input: "rm -rf /"})
+		_, _ = n.AskPermission(context.Background(), oversight.PermRequest{ToolName: "bash", Input: "rm -rf /", SilenceResolves: true})
 	}()
 	waitForStatus(t, 2*time.Second, "⏳ waiting for you… label", func() bool {
 		_, text := s.lastEdit()

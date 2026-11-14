@@ -93,13 +93,27 @@ func TestAskInputSilenceIsNotAnAnswer(t *testing.T) {
 	n := New(Config{Token: "t", ChatID: 1, APIBase: s.srv.URL, PermTimeout: 50 * time.Millisecond})
 	n.StartPolling(ctx)
 
-	start := time.Now()
-	answer, ok := n.AskInput(ctx, oversight.InputRequest{Question: "q"})
-	if ok || answer != "" {
-		t.Fatalf("silence must not answer: answer=%q ok=%v", answer, ok)
+	// Silence never ends the wait: the question stays open past PermTimeout
+	// (the caller's timed answer bounds it) and only the ask's cancellation
+	// releases the prompt slot.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		answer, ok := n.AskInput(ctx, oversight.InputRequest{Question: "q"})
+		if ok || answer != "" {
+			t.Errorf("silence must not answer: answer=%q ok=%v", answer, ok)
+		}
+	}()
+	select {
+	case <-done:
+		t.Fatal("the wait must outlive PermTimeout — the question is still open")
+	case <-time.After(300 * time.Millisecond):
 	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("PermTimeout did not bound the wait")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation must end the wait")
 	}
 }
 
@@ -107,7 +121,7 @@ func TestAskInputQuestionIsEscapedAndChunkSafe(t *testing.T) {
 	s := newAPIServer()
 	defer s.srv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	cancel() // returns right after the prompt is sent — escaping is under test
 	n := New(Config{Token: "t", ChatID: 1, APIBase: s.srv.URL, PermTimeout: 20 * time.Millisecond})
 	n.StartPolling(ctx)
 

@@ -21,6 +21,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/oversight"
 )
 
@@ -198,9 +199,9 @@ func TestAskPermission_DismissNoteSaysWhoAnswered(t *testing.T) {
 			wantNote: "answered via remote oversight",
 		},
 		{
-			name:     "remote timed out",
+			name:     "remote timed out (policy opts in)",
 			n:        instantSilentRemote{},
-			p:        foregroundAskPolicy,
+			p:        askPolicy{remoteTimeoutResolves: true}, // not the fg policy anymore
 			allow:    false,
 			src:      permSrcRemoteTimeout,
 			wantNote: "remote oversight timed out — deny applied",
@@ -275,6 +276,92 @@ func TestAskUserQuestion_DismissNoteForQuestions(t *testing.T) {
 	}
 }
 
+// recordingRemote reports what the ask layer told the backend about silence
+// (PermRequest.SilenceResolves) and then answers the ask.
+type recordingRemote struct {
+	oversight.Noop
+	got chan bool
+}
+
+func (r recordingRemote) AskPermission(_ context.Context, req oversight.PermRequest) (oversight.PermDecision, bool) {
+	r.got <- req.SilenceResolves
+	return oversight.PermAllow, true
+}
+
+// TestForegroundPolicy_SilenceNeverResolvesLivePrompt: the interactive
+// policy must not let remote-side silence resolve an ask (the report: a TUI
+// prompt the user was answering got withdrawn with "(answered elsewhere)"
+// after the backend's timeout), and the backend must be told to hold its
+// prompt slot accordingly — SilenceResolves mirrors the policy opt-in.
+func TestForegroundPolicy_SilenceNeverResolvesLivePrompt(t *testing.T) {
+	if foregroundAskPolicy.remoteTimeoutResolves {
+		t.Fatal("foreground asks must not resolve on remote silence")
+	}
+
+	cases := []struct {
+		name   string
+		p      askPolicy
+		wantIf bool
+	}{
+		{name: "foreground", p: foregroundAskPolicy, wantIf: false},
+		{name: "background", p: bgAskPolicy(config.Config{}, permOverrides{}), wantIf: false},
+		{name: "opt-in", p: askPolicy{remoteTimeoutResolves: true}, wantIf: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recordingRemote{got: make(chan bool, 1)}
+			direct := func(ctx context.Context) bool { <-ctx.Done(); return false } // remote answers first
+			if allow, src := askPermission(context.Background(), got,
+				oversight.PermRequest{ToolName: "bash"}, direct, tc.p); !allow || src != permSrcRemote {
+				t.Fatalf("remote should resolve: (%v, %s)", allow, src)
+			}
+			if v := <-got.got; v != tc.wantIf {
+				t.Fatalf("SilenceResolves = %v, want %v", v, tc.wantIf)
+			}
+		})
+	}
+}
+
+// TestAskPermission_ForegroundSilentRemote_DirectAnswerWins: with the
+// interactive policy, a remote surface that never replies must leave the ask
+// open for the direct (TUI) answer instead of resolving it with the timeout
+// action.
+func TestAskPermission_ForegroundSilentRemote_DirectAnswerWins(t *testing.T) {
+	direct := func(ctx context.Context) bool {
+		// The TUI prompt is answered a moment after the ask starts.
+		time.Sleep(20 * time.Millisecond)
+		return true
+	}
+	allow, src := askPermission(context.Background(), instantSilentRemote{},
+		oversight.PermRequest{ToolName: "bash"}, direct, foregroundAskPolicy)
+	if !allow || src != permSrcDirect {
+		t.Fatalf("got (%v, %s), want the direct answer (true, %s)", allow, src, permSrcDirect)
+	}
+}
+
+// TestClampAskDeadline: the countdown shown to the user must never promise
+// more time than the ask's own ctx will give.
+func TestClampAskDeadline(t *testing.T) {
+	long := 6 * time.Minute
+
+	if got := clampAskDeadline(long, context.Background()); got != long {
+		t.Fatalf("no ctx deadline: got %v, want %v", got, long)
+	}
+
+	ctx, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	if got := clampAskDeadline(long, ctx); got > 30*time.Second || got <= 0 {
+		t.Fatalf("ctx deadline must clamp: got %v", got)
+	}
+
+	past, cancel3 := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel3()
+	time.Sleep(5 * time.Millisecond)
+	if got := clampAskDeadline(long, past); got > 0 {
+		t.Fatalf("expired ctx must clamp to <= 0, got %v", got)
+	}
+}
+
 // TestHandlePermDismiss_RendersReasonNote: the TUI prints the carried note
 // instead of the generic wording, and an empty note keeps the fallback.
 func TestHandlePermDismiss_RendersReasonNote(t *testing.T) {
@@ -298,5 +385,67 @@ func TestHandlePermDismiss_RendersReasonNote(t *testing.T) {
 	nm2, _ := m2.handlePermDismiss(permDismissMsg{respCh: resp2})
 	if got := nm2.(model).transcript.String(); !strings.Contains(got, "(answered elsewhere)") {
 		t.Fatalf("transcript = %q, want the generic fallback note", got)
+	}
+}
+
+// TestPermDisplayPrompt_RefreshesCountdownAtDisplay: a prompt that waited in
+// the queue shows the time that is actually left when it is finally shown —
+// the status bar counts down live and the prompt line must not contradict it.
+func TestPermDisplayPrompt_RefreshesCountdownAtDisplay(t *testing.T) {
+	// Timed permission prompt (composed like the TUI hosts compose it).
+	base := permAskPromptAuto("bash", "ls", autoNote(false, 6*time.Minute))
+	msg := permRequestMsg{prompt: base, autoDefault: "n", autoAt: time.Now().Add(90 * time.Second)}
+	got := permDisplayPrompt(msg)
+	if strings.Contains(got, "6m0s") {
+		t.Fatalf("stale countdown in prompt: %q", got)
+	}
+	if !strings.Contains(got, "1m30s") {
+		t.Fatalf("remaining time missing from prompt: %q", got)
+	}
+	if !strings.Contains(got, " — Allow? [Y/n/a/d]") {
+		t.Fatalf("answer line mangled by the refresh: %q", got)
+	}
+
+	// Foreground prompts carry no timed answer — byte-identical, untouched.
+	fg := permAskPrompt("bash", "ls")
+	if permDisplayPrompt(permRequestMsg{prompt: fg}) != fg {
+		t.Fatal("foreground prompt must be unchanged")
+	}
+
+	// Question prompts refresh their own note wording and keep the answer line.
+	q := userAskPrompt("which?", []string{"a", "b"}, autoNoteQuestion(6*time.Minute))
+	qgot := permDisplayPrompt(permRequestMsg{prompt: q, freeText: true, autoAt: time.Now().Add(90 * time.Second)})
+	if strings.Contains(qgot, "6m0s") || !strings.Contains(qgot, "1m30s") {
+		t.Fatalf("question countdown not refreshed: %q", qgot)
+	}
+	if !strings.Contains(qgot, "your answer: ") {
+		t.Fatalf("question answer line mangled: %q", qgot)
+	}
+}
+
+// TestQueuedPerm_PromptShowsRemainingTimeWhenPromoted: the queue-promotion
+// path displays the refreshed note (the same rule as the direct path).
+func TestQueuedPerm_PromptShowsRemainingTimeWhenPromoted(t *testing.T) {
+	m := newPermTestModel()
+	c1, c2 := make(chan string, 1), make(chan string, 1)
+
+	first := timedAsk(c1) // shows ~6m0s
+	nm, _ := m.handlePermRequest(first)
+	m = nm.(model)
+
+	second := timedAsk(c2)
+	second.autoAt = time.Now().Add(90 * time.Second)
+	nm, _ = m.handlePermRequest(second)
+	m = nm.(model)
+	if len(m.permQueue) != 1 {
+		t.Fatalf("second ask should be queued, got %d", len(m.permQueue))
+	}
+
+	nm, _ = m.handlePermKey(enterKey()) // answer the first prompt
+	m = nm.(model)
+
+	got := m.transcript.String()
+	if !strings.Contains(got, "1m30s") {
+		t.Fatalf("promoted prompt must show the remaining time: %q", got)
 	}
 }

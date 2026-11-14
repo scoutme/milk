@@ -123,9 +123,14 @@ type askPolicy struct {
 }
 
 // foregroundAskPolicy is the interactive ask: direct input and remote
-// oversight, no deadline, remote timeout_action resolves remote-side silence
-// (the pre-ADR-0052 behavior, unchanged).
-var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: true}
+// oversight, no deadline — a live prompt waits for a human. Remote-side
+// silence never resolves it (remoteTimeoutResolves=false, ADR-0052
+// amendment): the backend holds its prompt slot until the ask ends instead
+// of timing out with timeout_action — that timeout used to withdraw a TUI
+// prompt the user was still answering, leaving an unexplained
+// "(answered elsewhere)" note. remoteTimeoutResolves stays the opt-in bound
+// for policies whose direct surface is not a live prompt.
+var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: false}
 
 // foregroundPermPolicy is foregroundAskPolicy plus the session allow-all /
 // deny-all mode (issue #302) from the host's live override snapshot — tool
@@ -223,6 +228,20 @@ func questionWithdrawNote(src permSource) string {
 	}
 }
 
+// clampAskDeadline bounds a timed answer by the ctx's own deadline: the
+// displayed countdown (AutoAt) and the ask's timer must promise no more time
+// than the context will actually give. Without this a job ending earlier
+// cancels the ask (generic withdrawal note, prompt gone) while the status
+// bar still counts minutes down.
+func clampAskDeadline(deadline time.Duration, ctx context.Context) time.Duration {
+	if d, ok := ctx.Deadline(); ok {
+		if rem := time.Until(d); rem < deadline {
+			return rem
+		}
+	}
+	return deadline
+}
+
 // dismissNoteFrom reads the resolving source's note the ask layer recorded on
 // ctx before cancelling (permDismissNoteKey) — "" keeps the generic wording.
 func dismissNoteFrom(ctx context.Context) string {
@@ -279,7 +298,13 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 			if ctx.Err() != nil {
 				return // already answered elsewhere — don't prompt the backend
 			}
-			dec, answered := n.AskPermission(ctx, req)
+			// The backend may time out on its own only when this policy would
+			// USE that result; otherwise it must hold its prompt slot until
+			// the ask ends (a live prompt must not be withdrawn by remote
+			// silence, and a late reply must still land on this ask).
+			r := req
+			r.SilenceResolves = p.remoteTimeoutResolves
+			dec, answered := n.AskPermission(ctx, r)
 			switch {
 			case answered:
 				if dec.Always() && p.sticky != nil {
@@ -517,6 +542,52 @@ func autoDefaultAnswer(defAllow bool) string {
 		return "y"
 	}
 	return "n"
+}
+
+// refreshTimedPromptNote re-renders the timed-answer note inside a composed
+// prompt: the note text sits between yellow()'s SGR codes, so only the text
+// between them is replaced and the styling (and the rest of the prompt)
+// stay byte-identical. Returns the prompt unchanged when no note is found.
+func refreshTimedPromptNote(prompt, note string) string {
+	for _, p := range []string{"auto-deny in ", "auto-allow in ", "no answer in "} {
+		k := strings.Index(prompt, p)
+		if k < 0 {
+			continue
+		}
+		e := strings.Index(prompt[k:], "\x1b[0m")
+		if e < 0 {
+			// Unstyled note (fixtures): the note ends where the prompt's
+			// fixed next segment begins.
+			if j := strings.Index(prompt[k:], " — Allow?"); j >= 0 {
+				e = j
+			} else if j := strings.Index(prompt[k:], "\n[milk] "); j >= 0 {
+				e = j
+			} else {
+				return prompt
+			}
+		}
+		return prompt[:k] + note + prompt[k+e:]
+	}
+	return prompt
+}
+
+// permDisplayPrompt is msg.prompt with its timed-answer note re-rendered at
+// display time: a prompt that waited in the queue must state the REMAINING
+// time, not the ask-start figure it was composed with — the status bar
+// counts down live and the prompt line must not contradict it.
+func permDisplayPrompt(msg permRequestMsg) string {
+	if msg.autoAt.IsZero() {
+		return msg.prompt // foreground prompt: no timed answer, text is final
+	}
+	rem := time.Until(msg.autoAt).Round(time.Second)
+	if rem < 0 {
+		rem = 0
+	}
+	note := autoNote(msg.autoDefault == "y", rem)
+	if msg.freeText {
+		note = autoNoteQuestion(rem)
+	}
+	return refreshTimedPromptNote(msg.prompt, note)
 }
 
 // permAskPromptAuto builds the TUI prompt for a background ask: the ordinary
