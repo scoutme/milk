@@ -527,9 +527,11 @@ type permRequestMsg struct {
 	prompt string
 	label  string // status-bar label; defaults to "[allow?]" when empty
 	respCh chan string
-	// autoDefault ("y"/"n") and autoAt mark a background ask with a timed
-	// answer (ADR-0052): the queue applies autoDefault when autoAt passes
-	// with no reply, shows a countdown for it, and answers overflow with it.
+	// autoDefault ("y"/"n") and autoAt mark a timed ask (ADR-0052): the
+	// prompt and status bar show a live countdown for it, overflow answers
+	// with it, and the ask's own timer applies it — a background ask's
+	// deadline, or the remote backend's timeout for a foreground prompt's
+	// fuse (foregroundPrompt). Empty autoDefault means no timed answer.
 	autoDefault string
 	autoAt      time.Time
 	// freeText marks an ask_user question prompt: the answer is whatever the
@@ -707,23 +709,34 @@ func (r *tuiInputReader) readLineFreeText(ctx context.Context, prompt, label str
 // through events.Host.RequestPermission (Phase 1's one real Host migration —
 // see docs/internal/design/machine-readable-output-design.md) and raced over the three
 // answer sources (ADR-0052's permask.go) — direct input and remote oversight
-// here, no timed answer: a foreground ask waits for a human. host is backed
-// by tuiHost, which reuses the existing TUI permRequestMsg flow: the
-// goroutine blocks while the TUI displays a yellow permission prompt, and a
-// remote answer withdraws it via permDismissMsg (readLineCtx). Grants are
-// persisted to ps (may be nil). Session-level skipPermissions is handled by
-// the caller via WithSkipPermissions before this is ever called. n may be
-// nil — no remote surface.
+// here, no ask deadline. Remote-side silence applies the remote's
+// timeout_action after perm_timeout_secs (foregroundAskPolicy) and the prompt
+// shows that fuse as a live countdown (foregroundFuse) — the configured
+// timeout stays honoured, never invisible. host is backed by tuiHost, which
+// reuses the existing TUI permRequestMsg flow: the goroutine blocks while the
+// TUI displays a yellow permission prompt, and a remote answer (or the fuse)
+// withdraws it via permDismissMsg (readLineCtx). Grants are persisted to ps
+// (may be nil). Session-level skipPermissions is handled by the caller via
+// WithSkipPermissions before this is ever called. n may be nil — no remote
+// surface.
 func makeLocalPermAsk(host events.Host, ps *local.PermStore, n oversight.Notifier, st *interactiveState) func(tool, summary string) bool {
 	return func(tool, summary string) bool {
 		p := foregroundPermPolicy(st.permOverridesNow())
 		p.sticky = stickySetter(st.setSessionPermMode, func(note string) {
 			host.Notify(events.Notification{Text: note})
 		})
+		// The remote's timeout is config (perm_timeout_secs/timeout_action):
+		// composed once so the countdown and the backend's timer name the
+		// same instant; fuse 0 (no remote surface) keeps the plain prompt.
+		fuse, fuseAllow := foregroundFuse(n, st.cfg.RemoteOversight)
+		prompt, autoDefault, autoAt := foregroundPrompt(tool, summary, fuse, fuseAllow)
 		allow, _ := askPermission(context.Background(), n,
 			oversight.PermRequest{ToolName: tool, Input: summary},
 			func(ctx context.Context) bool {
-				outcome, err := host.RequestPermission(ctx, events.PermissionRequest{Prompt: permAskPrompt(tool, summary), Tool: tool, Summary: summary})
+				outcome, err := host.RequestPermission(ctx, events.PermissionRequest{
+					Prompt: prompt, Tool: tool, Summary: summary,
+					AutoDefault: autoDefault, AutoAt: autoAt,
+				})
 				return err == nil && outcome.Allow
 			},
 			p)

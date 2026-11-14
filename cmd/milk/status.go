@@ -182,7 +182,8 @@ func (m *model) statusBar() string {
 	if m.workflowRunning {
 		left += dim(" [» " + workflowStatusLabel(m.workflowState) + "]")
 	}
-	// Timed answer countdown for a pending background ask (ADR-0052).
+	// Timed-answer countdown for a pending ask (ADR-0052): a background
+	// ask's deadline, or a foreground prompt's remote-timeout fuse.
 	if m.pendingPerm != nil && !m.pendingPerm.autoAt.IsZero() {
 		rem := time.Until(m.pendingPerm.autoAt).Round(time.Second)
 		if rem < 0 {

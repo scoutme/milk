@@ -123,14 +123,16 @@ type askPolicy struct {
 }
 
 // foregroundAskPolicy is the interactive ask: direct input and remote
-// oversight, no deadline — a live prompt waits for a human. Remote-side
-// silence never resolves it (remoteTimeoutResolves=false, ADR-0052
-// amendment): the backend holds its prompt slot until the ask ends instead
-// of timing out with timeout_action — that timeout used to withdraw a TUI
-// prompt the user was still answering, leaving an unexplained
-// "(answered elsewhere)" note. remoteTimeoutResolves stays the opt-in bound
-// for policies whose direct surface is not a live prompt.
-var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: false}
+// oversight, no ask deadline — a live prompt waits for a human, and remote
+// silence applies the remote's configured timeout_action after
+// perm_timeout_secs (remoteTimeoutResolves, ADR-0052). The timeout is a
+// config feature (perm_timeout_secs / timeout_action) and must be honoured:
+// what the bugfix taught is that it must never be INVISIBLE — the prompt
+// carries the same fuse as a live countdown (foregroundFuse +
+// foregroundPrompt), the withdrawal note says "remote oversight timed out —
+// <action> applied", and a direct answer in the same instant still wins the
+// tie. The backend owns the timer and posts the ⏱ notice on the chat.
+var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: true}
 
 // foregroundPermPolicy is foregroundAskPolicy plus the session allow-all /
 // deny-all mode (issue #302) from the host's live override snapshot — tool
@@ -139,6 +141,40 @@ func foregroundPermPolicy(ov permOverrides) askPolicy {
 	p := foregroundAskPolicy
 	p.sessionMode = ov.sessionMode
 	return p
+}
+
+// foregroundFuse returns the visible countdown for a foreground permission
+// prompt: how long the remote backend will wait before applying its
+// configured timeout_action, and what that action is. Zero means no fuse —
+// no remote surface (the backend never resolves the ask; the prompt simply
+// waits for a human) or no remote_oversight section in config. Duration and
+// action come from the same config newNotifier builds the backend from
+// (PermTimeoutDuration / TimeoutActionValue — default 120s / deny), so the
+// countdown names the moment the backend will actually fire. If the
+// backend's single prompt slot is busy the prompt posts late and the
+// countdown may reach zero first; the prompt then stays open — it counts
+// down to the configured fuse, never past it.
+func foregroundFuse(n oversight.Notifier, ro *config.RemoteOversightConfig) (time.Duration, bool) {
+	if ro == nil || !oversightRemote(n) {
+		return 0, false
+	}
+	return ro.PermTimeoutDuration(), ro.TimeoutActionValue() == "allow"
+}
+
+// foregroundPrompt composes a foreground permission prompt with its
+// remote-timeout fuse: the ordinary prompt with no countdown when fuse is 0,
+// otherwise the timed-answer prompt shape (same "auto-… in …" note the
+// background asks use, so the queue display, status bar and
+// permDisplayPrompt's remaining-time refresh all apply unchanged), plus the
+// matching AutoDefault/AutoAt metadata. The answer itself is applied by the
+// remote backend's timer (foregroundAskPolicy) — the countdown is display;
+// overflow in the prompt queue answers with the same configured default.
+func foregroundPrompt(tool, summary string, fuse time.Duration, fuseAllow bool) (prompt, autoDefault string, autoAt time.Time) {
+	if fuse <= 0 {
+		return permAskPrompt(tool, summary), "", time.Time{}
+	}
+	return permAskPromptAuto(tool, summary, autoNote(fuseAllow, fuse)),
+		autoDefaultAnswer(fuseAllow), time.Now().Add(fuse)
 }
 
 // sessionPermModeGetter adapts a host's override snapshot accessor onto the

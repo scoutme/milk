@@ -115,6 +115,38 @@ func TestAskPermission_TimesOutOnlyWhenSilenceResolves(t *testing.T) {
 	}
 }
 
+// timeout_action=allow is honoured the same way: the fuse fires, PermAllow
+// comes back unanswered, and the chat says "Allowed (timeout)" — the config
+// feature the foreground prompt's countdown promises.
+func TestAskPermission_TimeoutActionAllow(t *testing.T) {
+	s := newAPIServer() // no replies ever
+	defer s.srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := New(Config{Token: "t", ChatID: 1, APIBase: s.srv.URL, PermTimeout: 30 * time.Millisecond, TimeoutAction: "allow"})
+	n.StartPolling(ctx)
+
+	dec, ok := n.AskPermission(ctx, oversight.PermRequest{ToolName: "bash", SilenceResolves: true})
+	if ok {
+		t.Fatal("silence must not be an answer")
+	}
+	if dec != oversight.PermAllow {
+		t.Fatalf("decision = %v, want PermAllow (timeout_action allow)", dec)
+	}
+	var notices []string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		notices = timeoutNotices(sentSnapshot(t, s))
+		if len(notices) != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(notices) == 0 || !strings.Contains(notices[0], "Allowed (timeout)") {
+		t.Fatalf("timeout notice missing: %v", notices)
+	}
+}
+
 // Cancellation is the ask ending on another surface (e.g. the TUI prompt was
 // answered): withdraw quietly — the old code posted the timeout notice here
 // too, contradicting the answer the user had just given.
