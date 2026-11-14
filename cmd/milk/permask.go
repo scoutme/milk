@@ -123,9 +123,14 @@ type askPolicy struct {
 }
 
 // foregroundAskPolicy is the interactive ask: direct input and remote
-// oversight, no deadline, remote timeout_action resolves remote-side silence
-// (the pre-ADR-0052 behavior, unchanged).
-var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: true}
+// oversight, no deadline — a live prompt waits for a human. Remote-side
+// silence never resolves it (remoteTimeoutResolves=false, ADR-0052
+// amendment): the backend holds its prompt slot until the ask ends instead
+// of timing out with timeout_action — that timeout used to withdraw a TUI
+// prompt the user was still answering, leaving an unexplained
+// "(answered elsewhere)" note. remoteTimeoutResolves stays the opt-in bound
+// for policies whose direct surface is not a live prompt.
+var foregroundAskPolicy = askPolicy{remoteTimeoutResolves: false}
 
 // foregroundPermPolicy is foregroundAskPolicy plus the session allow-all /
 // deny-all mode (issue #302) from the host's live override snapshot — tool
@@ -184,6 +189,68 @@ func stickySetter(setMode func(sessionPermMode), note func(string)) func(bool) {
 	}
 }
 
+// permDismissNoteKey carries the ask's resolving source (a note string) onto
+// the direct surface's context so a withdrawn prompt can say *who* answered
+// instead of the vague "(answered elsewhere)" (ADR-0052's honest-transcript
+// rule). askPermission/askUserQuestion write the note before cancel() — the
+// Done channel read by the surface carries the happens-before edge.
+type permDismissNoteKey struct{}
+
+// permWithdrawNote is the withdrawal reason for a permission prompt: who
+// resolved the ask and what it applied. Empty src keeps the generic wording.
+func permWithdrawNote(src permSource, allow bool) string {
+	act := "deny"
+	if allow {
+		act = "allow"
+	}
+	switch src {
+	case permSrcRemote:
+		return "answered via remote oversight"
+	case permSrcRemoteTimeout:
+		return "remote oversight timed out — " + act + " applied"
+	case permSrcDefault:
+		return "timed answer — " + act + " applied"
+	default:
+		return ""
+	}
+}
+
+// questionWithdrawNote is permWithdrawNote for an ask_user question: silence
+// resolves as "no answer", never as a default.
+func questionWithdrawNote(src permSource) string {
+	switch src {
+	case permSrcRemote:
+		return "answered via remote oversight"
+	case permSrcDefault:
+		return "no answer in time"
+	default:
+		return ""
+	}
+}
+
+// clampAskDeadline bounds a timed answer by the ctx's own deadline: the
+// displayed countdown (AutoAt) and the ask's timer must promise no more time
+// than the context will actually give. Without this a job ending earlier
+// cancels the ask (generic withdrawal note, prompt gone) while the status
+// bar still counts minutes down.
+func clampAskDeadline(deadline time.Duration, ctx context.Context) time.Duration {
+	if d, ok := ctx.Deadline(); ok {
+		if rem := time.Until(d); rem < deadline {
+			return rem
+		}
+	}
+	return deadline
+}
+
+// dismissNoteFrom reads the resolving source's note the ask layer recorded on
+// ctx before cancelling (permDismissNoteKey) — "" keeps the generic wording.
+func dismissNoteFrom(ctx context.Context) string {
+	if s, ok := ctx.Value(permDismissNoteKey{}).(*string); ok {
+		return *s
+	}
+	return ""
+}
+
 // askPermission races the direct surface and remote oversight and returns the
 // first real answer plus its source. direct may be nil (no local surface); n
 // may be nil or oversight.Noop (no remote surface). With no surface at all
@@ -210,6 +277,11 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 	// ask.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The withdrawal note is written before cancel() on every resolution path:
+	// the direct surface reads it after observing ctx.Done() (see
+	// readLineCtx's permDismissMsg).
+	var note string
+	ctx = context.WithValue(ctx, permDismissNoteKey{}, &note)
 	type result struct {
 		allow bool
 		src   permSource
@@ -226,7 +298,13 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 			if ctx.Err() != nil {
 				return // already answered elsewhere — don't prompt the backend
 			}
-			dec, answered := n.AskPermission(ctx, req)
+			// The backend may time out on its own only when this policy would
+			// USE that result; otherwise it must hold its prompt slot until
+			// the ask ends (a live prompt must not be withdrawn by remote
+			// silence, and a late reply must still land on this ask).
+			r := req
+			r.SilenceResolves = p.remoteTimeoutResolves
+			dec, answered := n.AskPermission(ctx, r)
 			switch {
 			case answered:
 				if dec.Always() && p.sticky != nil {
@@ -254,11 +332,14 @@ func askPermission(ctx context.Context, n oversight.Notifier, req oversight.Perm
 	}
 	select {
 	case res := <-ch:
+		note = permWithdrawNote(res.src, res.allow)
 		return res.allow, res.src
 	case <-ctx.Done():
 		// External cancellation (a job's context ended) — resolve with the
 		// policy default rather than block forever. The direct surface's
-		// ctx-aware prompt is withdrawn by its own ctx handling.
+		// ctx-aware prompt is withdrawn by its own ctx handling. No note is
+		// recorded here: the direct side can observe this Done before the
+		// write below would land, so it keeps the generic fallback wording.
 		return p.def, permSrcDefault
 	}
 }
@@ -280,6 +361,10 @@ func askUserQuestion(ctx context.Context, n oversight.Notifier, req oversight.In
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// See askPermission: the withdrawal note is recorded before cancel() so the
+	// direct surface can say who answered.
+	var note string
+	ctx = context.WithValue(ctx, permDismissNoteKey{}, &note)
 	type result struct {
 		answer string
 		ok     bool
@@ -326,9 +411,12 @@ func askUserQuestion(ctx context.Context, n oversight.Notifier, req oversight.In
 	}
 	select {
 	case res := <-ch:
+		note = questionWithdrawNote(res.src)
 		return res.answer, res.ok, res.src
 	case <-ctx.Done():
 		// External cancellation (a job's context ended) — nobody answered.
+		// No note recorded (see askPermission's ctx.Done path): the generic
+		// fallback wording applies.
 		return "", false, permSrcDefault
 	}
 }
@@ -454,6 +542,52 @@ func autoDefaultAnswer(defAllow bool) string {
 		return "y"
 	}
 	return "n"
+}
+
+// refreshTimedPromptNote re-renders the timed-answer note inside a composed
+// prompt: the note text sits between yellow()'s SGR codes, so only the text
+// between them is replaced and the styling (and the rest of the prompt)
+// stay byte-identical. Returns the prompt unchanged when no note is found.
+func refreshTimedPromptNote(prompt, note string) string {
+	for _, p := range []string{"auto-deny in ", "auto-allow in ", "no answer in "} {
+		k := strings.Index(prompt, p)
+		if k < 0 {
+			continue
+		}
+		e := strings.Index(prompt[k:], "\x1b[0m")
+		if e < 0 {
+			// Unstyled note (fixtures): the note ends where the prompt's
+			// fixed next segment begins.
+			if j := strings.Index(prompt[k:], " — Allow?"); j >= 0 {
+				e = j
+			} else if j := strings.Index(prompt[k:], "\n[milk] "); j >= 0 {
+				e = j
+			} else {
+				return prompt
+			}
+		}
+		return prompt[:k] + note + prompt[k+e:]
+	}
+	return prompt
+}
+
+// permDisplayPrompt is msg.prompt with its timed-answer note re-rendered at
+// display time: a prompt that waited in the queue must state the REMAINING
+// time, not the ask-start figure it was composed with — the status bar
+// counts down live and the prompt line must not contradict it.
+func permDisplayPrompt(msg permRequestMsg) string {
+	if msg.autoAt.IsZero() {
+		return msg.prompt // foreground prompt: no timed answer, text is final
+	}
+	rem := time.Until(msg.autoAt).Round(time.Second)
+	if rem < 0 {
+		rem = 0
+	}
+	note := autoNote(msg.autoDefault == "y", rem)
+	if msg.freeText {
+		note = autoNoteQuestion(rem)
+	}
+	return refreshTimedPromptNote(msg.prompt, note)
 }
 
 // permAskPromptAuto builds the TUI prompt for a background ask: the ordinary

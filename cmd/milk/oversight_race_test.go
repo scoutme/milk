@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,31 +113,70 @@ func TestMakeLocalPermAsk_NoRemote_ClientOnly(t *testing.T) {
 // TestTUIHost_RequestPermission_WithdrawnOnCancel: when ctx ends before the
 // user answers (remote oversight won), the prompt is withdrawn with a
 // permDismissMsg keyed to the same respCh and an error is returned — the TUI
-// must never stay parked on a decided question.
+// must never stay parked on a decided question. An ask resolved before it was
+// ever shown must not flash a prompt at all.
 func TestTUIHost_RequestPermission_WithdrawnOnCancel(t *testing.T) {
+	var mu sync.Mutex
 	var msgs []tea.Msg
-	ir := &tuiInputReader{send: func(m tea.Msg) { msgs = append(msgs, m) }}
+	ir := &tuiInputReader{send: func(m tea.Msg) {
+		mu.Lock()
+		msgs = append(msgs, m)
+		mu.Unlock()
+	}}
+	snapshot := func() []tea.Msg {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]tea.Msg, len(msgs))
+		copy(out, msgs)
+		return out
+	}
 	host := newTUIHost(ir)
 
+	// Already-resolved ask: error without ever showing a prompt (no flash,
+	// nothing to withdraw).
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := host.RequestPermission(ctx, events.PermissionRequest{Prompt: "allow? "})
-	if err == nil {
+	if _, err := host.RequestPermission(ctx, events.PermissionRequest{Prompt: "allow? "}); err == nil {
+		t.Fatal("expected an error when the request is cancelled")
+	}
+	if n := len(snapshot()); n != 0 {
+		t.Fatalf("an already-resolved ask must not show a prompt, got %d message(s)", n)
+	}
+
+	// Cancel while the prompt is up: it is withdrawn with a matching dismiss.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := host.RequestPermission(ctx2, events.PermissionRequest{Prompt: "allow? "})
+		errCh <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	var req permRequestMsg
+	for time.Now().Before(deadline) {
+		found := false
+		for _, m := range snapshot() {
+			if v, ok := m.(permRequestMsg); ok {
+				req, found = v, true
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if req.respCh == nil {
+		t.Fatal("no permRequestMsg sent")
+	}
+	cancel2()
+	if err := <-errCh; err == nil {
 		t.Fatal("expected an error when the request is cancelled")
 	}
 
-	var req, dismiss *permRequestMsg
-	for _, m := range msgs {
-		switch v := m.(type) {
-		case permRequestMsg:
-			req = &v
-		case permDismissMsg:
-			d := permRequestMsg{respCh: v.respCh}
-			dismiss = &d
+	var dismiss *permDismissMsg
+	for _, m := range snapshot() {
+		if v, ok := m.(permDismissMsg); ok {
+			dismiss = &v
 		}
-	}
-	if req == nil {
-		t.Fatal("no permRequestMsg sent")
 	}
 	if dismiss == nil {
 		t.Fatal("no permDismissMsg sent — the prompt would stay parked in the TUI")

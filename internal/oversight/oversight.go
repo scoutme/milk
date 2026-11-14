@@ -38,6 +38,15 @@ type PermRequest struct {
 	// false for asks the session mode must never cover (the doom-loop
 	// safety gate), where the prompt keeps its plain y/n wording.
 	AllowAlways bool
+	// SilenceResolves reports whether remote-side silence may resolve the
+	// ask: true lets the backend time out on its own (PermTimeout →
+	// TimeoutAction, answered=false, its prompt slot released); false makes
+	// it hold the prompt until a reply or ctx cancellation — silence is not
+	// an answer for that ask (ADR-0052), a late reply must still answer it,
+	// and a timeout notice would contradict the surface that is still
+	// prompting. The ask layer sets it from its policy
+	// (askPolicy.remoteTimeoutResolves).
+	SilenceResolves bool
 }
 
 // InputRequest carries an ask_user question to the remote interface.
@@ -70,19 +79,23 @@ type Notifier interface {
 
 	// AskPermission sends a permission request to the remote interface and
 	// waits for a reply. answered reports whether a human actually replied;
-	// a timeout — the backend's own prompt timeout or ctx cancellation — is
-	// not an answer (see ADR-0052). On silence, decision carries the
-	// backend's configured timeout action, and the caller decides what
-	// silence means: the timeout action for foreground asks, the timed
-	// default for background ones.
+	// ctx cancellation — the ask resolved on another surface — is never an
+	// answer and withdraws the remote prompt quietly (see ADR-0052). With
+	// req.SilenceResolves the backend may also time out on its own: on
+	// PermTimeout it applies TimeoutAction, returns answered=false and
+	// releases its prompt slot, and the caller decides what that silence
+	// means (the timeout action for policies that opt in, otherwise the
+	// timed default). Without it the backend holds its prompt until a reply
+	// or cancellation.
 	AskPermission(ctx context.Context, req PermRequest) (decision PermDecision, answered bool)
 
 	// AskInput sends an ask_user question to the remote interface and waits
 	// for a free-text reply. answered reports whether a human actually
-	// replied; a timeout — the backend's own prompt timeout or ctx
-	// cancellation — is silence, and for questions silence is never an
-	// answer (unlike AskPermission there is no timeout action): the caller
-	// keeps waiting on its other surfaces or the timed answer.
+	// replied. There is no timeout action for questions and silence is
+	// never an answer: the backend holds its prompt until a reply or ctx
+	// cancellation (the caller's timed answer bounds the wait), so a late
+	// reply still answers the question instead of falling through to the
+	// chat-input callback.
 	AskInput(ctx context.Context, req InputRequest) (answer string, answered bool)
 }
 
