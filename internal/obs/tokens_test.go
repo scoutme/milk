@@ -194,3 +194,33 @@ func TestResetSessionTokens_ClearsRequestInput(t *testing.T) {
 		t.Errorf("got %d after reset, want 0", got)
 	}
 }
+
+// TestClearRequestInput_DropsOnlyThatRole pins the clear-on-identity-change
+// primitive behind the ctx:x/y pairing invariant (issue #429): when a turn is
+// dispatched under a new agent identity, the previous identity's recorded
+// request must be dropped for exactly that role — other roles (and suffixed
+// subagent/toolagent buckets) keep theirs.
+func TestClearRequestInput_DropsOnlyThatRole(t *testing.T) {
+	ResetSessionTokens()
+	t.Cleanup(ResetSessionTokens)
+	RecordRequestInput("primary", 5000)
+	RecordRequestInput("primary:toolagent", 7000)
+	RecordRequestInput("escalation", 9000)
+
+	ClearRequestInput("primary")
+
+	if got := SessionLastRequestInput("primary"); got != 0 {
+		t.Errorf("primary: got %d after clear, want 0", got)
+	}
+	if got := SessionLastRequestInput("primary:toolagent"); got != 7000 {
+		t.Errorf("primary:toolagent: got %d, want 7000 (clear must be exact-role)", got)
+	}
+	if got := SessionLastRequestInput("escalation"); got != 9000 {
+		t.Errorf("escalation: got %d, want 9000 (clear must be exact-role)", got)
+	}
+
+	ClearRequestInput("primary") // idempotent on an already-empty slot
+	if got := SessionLastRequestInput("primary"); got != 0 {
+		t.Errorf("primary: got %d after a second clear, want 0", got)
+	}
+}

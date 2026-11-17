@@ -235,6 +235,7 @@ func TestStatusTokens_ContextPressure_AbsoluteSizeWithoutContextWindow(t *testin
 		lastTurnCompletion: map[string]int64{"primary": 200, "escalation": 0},
 		lastTokenRole:      "primary",
 	}
+	stampCtxFixture(m)
 
 	bar := ansi.Strip(m.statusTokens())
 	if !strings.Contains(bar, "ctx:1.0k") {
@@ -262,6 +263,7 @@ func TestStatusTokens_ContextPressure_IdleShowsLastTurnUsage(t *testing.T) {
 		lastTurnCompletion: map[string]int64{"primary": 200, "escalation": 0},
 		lastTokenRole:      "primary",
 	}
+	stampCtxFixture(m)
 
 	bar := ansi.Strip(m.statusTokens())
 	if !strings.Contains(bar, "ctx:8.0k/10.0k") {
@@ -317,6 +319,7 @@ func TestStatusTokens_ContextPressure_CriticalTierIsRed(t *testing.T) {
 		lastTurnCompletion: map[string]int64{"primary": 0, "escalation": 0},
 		lastTokenRole:      "primary",
 	}
+	stampCtxFixture(m)
 
 	raw := m.statusTokens()
 	if !strings.Contains(raw, ansiRed) {
@@ -344,6 +347,7 @@ func TestStatusTokens_ContextPressure_LargeWindowStillShowsBothSides(t *testing.
 		lastTurnCompletion: map[string]int64{"primary": 566, "escalation": 0},
 		lastTokenRole:      "primary",
 	}
+	stampCtxFixture(m)
 
 	bar := ansi.Strip(m.statusTokens())
 	if !strings.Contains(bar, "ctx:4.8k/1.0M") {
@@ -503,6 +507,7 @@ func TestStatusTokens_ContextPressure_UsesSingleRequestNotTurnSum(t *testing.T) 
 		lastTurnCompletion: map[string]int64{"primary": 200},
 		lastTokenRole:      "primary",
 	}
+	stampCtxFixture(m)
 	bar := ansi.Strip(m.statusTokens())
 	if !strings.Contains(bar, "ctx:90.0k/100.0k") {
 		t.Errorf("want ctx:90.0k/100.0k from the single request, got %q", bar)

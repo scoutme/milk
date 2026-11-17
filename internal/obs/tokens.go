@@ -77,6 +77,19 @@ func SessionLastRequestInput(role string) int64 {
 	return requestInputTracker.last[role]
 }
 
+// ClearRequestInput drops the single-request input recorded for one exact
+// role. It exists for the ctx:x/y pairing invariant (issue #429): a request
+// measured against one agent's context window must never be displayed
+// against another's, so when a turn is dispatched under a different agent
+// identity than the previous one, the previous identity's recorded size is
+// discarded here instead of lingering as the role's "last request" — the
+// value is keyed by role alone and would otherwise survive an /agent switch.
+func ClearRequestInput(role string) {
+	requestInputTracker.mu.Lock()
+	delete(requestInputTracker.last, role)
+	requestInputTracker.mu.Unlock()
+}
+
 func accumulateSessionTokens(model, agent string, prompt, completion int64) {
 	key := model + "\x00" + agent
 	sessionAccumulator.mu.Lock()

@@ -385,6 +385,59 @@ func (m *model) statusAgent() string {
 	return agent
 }
 
+// ctxIdentity is the (agent name, model, window) triple a ctx numerator was
+// measured under. ctx:x/y may only ever divide a numerator by the window it
+// was actually measured against (issue #429) — both sides must come from the
+// same triple, so this struct is the provenance stamp they compare. The
+// window field is the *resolved* one (explicit context_window_tokens, else
+// the models.dev lookup), so an edit of either source counts as an identity
+// change and forces the pair to re-measure before it may display again.
+type ctxIdentity struct {
+	agent  string
+	model  string
+	window int
+}
+
+// ctxIdentityFor resolves the identity requests for role run under in cfg —
+// the agent config's name and model plus the context window the request will
+// be trimmed to. dispatchAgent stamps this per role at every turn dispatch
+// (stampTurnCtxIdentity); the ctx gate in statusTokens compares the stamp
+// against a fresh resolution: equality proves the displayed numerator was
+// measured against the displayed window.
+func ctxIdentityFor(cfg config.Config, role string) ctxIdentity {
+	var ac config.AgentConfig
+	if role == "escalation" {
+		ac = cfg.EscalationAgentConfig()
+	} else {
+		ac = cfg.ActiveAgent()
+	}
+	return ctxIdentity{agent: ac.Name, model: ac.Model, window: cfg.AgentContextWindowTokens(ac)}
+}
+
+// stampTurnCtxIdentity pins, per role, the ctxIdentity the dispatched turn's
+// requests will be measured under (issue #429). When a role's identity
+// changed since the last dispatch — /agent switch, --agent, an agent or
+// window config edit — its role-keyed last-request slot is dropped: without
+// this, a first turn that fails before reporting usage would leave the
+// previous agent's recorded request to be shown against the new agent's
+// window, which is exactly the mispairing this prevents. The idle ctx
+// fallback is gated on the same stamp in statusTokens.
+func (m *model) stampTurnCtxIdentity() {
+	if m.st == nil {
+		return
+	}
+	if m.turnCtxIdentity == nil {
+		m.turnCtxIdentity = map[string]ctxIdentity{}
+	}
+	for _, role := range []string{"primary", "escalation"} {
+		id := ctxIdentityFor(m.st.cfg, role)
+		if m.turnCtxIdentity[role] != id {
+			obs.ClearRequestInput(role)
+		}
+		m.turnCtxIdentity[role] = id
+	}
+}
+
 // statusTokens returns the token counter fragment for the status bar.
 // While busy: shows live streamed char count as a proxy for in-progress output.
 // While idle: "in:X out:Y  last in:X out:Y" — session totals + last turn real tokens.
@@ -458,9 +511,24 @@ func (m *model) statusTokens() string {
 	// the request count). Providers that don't report per request fall back to
 	// the turn's token delta. When busy, statusContextPressure already
 	// switches to the live char-based estimate.
-	perTurnInput := obs.SessionLastRequestInput(role)
-	if perTurnInput <= 0 {
-		perTurnInput = lastPrompt + m.lastTurnCacheRead[role] + m.lastTurnCacheCreate[role]
+	//
+	// Both sources are keyed by role alone, so they survive an /agent switch
+	// while the window resolves for the newly active agent immediately —
+	// exactly the mispairing issue #429 reports (the previous agent's last
+	// request divided by the new agent's window). The pair is therefore only
+	// read when the identity stamped at dispatch (turnCtxIdentity) still
+	// matches the active one; until the active agent serves a request of its
+	// own the fragment is suppressed rather than shown cross-agent. The busy
+	// path is a live estimate of the in-flight turn and needs no gate.
+	var perTurnInput int64
+	if m.st != nil {
+		ident := ctxIdentityFor(m.st.cfg, role)
+		if m.turnCtxIdentity[role] == ident {
+			perTurnInput = obs.SessionLastRequestInput(role)
+			if perTurnInput <= 0 {
+				perTurnInput = lastPrompt + m.lastTurnCacheRead[role] + m.lastTurnCacheCreate[role]
+			}
+		}
 	}
 	if ctxFragment := m.statusContextPressure(role, perTurnInput); ctxFragment != "" {
 		// Appended last and deliberately NOT run through the outer dim() below:
@@ -506,13 +574,10 @@ func (m *model) statusContextPressure(role string, promptTokens int64) string {
 	if m.st == nil {
 		return ""
 	}
-	var ac config.AgentConfig
-	if role == "escalation" {
-		ac = m.st.cfg.EscalationAgentConfig()
-	} else {
-		ac = m.st.cfg.ActiveAgent()
-	}
-	window := m.st.cfg.AgentContextWindowTokens(ac)
+	// Same resolver the dispatch stamp uses (ctxIdentityFor), so the window
+	// here can never drift from the one the numerator's identity was pinned
+	// against (issue #429).
+	window := ctxIdentityFor(m.st.cfg, role).window
 
 	numerator := promptTokens
 	if m.busy {
