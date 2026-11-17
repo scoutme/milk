@@ -45,6 +45,7 @@
 * [43. Background Sub-Agents for the Local Agent's Tool Loop](0043-background-subagents.md)
 * [44. Side-Panel Auto-Open, Shortcut Hints, and Alternating Background](0044-panel-auto-open-and-styling.md)
 * [45. Local Project-Level Config Overrides (.milk/)](0045-local-config-overrides.md)
+* [46. Interactive Attach to the Claude CLI Escalation Session](0046-interactive-attach-claude-cli.md)
 * [47. Live-Attach View for Background Jobs and Workflows](0047-live-background-transcript-view.md)
 * [48. Notification Toasts: Displaced, Timestamped, Dismissable Events](0048-notification-toasts.md)
 * [49. Machine-Readable Wire Contract: ACP v2 Embedding + Batch JSONL](0049-machine-readable-wire-contract.md)
