@@ -1314,6 +1314,16 @@ type model struct {
 	lastTurnCompletion  map[string]int64
 	lastTurnCacheRead   map[string]int64
 	lastTurnCacheCreate map[string]int64
+	// turnCtxIdentity pins, per role, the ctxIdentity (agent name + model +
+	// window) the most recent turn dispatch measured its requests under —
+	// stamped (with stale last-request slots cleared) by stampTurnCtxIdentity
+	// at every dispatchAgent. ctx:x/y renders its numerator only while this
+	// still equals the active identity: both numerator sources are keyed by
+	// role alone and survive an /agent switch, while the window resolves for
+	// the new agent immediately (issue #429) — the pair must never cross
+	// agents. A missing entry means "no turn dispatched yet" and suppresses
+	// the fragment too (fail closed on unknown provenance).
+	turnCtxIdentity map[string]ctxIdentity
 	// lastTokenRole tracks which role's counters were last displayed; used to detect
 	// role changes and clear stale last-turn counters between turns.
 	lastTokenRole string
@@ -1509,6 +1519,7 @@ func newModel(ctx context.Context, st *interactiveState, rtr *router.Router, age
 		lastTurnCompletion:  map[string]int64{"primary": 0, "escalation": 0},
 		lastTurnCacheRead:   map[string]int64{"primary": 0, "escalation": 0},
 		lastTurnCacheCreate: map[string]int64{"primary": 0, "escalation": 0},
+		turnCtxIdentity:     map[string]ctxIdentity{},
 		lastTurnTiming:      map[string]turnTiming{"primary": {}, "escalation": {}},
 		seenTiming:          map[string]turnTiming{"primary": {}, "escalation": {}},
 		loopDetector:        loop.New(st.cfg.LoopDetectionCfg()),
@@ -4829,6 +4840,12 @@ func (m model) dispatchAgent(input string) (tea.Model, tea.Cmd) {
 
 	// Capture input chars for the live token estimate in the status bar.
 	m.currentTurnInputChars = int64(len(agentInput))
+
+	// Pin the ctx numerator's provenance (issue #429) for this turn: the
+	// role-keyed last-request slots are dropped when the agent identity
+	// changed since the last dispatch, so a request measured against one
+	// agent's window can never be shown against another's.
+	m.stampTurnCtxIdentity()
 
 	return m, tea.Batch(
 		spinnerTick(),
