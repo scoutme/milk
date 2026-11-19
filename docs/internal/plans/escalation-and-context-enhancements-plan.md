@@ -1,5 +1,10 @@
 # Implementation plan: escalation-mechanism and request-length enhancements
 
+Status: **landed** — all five phases below shipped (per-phase status lines carry
+the branch/commit); one Phase 3 sub-item, "auto-escalate on fail-closed", was
+deliberately dropped after investigation. This file is kept as the design record,
+not maintained in sync with the implementation.
+
 ## Overview
 
 Follow-up to [`docs/internal/analysis/session-2026-10-01-primary-overload-analysis.md`](../analysis/session-2026-10-01-primary-overload-analysis.md),
@@ -160,6 +165,9 @@ model-stuck signals instead of only user-frustration signals.
 ---
 
 ## Track A, Phase 4 — Cheap self-escalation hinting (no new state machinery)
+
+**Status: landed** (`03d80af` — escalate hint appended to the strong nudge tier only,
+with the tier-split assertion test).
 
 **Why:** lowest-risk complement to Phase 3 — makes the *existing* model-initiated `escalate`
 tool more likely to actually get used, without adding any new forced-escalation logic.

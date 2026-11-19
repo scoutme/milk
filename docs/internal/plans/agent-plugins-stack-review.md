@@ -5,6 +5,9 @@ distribution, plugin agents, plugin commands) plus the focus/Esc keyboard batch 
 47 files (28 modified +875/−91, 19 new). Review date: 2026-11-09.
 This file is the verdict of the comprehensive review and the plan to clear it.
 
+Status: **all three phases complete** — one commit per fix on top of the reviewed
+`996e1f7` pre-state, merged as PR #427 (progress logs at the bottom).
+
 Status legend: [ ] not started · [~] in progress · [x] done.
 
 ---

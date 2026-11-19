@@ -644,8 +644,9 @@ design doc:
   stub returning a cancelled result; the setup wizard's form dialogs use the
   form-capable `acp.ACPHost.Elicit` round trip instead
 - `terminal_update` (PTY/agent-owned terminal streaming)
-- The `_milk/notification` and `_milk/memory` extension channels — never
-  emitted (`_milk/route` and `_milk/warning` are; see "Routing and warnings")
+- The `_milk/memory` extension channel — never emitted (`_milk/notification`,
+  `_milk/route` and `_milk/warning` all are; see "Routing and warnings" and
+  `cmd/milk/host_acp.go`'s `Notify`)
 - `NewSessionRequest.mcpServers` — accepted and parsed, never merged with
   the agent's own configured MCP servers
 - `cwd` isn't validated as an absolute path (the ACP spec says it should be),
@@ -675,9 +676,10 @@ whether a turn is running, and rendering progress.
   (`stdio.go`'s `StdioConn` — generic, no milk-specific knowledge, testable
   via `io.Pipe`).
 - `cmd/milk/serve.go` — the `serve --acp` cobra command.
-- `cmd/milk/acp_server.go` — method dispatch (`initialize`/`session/new`/
-  `session/prompt`/`session/cancel`); add a new `case` here plus the
-  matching struct in `lifecycle.go` to wire up another method.
+- `cmd/milk/acp_server.go` — method dispatch (`initialize`, `session/new`/
+  `list`/`resume`/`close`/`delete`, `session/set_config_option`,
+  `session/prompt`, plus the `session/cancel` notification); add a new `case`
+  here plus the matching struct in `lifecycle.go` to wire up another method.
 - `cmd/milk/acp_session.go` — per-session state and the actual turn dispatch,
   structurally mirroring `cmd/milk/repl.go`'s `buildTUIAgents` (TUI callbacks
   → `tea.Msg`; this file's callbacks → `conn.Notify`/ACP `Mapper` calls).
