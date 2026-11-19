@@ -1,6 +1,9 @@
-# ACP session-resume parity — implementation plan (design only)
+# ACP session-resume parity — implementation plan
 
-Status: **plan, reviewed — no implementation yet.** Baseline: `main` @ `a69c886`
+Status: **implemented** — landed in PR #199 (`feat(acp)`: session lifecycle with
+resume-by-default, standard history replay, `/export session`); this file is kept
+as the design record, not maintained in sync with the code.
+Original baseline: `main` @ `a69c886`
 (PR #196 merged), verified against `cmd/milk/acp_server.go`, `acp_session.go`,
 `acp_commands.go`, `interactive.go`, `commands.go`, `internal/session/*`,
 `internal/transport/acp/*`, and the upstream ACP v2 schema

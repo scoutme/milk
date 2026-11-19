@@ -1,5 +1,9 @@
 # Implementation Plan: Agent-as-Tool (ADR-0034)
 
+Status: **implemented** — merged as PR #71 (`feat: agent-as-tool — peer agents as
+callable tools`); this file is kept as the design record, not maintained in sync
+with the implementation.
+
 ## Overview
 
 Enable any configured agent to act as a callable tool for a localRunner (OpenAI-compat) primary agent. Specialist agents (aider, smolagents, custom summarisers) become tool functions the primary model can invoke without a full session handoff.

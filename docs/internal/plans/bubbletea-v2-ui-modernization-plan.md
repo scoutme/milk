@@ -1,5 +1,11 @@
 # Bubble Tea v2 UI modernization plan
 
+Status: **complete** — every phase below shipped; the v2 migration + two-skin
+redesign merged as PR #318, decisions recorded in
+[ADR-0076](../../adr/0076-bubbletea-v2-ui-modernization.md) (skins:
+[ADR-0077](../../adr/0077-tui-skins.md)). This file is kept as the design record,
+not maintained in sync with the implementation.
+
 Branch: `claude/bubbletea-ui-modernization-kyrnje`
 
 ## Starting point

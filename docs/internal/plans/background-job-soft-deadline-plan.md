@@ -1,5 +1,8 @@
 # Background-job soft deadline and bash-failure fix — plan
 
+Status: **implemented** — merged as PR #274 (`fix(local): bash exit code as the
+single failure signal + background-job soft deadline`).
+
 Issue: #271. Decision records: [ADR-0068](../../adr/0068-background-job-soft-deadline.md) (new), [ADR-0062](../../adr/0062-tool-batch-barrier-dispatch.md) (Update section).
 
 ## Evidence

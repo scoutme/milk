@@ -124,7 +124,18 @@
 > design's own catalog: `auth/*`, `session/set_config_option` dispatch
 > (`ConfigState` already exists, stays unwired), `elicitation/create` wiring,
 > `plan_update`/workflow mapping, `terminal_update`, the `milk/*`
-> `ExtNotification` channels, `available_commands_update`. One fix to shared
+> `ExtNotification` channels, `available_commands_update`.
+>
+> **Update (2026-11-19):** of that deferred list only `auth/*` and
+> `terminal_update` still stand — `session/set_config_option`,
+> `elicitation/create` (the outbound wizard form dialogs), `plan_update`/
+> workflow mapping and `available_commands_update` are all wired now, and of
+> the `milk/*` ExtNotification channels `_milk/route`, `_milk/warning` and
+> `_milk/notification` are emitted (`_milk/memory` still never is). The
+> current gap list lives in `docs/reference/acp-integration.md`'s
+> "Known gaps" section.
+>
+> One fix to shared
 > code this required: `internal/session/store.go`'s `Save`/`Drop` did an
 > unsynchronized read-modify-write of the shared `index.json` — harmless with
 > one session per process (true until now), a real lost-update race once

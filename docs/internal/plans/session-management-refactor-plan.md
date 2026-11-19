@@ -1,6 +1,10 @@
-# Session-management refactor — TUI, ACP and CLI parity (design only)
+# Session-management refactor — TUI, ACP and CLI parity
 
-Status: **plan, ready for review — no implementation yet.** Baseline: `main` after
+Status: **implemented** — PR #202 (session-management core + complete CLI session
+targeting), PR #203 (TUI `/sessions` `/resume` and scoped session commands),
+PR #204 (ACP session slash commands with view rebinding), PR #205 (docs
+cross-links); this file is kept as the design record, not maintained in sync with
+the code. Baseline at design time: `main` after
 the ACP session-resume parity work (`docs/internal/plans/acp-session-resume-plan.md`, implemented),
 verified against `cmd/milk/interactive.go`, `commands.go`, `completion.go`,
 `acp_commands.go`, `acp_server.go`, `acp_session.go`, `acp_history.go`,

@@ -1,5 +1,10 @@
 # Implementation Plan: Background Sub-Agents (ADR-0043)
 
+Status: **implemented** — merged as PR #143 (job manager + `spawn_background_agent`;
+later lifecycle/tooling follow-ups: #158 live-attach, #159 interactive controls,
+#239 agent choice, #257 status/wait/send tools); this file is kept as the design
+record, not maintained in sync with the implementation.
+
 ## Overview
 
 Give `internal/agent/local`'s tool loop a `spawn_background_agent` tool that forks an independent copy of the calling agent (same config, same built-in tools) to research a self-contained question in the background, with its own multi-step tool loop, and reports back a distilled result asynchronously — without blocking the caller's turn or consuming the caller's context.
