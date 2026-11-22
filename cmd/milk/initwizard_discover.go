@@ -28,6 +28,8 @@ type initWizardFinding struct {
 	Provider string           // local | bearer | claude-cli
 	URL      string           // endpoint ("" for claude-cli)
 	KeyEnv   string           // env var holding the key (bearer findings)
+	Value    string           // literal key (SECRET) when it lives only in another harness's config
+	Origin   string           // source file for harness-imported findings ("~/.claude/settings.json")
 	Model    string           // suggested model ("" = ask)
 	Models   []string         // models the server reported (local findings)
 	Claude   *claudeAuthState // Claude Code's login state (claude-cli findings)
@@ -188,6 +190,48 @@ func initWizardSearchedNames() string {
 		names = append(names, k.Env)
 	}
 	return strings.Join(names[:3], ", ") + ", …"
+}
+
+// foldCredentialFindings merges harness-imported credentials (Claude's
+// settings env maps) into the machine scan's findings. A credential whose
+// variable is exported becomes a KeyEnv finding like any other (the pointer
+// form); one that lives only in the harness's file carries its literal in
+// Value — copied into config.json like a typed key when picked, and displayed
+// only as a masked fingerprint. An existing finding for the same variable is
+// enriched with the file's URL/model overrides (ANTHROPIC_BASE_URL and
+// friends) instead of duplicated.
+func foldCredentialFindings(found []initWizardFinding, creds []importedCredential) []initWizardFinding {
+	for _, c := range creds {
+		dup := -1
+		for i := range found {
+			if found[i].KeyEnv == c.EnvVar && c.EnvVar != "" {
+				dup = i
+				break
+			}
+		}
+		if dup >= 0 {
+			if c.URL != "" {
+				found[dup].URL = c.URL
+			}
+			if c.Model != "" {
+				found[dup].Model = c.Model
+			}
+			continue
+		}
+		f := initWizardFinding{
+			Name: c.Name, Label: c.Label, Provider: "bearer",
+			URL: c.URL, Model: c.Model, Origin: c.Origin,
+		}
+		if v := strings.TrimSpace(os.Getenv(c.EnvVar)); v != "" {
+			f.KeyEnv = c.EnvVar
+			f.Detail = fmt.Sprintf("%s (%s)", c.EnvVar, initWizardMask(v))
+		} else {
+			f.Value = c.Value
+			f.Detail = fmt.Sprintf("key in %s (%s)", c.Origin, initWizardMask(c.Value))
+		}
+		found = append(found, f)
+	}
+	return found
 }
 
 // runClaudeLogin signs the user in to Claude Code with its own browser flow

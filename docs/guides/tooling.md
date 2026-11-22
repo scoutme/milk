@@ -220,10 +220,13 @@ Global list of servers; reference them from an agent entry via `"mcp_servers": [
 | `auth` | string | `"none"` (default), `"oauth"`, or `"token_cmd"` |
 | `token_cmd` | string | Shell command whose stdout is the Bearer token (`auth: "token_cmd"`) |
 | `enabled` | bool | Whether the server is active (default `true` when omitted) |
+| `origin` | string | Where the entry came from when imported from another harness (informational) |
 
 `mcp_connect_timeout_secs` (default `5`) bounds the per-server startup connect timeout. If a server doesn't respond in time, milk logs a warning and continues — the server's tools are still registered, and the client reconnects lazily on the first tool call targeting it (recorded as an `mcp.lazy_reconnect` span).
 
 Manage at runtime with `/mcp`, or `milk config mcp add|remove|assign|unassign`.
+
+**Import from other harnesses**: `/mcp import` (CLI: `milk config mcp import`) reads — read-only — the MCP servers configured in Claude Code (`~/.claude.json`, the `~/.claude/settings*.json` and project `.claude/settings*.json` files) and Claude Desktop (`claude_desktop_config.json`), lists what it found, and on `all` (or a name list) copies the entries into milk's config with their `origin` tagged. Imported servers are assigned to the primary and escalation agents; an existing server with the same name is never overwritten. The setup wizard offers the same choice after the escalation question ("I found MCP servers in your other tools' configs"), and its first question also adopts provider keys from Claude's `settings.json` `env` maps: an exported variable is referenced (`api_key_env`), a file-only literal is copied into `config.json` like a typed key — the confirmation says which happened.
 
 ### MCP servers with OAuth
 

@@ -59,7 +59,8 @@ cmd/milk/turn_routing.go      # host-independent routing core (pins, single-turn
 cmd/milk/workflow_core.go     # host-independent workflow launch plan, saved-workflow lookup and clear, shared by TUI and ACP
 cmd/milk/followup_core.go     # host-independent rules for when finished background jobs trigger a follow-up turn, shared by TUI and ACP
 cmd/milk/update_core.go       # host-independent self-update (one check path: skip filter + last-check debounce write-back; install seams) shared by TUI, CLI and ACP
-cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, field descriptors/defaults, config commit) shared by TUI handleInitWizardKey, ACP pendingInit chat flow and ACP form dialogs
+cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machine, validation, field descriptors/defaults, config commit — additive merge by default, `rebuild` for the destructive from-scratch commit, ADR-0106) shared by TUI handleInitWizardKey, ACP pendingInit chat flow and ACP form dialogs
+cmd/milk/harness_import.go    # read-only scan of other harnesses' configs (Claude Code/Desktop mcpServers + settings env maps) for the wizard's import step and /mcp import: MCP conversion, credential findings (env pointer or masked literal), origin tagging (ADR-0106)
 cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 cmd/milk/idlewatch.go         # shared idle watchdog: activity-refreshed turn warning + opt-in deadline wrap-up, TUI and ACP (issue #305)
 internal/tmux/                 # tmux session driver (send-keys + capture-pane polling) — state-synchronized terminal control shared by eval's claude adapter and the showcase recorder

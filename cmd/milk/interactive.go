@@ -106,6 +106,18 @@ type initWizardState struct {
 	claude    *claudeAuthState
 	loginDone bool
 	runLogin  bool
+	// imported are MCP servers found in other harnesses' configs (Claude
+	// Code / Claude Desktop), offered by the import step; importPicked is
+	// the subset the user chose to adopt; importDone stops the step from
+	// coming back.
+	imported     []importedMCPServer
+	importPicked []importedMCPServer
+	importDone   bool
+	// rebuild selects the destructive commit: the config is rebuilt from
+	// the wizard's answers alone (the pre-additive behaviour) instead of
+	// merged into the existing config. Set by /config init rebuild (or
+	// `milk config init --rebuild`); the default is additive.
+	rebuild bool
 }
 
 type initWizardStep int
@@ -120,6 +132,7 @@ const (
 	initStepAWSRegion                         // ask aws_region (bedrock only)
 	initStepClaudeLogin                       // offer the Claude Code browser login
 	initStepEscalation                        // ask escalation agent choice
+	initStepImport                            // offer MCP servers found in other harnesses' configs
 	initStepTuning                            // gate: fine-tune now? (no → defaults)
 	initStepRunCmd                            // tuning: run_cmd (local provider only)
 	initStepLimits                            // tuning: context_window_tokens (proposes a models.dev catalog match)
@@ -1453,6 +1466,8 @@ func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet)
 		return execMCPList(rest, st, toolSets)
 	case "add":
 		return execMCPAdd(rest, st)
+	case "import":
+		return execMCPImport(rest, st)
 	case "remove":
 		if rest == "" {
 			return milkTag() + " usage: /mcp remove <name>"
@@ -1481,7 +1496,7 @@ func execMCP(sub string, st *interactiveState, toolSets map[string]*mcp.ToolSet)
 		// handle to stream status updates back while it runs in the background).
 		return milkTag() + " usage: /mcp auth <server-name>  (run this in the TUI)"
 	default:
-		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, remove, enable, disable, tools, assign, unassign, reconnect, auth"
+		return milkTag() + " unknown subcommand: /mcp " + verb + "\n  try: list, add, import, remove, enable, disable, tools, assign, unassign, reconnect, auth"
 	}
 }
 
@@ -1585,6 +1600,10 @@ func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForSe
 	if len(agents) > 0 {
 		agentBadge = "  [" + strings.Join(agents, ", ") + "]"
 	}
+	originBadge := ""
+	if s.Origin != "" {
+		originBadge = "  " + dim("(from "+s.Origin+")")
+	}
 	endpoint := s.URL
 	if strings.ToLower(s.Transport) == "stdio" {
 		endpoint = s.Command
@@ -1592,7 +1611,7 @@ func writeMCPServerLine(b *strings.Builder, s config.MCPServerConfig, agentForSe
 			endpoint += " " + strings.Join(s.Args, " ")
 		}
 	}
-	fmt.Fprintf(b, "  %-20s  %-8s  %s%s%s%s\n", bold(s.Name), auth, endpoint, agentBadge, connStatus, cfgStatus)
+	fmt.Fprintf(b, "  %-20s  %-8s  %s%s%s%s%s\n", bold(s.Name), auth, endpoint, agentBadge, originBadge, connStatus, cfgStatus)
 }
 
 // execMCPReconnect resets the dead flag on named server(s) so they will
@@ -1629,6 +1648,52 @@ func execMCPReconnect(name string, _ *interactiveState, toolSets map[string]*mcp
 		return fmt.Sprintf("%s MCP server %q not found in any active toolset", milkTag(), name)
 	}
 	return fmt.Sprintf("%s MCP server %q reset — will reconnect on next use", milkTag(), name)
+}
+
+// execMCPImport adopts MCP servers found in other harnesses' configs (Claude
+// Code's mcpServers maps, Claude Desktop's claude_desktop_config.json).
+// Without arguments it lists what the scan found; with "all" or a
+// comma-separated list of names (or listing numbers) it imports them —
+// origin-tagged, assigned to the primary and escalation agents — and saves.
+// Existing same-name servers are never overwritten.
+func execMCPImport(rest string, st *interactiveState) string {
+	_, servers := harnessScanFn(activeConfigDir(st))
+	if len(servers) == 0 {
+		return milkTag() + " nothing to import — no MCP servers found in Claude Code or Claude Desktop configs"
+	}
+	if strings.TrimSpace(rest) == "" {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s MCP servers found in other tools' configs:\n", milkTag())
+		for i, s := range servers {
+			fmt.Fprintf(&b, "  %d) %-20s %s  %s\n", i+1, bold(s.Name), s.Detail, dim("("+s.Origin+")"))
+		}
+		fmt.Fprintf(&b, "%s import with: /mcp import all  (or /mcp import %s,…)", milkTag(), servers[0].Name)
+		return b.String()
+	}
+	picked, errMsg := initWizardImportPick(servers, rest)
+	if errMsg != "" {
+		return milkTag() + " " + errMsg
+	}
+	if len(picked) == 0 {
+		return milkTag() + " nothing selected — /mcp import all  (or /mcp import <name>,…)"
+	}
+	added, skipped := applyImportedMCPServers(&st.cfg, picked)
+	var msgs []string
+	if len(added) > 0 {
+		targets := []string{st.cfg.Agent}
+		if st.cfg.EscalationAgent != "" {
+			targets = append(targets, st.cfg.EscalationAgent)
+		}
+		msgs = append(msgs, fmt.Sprintf("%s imported %d MCP server(s) (%s) — assigned to %s",
+			milkTag(), len(added), strings.Join(added, ", "), strings.Join(targets, ", ")))
+	}
+	if len(skipped) > 0 {
+		msgs = append(msgs, milkTag()+" already configured (skipped): "+strings.Join(skipped, ", "))
+	}
+	if err := saveScoped(st.cfg, activeConfigDir(st), st.saveScope); err != nil {
+		msgs = append(msgs, fmt.Sprintf("%s config save failed: %v", milkTag(), err))
+	}
+	return strings.Join(msgs, "\n")
 }
 
 // execMCPAdd adds a new MCP server entry from key=value args.

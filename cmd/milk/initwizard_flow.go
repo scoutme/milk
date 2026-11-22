@@ -44,7 +44,7 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 	case initStepURL:
 		return initStepModel
 	case initStepModel:
-		if initWizardNeedsAuth(p) && st.primary.APIKeyEnv == "" {
+		if initWizardNeedsAuth(p) && st.primary.APIKeyEnv == "" && st.primary.APIKey == "" {
 			return initStepAuth
 		}
 		if initWizardNeedsAWSRegion(p) {
@@ -71,11 +71,13 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		if p == "claude-cli" {
 			return initStepEscalation // skipped for a claude-cli primary → tuning
 		}
-		return initStepTuning
+		return initWizardImportOrTuning(st)
 	case initStepEscalation:
 		if st.escCLI && initWizardNeedsLogin(st) {
 			return initStepClaudeLogin
 		}
+		return initWizardImportOrTuning(st)
+	case initStepImport:
 		return initStepTuning
 	case initStepTuning:
 		if !st.tuning {
@@ -95,6 +97,16 @@ func initWizardNextStep(st *initWizardState) initWizardStep {
 		return initStepOpenConfig
 	}
 	return initStepDone
+}
+
+// initWizardImportOrTuning routes to the harness-import step when discovery
+// found MCP servers in another harness's config and no pick has been made
+// yet; otherwise the optional-tuning gate.
+func initWizardImportOrTuning(st *initWizardState) initWizardStep {
+	if len(st.imported) > 0 && !st.importDone {
+		return initStepImport
+	}
+	return initStepTuning
 }
 
 // claudeOnPath reports whether the Claude Code CLI is installed — it decides
@@ -183,6 +195,14 @@ func initWizardRule() string {
 	return "\n" + dim(strings.Repeat("─", 56)) + "\n"
 }
 
+// initWizardRebuildNote is prepended to the banner when the wizard runs with
+// the destructive commit (/config init rebuild): the one line that says what
+// the mode means before the first question is asked.
+func initWizardRebuildNote() string {
+	return milkTag() + yellow(" rebuild mode — the config is rebuilt from your answers; everything else (MCP servers, routing rules, permissions, …) is reset") + "\n" +
+		dim("         cancel now and run plain /config init to merge into your existing config instead\n")
+}
+
 // initWizardProviderChoices is the same menu flattened for the ACP form flow.
 var initWizardProviderChoices = func() []initWizardChoice {
 	var cs []initWizardChoice
@@ -225,6 +245,7 @@ func initWizardTake(st *initWizardState, f initWizardFinding) string {
 	st.primary.Name = f.Name
 	st.primary.URL = f.URL
 	st.primary.APIKeyEnv = f.KeyEnv
+	st.primary.APIKey = f.Value
 	st.modelDefault = f.Model
 	st.modelChoices = f.Models
 	if f.Claude != nil {
@@ -233,6 +254,8 @@ func initWizardTake(st *initWizardState, f initWizardFinding) string {
 	switch {
 	case f.KeyEnv != "":
 		return green("  ✓ using "+f.Label) + dim(" — the key stays in $"+f.KeyEnv+"; nothing secret is copied into config.json") + "\n"
+	case f.Value != "":
+		return green("  ✓ using "+f.Label) + dim(" — the key is copied from "+f.Origin+" into config.json (same as typing it — keep the file private)") + "\n"
 	case f.Provider == "claude-cli":
 		return green("  ✓ using Claude Code") + "\n"
 	}
@@ -257,7 +280,7 @@ func initWizardPath(st *initWizardState) []initWizardStep {
 	if initWizardNeedsModel(provider) {
 		path = append(path, initStepModel)
 	}
-	if initWizardNeedsAuth(provider) && st.primary.APIKeyEnv == "" {
+	if initWizardNeedsAuth(provider) && st.primary.APIKeyEnv == "" && st.primary.APIKey == "" {
 		path = append(path, initStepAuth)
 	}
 	if initWizardNeedsAWSRegion(provider) {
@@ -268,6 +291,9 @@ func initWizardPath(st *initWizardState) []initWizardStep {
 	}
 	if provider != "claude-cli" {
 		path = append(path, initStepEscalation)
+	}
+	if len(st.imported) > 0 {
+		path = append(path, initStepImport)
 	}
 	return append(path, initStepTuning)
 }
@@ -442,6 +468,15 @@ func initWizardPrompt(st *initWizardState) string {
 		return milkTag() + " " + lbl + bold("When a task is too hard for the primary, hand it to Claude Code?") + "\n" +
 			dim("         This is the \"escalation\": a stronger AI milk switches to for the hard prompts.") + note + "\n" +
 			milkTag() + " use Claude Code as escalation agent? " + dim(yn) + ": "
+	case initStepImport:
+		var b strings.Builder
+		b.WriteString(milkTag() + " " + lbl + bold("I found MCP servers in your other tools' configs — bring them into milk?") + "\n")
+		b.WriteString(dim("         Imported servers go into config.json and are given to your primary and escalation agents.") + "\n")
+		for i, s := range st.imported {
+			fmt.Fprintf(&b, "  %d) %s %s  %s\n", i+1, bold(fmt.Sprintf("%-14s", s.Name)), initWizardExample(s.Detail), dim("("+s.Origin+")"))
+		}
+		b.WriteString(milkTag() + " import which? " + dim("numbers or names, 'all' — leave blank to skip") + ": ")
+		return b.String()
 	case initStepTuning:
 		return milkTag() + " " + lbl + bold("Fine-tune optional settings now?") + dim(" (server start command, context size, agents as tools)") + "\n" +
 			dim("  Skip to use sensible defaults — change anything later with /config.") + "\n" +

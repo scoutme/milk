@@ -11,6 +11,7 @@ package main
 // shared the same way, so form fields mirror the bracketed prompt defaults.
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -71,6 +72,15 @@ type initWizardResult struct {
 func initWizardStart(cwd string) (*initWizardState, string) {
 	st := &initWizardState{step: initStepProvider, escCLI: true, cwd: cwd}
 	st.found = initWizardDiscoverFn()
+	// Credentials and MCP servers from other harnesses' configs (Claude Code
+	// / Claude Desktop) join the scan: the credentials become findings like
+	// any other, the servers are offered by the import step.
+	creds, servers := harnessScanFn(cwd)
+	st.imported = servers
+	st.found = foldCredentialFindings(st.found, creds)
+	if len(st.found) > initWizardMaxFindings {
+		st.found = st.found[:initWizardMaxFindings]
+	}
 	banner := ""
 	if len(st.found) > 0 {
 		st.step = initStepFound
@@ -269,6 +279,27 @@ func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts
 			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
 		}
 
+	case initStepImport:
+		picked, errMsg := initWizardImportPick(st.imported, answer)
+		if errMsg != "" {
+			out.WriteString(milkTag() + " " + errMsg + "\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+		}
+		st.importPicked = picked
+		st.importDone = true
+		switch len(picked) {
+		case 0:
+			out.WriteString(dim("  skipped — re-run /config init or use /mcp import any time\n"))
+		case 1:
+			out.WriteString(green("  ✓ importing "+picked[0].Name) + "\n")
+		default:
+			names := make([]string, 0, len(picked))
+			for _, s := range picked {
+				names = append(names, s.Name)
+			}
+			out.WriteString(green("  ✓ importing "+strings.Join(names, ", ")) + "\n")
+		}
+
 	case initStepLimits:
 		v := 0
 		if answer == "" {
@@ -334,6 +365,15 @@ func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts
 // it (global or local scope, like every other config save — see
 // saveLocalOrGlobal). Returns the saved config and the completion summary to
 // display, or the save error.
+//
+// Two commit modes (ADR-0106). The default is additive: the answers merge
+// into the existing config — the primary agent is upserted by name and made
+// active, a chosen Claude Code escalation is set up, picked tool agents and
+// imported MCP servers are appended — and everything else (MCP servers,
+// routing rules, permissions, extra agents, …) is kept as it was. st.rebuild
+// selects the destructive alternative: the config is rebuilt from the
+// wizard's answers alone, resetting every field the wizard does not ask
+// about (the pre-additive behaviour).
 func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) {
 	var escalation *config.AgentConfig
 	if st.escCLI {
@@ -353,17 +393,45 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 			st.primary.ChatPath = p
 		}
 	}
-	cfg := config.InitConfig(st.primary, escalation)
-	// Add tool-agent entries from wizard step.
-	for _, name := range st.toolAgentNames {
-		if strings.EqualFold(name, st.primary.Name) {
-			continue // skip self-reference
+
+	var (
+		cfg       config.Config
+		prev      config.Config
+		prevOK    bool
+		mergeNote string
+	)
+	if st.rebuild {
+		// The previous config is only read to report what the rebuild reset.
+		if p, err := config.LoadMergedIn(st.cwd); err == nil {
+			prev, prevOK = p, true
 		}
-		cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
-			Agent:       name,
-			Description: "Specialist agent. Describe its capabilities here.",
-		})
+		cfg = config.InitConfig(st.primary, escalation)
+		// Add tool-agent entries from wizard step.
+		for _, name := range st.toolAgentNames {
+			if strings.EqualFold(name, st.primary.Name) {
+				continue // skip self-reference
+			}
+			cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
+				Agent:       name,
+				Description: "Specialist agent. Describe its capabilities here.",
+			})
+		}
+	} else {
+		loaded, err := config.LoadMergedIn(st.cwd)
+		var recovered *config.ErrConfigRecovered
+		switch {
+		case err == nil:
+		case errors.As(err, &recovered):
+			// The backup's content is usable — merge into it and say so.
+			mergeNote = yellow("  " + recovered.Error() + "\n")
+		default:
+			return config.Config{}, "", fmt.Errorf("loading the existing config: %w (fix it with /config open, or run \"/config init rebuild\" to overwrite it)", err)
+		}
+		cfg, prev, prevOK = loaded, loaded, true
+		mergeNote += mergeAgentAnswers(&cfg, st.primary, escalation, st.toolAgentNames)
 	}
+	added, skipped := applyImportedMCPServers(&cfg, st.importPicked)
+
 	// The scope step decided where this setup lives (the same options as the
 	// CLI's "Apply to local?" prompt); a preselected scope skips the question
 	// but lands the same way.
@@ -371,10 +439,17 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 	if scope == "" {
 		scope = preferredSaveScope(st.cwd)
 	}
-	// Explicit recovery path (#404): the wizard rebuilt config from the
-	// user's answers, so it writes even after a failed load.
-	if err := saveForcedScope(cfg, scope, st.cwd); err != nil {
-		return cfg, "", err
+	// The rebuild is the explicit recovery path (#404): it writes even after a
+	// failed load (forced save). The additive merge only ever writes a config
+	// it just loaded, so it keeps the ordinary persist guard.
+	var saveErr error
+	if st.rebuild {
+		saveErr = saveForcedScope(cfg, scope, st.cwd)
+	} else {
+		saveErr = saveScoped(cfg, st.cwd, scope)
+	}
+	if saveErr != nil {
+		return cfg, "", saveErr
 	}
 
 	// The real path — honors the wizard's dir (st.cwd), --config-root and
@@ -411,6 +486,26 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 	if escalation != nil {
 		sb.WriteString(fmt.Sprintf("%s escalation: %s  (claude-cli)\n", milkTag(), bold(escalation.Name)))
 	}
+	if mergeNote != "" {
+		sb.WriteString(mergeNote)
+	}
+	// What the mode did to everything the wizard does not ask about.
+	if st.rebuild {
+		sb.WriteString(initWizardResetNote(prev, prevOK, cfg, scope))
+	} else {
+		sb.WriteString(initWizardKeepNote(prev, prevOK))
+	}
+	if len(added) > 0 {
+		targets := []string{cfg.Agent}
+		if cfg.EscalationAgent != "" {
+			targets = append(targets, cfg.EscalationAgent)
+		}
+		sb.WriteString(fmt.Sprintf("%s imported %d MCP server(s) (%s) — assigned to %s\n",
+			milkTag(), len(added), strings.Join(added, ", "), strings.Join(targets, ", ")))
+	}
+	if len(skipped) > 0 {
+		sb.WriteString(dim("  already configured (skipped): "+strings.Join(skipped, ", ")) + "\n")
+	}
 	// Post-completion hints for fields the wizard doesn't ask for.
 	var hints []string
 	if st.primary.Provider == "bedrock" {
@@ -426,6 +521,106 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 		}
 	}
 	return cfg, sb.String(), nil
+}
+
+// mergeAgentAnswers merges the wizard's answers into cfg (additive commit):
+// the primary agent is upserted by name and made active, a chosen Claude Code
+// escalation is set up, and picked tool agents are appended — existing
+// entries with other names are never touched. A "no" to the escalation
+// question means "don't set one up", not "remove the one I have". Returns a
+// note when the escalation could not be set up because an agent with that
+// name already exists with another provider.
+func mergeAgentAnswers(cfg *config.Config, primary config.AgentConfig, escalation *config.AgentConfig, toolNames []string) string {
+	replaced := false
+	for i := range cfg.Agents {
+		if strings.EqualFold(cfg.Agents[i].Name, primary.Name) {
+			cfg.Agents[i] = primary
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		cfg.Agents = append(cfg.Agents, primary)
+	}
+	cfg.Agent = primary.Name
+	note := ""
+	if escalation != nil {
+		idx := findAgentIdx(*cfg, escalation.Name)
+		switch {
+		case idx < 0:
+			cfg.Agents = append(cfg.Agents, *escalation)
+			cfg.EscalationAgent = escalation.Name
+		case strings.EqualFold(cfg.Agents[idx].Provider, "claude-cli"):
+			cfg.EscalationAgent = escalation.Name
+		default:
+			note = fmt.Sprintf("%s an agent named %q already exists (%s) — escalation left unchanged; fix it with /agent\n",
+				yellow("  note:"), escalation.Name, cfg.Agents[idx].Provider)
+		}
+	}
+	for _, name := range toolNames {
+		if strings.EqualFold(name, primary.Name) {
+			continue // skip self-reference
+		}
+		found := false
+		for _, te := range cfg.AgentTools {
+			if strings.EqualFold(te.Agent, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.AgentTools = append(cfg.AgentTools, config.AgentToolEntry{
+				Agent:       name,
+				Description: "Specialist agent. Describe its capabilities here.",
+			})
+		}
+	}
+	return note
+}
+
+// initWizardKeepNote reports what the additive commit preserved.
+func initWizardKeepNote(prev config.Config, prevOK bool) string {
+	if !prevOK || (len(prev.MCPServers) == 0 && len(prev.Agents) == 0) {
+		return dim("  additive: nothing else was configured yet — re-running /config init keeps whatever you add in between\n")
+	}
+	return dim(fmt.Sprintf("  kept your existing settings (%d MCP server(s), %d agent(s), routing rules, permissions, …) — only what was answered changed\n",
+		len(prev.MCPServers), len(prev.Agents)))
+}
+
+// initWizardResetNote warns what the rebuild commit reset: every previous
+// entry the wizard's answers did not recreate is gone ("" when there was
+// nothing to lose).
+func initWizardResetNote(prev config.Config, prevOK bool, cfg config.Config, scope string) string {
+	if !prevOK {
+		return ""
+	}
+	var resetServers, resetAgents []string
+	for _, s := range prev.MCPServers {
+		if findMCPServerIdx(cfg.MCPServers, s.Name) < 0 {
+			resetServers = append(resetServers, s.Name)
+		}
+	}
+	for _, a := range prev.Agents {
+		if findAgentIdx(cfg, a.Name) < 0 {
+			resetAgents = append(resetAgents, a.Name)
+		}
+	}
+	if len(resetServers) == 0 && len(resetAgents) == 0 {
+		return ""
+	}
+	var parts []string
+	if len(resetServers) > 0 {
+		parts = append(parts, fmt.Sprintf("%d MCP server(s) (%s)", len(resetServers), strings.Join(resetServers, ", ")))
+	}
+	if len(resetAgents) > 0 {
+		parts = append(parts, fmt.Sprintf("%d agent(s) (%s)", len(resetAgents), strings.Join(resetAgents, ", ")))
+	}
+	backup := "the local scope keeps no backup"
+	if scope != "local" {
+		backup = "the previous file is kept at config.json.bak"
+	}
+	return yellow(fmt.Sprintf("  note: rebuild rebuilt the config from your answers — reset %s, and everything the wizard doesn't ask about is back to defaults; %s\n",
+		strings.Join(parts, " and "), backup))
 }
 
 // initWizardChatPathDefault is the chat-path default proposed for a URL:
@@ -575,6 +770,12 @@ func initWizardFieldFor(st *initWizardState, opts initWizardOpts) initWizardFiel
 				{"local", "local project — " + filepath.Join(config.LocalConfigDir, "config.json") + " (overrides global here)"},
 				{"global", "global — " + config.DirLabel() + "/config.json (every project)"},
 			}}
+	case initStepImport:
+		f := initWizardField{Name: "import", Label: "MCP servers found in other tools' configs — which should milk use?", Kind: "multiselect"}
+		for _, s := range st.imported {
+			f.Options = append(f.Options, initWizardChoice{Value: s.Name, Label: s.Name + " — " + s.Detail + " (" + s.Origin + ")"})
+		}
+		return f
 	}
 	return initWizardField{}
 }

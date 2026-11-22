@@ -39,23 +39,27 @@ func TestTakeScopeFlag(t *testing.T) {
 
 func TestParseInitArgs(t *testing.T) {
 	cases := []struct {
-		in        string
-		wantEmpty bool
-		wantScope string
+		in          string
+		wantEmpty   bool
+		wantRebuild bool
+		wantScope   string
 	}{
-		{"", false, ""},
-		{"empty", true, ""},
-		{"empty global", true, "global"},
-		{"empty --global", true, "global"},
-		{"local", false, "local"},
-		{"--global", false, "global"},
-		{"EMPTY Global", true, "global"},
-		{"nonsense words", false, ""}, // unrecognized words are ignored
+		{"", false, false, ""},
+		{"empty", true, false, ""},
+		{"empty global", true, false, "global"},
+		{"empty --global", true, false, "global"},
+		{"local", false, false, "local"},
+		{"--global", false, false, "global"},
+		{"EMPTY Global", true, false, "global"},
+		{"rebuild", false, true, ""},
+		{"reinit local", false, true, "local"},
+		{"--rebuild --global", false, true, "global"},
+		{"nonsense words", false, false, ""}, // unrecognized words are ignored
 	}
 	for _, c := range cases {
-		empty, scope := parseInitArgs(c.in)
-		if empty != c.wantEmpty || scope != c.wantScope {
-			t.Errorf("parseInitArgs(%q) = (%v, %q), want (%v, %q)", c.in, empty, scope, c.wantEmpty, c.wantScope)
+		empty, rebuild, scope := parseInitArgs(c.in)
+		if empty != c.wantEmpty || rebuild != c.wantRebuild || scope != c.wantScope {
+			t.Errorf("parseInitArgs(%q) = (%v, %v, %q), want (%v, %v, %q)", c.in, empty, rebuild, scope, c.wantEmpty, c.wantRebuild, c.wantScope)
 		}
 	}
 }

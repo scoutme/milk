@@ -179,7 +179,7 @@ func acpConfig(as *acpSession, rest string) (string, string) {
 	case sub == "init" || strings.HasPrefix(sub, "init "):
 		return acpInitRun(as, strings.TrimSpace(rest[len("init"):])), ""
 	}
-	return milkTag() + " usage: /config | /config show | /config init [empty] [local|global] | /config open", ""
+	return milkTag() + " usage: /config | /config show | /config init [empty|rebuild] [local|global] | /config open", ""
 }
 
 // acpInit implements /init — the wizard's original name, kept as an alias of
@@ -191,13 +191,15 @@ func acpInit(as *acpSession, rest string) (string, string) {
 
 // acpInitRun runs /config init with its optional args over ACP: "empty
 // [local|global]" bootstraps the minimal config file without the wizard;
+// "rebuild" (alias "reinit") selects the destructive commit (rebuild from
+// the answers alone instead of merging into the existing config);
 // "local"/"global" preselects where the wizard's result is saved.
 func acpInitRun(as *acpSession, args string) string {
-	empty, scope := parseInitArgs(args)
+	empty, rebuild, scope := parseInitArgs(args)
 	if empty {
 		return runConfigInitEmpty(scope, activeConfigDir(as.st))
 	}
-	return acpStartInitWizard(as, scope)
+	return acpStartInitWizard(as, scope, rebuild)
 }
 
 // acpStartInitWizard starts the setup wizard and drives it as far as this
@@ -205,13 +207,17 @@ func acpInitRun(as *acpSession, args string) string {
 // choice prompts inside this turn (see runInitDialogs), typed chat answers
 // in later turns for whatever remains (as.pendingInit) — every question
 // carrying what 'default' means for it, so no empty turn is ever needed.
-func acpStartInitWizard(as *acpSession, scope string) string {
+func acpStartInitWizard(as *acpSession, scope string, rebuild bool) string {
 	// One wizard at a time: runTurn has already cancelled a pending
 	// telegram wizard for this slash command; keep the invariant even if a
 	// future call path skips that block.
 	as.pendingTelegram = nil
 	st, banner := initWizardStart(activeConfigDir(as.st))
 	st.scope = scope
+	st.rebuild = rebuild
+	if rebuild {
+		banner = initWizardRebuildNote() + banner
+	}
 	text, done := as.runInitDialogs(as.currentCtx(), st)
 	if !done {
 		as.pendingInit = st

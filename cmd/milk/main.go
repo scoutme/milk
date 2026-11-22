@@ -61,6 +61,7 @@ var (
 	flagLocal        bool          // --local: write to .milk/config.json (project-local)
 	flagGlobal       bool          // --global: write to ~/.milk/config.json (global)
 	flagEmpty        bool          // --empty (config init): write the minimal empty config file, no wizard
+	flagRebuild      bool          // --rebuild (config init): rebuild the config from the wizard's answers alone (destructive)
 	flagOutputFormat string        // --output-format: text|json|stream-json for one-shot prompts
 	flagTurnTimeout  time.Duration // --turn-timeout: hard wall-clock budget for one-shot turns (<=0 disables)
 	flagConfigRoot   string        // --config-root: alternate milk state root instead of ~/.milk
@@ -2445,7 +2446,25 @@ func runInitWizard() error {
 		escalation = &e
 	}
 
-	cfg := config.InitConfig(primary, escalation)
+	var cfg config.Config
+	if flagRebuild {
+		cfg = config.InitConfig(primary, escalation)
+	} else {
+		// Additive (the default, ADR-0106): merge the answers into the
+		// existing config — only the primary/escalation agents the wizard
+		// asked about change, everything else is kept.
+		loaded, err := config.LoadMergedIn("")
+		var recovered *config.ErrConfigRecovered
+		switch {
+		case err == nil:
+		case errors.As(err, &recovered):
+			fmt.Println("note:", recovered.Error())
+		default:
+			return fmt.Errorf("loading the existing config: %w (fix it, or re-run with --rebuild to overwrite it)", err)
+		}
+		cfg = loaded
+		mergeAgentAnswers(&cfg, primary, escalation, nil)
+	}
 	scope := "global"
 	if flagLocal {
 		scope = "local"
@@ -2454,10 +2473,17 @@ func runInitWizard() error {
 	} else {
 		scope = promptLocalOrGlobal()
 	}
-	// Explicit recovery path (#404): init rebuilds config from scratch, so
-	// it writes even when the previous load failed — and clears the guard.
-	if err := saveConfigForScopeForced(cfg, scope); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	// The rebuild is the explicit recovery path (#404): it writes even when
+	// the previous load failed — and clears the guard. The additive merge
+	// keeps the ordinary persist guard (it just loaded a real config).
+	var saveErr error
+	if flagRebuild {
+		saveErr = saveConfigForScopeForced(cfg, scope)
+	} else {
+		saveErr = saveConfigForScope(cfg, scope)
+	}
+	if saveErr != nil {
+		return fmt.Errorf("saving config: %w", saveErr)
 	}
 
 	// The real written path — honors --config-root and $MILK_CONFIG_ROOT, so
@@ -2506,6 +2532,8 @@ func init() {
 		Use:   "init",
 		Short: "Interactive setup wizard — configure primary and escalation agents",
 		Long: "Interactive setup wizard — configure primary and escalation agents.\n" +
+			"The answers are merged into the existing config (everything the wizard doesn't ask about is kept);\n" +
+			"with --rebuild the config is instead rebuilt from the answers alone (destructive).\n" +
 			"With --empty: skip the wizard and just create the minimal empty config file ({}) —\n" +
 			"the no-questions bootstrap for a project-local override (default scope local; --global for the global config).",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -2513,6 +2541,7 @@ func init() {
 		},
 	}
 	configInitCmd.Flags().BoolVar(&flagEmpty, "empty", false, "Skip the wizard — write a minimal empty config file ({})")
+	configInitCmd.Flags().BoolVar(&flagRebuild, "rebuild", false, "Rebuild the config from the wizard's answers alone (resets everything else)")
 	configCmd.AddCommand(configInitCmd)
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "open",
@@ -2586,6 +2615,13 @@ func newConfigMCPCmd() *cobra.Command {
 		},
 	})
 	mcpCmd.AddCommand(&cobra.Command{
+		Use:   "import [all|name,...]",
+		Short: "Import MCP servers found in other harnesses' configs (Claude Code, Claude Desktop)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runConfigMCPImport(strings.Join(args, " "))
+		},
+	})
+	mcpCmd.AddCommand(&cobra.Command{
 		Use:   "assign <server> <agent>",
 		Short: "Assign an MCP server to an agent",
 		Args:  cobra.ExactArgs(2),
@@ -2655,6 +2691,61 @@ func runConfigMCPAdd(inline string) error {
 		verb = "updated"
 	}
 	fmt.Printf("MCP server %q %s (saved to %s) — use \"milk config mcp assign %s <agent>\" to expose it\n", sc.Name, verb, scope, sc.Name)
+	return nil
+}
+
+// runConfigMCPImport is the headless `milk config mcp import`: scan other
+// harnesses' configs, list what was found (no args) or adopt the selection
+// ("all" or names), assign the imports to the primary and escalation agents,
+// and save. Existing same-name servers are never overwritten.
+func runConfigMCPImport(selectArg string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	_, servers := harnessScanFn(cwd)
+	if len(servers) == 0 {
+		fmt.Println("nothing to import — no MCP servers found in Claude Code or Claude Desktop configs")
+		return nil
+	}
+	if strings.TrimSpace(selectArg) == "" {
+		fmt.Println("MCP servers found in other tools' configs:")
+		for i, s := range servers {
+			fmt.Printf("  %d) %-20s %s  (%s)\n", i+1, s.Name, s.Detail, s.Origin)
+		}
+		fmt.Println(`import with: milk config mcp import all  (or milk config mcp import <name>,…)`)
+		return nil
+	}
+	picked, errMsg := initWizardImportPick(servers, selectArg)
+	if errMsg != "" {
+		return errors.New(errMsg)
+	}
+	if len(picked) == 0 {
+		return errors.New(`nothing selected — milk config mcp import all  (or milk config mcp import <name>,…)`)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	added, skipped := applyImportedMCPServers(&cfg, picked)
+	if len(added) > 0 {
+		targets := []string{cfg.Agent}
+		if cfg.EscalationAgent != "" {
+			targets = append(targets, cfg.EscalationAgent)
+		}
+		fmt.Printf("imported %d MCP server(s) (%s) — assigned to %s\n", len(added), strings.Join(added, ", "), strings.Join(targets, ", "))
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("already configured (skipped): %s\n", strings.Join(skipped, ", "))
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	scope := promptScopeIfNeeded()
+	if err := saveConfigForScope(cfg, scope); err != nil {
+		return err
+	}
+	fmt.Printf("(saved to %s)\n", scope)
 	return nil
 }
 
