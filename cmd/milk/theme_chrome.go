@@ -33,18 +33,37 @@ func panelTabName(region panelRegion) string {
 	return ""
 }
 
-// handleThemeCmd handles /theme [off|supermilk]: switches the theme live,
-// pushes its colours into the terminal and persists the choice.
+// handleThemeCmd handles /theme [name|list|reload]: switches the theme live,
+// pushes its colours into the terminal and persists the choice. `list`
+// renders the registry with each theme's source; `reload` rescans the theme
+// dirs (~/.milk/themes and <project>/.milk/themes) so a drop-in JSON theme
+// appears without a restart. Both reserved words win over a theme of the
+// same name.
 func (m model) handleThemeCmd(arg string) (tea.Model, tea.Cmd) {
-	if arg == "" {
-		m.appendTranscript(fmt.Sprintf("%s theme: %s  (use /theme off|supermilk)\n", milkTag(), bold(th.name)))
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "":
+		m.appendTranscript(fmt.Sprintf("%s theme: %s  (use /theme <name>|list)\n", milkTag(), bold(th.name)))
+		return m, nil
+	case "list":
+		m.appendTranscript(themeListText())
+		return m, nil
+	case "reload":
+		loadThemeRegistry(m.themeProjectDir())
+		note := fmt.Sprintf("%s theme dirs rescanned: %d themes", milkTag(), len(themeRegistry.Names()))
+		if w := themeRegistry.Warnings(); len(w) > 0 {
+			note += fmt.Sprintf(" (%d skipped)", len(w))
+		}
+		m.appendTranscript(note + "\n")
+		for _, warn := range themeRegistry.Warnings() {
+			m.appendTranscript(milkTag() + " warning: " + warn + "\n")
+		}
 		return m, nil
 	}
-	if _, ok := themes[strings.ToLower(arg)]; !ok {
-		m.appendTranscript(milkTag() + " usage: /theme [off|supermilk]\n")
+	if _, ok := themeDefFor(arg); !ok {
+		m.appendTranscript(milkTag() + " usage: /theme [name|list|reload]\n")
 		return m, nil
 	}
-	if th.modern {
+	if th.skin {
 		restoreTerminalColors()
 	}
 	setTheme(arg)

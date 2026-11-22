@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scoutme/milk/internal/sgr"
+	"github.com/scoutme/milk/internal/theme"
 )
 
 // Full-row diff backgrounds (issue #273).
@@ -95,7 +96,7 @@ func tintDiffSurface(content string, width int) string {
 // returned render, never to the cached wrap.
 func tintFullRows(content string, width int) string {
 	content = dimMilkAnnotationRows(content)
-	if th.modern {
+	if th.toolRows == theme.ToolRowsAccent {
 		content = modernToolRows(content)
 	}
 	return tintDiffSurface(tintThinkSurface(content, width), width)

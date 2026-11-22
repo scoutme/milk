@@ -457,7 +457,7 @@ func (m model) viewString() string {
 	if !m.ready {
 		return ""
 	}
-	if th.modern {
+	if th.skin {
 		if bg := tkBase.sgrBg(); bg != "" {
 			return tintBlock(m.viewBody(), m.width-1, bg) // last column left to the terminal default (same colour via OSC 11): a full-width row can double-advance on ConPTY
 		}

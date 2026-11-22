@@ -12,7 +12,7 @@ func TestThemeOffKeepsOriginalLook(t *testing.T) {
 	if !setTheme("off") {
 		t.Fatal("off must be a valid theme")
 	}
-	if th.modern {
+	if th.skin {
 		t.Fatal("off theme must not be modern")
 	}
 	if got := userEcho("❯ ", "hi"); got != "❯ hi\n" {
@@ -29,7 +29,7 @@ func TestThemeOffKeepsOriginalLook(t *testing.T) {
 func TestThemeSwitchAndReject(t *testing.T) {
 	t.Cleanup(func() { setTheme("off") })
 	for _, name := range []string{"supermilk"} {
-		if !setTheme(name) || !th.modern || th.name != name {
+		if !setTheme(name) || !th.skin || th.name != name {
 			t.Fatalf("setTheme(%q) did not activate a modern theme", name)
 		}
 		if !strings.Contains(userEcho("❯ ", "hi"), "YOU") {
@@ -42,7 +42,7 @@ func TestThemeSwitchAndReject(t *testing.T) {
 	if th.name != "supermilk" {
 		t.Errorf("a rejected switch must keep the active theme, got %q", th.name)
 	}
-	if setTheme("OFF"); th.modern {
+	if setTheme("OFF"); th.skin {
 		t.Error("theme names are case-insensitive; OFF should switch back")
 	}
 }

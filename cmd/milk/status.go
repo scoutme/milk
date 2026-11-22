@@ -76,7 +76,7 @@ func (m *model) headerBar() string {
 	rightFulPlain := repoURL + " " + version + "  " + sessLabel + "  " + paletteHint + "  /help"
 	rightShort := vStyled + dim("  "+sessLabel+"  "+paletteHint+"  /help")
 	rightShortPlain := version + "  " + sessLabel + "  " + paletteHint + "  /help"
-	if th.modern {
+	if th.skin {
 		// The supermilk skin paints its own right group — and it must
 		// cover the narrow variant too: the classic short fallback would
 		// otherwise silently dim the hints (pre-/help behavior) on any
@@ -122,7 +122,7 @@ func (m *model) statusBar() string {
 		rolePart = dim(rolePart)
 		agentPart = dim("agent:") + m.statusAgent()
 	}
-	if th.modern {
+	if th.skin {
 		roleName := strings.ToLower(sessRole)
 		rolePart = "● " + roleName
 		agentPart = "· " + m.statusAgent()
@@ -145,7 +145,7 @@ func (m *model) statusBar() string {
 	if isPerm {
 		right += m.statusCwd() + " "
 	} else {
-		if th.modern && m.width >= 110 {
+		if th.skin && m.width >= 110 {
 			right += dim("Alt+↑/↓ history  ·  Ctrl+C exit  ·  ")
 		}
 		right += dim(m.statusCwd() + " ")
