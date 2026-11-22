@@ -249,19 +249,23 @@ var commandRegistry = []cmdSpec{
   /setup telegram status  show current Telegram oversight status`},
 	{name: cmdConfig, hosts: hostBoth, desc: "print the config, run the setup wizard, or open the config file", hint: "[show|init|open]", help: `  /config                print the current config (merged global + local overrides)
   /config show           print the merged config tagged [global]/[local]/[default]
-  /config init [local|global]   run the setup wizard (configure primary + escalation agents);
+  /config init [local|global]   run the setup wizard (additive: merges into your existing config);
                          local/global = where to save (project .milk/config.json or global; else asked)
+  /config init rebuild [local|global]  rebuild the config from the wizard's answers alone —
+                         resets everything it doesn't ask about (the old destructive behaviour)
   /config init empty [local|global]  create the minimal config file ({}) with no questions —
                          the bootstrap for a project-local override (default scope: local)
   /config open           open config in $EDITOR / system default editor`},
 	{name: cmdInit, hosts: hostBoth, desc: "run the setup wizard (alias for /config init)", help: `  /init                  alias for /config init — run the setup wizard
-                         (same args: [empty] [local|global])`},
+                         (same args: [empty|rebuild] [local|global])`},
 	{name: cmdOpen, hosts: hostTUI, desc: "open any file in $EDITOR (agent can also call the open_file tool)", hint: "<file>", help: `  /open <file>           open any file in $EDITOR (agent can also call the open_file tool)`},
-	{name: cmdMCP, hosts: hostTUI, desc: "list and manage MCP servers", hint: "[list|add|remove <name>|enable <name>|disable <name>|tools [<name>]|reconnect [<name>]|assign|unassign|auth <name>]", help: `  /mcp                   list configured MCP servers and their status
+	{name: cmdMCP, hosts: hostTUI, desc: "list and manage MCP servers", hint: "[list|add|import|remove <name>|enable <name>|disable <name>|tools [<name>]|reconnect [<name>]|assign|unassign|auth <name>]", help: `  /mcp                   list configured MCP servers and their status
   /mcp list [<agent>]    list MCP servers for an agent (default: primary)
   /mcp add                add a new MCP server interactively
   /mcp add name=… url=… [transport=http] [auth=…] [api_key=…] [timeout=…]
   /mcp add name=… transport=stdio command=… [args=arg1,arg2,…]
+  /mcp import [all|name,…]  import MCP servers found in other tools' configs (Claude Code,
+                         Claude Desktop) — origin-tagged and assigned to primary + escalation
   /mcp remove <name>     remove an MCP server by name
   /mcp enable <name>     enable a disabled MCP server
   /mcp disable <name>    disable an MCP server (keeps config)

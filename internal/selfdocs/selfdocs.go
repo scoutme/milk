@@ -33,6 +33,7 @@ var (
 	aliases = map[string]string{
 		"mcp":                    "mcp_servers-field",
 		"mcp add":                "mcp_servers-field",
+		"mcp import":             "mcp_servers-field",
 		"mcp remove":             "mcp_servers-field",
 		"mcp assign":             "mcp_servers-field",
 		"mcp unassign":           "mcp_servers-field",

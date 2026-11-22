@@ -1029,7 +1029,7 @@ func (m model) handleForgetCmd(pat string) model {
 	return m
 }
 
-// handleMCPCmd handles `/mcp [list|add [key=val ...]|remove|enable|disable|tools|assign|unassign|reconnect]`.
+// handleMCPCmd handles `/mcp [list|add [key=val ...]|import|remove|enable|disable|tools|assign|unassign|reconnect]`.
 // /mcp add with missing required fields launches an interactive wizard; all other
 // subcommands are stateless and delegate directly to the exec* helpers.
 func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
@@ -1053,7 +1053,7 @@ func (m model) handleMCPCmd(arg string) (model, tea.Cmd) {
 
 	m.appendTranscript(execMCP(arg, m.st, m.agents.mcpToolSets) + "\n")
 	switch verb {
-	case "remove", "enable", "disable", "assign", "unassign":
+	case "import", "remove", "enable", "disable", "assign", "unassign":
 		m = m.refreshMCPToolSets()
 	}
 	return m, nil
@@ -1367,23 +1367,27 @@ func takeScopeFlag(args string) (string, string) {
 }
 
 // parseInitArgs parses the optional arguments of /config init and its CLI
-// twin: an "empty" mode word (skip the wizard, write the minimal config file)
-// and a scope word ("local"/"global", with or without leading dashes) that
-// preselects where the config is saved — the slash-command spelling of
-// `milk config init --local|--global`. Unrecognized words are ignored (the
-// wizard's own answers are never passed here).
-func parseInitArgs(args string) (empty bool, scope string) {
+// twin: an "empty" mode word (skip the wizard, write the minimal config file),
+// a "rebuild" mode word (the destructive commit: rebuild the config from the
+// wizard's answers alone instead of merging into the existing one — "reinit"
+// is accepted as a synonym), and a scope word ("local"/"global", with or
+// without leading dashes) that preselects where the config is saved — the
+// slash-command spelling of `milk config init --local|--global`. Unrecognized
+// words are ignored (the wizard's own answers are never passed here).
+func parseInitArgs(args string) (empty, rebuild bool, scope string) {
 	for _, tok := range strings.Fields(args) {
 		switch strings.ToLower(strings.TrimLeft(tok, "-")) {
 		case "empty":
 			empty = true
+		case "rebuild", "reinit":
+			rebuild = true
 		case "local":
 			scope = "local"
 		case "global":
 			scope = "global"
 		}
 	}
-	return empty, scope
+	return empty, rebuild, scope
 }
 
 // runConfigInitEmpty bootstraps the minimal empty config file at scope
@@ -1485,8 +1489,8 @@ func execBash(sub string, st *interactiveState) string {
 	}
 }
 
-// handleConfigCmd dispatches /config, /config init [empty] [local|global],
-// /config open, /config show.
+// handleConfigCmd dispatches /config, /config init [empty|rebuild]
+// [local|global], /config open, /config show.
 func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 	lower := strings.ToLower(strings.TrimSpace(sub))
 	switch {
@@ -1506,7 +1510,7 @@ func (m model) handleConfigCmd(sub string) (tea.Model, tea.Cmd) {
 	case lower == "init" || strings.HasPrefix(lower, "init "):
 		return m.handleConfigInitCmd(strings.TrimSpace(sub[len("init"):]))
 	default:
-		m.appendTranscript(milkTag() + " usage: /config | /config show | /config init [empty] [local|global] | /config open\n")
+		m.appendTranscript(milkTag() + " usage: /config | /config show | /config init [empty|rebuild] [local|global] | /config open\n")
 		return m, nil
 	}
 }

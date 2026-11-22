@@ -1179,6 +1179,11 @@ type MCPServerConfig struct {
 	// (derived from the plugin install location at load time).
 	PluginRoot string `json:"-"`
 	PluginData string `json:"-"`
+
+	// Origin names where the entry came from when it was imported from
+	// another harness's config (e.g. "~/.claude.json"). Informational:
+	// shown by /mcp list, never used to resolve anything.
+	Origin string `json:"origin,omitempty"`
 }
 
 // IsEnabled reports whether this MCP server entry is enabled.

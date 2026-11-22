@@ -736,16 +736,23 @@ func copilotHostname(u string) string {
 // core in initwizard_core.go owns the state and the banner+first prompt; the
 // TUI's per-Enter answer handling is handleInitWizardKey below. args:
 // "empty [local|global]" bootstraps the minimal config file without the
-// wizard; "local" / "global" preselects where the wizard's result is saved —
-// the slash-command spelling of `milk config init --local|--global`.
+// wizard; "rebuild" (alias "reinit") switches to the destructive commit —
+// the config is rebuilt from the wizard's answers alone instead of merged
+// into the existing one; "local" / "global" preselects where the wizard's
+// result is saved — the slash-command spelling of `milk config init
+// --local|--global`.
 func (m model) handleConfigInitCmd(args string) (tea.Model, tea.Cmd) {
-	empty, scope := parseInitArgs(args)
+	empty, rebuild, scope := parseInitArgs(args)
 	if empty {
 		m.appendTranscript(runConfigInitEmpty(scope, activeConfigDir(m.st)) + "\n")
 		return m, nil
 	}
 	st, banner := initWizardStart(activeConfigDir(m.st))
 	st.scope = scope
+	st.rebuild = rebuild
+	if rebuild {
+		banner = initWizardRebuildNote() + banner
+	}
 	m.pendingInit = st
 	m.appendTranscript(banner + initWizardRule() + initWizardPrompt(st))
 	m.ta.Reset()
