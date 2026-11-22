@@ -266,8 +266,8 @@ func harnessLabel(path, home string) string {
 // harnessFile is the tolerant parse result of one harness config file: the
 // pieces milk can adopt, whatever else the file carries.
 type harnessFile struct {
-	env      map[string]string            // settings "env" map
-	servers  map[string]map[string]any    // "mcpServers" map
+	env      map[string]string                    // settings "env" map
+	servers  map[string]map[string]any            // "mcpServers" map
 	projects map[string]map[string]map[string]any // ~/.claude.json "projects" → mcpServers
 }
 

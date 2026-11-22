@@ -266,40 +266,39 @@ func initWizardApplyStep(st *initWizardState, answer string, opts initWizardOpts
 			st.toolAgentNames = splitCommaNames(answer)
 		}
 
-		case initStepScope:
-			// Same options and default as the CLI's "Apply to local? [Y/n]"
-			// prompt: y/local → project-local, n/global → global, blank = y.
-			switch strings.ToLower(answer) {
-			case "", "y", "yes", "local":
-				st.scope = "local"
-			case "n", "no", "global":
-				st.scope = "global"
-			default:
-				out.WriteString(milkTag() + " invalid choice — enter y (local) or n (global)\n")
-				return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
-			}
+	case initStepScope:
+		// Same options and default as the CLI's "Apply to local? [Y/n]"
+		// prompt: y/local → project-local, n/global → global, blank = y.
+		switch strings.ToLower(answer) {
+		case "", "y", "yes", "local":
+			st.scope = "local"
+		case "n", "no", "global":
+			st.scope = "global"
+		default:
+			out.WriteString(milkTag() + " invalid choice — enter y (local) or n (global)\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+		}
 
-		case initStepImport:
-			picked, errMsg := initWizardImportPick(st.imported, answer)
-			if errMsg != "" {
-				out.WriteString(milkTag() + " " + errMsg + "\n")
-				return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+	case initStepImport:
+		picked, errMsg := initWizardImportPick(st.imported, answer)
+		if errMsg != "" {
+			out.WriteString(milkTag() + " " + errMsg + "\n")
+			return initWizardResult{Output: out.String(), Prompt: initWizardPrompt(st)}
+		}
+		st.importPicked = picked
+		st.importDone = true
+		switch len(picked) {
+		case 0:
+			out.WriteString(dim("  skipped — re-run /config init or use /mcp import any time\n"))
+		case 1:
+			out.WriteString(green("  ✓ importing "+picked[0].Name) + "\n")
+		default:
+			names := make([]string, 0, len(picked))
+			for _, s := range picked {
+				names = append(names, s.Name)
 			}
-			st.importPicked = picked
-			st.importDone = true
-			switch len(picked) {
-			case 0:
-				out.WriteString(dim("  skipped — re-run /config init or use /mcp import any time\n"))
-			case 1:
-				out.WriteString(green("  ✓ importing "+picked[0].Name) + "\n")
-			default:
-				names := make([]string, 0, len(picked))
-				for _, s := range picked {
-					names = append(names, s.Name)
-				}
-				out.WriteString(green("  ✓ importing "+strings.Join(names, ", ")) + "\n")
-			}
-
+			out.WriteString(green("  ✓ importing "+strings.Join(names, ", ")) + "\n")
+		}
 
 	case initStepLimits:
 		v := 0
@@ -505,7 +504,7 @@ func commitInitWizardConfig(st *initWizardState) (config.Config, string, error) 
 			milkTag(), len(added), strings.Join(added, ", "), strings.Join(targets, ", ")))
 	}
 	if len(skipped) > 0 {
-		sb.WriteString(dim("  already configured (skipped): " + strings.Join(skipped, ", ")) + "\n")
+		sb.WriteString(dim("  already configured (skipped): "+strings.Join(skipped, ", ")) + "\n")
 	}
 	// Post-completion hints for fields the wizard doesn't ask for.
 	var hints []string

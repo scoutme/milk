@@ -39,10 +39,10 @@ func writeHarnessFile(t *testing.T, path, content string) {
 // no URL" is not importable at all.
 func TestClaudeMCPServer_Conversion(t *testing.T) {
 	cases := []struct {
-		name    string
-		raw     map[string]any
-		wantOK  bool
-		check   func(t *testing.T, cfg importedMCPServer)
+		name   string
+		raw    map[string]any
+		wantOK bool
+		check  func(t *testing.T, cfg importedMCPServer)
 	}{
 		{
 			name: "stdio",
