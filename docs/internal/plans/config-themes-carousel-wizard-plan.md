@@ -328,6 +328,30 @@ browse/cancel/confirm incl. wheel; PR 3: build a variant, hand-edit its JSON,
 - **Wheel hijack scope:** only while the carousel/wizard overlay is open;
   otherwise wheel behaviour is untouched (panels/transcript scroll).
 
+## Follow-up — classic chrome as data (the `chrome` block)
+
+Two PRs past the original slicing, the classic look's remaining surfaces
+became schema too ("off declares its palette" + "close the off-theme color
+gaps"): first the eleven palette slots drove the classic chrome (bars,
+header border, accent, toast), then a `chrome` sub-block covered the roles
+no slot can serve — panel titles/section, generic border, panel alt ground,
+think surface, permission prompt pair, wordmark gold, agent sage/steel tags,
+staleness ramp (3 stops), changeset roles (4), input selection and
+completion grounds, and the 16-frame spinner pulse ramp. `off.json` declares
+every one with the exact values the render code carried; `resolveChrome()`
+resolves token-if-present / constant-if-absent per surface; `Transform`
+moves the whole block so darken/lighten variants shift every visible
+surface. `goldenOff` pins the block like the palette.
+
+Boundaries (documented, not gaps): **ANSI semantic slots** — error red,
+spinner yellow, the bold-yellow highlight, status agent 1/3/8 — stay
+indexed and ride the terminal's own palette (`terminal.ansi16`, which
+`Transform` shifts when a theme declares one). **glamour's markdown body
+styling** is the rendering engine's style sheet, not chrome; wiring it to
+the palette is its own piece of work. The 256-colour cube constants (think
+surface `48;5;235`, selection `240`, completion `238`) are now expressed as
+their exact truecolor hexes when a theme declares them.
+
 ## Out of scope
 
 - Theme marketplace / shipping themes as plugins (the marketplace fetcher

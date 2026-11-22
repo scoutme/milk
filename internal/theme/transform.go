@@ -9,6 +9,7 @@ package theme
 func Transform(rt *Resolved, dLight, dSat float64) *Resolved {
 	out := *rt
 	out.Colors = mapPalette(rt.Colors, dLight, dSat)
+	out.Chrome = mapChrome(rt.Chrome, dLight, dSat)
 	if rt.Terminal != nil {
 		t := *rt.Terminal
 		t.Bg = shiftHex(t.Bg, dLight, dSat)
@@ -48,4 +49,18 @@ func shiftHex(hex string, dLight, dSat float64) string {
 	}
 	h, s, l := hexToHSL(hex)
 	return hslToHex(h, clamp01(s+dSat), clamp01(l+dLight))
+}
+
+// mapChrome shifts every declared chrome surface with the palette — the
+// point of the block: a darken/lighten variant moves the panel greys, the
+// borders, the ramps, everything visible. Undeclared entries stay absent.
+func mapChrome(c Chrome, dLight, dSat float64) Chrome {
+	out := Chrome{Pulse: append([]string(nil), c.Pulse...)}
+	for i, p := range c.colors() {
+		*out.colors()[i] = Color{Dark: shiftHex(p.Dark, dLight, dSat), Light: shiftHex(p.Light, dLight, dSat)}
+	}
+	for i, hex := range out.Pulse {
+		out.Pulse[i] = shiftHex(hex, dLight, dSat)
+	}
+	return out
 }
