@@ -284,13 +284,16 @@ func resolveChrome() {
 	applyC := func(dst *themeColor, src theme.Color, fb themeColor) {
 		apply(dst, themeColorOf(src), fb)
 	}
+	c := th.chrome
 	apply(&chromeHeaderBg, tkBase, classicHeaderBg)
+	// header_bg: a chrome surface that may differ from base (off's bar is
+	// #1b1b1f over its standard black base). Fallback: whatever base settled.
+	applyC(&chromeHeaderBg, c.HeaderBg, chromeHeaderBg)
 	apply(&chromeHeaderFg, tkMuted, classicHeaderFg)
 	apply(&chromeStatusBg, tkRaised, classicStatusBg)
 	apply(&chromeHeaderBorder, tkHairline, classicHeaderBorder)
 	apply(&chromeAccent, tkAccent, classicAccent)
 	apply(&chromeToast, tkToast, classicToast)
-	c := th.chrome
 	applyC(&chromePanelTitle, c.PanelTitle, classicPanelTitle)
 	applyC(&chromePanelSection, c.PanelSection, classicPanelSection)
 	applyC(&chromeBorder, c.Border, classicBorder)

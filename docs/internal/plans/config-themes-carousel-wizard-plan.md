@@ -343,6 +343,13 @@ resolves token-if-present / constant-if-absent per surface; `Transform`
 moves the whole block so darken/lighten variants shift every visible
 surface. `goldenOff` pins the block like the palette.
 
+Later fix (the "standard black background" pass): `base` is the look's
+*ground* — off declares the standard black (`#000000`/`#ffffff`) there —
+and the header bar's own `#1b1b1f` moved to a `chrome.header_bg` slot
+(fallback: base), so the palette carries the real background like
+supermilk's does. off also declares `text` (the classic body ink), which
+the swatch strip needs to show the full base/raised/text/accent quartet.
+
 Boundaries (documented, not gaps): **ANSI semantic slots** — error red,
 spinner yellow, the bold-yellow highlight, status agent 1/3/8 — stay
 indexed and ride the terminal's own palette (`terminal.ansi16`, which

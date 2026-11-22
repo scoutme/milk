@@ -21,20 +21,25 @@ var goldenOff = &themeDef{
 	// its palette explicitly — every chrome constant the classic path reads
 	// is a declared token. thumb/accentLo/think are the derivations over
 	// those declarations (pinned so derivation changes are deliberate).
-	base:     themeColor{dark: "#1b1b1f", light: "#e9e6df"},
+	// base is the standard black background (and its standard light
+	// counterpart) — the look's ground — while the header bar's own #1b1b1f
+	// lives in chrome.header_bg.
+	base:     themeColor{dark: "#000000", light: "#ffffff"},
 	raised:   themeColor{dark: "#25252a", light: "#e5e3dd"},
 	toast:    themeColor{dark: "#1a263a", light: "#d9e4f5"},
 	hairline: themeColor{dark: "#3a3a41", light: "#c4c0b6"},
 	thumb:    themeColor{dark: "#7a7775", light: "#87837a"},
+	text:     themeColor{dark: "#d0d0d0", light: "#080808"},
 	muted:    themeColor{dark: "#b9b4a8", light: "#4a463e"},
 	accent:   themeColor{dark: "#ffd03c", light: "#ffd03c"},
-	accentLo: themeColor{dark: "#5f5128", light: "#f0dfae"},
+	accentLo: themeColor{dark: "#4d3e12", light: "#fff1c5"},
 	think:    themeColor{dark: "#b9b4a8", light: "#4a463e"},
 	focus:    themeColor{dark: "#161d2e", light: "#e2e7f3"},
 	// The chrome block: every classic surface, declared (off.json) instead of
 	// held as render constants. golden-pinned like the palette so chrome
 	// changes are deliberate.
 	chrome: theme.Chrome{
+		HeaderBg:       theme.Color{Dark: "#1b1b1f", Light: "#e9e6df"},
 		PanelTitle:     theme.Color{Dark: "#888888", Light: "#555555"},
 		PanelSection:   theme.Color{Dark: "#666666", Light: "#777777"},
 		Border:         theme.Color{Dark: "#555555", Light: "#aaaaaa"},

@@ -66,20 +66,24 @@ type Palette struct {
 // the render layer keeps its own constant (token-if-present). A skin ignores
 // the block entirely — its chrome reads the palette.
 type Chrome struct {
+	// HeaderBg is the header bar's own ground when it must differ from the
+	// theme's base (off's base is the standard black background while its
+	// bar is #1b1b1f). Falls back to base when undeclared.
+	HeaderBg       Color    `json:"header_bg,omitempty"`
 	PanelTitle     Color    `json:"panel_title,omitempty"`
 	PanelSection   Color    `json:"panel_section,omitempty"`
 	Border         Color    `json:"border,omitempty"`
-	PanelAlt       Color    `json:"panel_alt,omitempty"`       // alternating panel-row ground
-	ThinkSurface   Color    `json:"think_surface,omitempty"`   // reasoning/tool fold surface
-	PermFg         Color    `json:"perm_fg,omitempty"`         // permission-prompt ink
-	PermBg         Color    `json:"perm_bg,omitempty"`         // permission-prompt ground
-	Wordmark       Color    `json:"wordmark,omitempty"`        // startup-banner "milk"
-	AgentSage      Color    `json:"agent_sage,omitempty"`      // primary agent tag
-	AgentSteel     Color    `json:"agent_steel,omitempty"`     // escalation agent tag
-	StaleFresh     Color    `json:"stale_fresh,omitempty"`     // staleness ramp, fresh end
-	StaleMid       Color    `json:"stale_mid,omitempty"`       // staleness ramp, middle
-	StaleWarm      Color    `json:"stale_warm,omitempty"`      // staleness ramp, stale end
-	ChangeCreated  Color    `json:"change_created,omitempty"`  // changeset roles (project panel)
+	PanelAlt       Color    `json:"panel_alt,omitempty"`      // alternating panel-row ground
+	ThinkSurface   Color    `json:"think_surface,omitempty"`  // reasoning/tool fold surface
+	PermFg         Color    `json:"perm_fg,omitempty"`        // permission-prompt ink
+	PermBg         Color    `json:"perm_bg,omitempty"`        // permission-prompt ground
+	Wordmark       Color    `json:"wordmark,omitempty"`       // startup-banner "milk"
+	AgentSage      Color    `json:"agent_sage,omitempty"`     // primary agent tag
+	AgentSteel     Color    `json:"agent_steel,omitempty"`    // escalation agent tag
+	StaleFresh     Color    `json:"stale_fresh,omitempty"`    // staleness ramp, fresh end
+	StaleMid       Color    `json:"stale_mid,omitempty"`      // staleness ramp, middle
+	StaleWarm      Color    `json:"stale_warm,omitempty"`     // staleness ramp, stale end
+	ChangeCreated  Color    `json:"change_created,omitempty"` // changeset roles (project panel)
 	ChangeModified Color    `json:"change_modified,omitempty"`
 	ChangeDeleted  Color    `json:"change_deleted,omitempty"`
 	ChangeRenamed  Color    `json:"change_renamed,omitempty"`
@@ -90,26 +94,13 @@ type Chrome struct {
 
 // mergeChrome overlays src over dst, non-absent fields win — the extends
 // chain's merge rule applied to the chrome block.
+// mergeChrome overlays src over dst field-by-field (the palette's merge
+// rule per named surface) plus the pulse ramp. Iterates colors() so a new
+// surface cannot be forgotten here.
 func mergeChrome(dst *Chrome, src Chrome) {
-	mergeColor(&dst.PanelTitle, src.PanelTitle)
-	mergeColor(&dst.PanelSection, src.PanelSection)
-	mergeColor(&dst.Border, src.Border)
-	mergeColor(&dst.PanelAlt, src.PanelAlt)
-	mergeColor(&dst.ThinkSurface, src.ThinkSurface)
-	mergeColor(&dst.PermFg, src.PermFg)
-	mergeColor(&dst.PermBg, src.PermBg)
-	mergeColor(&dst.Wordmark, src.Wordmark)
-	mergeColor(&dst.AgentSage, src.AgentSage)
-	mergeColor(&dst.AgentSteel, src.AgentSteel)
-	mergeColor(&dst.StaleFresh, src.StaleFresh)
-	mergeColor(&dst.StaleMid, src.StaleMid)
-	mergeColor(&dst.StaleWarm, src.StaleWarm)
-	mergeColor(&dst.ChangeCreated, src.ChangeCreated)
-	mergeColor(&dst.ChangeModified, src.ChangeModified)
-	mergeColor(&dst.ChangeDeleted, src.ChangeDeleted)
-	mergeColor(&dst.ChangeRenamed, src.ChangeRenamed)
-	mergeColor(&dst.Selection, src.Selection)
-	mergeColor(&dst.Completion, src.Completion)
+	for i, p := range src.colors() {
+		mergeColor(dst.colors()[i], *p)
+	}
 	if len(src.Pulse) > 0 {
 		dst.Pulse = append([]string(nil), src.Pulse...)
 	}
@@ -119,7 +110,7 @@ func mergeChrome(dst *Chrome, src Chrome) {
 // transformation). chromeFieldNames are the matching JSON keys, in the same
 // order — used for error messages.
 var chromeFieldNames = []string{
-	"panel_title", "panel_section", "border", "panel_alt", "think_surface",
+	"header_bg", "panel_title", "panel_section", "border", "panel_alt", "think_surface",
 	"perm_fg", "perm_bg", "wordmark", "agent_sage", "agent_steel",
 	"stale_fresh", "stale_mid", "stale_warm",
 	"change_created", "change_modified", "change_deleted", "change_renamed",
@@ -128,7 +119,7 @@ var chromeFieldNames = []string{
 
 func (c *Chrome) colors() []*Color {
 	return []*Color{
-		&c.PanelTitle, &c.PanelSection, &c.Border, &c.PanelAlt, &c.ThinkSurface,
+		&c.HeaderBg, &c.PanelTitle, &c.PanelSection, &c.Border, &c.PanelAlt, &c.ThinkSurface,
 		&c.PermFg, &c.PermBg, &c.Wordmark, &c.AgentSage, &c.AgentSteel,
 		&c.StaleFresh, &c.StaleMid, &c.StaleWarm,
 		&c.ChangeCreated, &c.ChangeModified, &c.ChangeDeleted, &c.ChangeRenamed,
