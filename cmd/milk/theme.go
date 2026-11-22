@@ -141,6 +141,20 @@ var (
 	tkAccentLo, tkThink, tkFocus                                              themeColor
 )
 
+// themeChanged marks the display stale after a theme (re)activation — the
+// switch tail every live path shares (/theme <name>, carousel confirm, the
+// builder's previews and save, cancel-restore). The per-turn colorized
+// transcript caches hold the PREVIOUS theme's colours keyed by raw text
+// alone: without dropping them here, a rebuild re-serves the old skin's
+// rows and only the chrome visibly changes (the missing live preview).
+func (m *model) themeChanged() {
+	m.colorizeForce = true
+	m.turnColorCache = nil
+	m.turnRawCache = nil
+	m.wrapCacheValid = false
+	m.viewportDirty = true
+}
+
 // applyThemeDef activates an already-resolved theme definition and rebuilds
 // every style derived from it — setTheme's tail. The theme builder previews
 // through here before its candidate is in any registry.

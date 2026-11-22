@@ -60,19 +60,19 @@ var twTokenSet = map[string]bool{
 
 // themeWizardState is the open builder session.
 type themeWizardState struct {
-	mode  themeWizardMode
-	step  themeWizardStep
-	sel   int // choice-step selection (mode/base/more/terminal)
-	base  string
-	name  string
-	colors  map[string]theme.Color
-	colorIdx int
-	more   bool
+	mode       themeWizardMode
+	step       themeWizardStep
+	sel        int // choice-step selection (mode/base/more/terminal)
+	base       string
+	name       string
+	colors     map[string]theme.Color
+	colorIdx   int
+	more       bool
 	deriveTerm bool
-	tagline string
-	dl, ds float64 // variant: lightness / saturation deltas
-	orig   string // theme active at open — what cancel restores
-	err    string // shown inline instead of advancing
+	tagline    string
+	dl, ds     float64 // variant: lightness / saturation deltas
+	orig       string  // theme active at open — what cancel restores
+	err        string  // shown inline instead of advancing
 }
 
 func (w *themeWizardState) put(key string, c theme.Color) {
@@ -203,6 +203,7 @@ func (m model) themeWizardCancel() (tea.Model, tea.Cmd) {
 		}
 		setTheme(w.orig)
 		applyThemeTerminal()
+		m.themeChanged()
 	}
 	m.ta.Reset()
 	m.appendTranscript(milkTag() + " theme builder: cancelled\n")
@@ -226,8 +227,7 @@ func (m *model) themeWizardPreview(w *themeWizardState) {
 	}
 	applyThemeDef(themeDefFromResolved(rt))
 	applyThemeTerminal()
-	m.colorizeForce = true
-	m.viewportDirty = true
+	m.themeChanged()
 	m.syncLayout()
 }
 
@@ -270,8 +270,7 @@ func (m model) themeWizardSave(w *themeWizardState) (tea.Model, tea.Cmd) {
 	setTheme(out.Name)
 	applyThemeTerminal()
 	m.st.cfg.Theme = th.name
-	m.colorizeForce = true
-	m.viewportDirty = true
+	m.themeChanged()
 	m.ta.Reset()
 	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s theme: %s (config save failed: %v)\n", milkTag(), bold(th.name), err))
@@ -368,7 +367,7 @@ func (w *themeWizardState) choiceLen() int {
 	case twStepMode:
 		return 3
 	case twStepBase:
-		return len(themeRegistry.Names())
+		return len(w.baseRows())
 	case twStepMore:
 		return 2
 	case twStepTerminal:
@@ -390,7 +389,7 @@ func (m model) themeWizardAcceptChoice() (tea.Model, tea.Cmd) {
 			w.step = twStepBase
 		}
 	case twStepBase:
-		names := themeRegistry.Names()
+		names := w.baseRows()
 		if w.sel < len(names) {
 			w.base = names[w.sel]
 		}
@@ -522,6 +521,11 @@ func themeWizardHint(w *themeWizardState) string {
 	switch w.step {
 	case twStepName:
 		return `lowercase letters, digits, _ and -`
+	case twStepBase:
+		if w.mode == twVariant {
+			return `only themes with a palette can be varied (off is chrome-coded)`
+		}
+		return ""
 	case twStepColor, twStepToken:
 		return `"#rrggbb" or "#rrggbb/#rrggbb" (dark/light)`
 	case twStepTagline:
@@ -607,12 +611,30 @@ func (m *model) renderThemeWizard(boxWidth int) string {
 }
 
 // choiceRows are the visible rows of the current choice step.
+// baseRows is the base step's list: every theme for the from-existing mode,
+// but only palette-bearing themes for a variant. "off" paints hardcoded
+// chrome and declares almost no tokens — Transform has nothing to move, so
+// a variant of it previews as "nothing happens" (the reported no-op).
+func (w *themeWizardState) baseRows() []string {
+	names := themeRegistry.Names()
+	if w.mode != twVariant {
+		return names
+	}
+	out := names[:0:0]
+	for _, n := range names {
+		if rt, ok := themeRegistry.Get(n); ok && !rt.Colors.Base.Absent() {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func (w *themeWizardState) choiceRows() []string {
 	switch w.step {
 	case twStepMode:
 		return []string{"from an existing theme", "from scratch", "darken/lighten variant of a theme"}
 	case twStepBase:
-		return themeRegistry.Names()
+		return w.baseRows()
 	case twStepMore:
 		return []string{"no", "yes"}
 	case twStepTerminal:

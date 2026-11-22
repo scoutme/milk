@@ -104,8 +104,7 @@ func (m *model) themeCarouselPreview(name string) {
 		return
 	}
 	applyThemeTerminal()
-	m.colorizeForce = true
-	m.viewportDirty = true
+	m.themeChanged()
 	m.syncLayout()
 }
 
@@ -120,8 +119,7 @@ func (m model) themeCarouselConfirm() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.st.cfg.Theme = th.name
-	m.colorizeForce = true
-	m.viewportDirty = true
+	m.themeChanged()
 	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s theme: %s (config save failed: %v)\n", milkTag(), bold(th.name), err))
 	} else {
