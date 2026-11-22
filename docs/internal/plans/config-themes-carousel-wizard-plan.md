@@ -1,9 +1,9 @@
 # Config-driven themes, `/theme` carousel, and the theme-builder wizard — plan
 
-Status: **in progress** — PR 1 (Steps 1–2) and PR 2 (Step 3 + `/theme
-view`) implemented and merged to `main`; the carousel's live-TUI check
-(browse/cancel/confirm incl. wheel in a real terminal) is the remaining
-verification for PR 2. Steps 4–5 (wizard, docs/ADR) still planned.
+Status: **in progress** — PR 1 (Steps 1–2), PR 2 (Step 3 + `/theme
+view`) and PR 3 (Step 4, the builder incl. the darken/lighten variant mode)
+implemented and merged to `main`. Step 5 (ADR + docs) is the remaining
+planned work.
 
 Touchpoints: `cmd/milk/theme.go`, `cmd/milk/theme_chrome.go`, `cmd/milk/slashcmd.go`,
 `cmd/milk/interactive.go`, `internal/config/config.go`, new `internal/theme/`,

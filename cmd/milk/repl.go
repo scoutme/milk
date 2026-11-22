@@ -1135,6 +1135,10 @@ type model struct {
 	// themes plan): arrows/wheel live-preview candidates, enter applies,
 	// any other key restores and closes.
 	pendingThemeCarousel *themeCarouselState
+	// pendingThemeWizard is the open theme-builder session (PR 3): /theme
+	// new walks mode → base → colors → terminal → tagline → review (or the
+	// variant carousel), previewing through the real switch path.
+	pendingThemeWizard *themeWizardState
 
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
@@ -2234,6 +2238,25 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The builder's variant step borrows the same gesture: the wheel steps
+	// lightness like the carousel steps themes; a press cancels the build.
+	if m.pendingThemeWizard != nil {
+		ev := newMouseEvent(msg)
+		w := m.pendingThemeWizard
+		switch {
+		case ev.Button == tea.MouseWheelUp, ev.Button == tea.MouseWheelDown:
+			delta := 0.05
+			if ev.Button == tea.MouseWheelUp {
+				delta = -0.05
+			}
+			w.dl = clampf(w.dl+delta, -0.25, 0.25)
+			m.themeWizardPreview(w)
+			return m, nil
+		case ev.Action == mousePress:
+			return m.themeWizardCancel()
+		}
+		return m, nil
+	}
 	if m.ptyPane != nil {
 		// The PTY pane's View() branch takes over the whole main area and
 		// renders no side panels (see layout.go), but mainWidth()/regionAt
@@ -2786,6 +2809,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingThemeCarousel != nil {
 			return m.handleThemeCarouselKey(msg)
+		}
+		if m.pendingThemeWizard != nil {
+			return m.handleThemeWizardKey(msg)
 		}
 		if m.pendingPluginBrowse != nil {
 			return m.handlePluginBrowseKey(msg)

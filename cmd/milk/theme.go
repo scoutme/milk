@@ -73,24 +73,29 @@ func (c themeColor) pick() string {
 }
 
 func hexRGB(h string) (r, g, b int) {
+	if len(h) < 7 { // empty or partial — absent tokens must never panic the render path
+		return 0, 0, 0
+	}
 	v, _ := strconv.ParseUint(h[1:], 16, 32)
 	return int(v >> 16), int(v >> 8 & 0xff), int(v & 0xff)
 }
 
 // sgrBg / sgrFg are raw truecolor escapes, "" when not a TTY.
 func (c themeColor) sgrBg() string {
-	if !isTTY {
+	h := c.pick()
+	if !isTTY || h == "" {
 		return ""
 	}
-	r, g, b := hexRGB(c.pick())
+	r, g, b := hexRGB(h)
 	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
 }
 
 func (c themeColor) sgrFg() string {
-	if !isTTY {
+	h := c.pick()
+	if !isTTY || h == "" {
 		return ""
 	}
-	r, g, b := hexRGB(c.pick())
+	r, g, b := hexRGB(h)
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
 }
 
@@ -136,6 +141,16 @@ var (
 	tkAccentLo, tkThink, tkFocus                                              themeColor
 )
 
+// applyThemeDef activates an already-resolved theme definition and rebuilds
+// every style derived from it — setTheme's tail. The theme builder previews
+// through here before its candidate is in any registry.
+func applyThemeDef(t *themeDef) {
+	th = t
+	tkBase, tkRaised, tkToast, tkHairline, tkThumb = t.base, t.raised, t.toast, t.hairline, t.thumb
+	tkText, tkMuted, tkAccent, tkAccentLo, tkThink, tkFocus = t.text, t.muted, t.accent, t.accentLo, t.think, t.focus
+	refreshThemeColors()
+}
+
 // setTheme activates a theme by name — registry lookup, so builtins and
 // drop-in JSON themes (~/.milk/themes, .milk/themes) alike — and rebuilds
 // every style derived from it. Unknown names are rejected.
@@ -144,10 +159,7 @@ func setTheme(name string) bool {
 	if !ok {
 		return false
 	}
-	th = t
-	tkBase, tkRaised, tkToast, tkHairline, tkThumb = t.base, t.raised, t.toast, t.hairline, t.thumb
-	tkText, tkMuted, tkAccent, tkAccentLo, tkThink, tkFocus = t.text, t.muted, t.accent, t.accentLo, t.think, t.focus
-	refreshThemeColors()
+	applyThemeDef(t)
 	return true
 }
 
@@ -398,8 +410,8 @@ const originalThinkBgParams = "48;5;235"
 // original dark grey, or the raised surface of a skin (readable on light).
 func applyThinkSurface() {
 	thinkBgParams = originalThinkBgParams
-	if th.skin {
-		r, g, b := hexRGB(tkRaised.dark)
+	if th.skin && tkRaised.pick() != "" {
+		r, g, b := hexRGB(tkRaised.pick())
 		thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
 	}
 	ansiThinkBg = "\033[" + thinkBgParams + "m"
