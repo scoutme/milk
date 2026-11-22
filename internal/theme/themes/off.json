@@ -1,0 +1,7 @@
+{
+  "name": "off",
+  "look": "classic",
+  "colors": {
+    "focus": { "dark": "#161d2e", "light": "#e2e7f3" }
+  }
+}

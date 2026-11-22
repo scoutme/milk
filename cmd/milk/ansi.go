@@ -132,7 +132,7 @@ func staleContentColor(ratio float64) string {
 	if ratio > 1 {
 		ratio = 1
 	}
-	if th.modern {
+	if th.skin {
 		// grey → dark grey: readable on a light ground, staleness reads as
 		// the text settling into the page
 		g := 150 + int(float64(58-150)*ratio)

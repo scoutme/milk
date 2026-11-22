@@ -602,7 +602,7 @@ func writeSeedTurn(b *strings.Builder, st *interactiveState, t session.Turn) {
 			name = string(t.Agent)
 		}
 		b.WriteString(agentTag(name, role) + text + "\n")
-		if !th.modern {
+		if !th.skin {
 			b.WriteByte('\n')
 		}
 	}

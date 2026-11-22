@@ -30,6 +30,7 @@ const (
 	nsWorkflow = "workflow"
 	nsSession  = "session"
 	nsPlugin   = "plugin" // installed plugin names (records ∪ drop-in dirs)
+	nsTheme    = "theme"  // registry theme names (builtins ∪ drop-in theme dirs)
 )
 
 // nsByPlaceholder maps the text inside <...> to a name space.
@@ -57,6 +58,7 @@ var nsByCmdScoped = map[string]string{
 	// an install target is qualified by @<mkt>, which the parser attributes to
 	// the same position; typing it is intentional).
 	cmdPlugins + " name": nsPlugin,
+	cmdTheme + " name":   nsTheme,
 }
 
 // freeTextParams lists placeholder texts that are intentionally completed as
@@ -517,6 +519,11 @@ func (m model) paramLookup(ns string) []string {
 			sort.Strings(out)
 		}
 		return out
+	case nsTheme:
+		// Live registry names (builtins + drop-in theme dirs): the same list
+		// /theme list renders and setTheme accepts, so completion can never
+		// offer a name the handler rejects.
+		return themeRegistry.Names()
 	case nsSession:
 		// Live session refs for the cwd (plan D2): short IDs — what the
 		// listings show — plus names. /resume and /drop accept either.

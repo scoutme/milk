@@ -11,15 +11,19 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/scoutme/milk/internal/sgr"
+	"github.com/scoutme/milk/internal/theme"
 )
 
-// Switchable TUI themes. "off" (the default) is the original look, byte for
-// byte; "supermilk" is the opt-in skin (/theme supermilk or config "theme"):
-// milk-white ground, soft ink text, muted olive accent. A skin restyles only
-// the chrome (header, status bar, turn labels, panel titles, scrollbars),
-// paints the whole screen and, on exit, hands the terminal's own colours
-// back. Panel *layout* is theme-independent since ADR-0098 — the two skins
-// share the same free/grouped width budget.
+// Switchable TUI themes are registry data (internal/theme): the builtins
+// "off" and "supermilk" plus drop-in JSON themes from ~/.milk/themes/*.json
+// and <project>/.milk/themes/*.json. This file owns the *runtime* shape only
+// — themeDef and the tokens the render call sites read; the schema,
+// extends-resolution and derivations live in internal/theme (plan:
+// docs/internal/plans/config-themes-carousel-wizard-plan.md). A skin
+// restyles only the chrome (header, status bar, turn labels, panel titles,
+// scrollbars), paints the whole screen and, on exit, hands the terminal's
+// own colours back. Panel *layout* is theme-independent since ADR-0098 —
+// all themes share the same free/grouped width budget.
 
 type themeColor struct{ dark, light string }
 
@@ -91,8 +95,14 @@ func (c themeColor) sgrFg() string {
 }
 
 type themeDef struct {
-	name                                                                              string
-	modern                                                                            bool
+	name string
+	// skin is the resolved `look: skin` shape (the render call sites'
+	// shortcut; `look: classic` is the original shape). The schema's two
+	// per-theme cosmetic knobs below reach their own call sites — everything
+	// else that used to hang off "modern" is the look itself.
+	skin                                                                              bool
+	toolRows                                                                          theme.ToolRows
+	scrollbar                                                                         theme.Scrollbar
 	base, raised, toast, hairline, thumb, text, muted, accent, accentLo, think, focus themeColor
 	// terminal colours handed to the emulator while the theme is active
 	tagline                    string // "" = defaultTagline
@@ -111,30 +121,13 @@ func taglineText() string {
 	return defaultTagline
 }
 
-// themeOff keeps colours in code by design (accentStyle, the alt-background
-// fallbacks) — focus is the one tint it declares as a token, so panel render
-// code never carries escapes for it either (issue #412).
-var themeOff = &themeDef{name: "off", focus: themeColor{dark: "#161d2e", light: "#e2e7f3"}}
-
-// supermilk: a milk-white ground with warm ink text, hairline separators and
-// a single muted olive accent; the ANSI ramp is pulled into the same family
-// so coloured text (code spans, links) stays readable on the light ground.
-var themeSuperMilk = &themeDef{
-	name: "supermilk", modern: true,
-	tagline: "Got models? Got milk.",
-	base:    fixed("#f8f5ee"), raised: fixed("#efebe0"), toast: fixed("#e8e3d5"),
-	hairline: fixed("#dcd7c9"), thumb: fixed("#c2bfb4"),
-	text: fixed("#3f2a26"), muted: fixed("#7d7b74"), think: fixed("#5d6f4a"),
-	accent: fixed("#6b6140"), accentLo: fixed("#c9c5b8"),
-	focus:  fixed("#e7e9f5"),
-	termBg: "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
-	termAnsi: [16]string{
-		"#f8f5ee", "#8a4b3c", "#5f6b3a", "#7a6a2e", "#4a6280", "#7a5a78", "#4a6f6a", "#3f2a26",
-		"#7d7b74", "#a85f4d", "#7a8a4e", "#9a8640", "#6482a8", "#9a7498", "#6a948c", "#2b1a17",
-	},
-}
-
-var themes = map[string]*themeDef{"off": themeOff, "supermilk": themeSuperMilk}
+// themeOff is the initial theme (and the /theme fallback): the original
+// look. Its colours stay in code by design on the classic path (accentStyle,
+// the alt-background fallbacks) — focus is the one tint the theme declares
+// as a token, so panel render code never carries escapes for it either
+// (issue #412). Both builtins resolve from internal/theme's data; the
+// pre-registry literals survive as goldens in theme_parity_test.go.
+var themeOff = mustThemeDef("off")
 
 // th is the active theme; tk* mirror its tokens for call sites.
 var (
@@ -143,10 +136,11 @@ var (
 	tkAccentLo, tkThink, tkFocus                                              themeColor
 )
 
-// setTheme activates a theme by name and rebuilds every style derived from
-// it. Unknown names are rejected.
+// setTheme activates a theme by name — registry lookup, so builtins and
+// drop-in JSON themes (~/.milk/themes, .milk/themes) alike — and rebuilds
+// every style derived from it. Unknown names are rejected.
 func setTheme(name string) bool {
-	t, ok := themes[strings.ToLower(strings.TrimSpace(name))]
+	t, ok := themeDefFor(name)
 	if !ok {
 		return false
 	}
@@ -170,7 +164,7 @@ var (
 // terminal's colors midway (a navy bar on a dark terminal showing navy only at
 // its ends). The skin ("modern") paints its own ground, so it is left alone.
 func tintChrome(bar string, colors ...string) string {
-	if th.modern || !isTTY {
+	if th.skin || !isTTY {
 		return bar
 	}
 	return sgr.WithBackground(bar, strings.Join(colors, ""))
@@ -182,7 +176,7 @@ func rebuildStyles() {
 	styleStatusBarPerm = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#1A1A00")).
 		Background(adaptiveColor("#FFD700", "#B8860B"))
-	if !th.modern {
+	if !th.skin {
 		styleHeaderBar = lipgloss.NewStyle().
 			Background(chromeHeaderBg.adaptive()).
 			Foreground(chromeHeaderFg.adaptive()).
@@ -240,7 +234,7 @@ var originalPulse = [16]string{
 // buildPulse is the 16-step breathing gradient keyed to the spinner frame:
 // the original yellow ramp, or accent-floor → accent → floor for a theme.
 func buildPulse() [16]string {
-	if !th.modern {
+	if !th.skin {
 		return originalPulse
 	}
 	var out [16]string
@@ -256,7 +250,7 @@ func buildPulse() [16]string {
 
 // accentStyle is the "gold" emphasis: original gold, or the theme accent.
 func accentStyle() string {
-	if !th.modern {
+	if !th.skin {
 		return "\033[1;38;2;255;208;60m"
 	}
 	return ansiBold + tkAccent.sgrFg()
@@ -264,7 +258,7 @@ func accentStyle() string {
 
 // wordmark is the startup-banner "milk".
 func wordmark() string {
-	if !th.modern {
+	if !th.skin {
 		return "\033[1;38;2;255;208;96mmilk\033[0m"
 	}
 	return boldGold("milk")
@@ -274,7 +268,7 @@ func panelAltBackgroundCode() string {
 	if !isTTY {
 		return ""
 	}
-	if th.modern {
+	if th.skin {
 		return tkRaised.sgrBg()
 	}
 	if hasDarkBackground() {
@@ -301,7 +295,7 @@ func toastBackgroundCode() string {
 	if !isTTY {
 		return ""
 	}
-	if th.modern {
+	if th.skin {
 		return tkToast.sgrBg()
 	}
 	if hasDarkBackground() {
@@ -310,16 +304,17 @@ func toastBackgroundCode() string {
 	return "\033[48;2;217;228;245m" // #D9E4F5
 }
 
-// Scrollbars: original dim glyphs, or a hairline track with a slim thumb.
+// Scrollbars: original dim glyphs, or a hairline track with a slim thumb —
+// the schema's `scrollbar` knob (default: slim on a skin, classic on classic).
 func scrollTrackGlyph() string {
-	if !th.modern {
+	if th.scrollbar != theme.ScrollbarSlim {
 		return dim("│")
 	}
 	return colorize("│", tkHairline.sgrFg())
 }
 
 func scrollThumbGlyph() string {
-	if !th.modern {
+	if th.scrollbar != theme.ScrollbarSlim {
 		return dim("▌")
 	}
 	return colorize("┃", tkThumb.sgrFg())
@@ -333,7 +328,7 @@ var (
 
 // agentTag is the label before an agent's reply.
 func agentTag(name, role string) string {
-	if !th.modern {
+	if !th.skin {
 		if role == "escalation" {
 			return colorize(name+":", ansiBold+softSteel.sgrFg()) + " "
 		}
@@ -344,7 +339,7 @@ func agentTag(name, role string) string {
 
 // userEcho is the transcript echo of a submitted line.
 func userEcho(label, input string) string {
-	if !th.modern {
+	if !th.skin {
 		return label + input + "\n"
 	}
 	return "\n" + colorize("YOU", ansiBold+tkAccent.sgrFg()) + softRule() + "\n" + input + "\n"
@@ -360,7 +355,7 @@ func osc(format string, a ...any) {
 // everything milk does not paint itself (edge columns, scrollbar gutter,
 // ANSI-coloured text) matches. Returns the restore func. A no-op for "off".
 func applyThemeTerminal() func() {
-	if !isTTY || !th.modern {
+	if !isTTY || !th.skin {
 		return func() {}
 	}
 	osc("11;%s", th.termBg)
@@ -388,7 +383,7 @@ func restoreTerminalColors() {
 // dimCode is the "recede" style: faint, or the theme's muted ink — SGR faint
 // washes out to near-invisible on a light ground.
 func dimCode() string {
-	if !th.modern {
+	if !th.skin {
 		return ansiDim
 	}
 	return tkMuted.sgrFg()
@@ -403,7 +398,7 @@ const originalThinkBgParams = "48;5;235"
 // original dark grey, or the raised surface of a skin (readable on light).
 func applyThinkSurface() {
 	thinkBgParams = originalThinkBgParams
-	if th.modern {
+	if th.skin {
 		r, g, b := hexRGB(tkRaised.dark)
 		thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
 	}

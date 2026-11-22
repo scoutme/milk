@@ -5806,6 +5806,10 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
+	// Themes are registry data: scan ~/.milk/themes + <project>/.milk/themes
+	// first, then apply the configured one (an unknown name falls back to
+	// "off" by staying on the initial theme).
+	loadThemeRegistry(sess.CWD)
 	setTheme(st.cfg.Theme)
 	animationsEnabled = isTTY && st.cfg.AnimationsEnabled()
 	defer applyThemeTerminal()()
