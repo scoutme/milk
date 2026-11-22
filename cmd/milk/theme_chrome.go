@@ -46,6 +46,8 @@ func (m model) handleThemeCmd(arg string) (tea.Model, tea.Cmd) {
 	switch {
 	case len(fields) == 0, len(fields) == 1 && fields[0] == "carousel":
 		return m.openThemeCarousel()
+	case len(fields) == 1 && strings.EqualFold(fields[0], "new"):
+		return m.openThemeWizard()
 	case len(fields) == 1 && fields[0] == "list":
 		m.appendTranscript(themeListText())
 		return m, nil

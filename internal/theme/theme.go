@@ -166,6 +166,28 @@ func Validate(t *Theme) error {
 	return nil
 }
 
+// Resolve flattens a single self-contained theme (no extends chain) through
+// the chain machinery and the common-basis derivations — the theme builder's
+// preview path for a candidate that is not (yet) in any registry.
+func Resolve(t *Theme) *Resolved { return resolve([]*Theme{t}) }
+
+// Materialize writes a resolved theme back as a standalone, fully explicit
+// Theme — what the builder saves: every colour and shape decision spelled
+// out, so the theme keeps working even if the theme it derived from ever
+// disappears. DerivedFrom is preserved as provenance.
+func Materialize(rt *Resolved) *Theme {
+	return &Theme{
+		Name:        rt.Name,
+		DerivedFrom: rt.DerivedFrom,
+		Look:        rt.Look,
+		Tagline:     rt.Tagline,
+		ToolRows:    rt.ToolRows,
+		Scrollbar:   rt.Scrollbar,
+		Colors:      rt.Colors,
+		Terminal:    rt.Terminal,
+	}
+}
+
 // resolve flattens one chain — root ancestor first, the theme itself last —
 // into a Resolved: later entries override earlier ones per non-empty field,
 // then derivations complete the palette. lookup resolves extends names; it
