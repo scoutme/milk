@@ -57,6 +57,98 @@ type Palette struct {
 	Focus    Color `json:"focus,omitempty"`
 }
 
+// Chrome is the classic look's surface vocabulary beyond the palette's
+// eleven slots — the roles one slot cannot serve (off's panel titles are
+// grey while its accent is gold). A classic theme declares the surfaces it
+// cares about, exactly like palette tokens; Transform shifts them with the
+// rest of the palette so darken/lighten variants move every visible
+// surface. There are no derivations here: a surface is either declared or
+// the render layer keeps its own constant (token-if-present). A skin ignores
+// the block entirely — its chrome reads the palette.
+type Chrome struct {
+	PanelTitle     Color    `json:"panel_title,omitempty"`
+	PanelSection   Color    `json:"panel_section,omitempty"`
+	Border         Color    `json:"border,omitempty"`
+	PanelAlt       Color    `json:"panel_alt,omitempty"`       // alternating panel-row ground
+	ThinkSurface   Color    `json:"think_surface,omitempty"`   // reasoning/tool fold surface
+	PermFg         Color    `json:"perm_fg,omitempty"`         // permission-prompt ink
+	PermBg         Color    `json:"perm_bg,omitempty"`         // permission-prompt ground
+	Wordmark       Color    `json:"wordmark,omitempty"`        // startup-banner "milk"
+	AgentSage      Color    `json:"agent_sage,omitempty"`      // primary agent tag
+	AgentSteel     Color    `json:"agent_steel,omitempty"`     // escalation agent tag
+	StaleFresh     Color    `json:"stale_fresh,omitempty"`     // staleness ramp, fresh end
+	StaleMid       Color    `json:"stale_mid,omitempty"`       // staleness ramp, middle
+	StaleWarm      Color    `json:"stale_warm,omitempty"`      // staleness ramp, stale end
+	ChangeCreated  Color    `json:"change_created,omitempty"`  // changeset roles (project panel)
+	ChangeModified Color    `json:"change_modified,omitempty"`
+	ChangeDeleted  Color    `json:"change_deleted,omitempty"`
+	ChangeRenamed  Color    `json:"change_renamed,omitempty"`
+	Selection      Color    `json:"selection,omitempty"`  // input selection ground
+	Completion     Color    `json:"completion,omitempty"` // completion highlight ground
+	Pulse          []string `json:"pulse,omitempty"`      // ≤16 spinner ramp entries; padded with the last on resolve
+}
+
+// mergeChrome overlays src over dst, non-absent fields win — the extends
+// chain's merge rule applied to the chrome block.
+func mergeChrome(dst *Chrome, src Chrome) {
+	mergeColor(&dst.PanelTitle, src.PanelTitle)
+	mergeColor(&dst.PanelSection, src.PanelSection)
+	mergeColor(&dst.Border, src.Border)
+	mergeColor(&dst.PanelAlt, src.PanelAlt)
+	mergeColor(&dst.ThinkSurface, src.ThinkSurface)
+	mergeColor(&dst.PermFg, src.PermFg)
+	mergeColor(&dst.PermBg, src.PermBg)
+	mergeColor(&dst.Wordmark, src.Wordmark)
+	mergeColor(&dst.AgentSage, src.AgentSage)
+	mergeColor(&dst.AgentSteel, src.AgentSteel)
+	mergeColor(&dst.StaleFresh, src.StaleFresh)
+	mergeColor(&dst.StaleMid, src.StaleMid)
+	mergeColor(&dst.StaleWarm, src.StaleWarm)
+	mergeColor(&dst.ChangeCreated, src.ChangeCreated)
+	mergeColor(&dst.ChangeModified, src.ChangeModified)
+	mergeColor(&dst.ChangeDeleted, src.ChangeDeleted)
+	mergeColor(&dst.ChangeRenamed, src.ChangeRenamed)
+	mergeColor(&dst.Selection, src.Selection)
+	mergeColor(&dst.Completion, src.Completion)
+	if len(src.Pulse) > 0 {
+		dst.Pulse = append([]string(nil), src.Pulse...)
+	}
+}
+
+// chromeColors iterates every named chrome colour (for validation and
+// transformation). chromeFieldNames are the matching JSON keys, in the same
+// order — used for error messages.
+var chromeFieldNames = []string{
+	"panel_title", "panel_section", "border", "panel_alt", "think_surface",
+	"perm_fg", "perm_bg", "wordmark", "agent_sage", "agent_steel",
+	"stale_fresh", "stale_mid", "stale_warm",
+	"change_created", "change_modified", "change_deleted", "change_renamed",
+	"selection", "completion",
+}
+
+func (c *Chrome) colors() []*Color {
+	return []*Color{
+		&c.PanelTitle, &c.PanelSection, &c.Border, &c.PanelAlt, &c.ThinkSurface,
+		&c.PermFg, &c.PermBg, &c.Wordmark, &c.AgentSage, &c.AgentSteel,
+		&c.StaleFresh, &c.StaleMid, &c.StaleWarm,
+		&c.ChangeCreated, &c.ChangeModified, &c.ChangeDeleted, &c.ChangeRenamed,
+		&c.Selection, &c.Completion,
+	}
+}
+
+// mergeColor overlays src over dst: non-empty variants win.
+func mergeColor(dst *Color, src Color) {
+	if src.Absent() {
+		return
+	}
+	if src.Dark != "" {
+		dst.Dark = src.Dark
+	}
+	if src.Light != "" {
+		dst.Light = src.Light
+	}
+}
+
 // Terminal is the emulator palette a skin pushes while active (OSC 10/11/12
 // and the 16-colour ramp). Omit the block entirely to leave the terminal's
 // own colours alone. Ansi16 entries may be "" to leave one slot alone; the
@@ -80,6 +172,7 @@ type Theme struct {
 	ToolRows    ToolRows  `json:"tool_rows,omitempty"`
 	Scrollbar   Scrollbar `json:"scrollbar,omitempty"`
 	Colors      Palette   `json:"colors,omitempty"`
+	Chrome      Chrome    `json:"chrome,omitempty"`
 	Terminal    *Terminal `json:"terminal,omitempty"`
 }
 
@@ -94,6 +187,7 @@ type Resolved struct {
 	Scrollbar   Scrollbar
 	Tagline     string
 	Colors      Palette
+	Chrome      Chrome
 	// Terminal is nil when the theme leaves the emulator palette alone.
 	Terminal *Terminal
 }
@@ -140,6 +234,22 @@ func Validate(t *Theme) error {
 			}
 		}
 	}
+	for i, c := range t.Chrome.colors() {
+		name := chromeFieldNames[i]
+		for _, v := range []string{c.Dark, c.Light} {
+			if _, err := ParseHex(v); err != nil {
+				errs = append(errs, fmt.Sprintf("chrome.%s: %v", name, err))
+			}
+		}
+	}
+	if len(t.Chrome.Pulse) > 16 {
+		errs = append(errs, fmt.Sprintf("chrome.pulse: %d entries, want at most 16", len(t.Chrome.Pulse)))
+	}
+	for i, v := range t.Chrome.Pulse {
+		if _, err := ParseHex(v); err != nil {
+			errs = append(errs, fmt.Sprintf("chrome.pulse[%d]: %v", i, err))
+		}
+	}
 	if t.Terminal != nil {
 		for _, c := range []struct {
 			name  string
@@ -184,6 +294,7 @@ func Materialize(rt *Resolved) *Theme {
 		ToolRows:    rt.ToolRows,
 		Scrollbar:   rt.Scrollbar,
 		Colors:      rt.Colors,
+		Chrome:      rt.Chrome,
 		Terminal:    rt.Terminal,
 	}
 }
@@ -214,17 +325,6 @@ func resolve(chain []*Theme) *Resolved {
 			term.Ansi16 = append([]string(nil), t.Terminal.Ansi16...)
 			out.Terminal = &term
 		}
-		mergeColor := func(dst *Color, src Color) {
-			if src.Absent() {
-				return
-			}
-			if src.Dark != "" {
-				dst.Dark = src.Dark
-			}
-			if src.Light != "" {
-				dst.Light = src.Light
-			}
-		}
 		mergeColor(&out.Colors.Base, t.Colors.Base)
 		mergeColor(&out.Colors.Raised, t.Colors.Raised)
 		mergeColor(&out.Colors.Toast, t.Colors.Toast)
@@ -236,6 +336,7 @@ func resolve(chain []*Theme) *Resolved {
 		mergeColor(&out.Colors.AccentLo, t.Colors.AccentLo)
 		mergeColor(&out.Colors.Think, t.Colors.Think)
 		mergeColor(&out.Colors.Focus, t.Colors.Focus)
+		mergeChrome(&out.Chrome, t.Chrome)
 	}
 	last := chain[len(chain)-1]
 	out.Name = last.Name
@@ -263,6 +364,11 @@ func resolve(chain []*Theme) *Resolved {
 	}
 
 	deriveColors(&out.Colors)
+	// The chrome pulse is declared as-is (it is not derivable — the classic
+	// ramp is hand-laid), but always resolves to a full 16-frame ramp.
+	for len(out.Chrome.Pulse) > 0 && len(out.Chrome.Pulse) < 16 {
+		out.Chrome.Pulse = append(out.Chrome.Pulse, out.Chrome.Pulse[len(out.Chrome.Pulse)-1])
+	}
 	if out.Terminal != nil {
 		deriveTerminal(out.Terminal, out.Colors)
 	}
@@ -271,8 +377,8 @@ func resolve(chain []*Theme) *Resolved {
 
 // deriveColors completes absent tokens from the declared basis — the "common
 // basis" of the schema: a hand-written theme can be six colours and still
-// resolve complete. Each rule fires only when its inputs are present, so the
-// "off" theme (focus only, no base) resolves to exactly what it declares.
+// resolve complete. Each rule fires only when its inputs are present, so a
+// theme that declares nothing resolves to exactly what it declares.
 // Order matters: toast reads the derived raised.
 func deriveColors(c *Palette) {
 	if c.Think.Absent() && !c.Muted.Absent() {

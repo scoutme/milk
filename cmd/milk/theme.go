@@ -110,6 +110,9 @@ type themeDef struct {
 	toolRows                                                                          theme.ToolRows
 	scrollbar                                                                         theme.Scrollbar
 	base, raised, toast, hairline, thumb, text, muted, accent, accentLo, think, focus themeColor
+	// chrome is the classic surface vocabulary (the schema's chrome block);
+	// the classic call sites read it via the chrome* vars below.
+	chrome theme.Chrome
 	// terminal colours handed to the emulator while the theme is active
 	tagline                    string // "" = defaultTagline
 	termBg, termFg, termCursor string
@@ -191,6 +194,32 @@ var (
 	classicToast        = themeColor{dark: "#1a263a", light: "#d9e4f5"}
 )
 
+// Classic fallbacks for the schema's chrome block — the same values the
+// render layer carried as constants. A classic theme that declares a chrome
+// surface gets its own value instead (token-if-present); one that declares
+// none renders exactly as before.
+var (
+	classicPanelTitle     = themeColor{dark: "#888888", light: "#555555"}
+	classicPanelSection   = themeColor{dark: "#666666", light: "#777777"}
+	classicBorder         = themeColor{dark: "#555555", light: "#aaaaaa"}
+	classicPanelAlt       = themeColor{dark: "#18181c", light: "#ececef"}
+	classicThinkSurface   = themeColor{dark: "#262626", light: "#262626"}
+	classicPermFg         = themeColor{dark: "#1a1a00", light: "#1a1a00"}
+	classicPermBg         = themeColor{dark: "#b8860b", light: "#ffd700"}
+	classicWordmark       = themeColor{dark: "#ffd060", light: "#ffd060"}
+	classicAgentSage      = themeColor{dark: "#a8b58f", light: "#5f6b3a"}
+	classicAgentSteel     = themeColor{dark: "#93a9c7", light: "#3f5a80"}
+	classicStaleFresh     = themeColor{dark: "#dcdad7", light: "#dcdad7"}
+	classicStaleMid       = themeColor{dark: "#c38237", light: "#c38237"}
+	classicStaleWarm      = themeColor{dark: "#af4128", light: "#af4128"}
+	classicChangeCreated  = themeColor{dark: "#6fbf82", light: "#2f7d32"}
+	classicChangeModified = themeColor{dark: "#d0a93c", light: "#8a6a00"}
+	classicChangeDeleted  = themeColor{dark: "#e07b70", light: "#a5372b"}
+	classicChangeRenamed  = themeColor{dark: "#8ab0e8", light: "#3a5fa8"}
+	classicSelection      = themeColor{dark: "#585858", light: "#585858"}
+	classicCompletion     = themeColor{dark: "#444444", light: "#444444"}
+)
+
 // chrome* are the active classic chrome colors: the theme's tokens where it
 // declares them (token-if-present), the classic constants otherwise. Resolved
 // once per theme activation in resolveChrome(), so the call sites below keep
@@ -200,40 +229,96 @@ var (
 // slot cannot serve two distinct classic roles (off's panel titles are grey
 // while its accent is gold).
 var (
-	chromeHeaderBg     = classicHeaderBg
-	chromeHeaderFg     = classicHeaderFg
-	chromeStatusBg     = classicStatusBg
-	chromeHeaderBorder = classicHeaderBorder
-	chromeAccent       = classicAccent
-	chromeToast        = classicToast
+	chromeHeaderBg       = classicHeaderBg
+	chromeHeaderFg       = classicHeaderFg
+	chromeStatusBg       = classicStatusBg
+	chromeHeaderBorder   = classicHeaderBorder
+	chromeAccent         = classicAccent
+	chromeToast          = classicToast
+	chromePanelTitle     = classicPanelTitle
+	chromePanelSection   = classicPanelSection
+	chromeBorder         = classicBorder
+	chromePanelAlt       = classicPanelAlt
+	chromeThinkSurface   = classicThinkSurface
+	chromePermFg         = classicPermFg
+	chromePermBg         = classicPermBg
+	chromeWordmark       = classicWordmark
+	chromeAgentSage      = classicAgentSage
+	chromeAgentSteel     = classicAgentSteel
+	chromeStaleFresh     = classicStaleFresh
+	chromeStaleMid       = classicStaleMid
+	chromeStaleWarm      = classicStaleWarm
+	chromeChangeCreated  = classicChangeCreated
+	chromeChangeModified = classicChangeModified
+	chromeChangeDeleted  = classicChangeDeleted
+	chromeChangeRenamed  = classicChangeRenamed
+	chromeSelection      = classicSelection
+	chromeCompletion     = classicCompletion
+	chromePulse          = originalPulse // [16]string — the theme's chrome.pulse when declared
 )
 
 // present reports whether a themeColor carries any variant at all.
 func (c themeColor) present() bool { return c.dark != "" || c.light != "" }
 
-// resolveChrome points the classic chrome at the active theme's tokens,
-// falling back to the classic constants for themes that declare none.
+// rawBgCode is a ground-picked background escape with no isTTY gate — for
+// the input/completion surfaces the original painted with fixed 256-colour
+// constants (the cube greys are exact hexes, so the truecolor form is
+// visually identical).
+func rawBgCode(c themeColor) string {
+	r, g, b := hexRGB(c.pick())
+	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
+}
+
+// resolveChrome points the classic chrome at the active theme's tokens and
+// chrome block, falling back to the classic constants for whatever it
+// declares nothing about. Run once per theme activation (refreshThemeColors)
+// so the call sites keep reading the same names.
 func resolveChrome() {
-	chromeHeaderBg, chromeHeaderFg, chromeStatusBg = classicHeaderBg, classicHeaderFg, classicStatusBg
-	chromeHeaderBorder, chromeAccent, chromeToast = classicHeaderBorder, classicAccent, classicToast
-	if tkBase.present() {
-		chromeHeaderBg = tkBase
+	apply := func(dst *themeColor, src, fb themeColor) {
+		if !src.present() {
+			*dst = fb
+			return
+		}
+		*dst = src
 	}
-	if tkMuted.present() {
-		chromeHeaderFg = tkMuted
+	applyC := func(dst *themeColor, src theme.Color, fb themeColor) {
+		apply(dst, themeColorOf(src), fb)
 	}
-	if tkRaised.present() {
-		chromeStatusBg = tkRaised
+	apply(&chromeHeaderBg, tkBase, classicHeaderBg)
+	apply(&chromeHeaderFg, tkMuted, classicHeaderFg)
+	apply(&chromeStatusBg, tkRaised, classicStatusBg)
+	apply(&chromeHeaderBorder, tkHairline, classicHeaderBorder)
+	apply(&chromeAccent, tkAccent, classicAccent)
+	apply(&chromeToast, tkToast, classicToast)
+	c := th.chrome
+	applyC(&chromePanelTitle, c.PanelTitle, classicPanelTitle)
+	applyC(&chromePanelSection, c.PanelSection, classicPanelSection)
+	applyC(&chromeBorder, c.Border, classicBorder)
+	applyC(&chromePanelAlt, c.PanelAlt, classicPanelAlt)
+	applyC(&chromeThinkSurface, c.ThinkSurface, classicThinkSurface)
+	applyC(&chromePermFg, c.PermFg, classicPermFg)
+	applyC(&chromePermBg, c.PermBg, classicPermBg)
+	applyC(&chromeWordmark, c.Wordmark, classicWordmark)
+	applyC(&chromeAgentSage, c.AgentSage, classicAgentSage)
+	applyC(&chromeAgentSteel, c.AgentSteel, classicAgentSteel)
+	applyC(&chromeStaleFresh, c.StaleFresh, classicStaleFresh)
+	applyC(&chromeStaleMid, c.StaleMid, classicStaleMid)
+	applyC(&chromeStaleWarm, c.StaleWarm, classicStaleWarm)
+	applyC(&chromeChangeCreated, c.ChangeCreated, classicChangeCreated)
+	applyC(&chromeChangeModified, c.ChangeModified, classicChangeModified)
+	applyC(&chromeChangeDeleted, c.ChangeDeleted, classicChangeDeleted)
+	applyC(&chromeChangeRenamed, c.ChangeRenamed, classicChangeRenamed)
+	applyC(&chromeSelection, c.Selection, classicSelection)
+	applyC(&chromeCompletion, c.Completion, classicCompletion)
+	chromePulse = originalPulse
+	if len(c.Pulse) == len(chromePulse) {
+		// Declared as hex; the spinner ramp is SGR foregrounds.
+		for i, hex := range c.Pulse {
+			r, g, b := hexRGB(hex)
+			chromePulse[i] = fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+		}
 	}
-	if tkHairline.present() {
-		chromeHeaderBorder = tkHairline
-	}
-	if tkAccent.present() {
-		chromeAccent = tkAccent
-	}
-	if tkToast.present() {
-		chromeToast = tkToast
-	}
+	inputSelectionOn = rawBgCode(chromeSelection)
 }
 
 // tintChrome keeps a chrome bar's own colors behind its styled spans. Spans
@@ -251,8 +336,8 @@ func tintChrome(bar string, colors ...string) string {
 // these are the original definitions.
 func rebuildStyles() {
 	styleStatusBarPerm = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#1A1A00")).
-		Background(adaptiveColor("#FFD700", "#B8860B"))
+		Foreground(chromePermFg.adaptive()).
+		Background(chromePermBg.adaptive())
 	if !th.skin {
 		styleHeaderBar = lipgloss.NewStyle().
 			Background(chromeHeaderBg.adaptive()).
@@ -265,17 +350,17 @@ func rebuildStyles() {
 		styleBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
-			BorderForeground(adaptiveColor("#AAA", "#555"))
+			BorderForeground(chromeBorder.adaptive())
 		stylePanelTitle = lipgloss.NewStyle().
-			Foreground(adaptiveColor("#555", "#888")).
+			Foreground(chromePanelTitle.adaptive()).
 			Bold(true)
 		stylePanelSection = lipgloss.NewStyle().
-			Foreground(adaptiveColor("#777", "#666"))
-		// Changeset (issue #331): dark-on-light tuned for the original skin.
-		styleChangeCreated = lipgloss.NewStyle().Foreground(adaptiveColor("#2f7d32", "#6fbf82"))
-		styleChangeModified = lipgloss.NewStyle().Foreground(adaptiveColor("#8a6a00", "#d0a93c"))
-		styleChangeDeleted = lipgloss.NewStyle().Foreground(adaptiveColor("#a5372b", "#e07b70"))
-		styleChangeRenamed = lipgloss.NewStyle().Foreground(adaptiveColor("#3a5fa8", "#8ab0e8"))
+			Foreground(chromePanelSection.adaptive())
+		// Changeset (issue #331): the chrome block's roles.
+		styleChangeCreated = lipgloss.NewStyle().Foreground(chromeChangeCreated.adaptive())
+		styleChangeModified = lipgloss.NewStyle().Foreground(chromeChangeModified.adaptive())
+		styleChangeDeleted = lipgloss.NewStyle().Foreground(chromeChangeDeleted.adaptive())
+		styleChangeRenamed = lipgloss.NewStyle().Foreground(chromeChangeRenamed.adaptive())
 		return
 	}
 	styleHeaderBar = lipgloss.NewStyle().
@@ -312,7 +397,7 @@ var originalPulse = [16]string{
 // the original yellow ramp, or accent-floor → accent → floor for a theme.
 func buildPulse() [16]string {
 	if !th.skin {
-		return originalPulse
+		return chromePulse
 	}
 	var out [16]string
 	r0, g0, b0 := hexRGB(tkAccentLo.dark)
@@ -339,7 +424,8 @@ func accentStyle() string {
 // wordmark is the startup-banner "milk".
 func wordmark() string {
 	if !th.skin {
-		return "\033[1;38;2;255;208;96mmilk\033[0m"
+		r, g, b := hexRGB(chromeWordmark.pick())
+		return fmt.Sprintf("\033[1;38;2;%d;%d;%dm", r, g, b) + "milk\033[0m"
 	}
 	return boldGold("milk")
 }
@@ -351,10 +437,7 @@ func panelAltBackgroundCode() string {
 	if th.skin {
 		return tkRaised.sgrBg()
 	}
-	if hasDarkBackground() {
-		return "\033[48;2;24;24;28m"
-	}
-	return "\033[48;2;236;236;239m"
+	return chromePanelAlt.sgrBg()
 }
 
 // focusBgCode is the focused side panel's tint (issue #412): a slightly
@@ -399,10 +482,11 @@ func scrollThumbGlyph() string {
 	return colorize("┃", tkThumb.sgrFg())
 }
 
-// Muted tags for the original look's agent labels (no raw ANSI green/blue).
+// Muted tags for the original look's agent labels (no raw ANSI green/blue)
+// — the chrome block's agent_sage/agent_steel with the classic fallbacks.
 var (
-	softSage  = themeColor{dark: "#a8b58f", light: "#5f6b3a"}
-	softSteel = themeColor{dark: "#93a9c7", light: "#3f5a80"}
+	softSage  = classicAgentSage
+	softSteel = classicAgentSteel
 )
 
 // agentTag is the label before an agent's reply.
@@ -474,11 +558,18 @@ func softRule() string { return " " + colorize(strings.Repeat("─", 18), tkHair
 const originalThinkBgParams = "48;5;235"
 
 // applyThinkSurface points the thinking-surface background at the theme: the
-// original dark grey, or the raised surface of a skin (readable on light).
+// classic chrome's think_surface, or the raised surface of a skin (readable
+// on light). The classic constant stays as the fallback for themes that
+// declare no chrome.
 func applyThinkSurface() {
 	thinkBgParams = originalThinkBgParams
-	if th.skin && tkRaised.pick() != "" {
-		r, g, b := hexRGB(tkRaised.pick())
+	if th.skin {
+		if tkRaised.pick() != "" {
+			r, g, b := hexRGB(tkRaised.pick())
+			thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
+		}
+	} else if !th.chrome.ThinkSurface.Absent() {
+		r, g, b := hexRGB(chromeThinkSurface.pick())
 		thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
 	}
 	ansiThinkBg = "\033[" + thinkBgParams + "m"

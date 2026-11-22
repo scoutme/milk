@@ -235,6 +235,7 @@ func TestVariantOfOffMovesChrome(t *testing.T) {
 	// The chrome the builder opened with — cancel must land back here no
 	// matter which theme earlier tests left active.
 	origBg, origAccent, origToast := chromeHeaderBg, chromeAccent, chromeToast
+	origTitle, origStale, origPulse := chromePanelTitle, chromeStaleMid, chromePulse[8]
 	m = wizDown(m)
 	m = wizDown(m)
 	m = wizEnter(m) // mode → variant → base step
@@ -251,10 +252,22 @@ func TestVariantOfOffMovesChrome(t *testing.T) {
 	if chromeToast == classicToast {
 		t.Error("a variant of off must move the toast ground")
 	}
+	if chromePanelTitle == classicPanelTitle {
+		t.Error("a variant of off must move the panel-title chrome")
+	}
+	if chromeStaleMid == classicStaleMid {
+		t.Error("a variant of off must move the staleness ramp")
+	}
+	if chromePulse[8] == originalPulse[8] {
+		t.Error("a variant of off must move the spinner ramp")
+	}
 	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyEscape}) // esc
 	if chromeHeaderBg != origBg || chromeAccent != origAccent || chromeToast != origToast {
 		t.Errorf("cancel must restore the chrome the builder opened with: bg %+v→%+v accent %+v→%+v toast %+v→%+v",
 			origBg, chromeHeaderBg, origAccent, chromeAccent, origToast, chromeToast)
+	}
+	if chromePanelTitle != origTitle || chromeStaleMid != origStale || chromePulse[8] != origPulse {
+		t.Error("cancel must restore the chrome-block surfaces too")
 	}
 }
 

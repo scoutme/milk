@@ -31,6 +31,36 @@ var goldenOff = &themeDef{
 	accentLo: themeColor{dark: "#5f5128", light: "#f0dfae"},
 	think:    themeColor{dark: "#b9b4a8", light: "#4a463e"},
 	focus:    themeColor{dark: "#161d2e", light: "#e2e7f3"},
+	// The chrome block: every classic surface, declared (off.json) instead of
+	// held as render constants. golden-pinned like the palette so chrome
+	// changes are deliberate.
+	chrome: theme.Chrome{
+		PanelTitle:     theme.Color{Dark: "#888888", Light: "#555555"},
+		PanelSection:   theme.Color{Dark: "#666666", Light: "#777777"},
+		Border:         theme.Color{Dark: "#555555", Light: "#aaaaaa"},
+		PanelAlt:       theme.Color{Dark: "#18181c", Light: "#ececef"},
+		ThinkSurface:   theme.Color{Dark: "#262626", Light: "#262626"},
+		PermFg:         theme.Color{Dark: "#1a1a00", Light: "#1a1a00"},
+		PermBg:         theme.Color{Dark: "#b8860b", Light: "#ffd700"},
+		Wordmark:       theme.Color{Dark: "#ffd060", Light: "#ffd060"},
+		AgentSage:      theme.Color{Dark: "#a8b58f", Light: "#5f6b3a"},
+		AgentSteel:     theme.Color{Dark: "#93a9c7", Light: "#3f5a80"},
+		StaleFresh:     theme.Color{Dark: "#dcdad7", Light: "#dcdad7"},
+		StaleMid:       theme.Color{Dark: "#c38237", Light: "#c38237"},
+		StaleWarm:      theme.Color{Dark: "#af4128", Light: "#af4128"},
+		ChangeCreated:  theme.Color{Dark: "#6fbf82", Light: "#2f7d32"},
+		ChangeModified: theme.Color{Dark: "#d0a93c", Light: "#8a6a00"},
+		ChangeDeleted:  theme.Color{Dark: "#e07b70", Light: "#a5372b"},
+		ChangeRenamed:  theme.Color{Dark: "#8ab0e8", Light: "#3a5fa8"},
+		Selection:      theme.Color{Dark: "#585858", Light: "#585858"},
+		Completion:     theme.Color{Dark: "#444444", Light: "#444444"},
+		Pulse: []string{
+			"#3c3200", "#433a01", "#514904", "#6e6509",
+			"#9d870f", "#ccaa14", "#e8c519", "#fbd71c",
+			"#ffdc1e", "#fbd71c", "#e8c519", "#ccaa14",
+			"#9d870f", "#6e6509", "#514904", "#433a01",
+		},
+	},
 }
 
 var goldenSuperMilk = &themeDef{

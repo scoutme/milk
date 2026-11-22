@@ -108,6 +108,7 @@ func themeDefFromResolved(rt *theme.Resolved) *themeDef {
 		muted: themeColorOf(rt.Colors.Muted), accent: themeColorOf(rt.Colors.Accent),
 		accentLo: themeColorOf(rt.Colors.AccentLo), think: themeColorOf(rt.Colors.Think),
 		focus: themeColorOf(rt.Colors.Focus),
+		chrome: rt.Chrome,
 	}
 	if rt.Terminal != nil {
 		t.termBg, t.termFg, t.termCursor = rt.Terminal.Bg, rt.Terminal.Fg, rt.Terminal.Cursor
