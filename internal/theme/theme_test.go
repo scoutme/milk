@@ -32,11 +32,13 @@ func TestResolveDerivations(t *testing.T) {
 	}
 }
 
-// TestResolveOffIsMinimal: "off" resolves to exactly what it declares — no
-// derivation may invent tokens for the classic look (its chrome colours are
-// the render layer's own).
-func TestResolveOffIsMinimal(t *testing.T) {
-	off := resolve([]*Theme{builtinOff})
+// TestResolveMinimalThemeStaysMinimal: a theme that declares only what it
+// needs resolves to exactly that — no derivation may invent tokens. (off
+// used to be this fixture; it now declares its classic palette explicitly —
+// classic chrome-as-data — so a synthetic minimal theme keeps the contract.)
+func TestResolveMinimalThemeStaysMinimal(t *testing.T) {
+	mini := &Theme{Name: "mini", Look: LookClassic, Colors: Palette{Focus: Color{Dark: "#161d2e", Light: "#e2e7f3"}}}
+	off := resolve([]*Theme{mini})
 	if off.Look != LookClassic || off.ToolRows != ToolRowsPlain || off.Scrollbar != ScrollbarClassic {
 		t.Errorf("off shape: %s %s %s", off.Look, off.ToolRows, off.Scrollbar)
 	}

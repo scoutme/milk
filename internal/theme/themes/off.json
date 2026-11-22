@@ -2,6 +2,12 @@
   "name": "off",
   "look": "classic",
   "colors": {
+    "base": { "dark": "#1b1b1f", "light": "#e9e6df" },
+    "raised": { "dark": "#25252a", "light": "#e5e3dd" },
+    "toast": { "dark": "#1a263a", "light": "#d9e4f5" },
+    "hairline": { "dark": "#3a3a41", "light": "#c4c0b6" },
+    "muted": { "dark": "#b9b4a8", "light": "#4a463e" },
+    "accent": "#ffd03c",
     "focus": { "dark": "#161d2e", "light": "#e2e7f3" }
   }
 }

@@ -53,6 +53,7 @@ func setDarkBackground(isDark bool) bool {
 
 // refreshThemeColors re-resolves everything derived from the background.
 func refreshThemeColors() {
+	resolveChrome()
 	applyThinkSurface()
 	pulseColors = buildPulse()
 	rebuildStyles()
@@ -177,13 +178,63 @@ func setTheme(name string) bool {
 	return true
 }
 
-// Chrome colors of the original look (theme "off"), light/dark by terminal
-// background. Styles and the per-row re-tint below read the same tokens.
+// Classic chrome of the original look — the fallbacks a palette-less classic
+// theme resolves to. off.json now declares these exact values as its palette
+// (themes-as-data: the classic path speaks the same token vocabulary as the
+// skin path), so a variant of off moves its chrome via Transform.
 var (
-	chromeHeaderBg = themeColor{dark: "#1b1b1f", light: "#e9e6df"}
-	chromeHeaderFg = themeColor{dark: "#b9b4a8", light: "#4a463e"}
-	chromeStatusBg = themeColor{dark: "#25252a", light: "#e5e3dd"}
+	classicHeaderBg     = themeColor{dark: "#1b1b1f", light: "#e9e6df"}
+	classicHeaderFg     = themeColor{dark: "#b9b4a8", light: "#4a463e"}
+	classicStatusBg     = themeColor{dark: "#25252a", light: "#e5e3dd"}
+	classicHeaderBorder = themeColor{dark: "#3a3a41", light: "#c4c0b6"}
+	classicAccent       = themeColor{dark: "#ffd03c", light: "#ffd03c"}
+	classicToast        = themeColor{dark: "#1a263a", light: "#d9e4f5"}
 )
+
+// chrome* are the active classic chrome colors: the theme's tokens where it
+// declares them (token-if-present), the classic constants otherwise. Resolved
+// once per theme activation in resolveChrome(), so the call sites below keep
+// reading the same names. Slots that stay code (documented gaps — the pulse
+// ramp, staleness ramp, changeset colors, softSage/softSteel tags, think
+// surface, status-perm gold) are not in this map on purpose: one palette
+// slot cannot serve two distinct classic roles (off's panel titles are grey
+// while its accent is gold).
+var (
+	chromeHeaderBg     = classicHeaderBg
+	chromeHeaderFg     = classicHeaderFg
+	chromeStatusBg     = classicStatusBg
+	chromeHeaderBorder = classicHeaderBorder
+	chromeAccent       = classicAccent
+	chromeToast        = classicToast
+)
+
+// present reports whether a themeColor carries any variant at all.
+func (c themeColor) present() bool { return c.dark != "" || c.light != "" }
+
+// resolveChrome points the classic chrome at the active theme's tokens,
+// falling back to the classic constants for themes that declare none.
+func resolveChrome() {
+	chromeHeaderBg, chromeHeaderFg, chromeStatusBg = classicHeaderBg, classicHeaderFg, classicStatusBg
+	chromeHeaderBorder, chromeAccent, chromeToast = classicHeaderBorder, classicAccent, classicToast
+	if tkBase.present() {
+		chromeHeaderBg = tkBase
+	}
+	if tkMuted.present() {
+		chromeHeaderFg = tkMuted
+	}
+	if tkRaised.present() {
+		chromeStatusBg = tkRaised
+	}
+	if tkHairline.present() {
+		chromeHeaderBorder = tkHairline
+	}
+	if tkAccent.present() {
+		chromeAccent = tkAccent
+	}
+	if tkToast.present() {
+		chromeToast = tkToast
+	}
+}
 
 // tintChrome keeps a chrome bar's own colors behind its styled spans. Spans
 // close themselves with a full reset, which would drop the bar back to the
@@ -208,7 +259,7 @@ func rebuildStyles() {
 			Foreground(chromeHeaderFg.adaptive()).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderBottom(true).
-			BorderForeground(adaptiveColor("#c4c0b6", "#3a3a41"))
+			BorderForeground(chromeHeaderBorder.adaptive())
 		styleStatusBar = lipgloss.NewStyle().
 			Background(chromeStatusBg.adaptive())
 		styleBorder = lipgloss.NewStyle().
@@ -274,10 +325,13 @@ func buildPulse() [16]string {
 	return out
 }
 
-// accentStyle is the "gold" emphasis: original gold, or the theme accent.
+// accentStyle is the "gold" emphasis: the theme's accent (off declares the
+// original gold), or the theme accent on a skin. The classic form is one
+// combined SGR — the byte shape the original look always emitted.
 func accentStyle() string {
 	if !th.skin {
-		return "\033[1;38;2;255;208;60m"
+		r, g, b := hexRGB(chromeAccent.pick())
+		return fmt.Sprintf("\033[1;38;2;%d;%d;%dm", r, g, b)
 	}
 	return ansiBold + tkAccent.sgrFg()
 }
@@ -324,10 +378,9 @@ func toastBackgroundCode() string {
 	if th.skin {
 		return tkToast.sgrBg()
 	}
-	if hasDarkBackground() {
-		return "\033[48;2;26;38;58m" // #1A263A
-	}
-	return "\033[48;2;217;228;245m" // #D9E4F5
+	// The classic toast ground: the theme's toast token (off declares the
+	// original #1A263A / #D9E4F5), or the classic constant.
+	return chromeToast.sgrBg()
 }
 
 // Scrollbars: original dim glyphs, or a hairline track with a slim thumb —
