@@ -107,7 +107,7 @@ func themeDefFromResolved(rt *theme.Resolved) *themeDef {
 		thumb: themeColorOf(rt.Colors.Thumb), text: themeColorOf(rt.Colors.Text),
 		muted: themeColorOf(rt.Colors.Muted), accent: themeColorOf(rt.Colors.Accent),
 		accentLo: themeColorOf(rt.Colors.AccentLo), think: themeColorOf(rt.Colors.Think),
-		focus: themeColorOf(rt.Colors.Focus),
+		focus:  themeColorOf(rt.Colors.Focus),
 		chrome: rt.Chrome,
 	}
 	if rt.Terminal != nil {

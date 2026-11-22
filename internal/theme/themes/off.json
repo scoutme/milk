@@ -2,15 +2,17 @@
   "name": "off",
   "look": "classic",
   "colors": {
-    "base": { "dark": "#1b1b1f", "light": "#e9e6df" },
+    "base": { "dark": "#000000", "light": "#ffffff" },
     "raised": { "dark": "#25252a", "light": "#e5e3dd" },
     "toast": { "dark": "#1a263a", "light": "#d9e4f5" },
     "hairline": { "dark": "#3a3a41", "light": "#c4c0b6" },
+    "text": { "dark": "#d0d0d0", "light": "#080808" },
     "muted": { "dark": "#b9b4a8", "light": "#4a463e" },
     "accent": "#ffd03c",
     "focus": { "dark": "#161d2e", "light": "#e2e7f3" }
   },
   "chrome": {
+    "header_bg": { "dark": "#1b1b1f", "light": "#e9e6df" },
     "panel_title": { "dark": "#888888", "light": "#555555" },
     "panel_section": { "dark": "#666666", "light": "#777777" },
     "border": { "dark": "#555555", "light": "#aaaaaa" },
