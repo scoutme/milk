@@ -1131,6 +1131,10 @@ type model struct {
 
 	// pending bare /plugins marketplace browse (flyover, install on enter)
 	pendingPluginBrowse *pluginBrowseState
+	// pendingThemeCarousel is the open /theme browse flyover (PR 2 of the
+	// themes plan): arrows/wheel live-preview candidates, enter applies,
+	// any other key restores and closes.
+	pendingThemeCarousel *themeCarouselState
 
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
@@ -2214,6 +2218,22 @@ func enableMouseTracking() {
 }
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// The theme carousel hijacks the mouse while open (plan PR 2): the wheel
+	// cycles candidates with live preview and any press closes the browse
+	// like any other key — before the panel/transcript scroll handlers, so a
+	// wheel tick can never scroll the transcript under the flyover.
+	if m.pendingThemeCarousel != nil {
+		ev := newMouseEvent(msg)
+		switch {
+		case ev.Button == tea.MouseWheelUp:
+			return m.themeCarouselStep(-1)
+		case ev.Button == tea.MouseWheelDown:
+			return m.themeCarouselStep(+1)
+		case ev.Action == mousePress:
+			return m.themeCarouselClose()
+		}
+		return m, nil
+	}
 	if m.ptyPane != nil {
 		// The PTY pane's View() branch takes over the whole main area and
 		// renders no side panels (see layout.go), but mainWidth()/regionAt
@@ -2763,6 +2783,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingTool != nil {
 			return m.handleAgentToolWizardKey(msg)
+		}
+		if m.pendingThemeCarousel != nil {
+			return m.handleThemeCarouselKey(msg)
 		}
 		if m.pendingPluginBrowse != nil {
 			return m.handlePluginBrowseKey(msg)

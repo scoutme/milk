@@ -211,10 +211,12 @@ var commandRegistry = []cmdSpec{
   /agent tool add <tool> description=<desc> [for <agent>|global]  add a new tool-agent entry
   /agent tool remove <tool> [for <agent>|global]  remove a tool-agent entry
                          (writes accept --local or --global — save to the project or the global config)`},
-	{name: cmdTheme, hosts: hostTUI, desc: "switch the TUI skin (off = original look)", hint: "[name|list|reload]", help: `  /theme                 show the active theme
+	{name: cmdTheme, hosts: hostTUI, desc: "switch the TUI skin (off = original look)", hint: "[name|list|reload|view|carousel]", help: `  /theme                 browse themes — ←/→ or wheel preview, enter apply, any key cancel
+  /theme carousel        the same browse flyover as bare /theme
   /theme <name>          switch to a theme (builtins or ~/.milk/themes/*.json)
   /theme list            list every theme with its source (builtin/user/project)
   /theme reload          rescan the theme dirs — drop-in themes, no restart
+  /theme view [name]     print a theme's JSON (copy-paste starting point)
   /theme off             original look (default)
   /theme supermilk       milk-white skin, soft ink, hairlines`},
 	{name: cmdColorize, hosts: hostTUI, desc: "show or set the markdown colorization mode", hint: "[off|fenced|balanced|full]", help: `  /colorize              show current colorization mode

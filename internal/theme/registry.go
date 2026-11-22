@@ -29,7 +29,8 @@ type Registry struct {
 	mu       sync.RWMutex
 	themes   map[string]*Theme
 	sources  map[string]Source
-	order    []string // first-seen order: builtins, user A–Z, project A–Z
+	raw      map[string]string // original descriptor text per name (/theme view)
+	order    []string          // first-seen order: builtins, user A–Z, project A–Z
 	resolved map[string]*Resolved
 	warnings []string
 }
@@ -39,10 +40,11 @@ func New() *Registry {
 	r := &Registry{
 		themes:   map[string]*Theme{},
 		sources:  map[string]Source{},
+		raw:      map[string]string{},
 		resolved: map[string]*Resolved{},
 	}
 	for _, t := range builtins {
-		r.add(t, SourceBuiltin)
+		r.add(t, SourceBuiltin, builtinRaw[t.Name])
 	}
 	return r
 }
@@ -56,11 +58,12 @@ func (r *Registry) Load(userDir, projectDir string) {
 	defer r.mu.Unlock()
 	r.themes = map[string]*Theme{}
 	r.sources = map[string]Source{}
+	r.raw = map[string]string{}
 	r.order = nil
 	r.resolved = map[string]*Resolved{}
 	r.warnings = nil
 	for _, t := range builtins {
-		r.add(t, SourceBuiltin)
+		r.add(t, SourceBuiltin, builtinRaw[t.Name])
 	}
 	for _, dir := range []struct {
 		path string
@@ -83,21 +86,25 @@ func (r *Registry) loadDir(dir string, src Source) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		t, err := readThemeFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // path comes from a theme dir listing
 		if err != nil {
 			r.warnings = append(r.warnings, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
-		r.add(t, src)
+		t, err := parseTheme(data, strings.TrimSuffix(strings.ToLower(e.Name()), ".json"))
+		if err != nil {
+			r.warnings = append(r.warnings, fmt.Sprintf("%s: %v", path, err))
+			continue
+		}
+		r.add(t, src, string(data))
 	}
 }
 
-// readThemeFile parses and validates one theme file. Unknown keys are an
-// error (the schema is small and spelled out in docs/reference/spec.md — a
-// typo'd key must not silently do nothing).
 // parseTheme decodes one theme descriptor — the shared path for the embedded
 // builtins and filesystem drop-ins alike: discovery differs, parsing and
 // validation never do. baseName names the theme when the descriptor omits it.
+// Unknown keys are an error (the schema is small and spelled out in
+// docs/reference/spec.md — a typo'd key must not silently do nothing).
 func parseTheme(data []byte, baseName string) (*Theme, error) {
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
@@ -114,25 +121,29 @@ func parseTheme(data []byte, baseName string) (*Theme, error) {
 	return &t, nil
 }
 
-func readThemeFile(path string) (*Theme, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from a themedir listing
-	if err != nil {
-		return nil, err
-	}
-	return parseTheme(data, strings.TrimSuffix(filepath.Base(path), ".json"))
-}
-
 // add registers a theme under its lowercased name. Source order is load
 // order: a later add shadows an earlier one but keeps the earlier listing
 // position, so the carousel order is stable while a project shadow works.
-func (r *Registry) add(t *Theme, src Source) {
+// raw is the descriptor's original text (/theme view).
+func (r *Registry) add(t *Theme, src Source, raw string) {
 	key := strings.ToLower(strings.TrimSpace(t.Name))
 	if _, seen := r.themes[key]; !seen {
 		r.order = append(r.order, key)
 	}
 	r.themes[key] = t
 	r.sources[key] = src
+	r.raw[key] = raw
 	delete(r.resolved, key) // invalidate any cached resolution
+}
+
+// JSON returns the theme's original descriptor text — the drop-in file's own
+// content, or the embedded builtin — so /theme view shows any theme's JSON
+// uniformly and a theme author can copy a working example.
+func (r *Registry) JSON(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	raw, ok := r.raw[strings.ToLower(strings.TrimSpace(name))]
+	return raw, ok
 }
 
 // Get resolves a theme by name (case-insensitive). Reports false for an

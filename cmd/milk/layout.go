@@ -495,6 +495,7 @@ func (m model) viewBody() string {
 	mainArea = m.overlayToasts(mainArea)
 	mainArea = m.overlayPalette(mainArea)
 	mainArea = m.overlayAgentPicker(mainArea)
+	mainArea = m.overlayThemeCarousel(mainArea)
 	if hints := m.hintRegion(); len(hints) > 0 {
 		return m.headerBar() + "\n" + mainArea + "\n" + strings.Join(hints, "\n") + "\n" + m.statusBar()
 	}
