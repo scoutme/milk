@@ -86,24 +86,28 @@ func themeListText() string {
 	return b.String()
 }
 
+// themeColorOf converts a schema Color to the render layer's token type.
+func themeColorOf(c theme.Color) themeColor {
+	return themeColor{dark: c.Dark, light: c.Light}
+}
+
 // themeDefFromResolved converts a resolved theme into the render layer's
 // themeDef. `skin` is the resolved `look: skin` — the shape shortcut the
 // render call sites branch on; `tool_rows`/`scrollbar` are the schema's two
 // per-theme cosmetic knobs and reach their own call sites.
 func themeDefFromResolved(rt *theme.Resolved) *themeDef {
-	toTC := func(c theme.Color) themeColor { return themeColor{dark: c.Dark, light: c.Light} }
 	t := &themeDef{
 		name:      rt.Name,
 		skin:      rt.Look == theme.LookSkin,
 		toolRows:  rt.ToolRows,
 		scrollbar: rt.Scrollbar,
 		tagline:   rt.Tagline,
-		base:      toTC(rt.Colors.Base), raised: toTC(rt.Colors.Raised),
-		toast: toTC(rt.Colors.Toast), hairline: toTC(rt.Colors.Hairline),
-		thumb: toTC(rt.Colors.Thumb), text: toTC(rt.Colors.Text),
-		muted: toTC(rt.Colors.Muted), accent: toTC(rt.Colors.Accent),
-		accentLo: toTC(rt.Colors.AccentLo), think: toTC(rt.Colors.Think),
-		focus: toTC(rt.Colors.Focus),
+		base:      themeColorOf(rt.Colors.Base), raised: themeColorOf(rt.Colors.Raised),
+		toast: themeColorOf(rt.Colors.Toast), hairline: themeColorOf(rt.Colors.Hairline),
+		thumb: themeColorOf(rt.Colors.Thumb), text: themeColorOf(rt.Colors.Text),
+		muted: themeColorOf(rt.Colors.Muted), accent: themeColorOf(rt.Colors.Accent),
+		accentLo: themeColorOf(rt.Colors.AccentLo), think: themeColorOf(rt.Colors.Think),
+		focus: themeColorOf(rt.Colors.Focus),
 	}
 	if rt.Terminal != nil {
 		t.termBg, t.termFg, t.termCursor = rt.Terminal.Bg, rt.Terminal.Fg, rt.Terminal.Cursor

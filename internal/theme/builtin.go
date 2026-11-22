@@ -23,6 +23,10 @@ import (
 //go:embed themes/*.json
 var themesFS embed.FS
 
+// builtinRaw holds each builtin descriptor's original text (/theme view),
+// filled by mustLoadBuiltins before builtins initializes.
+var builtinRaw = map[string]string{}
+
 // builtins is the registry's seed, in embedded file-name order
 // (off.json < supermilk.json — alphabetical today; revisit if a third
 // builtin ever needs a different listing position).
@@ -46,6 +50,7 @@ func mustLoadBuiltins() []*Theme {
 		if err != nil {
 			panic(fmt.Sprintf("theme: embedded builtin %s: %v", e.Name(), err))
 		}
+		builtinRaw[t.Name] = string(data)
 		out = append(out, t)
 	}
 	if len(out) == 0 {
