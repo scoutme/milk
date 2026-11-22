@@ -523,7 +523,7 @@ func themeWizardHint(w *themeWizardState) string {
 		return `lowercase letters, digits, _ and -`
 	case twStepBase:
 		if w.mode == twVariant {
-			return `only themes with a palette can be varied (off is chrome-coded)`
+			return `only themes with a palette can be varied`
 		}
 		return ""
 	case twStepColor, twStepToken:

@@ -26,7 +26,7 @@ func TestTransformGolden(t *testing.T) {
 }
 
 func TestTransformAbsentStaysAbsent(t *testing.T) {
-	off := resolve([]*Theme{builtinOff})
+	off := resolve([]*Theme{{Name: "mini", Colors: Palette{Focus: Color{Dark: "#161d2e", Light: "#e2e7f3"}}}})
 	got := Transform(off, -0.2, 0)
 	if !got.Colors.Base.Absent() || !got.Colors.Text.Absent() {
 		t.Errorf("absent tokens must stay absent, got %+v", got.Colors)

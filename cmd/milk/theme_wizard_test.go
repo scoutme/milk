@@ -182,25 +182,79 @@ func TestThemeChangeInvalidatesColorizedTurnCache(t *testing.T) {
 }
 
 // TestThemeWizardVariantBaseListSkipsPaletteless pins the variant mode's
-// "arrows do nothing" case: "off" is chrome-coded (no palette), so
-// Transform has nothing to move and its preview can only no-op. The base
-// step must not offer it.
+// TestThemeWizardVariantBaseListSkipsPaletteless pins the base-step filter:
+// a variant needs a palette to transform. "off" now declares its palette
+// (classic chrome-as-data) and is offered; a palette-less drop-in is not —
+// its arrows would preview nothing.
 func TestThemeWizardVariantBaseListSkipsPaletteless(t *testing.T) {
 	m := wizardTestModel(t)
+	user := t.TempDir()
+	os.WriteFile(filepath.Join(user, "focus-only.json"),
+		[]byte(`{"name":"focus-only","look":"classic","colors":{"focus":"#000000"}}`), 0o644)
+	loadTestRegistry(t, user, "")
+	t.Cleanup(func() { loadThemeRegistry("") })
 	m = wizDown(m)
 	m = wizDown(m)
 	m = wizEnter(m) // mode → variant → base step
 	rows := m.pendingThemeWizard.choiceRows()
-	if len(rows) == 0 {
-		t.Fatal("variant base list must offer the palette themes")
-	}
+	found := map[string]bool{}
 	for _, r := range rows {
-		if r == "off" {
-			t.Error("variant base list must skip palette-less themes (off) — arrows would preview nothing")
-		}
+		found[r] = true
+	}
+	if !found["off"] || !found["supermilk"] {
+		t.Errorf("variant base list must offer the paletted builtins (off declares its palette now), got %v", rows)
+	}
+	if found["focus-only"] {
+		t.Error("variant base list must skip palette-less themes — arrows would preview nothing")
 	}
 	if got := m.pendingThemeWizard.choiceLen(); got != len(rows) {
 		t.Errorf("choiceLen = %d, want %d (the two must read the same list)", got, len(rows))
+	}
+}
+
+// TestVariantOfOffMovesChrome pins the point of paletting off: a darken/
+// lighten variant must visibly move the classic chrome (bars, border,
+// accent, toast ground), not just the box swatches — and esc restores the
+// original constants.
+func TestVariantOfOffMovesChrome(t *testing.T) {
+	// Open the builder on a deterministic theme: earlier tests' cleanups can
+	// leave the process-global th pointing at a theme this fixture's registry
+	// no longer resolves, which makes cancel-restore unresolvable.
+	testutil.SandboxHome(t)
+	t.Setenv("USERPROFILE", t.TempDir())
+	old := th.name
+	t.Cleanup(func() { setTheme(old) })
+	loadThemeRegistry("")
+	setTheme("off")
+	m := layoutTestModel(t, 80, 24)
+	out, _ := m.handleThemeCmd("new")
+	m = out.(model)
+	if m.pendingThemeWizard == nil {
+		t.Fatal("/theme new must open the builder")
+	}
+	// The chrome the builder opened with — cancel must land back here no
+	// matter which theme earlier tests left active.
+	origBg, origAccent, origToast := chromeHeaderBg, chromeAccent, chromeToast
+	m = wizDown(m)
+	m = wizDown(m)
+	m = wizEnter(m) // mode → variant → base step
+	m = wizEnter(m) // base: off (first row)
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight}) // lightness +15%
+	if chromeHeaderBg == classicHeaderBg {
+		t.Error("a variant of off must move the header chrome")
+	}
+	if chromeAccent == classicAccent {
+		t.Error("a variant of off must move the accent")
+	}
+	if chromeToast == classicToast {
+		t.Error("a variant of off must move the toast ground")
+	}
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyEscape}) // esc
+	if chromeHeaderBg != origBg || chromeAccent != origAccent || chromeToast != origToast {
+		t.Errorf("cancel must restore the chrome the builder opened with: bg %+v→%+v accent %+v→%+v toast %+v→%+v",
+			origBg, chromeHeaderBg, origAccent, chromeAccent, origToast, chromeToast)
 	}
 }
 
