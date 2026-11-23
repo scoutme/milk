@@ -612,9 +612,9 @@ func (m *model) renderThemeWizard(boxWidth int) string {
 
 // choiceRows are the visible rows of the current choice step.
 // baseRows is the base step's list: every theme for the from-existing mode,
-// but only palette-bearing themes for a variant. "off" paints hardcoded
-// chrome and declares almost no tokens — Transform has nothing to move, so
-// a variant of it previews as "nothing happens" (the reported no-op).
+// but only palette-bearing themes for a variant — a variant needs tokens for
+// Transform to move, so a palette-less drop-in is skipped (its arrows would
+// preview nothing).
 func (w *themeWizardState) baseRows() []string {
 	names := themeRegistry.Names()
 	if w.mode != twVariant {

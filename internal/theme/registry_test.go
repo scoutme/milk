@@ -16,7 +16,7 @@ func writeTheme(t *testing.T, dir, file, body string) {
 func TestRegistryBuiltins(t *testing.T) {
 	r := New()
 	names := r.Names()
-	if len(names) != 2 || names[0] != "off" || names[1] != "supermilk" {
+	if len(names) != 3 || names[0] != "off" || names[1] != "space" || names[2] != "supermilk" {
 		t.Fatalf("Names() = %v", names)
 	}
 	if _, ok := r.Get("SUPERMILK"); !ok {
@@ -46,9 +46,14 @@ func TestRegistryLoadAndShadowing(t *testing.T) {
 
 	// Project shadows user shadows builtin; positions stay stable.
 	names := r.Names()
-	want := []string{"off", "supermilk", "oatmilk"}
-	if len(names) != 3 || names[0] != want[0] || names[1] != want[1] || names[2] != want[2] {
+	want := []string{"off", "space", "supermilk", "oatmilk"}
+	if len(names) != len(want) {
 		t.Fatalf("Names() = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("Names() = %v, want %v", names, want)
+		}
 	}
 	if src, _ := r.Source("oatmilk"); src != SourceProject {
 		t.Errorf("oatmilk source = %s, want project", src)

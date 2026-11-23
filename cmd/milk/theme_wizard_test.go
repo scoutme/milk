@@ -98,10 +98,12 @@ func TestThemeWizardFromScratchSaves(t *testing.T) {
 func TestThemeWizardVariantDerives(t *testing.T) {
 	m := wizardTestModel(t)
 
-	// mode: down ×2 → "darken/lighten variant", enter → base: down → supermilk.
+	// mode: down ×2 → "darken/lighten variant", enter → base: down ×2 → supermilk
+	// (the base list is the registry order: off, space, supermilk).
 	m = wizDown(m)
 	m = wizDown(m)
 	m = wizEnter(m)
+	m = wizDown(m)
 	m = wizDown(m)
 	m = wizEnter(m)
 	// variant step: two lightness steps right.
@@ -141,10 +143,10 @@ func TestThemeWizardCancelRestores(t *testing.T) {
 	m := wizardTestModel(t)
 	orig := m.pendingThemeWizard.orig
 
-	// Pick a base so the preview switches the whole TUI to supermilk…
+	// Pick a base so the preview switches the whole TUI away from it…
 	m = wizEnter(m) // mode: from existing
 	m = wizDown(m)
-	m = wizEnter(m) // base: supermilk
+	m = wizEnter(m) // base: space (second row, after off)
 	if th.name == orig {
 		t.Fatal("picking a base must live-preview it")
 	}

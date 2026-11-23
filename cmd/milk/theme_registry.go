@@ -10,7 +10,8 @@ import (
 )
 
 // themeRegistry is the single lookup path for themes (plan step 2, PR 1):
-// the builtins ("off", "supermilk") plus every drop-in theme file in
+// the embedded builtins ("off", "space", "supermilk") plus every drop-in
+// theme file in
 // ~/.milk/themes/*.json (state root) and <project>/.milk/themes/*.json.
 // Themes are data (internal/theme) — a new theme is a JSON file, never new
 // branches. The runtime render layer keeps its themeDef; conversion happens
