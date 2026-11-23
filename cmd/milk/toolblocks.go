@@ -175,6 +175,11 @@ func toolBodyLine(s string) string {
 	if th.skin {
 		return thinkSurfaceLines(compactBlankLines(s), ansiThinkBg+tkText.sgrFg())
 	}
+	if tkText.present() {
+		// Body ink as data: a classic theme that declares text paints its
+		// tool data with it; palette-less themes keep the terminal default.
+		return thinkSurfaceLines(s, ansiThinkBg+tkText.sgrFg())
+	}
 	return thinkSurfaceLines(s, ansiThinkBg)
 }
 

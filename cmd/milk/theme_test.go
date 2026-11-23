@@ -7,6 +7,23 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// TestThemeTextInksMarkdown: the text token is the body ink — the glamour
+// document colour follows it (off declares the classic ink, so its prose is
+// painted with the palette, not left to the terminal default). A theme that
+// declares no text keeps glamour's own standard document ink.
+func TestThemeTextInksMarkdown(t *testing.T) {
+	old := th
+	t.Cleanup(func() { applyThemeDef(old) })
+	applyThemeDef(&themeDef{name: "inked", text: themeColor{dark: "#ff0000", light: "#00ff00"}})
+	if out := colorizeGlamour("hello"); !strings.Contains(out, "38;2;255;0;0") {
+		t.Errorf("body ink must follow the text token, got %q", out)
+	}
+	applyThemeDef(&themeDef{name: "plain"})
+	if out := colorizeGlamour("hello"); strings.Contains(out, "38;2;255;0;0") {
+		t.Errorf("a text-less theme must keep glamour's own ink, got %q", out)
+	}
+}
+
 func TestThemeOffKeepsOriginalLook(t *testing.T) {
 	t.Cleanup(func() { setTheme("off") })
 	if !setTheme("off") {

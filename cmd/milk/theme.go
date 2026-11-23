@@ -56,6 +56,7 @@ func refreshThemeColors() {
 	resolveChrome()
 	applyThinkSurface()
 	pulseColors = buildPulse()
+	rebuildGlamour()
 	rebuildStyles()
 }
 
