@@ -109,15 +109,18 @@ func (m *model) themeCarouselPreview(name string) {
 }
 
 // themeCarouselConfirm is handleThemeCmd's tail: the candidate is already
-// applied, so all that remains is persisting the choice, the transcript
-// record and the background re-detect (the skin may have painted the ground,
-// so the light/dark verdict follows the theme).
+// applied, so what remains is persisting the choice and the transcript
+// record — plus re-anchoring the terminal through the paint protocol
+// (restore → ask → staged paint, theme.go): a bare query here would be
+// answered with the preview's own colours.
 func (m model) themeCarouselConfirm() (tea.Model, tea.Cmd) {
 	w := m.pendingThemeCarousel
 	m.pendingThemeCarousel = nil
 	if w == nil {
 		return m, nil
 	}
+	restoreTerminalColors()
+	m.pendingTerminalApply = true
 	m.st.cfg.Theme = th.name
 	m.themeChanged()
 	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
@@ -127,7 +130,7 @@ func (m model) themeCarouselConfirm() (tea.Model, tea.Cmd) {
 	}
 	m.appendTranscript(milkTag() + " theme: " + bold(th.name) + "\n")
 	m.syncLayout()
-	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor)
+	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor, terminalPaintTimeout())
 }
 
 // themeCarouselClose cancels the browse: the original theme (and the
@@ -142,9 +145,14 @@ func (m model) themeCarouselClose() (tea.Model, tea.Cmd) {
 	if th.name != w.orig {
 		m.themeCarouselPreview(w.orig)
 	}
+	// Re-anchor even when the original was already showing: restore → ask →
+	// staged paint (theme.go), so a cancelled browse can never leave a
+	// latched preview colour behind.
+	restoreTerminalColors()
+	m.pendingTerminalApply = true
 	m.appendTranscript(milkTag() + " theme: browse cancelled\n")
 	m.syncLayout()
-	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor)
+	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor, terminalPaintTimeout())
 }
 
 // overlayThemeCarousel draws the open carousel flyover over the main area,

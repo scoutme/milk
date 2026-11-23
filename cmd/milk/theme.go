@@ -7,7 +7,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/scoutme/milk/internal/sgr"
@@ -578,6 +580,36 @@ func restoreTerminalColors() {
 	osc("110")
 	osc("111")
 	osc("112")
+}
+
+// --- terminal-paint protocol ---
+//
+// The detected background (darkBackground) must only ever be the TERMINAL'S
+// OWN ground, never an echo of what milk painted: tea's query is written
+// when the program handles its message — i.e. after the Update that returned
+// it — so a paint issued before that answer makes the query return milk's
+// own colour and latch it forever. That loop is what kept "off"/"space"
+// light after a visit to the light supermilk skin: supermilk painted light,
+// the re-detect answered light, and every later variant pick followed it.
+//
+// So every paint is staged: the switch path calls restoreTerminalColors()
+// synchronously, sets model.pendingTerminalApply, and returns
+// tea.RequestBackgroundColor — the query is then written after the restore,
+// answered at native colours, and BackgroundColorMsg (latch rebuilt, then
+// paint) or terminalPaintTimeout (terminals that never answer OSC 11:
+// best-effort with the current verdict) performs the staged paint. The five
+// sites: startup (repl.go), /theme <name>, carousel confirm/close, wizard
+// save/cancel. Previews (carousel step, wizard colour step) paint directly
+// without asking — they never touch the latch, which stays native.
+//
+// terminalPaintTimeoutMsg performs a staged paint whose query was never
+// answered. It always fires; once BackgroundColorMsg already painted, the
+// pending flag is clear and it does nothing.
+type terminalPaintTimeoutMsg struct{}
+
+// terminalPaintTimeout schedules that fallback (see terminalPaintTimeoutMsg).
+func terminalPaintTimeout() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return terminalPaintTimeoutMsg{} })
 }
 
 // dimCode is the "recede" style: faint, or the theme's muted ink — SGR faint

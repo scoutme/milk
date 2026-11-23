@@ -89,11 +89,13 @@ func (m model) handleThemeCmd(arg string) (tea.Model, tea.Cmd) {
 		m.appendTranscript(milkTag() + " usage: /theme [name|list|reload|view|carousel]\n")
 		return m, nil
 	}
-	if th.skin {
-		restoreTerminalColors()
-	}
 	setTheme(arg)
-	applyThemeTerminal()
+	// Paint protocol (theme.go): re-anchor first — restore the terminal's
+	// own palette and stage the theme's paint for the answer. Painting here
+	// (pre-answer) would make the query echo milk's own colour and latch it
+	// — the loop that kept off/space light after a supermilk visit.
+	restoreTerminalColors()
+	m.pendingTerminalApply = true
 	m.st.cfg.Theme = th.name
 	m.themeChanged()
 	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
@@ -102,10 +104,10 @@ func (m model) handleThemeCmd(arg string) (tea.Model, tea.Cmd) {
 		m.notify("theme: "+th.name, "/theme")
 	}
 	m.syncLayout()
-	// The skin paints the terminal background, so the detected light/dark
-	// follows the theme: ask again once the colors changed (switching back to
-	// "off" must not keep the cream skin's "light" verdict on a dark terminal).
-	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor)
+	// The staged paint lands here: the query below is written after the
+	// restore above, so the terminal answers with its own ground and the
+	// variant pick can never follow milk's previous paint (theme.go).
+	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor, terminalPaintTimeout())
 }
 
 // toolRowRe matches a tool-activity row as the agents emit it: "» name: summary"
