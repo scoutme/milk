@@ -63,6 +63,7 @@ cmd/milk/initwizard_core.go   # host-independent /config init wizard (step machi
 cmd/milk/harness_import.go    # read-only scan of other harnesses' configs (Claude Code/Desktop mcpServers + settings env maps) for the wizard's import step and /mcp import: MCP conversion, credential findings (env pointer or masked literal), origin tagging (ADR-0106)
 cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 cmd/milk/idlewatch.go         # shared idle watchdog: activity-refreshed turn warning + opt-in deadline wrap-up, TUI and ACP (issue #305)
+cmd/milk/steer.go             # mid-turn steering (issue #441, ADR-0108): steerable-prefix drain of the busy queues (steerMu, flush-path stop rule, global FIFO) + the delivery echo msg — agent side is local.WithSteerDrain + runToolLoop's two boundary drains
 internal/tmux/                 # tmux session driver (send-keys + capture-pane polling) — state-synchronized terminal control shared by eval's claude adapter and the showcase recorder
 internal/showcase/              # showcase manifest (beats = keys + pane-state waits), calibration recorder + assertion verifier runners, vhs-tape generator, clean config root (ADR-0099)
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json

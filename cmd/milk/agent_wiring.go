@@ -46,6 +46,13 @@ type localAgentWiring struct {
 	// permMode is the session allow-all/deny-all mode (issue #302),
 	// consulted before the grant store and any prompt. nil = no mode.
 	permMode func() (decided bool, allow bool)
+	// steerDrain pops input the user queued while this turn runs (issue
+	// #441) at every model-request boundary of the running turn. Session
+	// turn agents only: buildToolRunner deliberately does not copy it into
+	// agent-as-tool runners (a nested tool-agent call must never consume
+	// the session's queue), and background clones drop it. nil = the agent
+	// never steers — its host's queue keeps flushing one per next turn.
+	steerDrain func() []string
 
 	// Hooks. All optional; nil leaves the agent's no-op default.
 	onOpenFile          func(path string) error
@@ -73,6 +80,9 @@ func wireLocalAgent(a *local.Agent, w localAgentWiring) *local.Agent {
 	}
 	if w.permMode != nil {
 		a = a.WithPermissionModeFunc(w.permMode)
+	}
+	if w.steerDrain != nil {
+		a = a.WithSteerDrain(w.steerDrain)
 	}
 	if w.permStore != nil || w.permAsk != nil {
 		a = a.WithPermissions(w.permStore, w.permAsk)

@@ -1294,8 +1294,10 @@ type Config struct {
 	ShowTips *bool `json:"show_tips,omitempty"`
 
 	// QueueWhileBusy controls the busy-input disposition of Enter (true by
-	// default): while an agent turn runs, Enter queues the typed prompt for
-	// the live agent's next turn. "queue_while_busy": false restores the
+	// default): while an agent turn runs, Enter queues the typed prompt —
+	// steerable entries (plain prompt text) are delivered into the RUNNING
+	// turn at its next model-request boundary (ADR-0108, issue #441), the
+	// rest flush as the next turn. "queue_while_busy": false restores the
 	// hint-only behavior (Ctrl+Enter forks to a background agent either way).
 	QueueWhileBusy *bool `json:"queue_while_busy,omitempty"`
 
@@ -2588,8 +2590,10 @@ func (c Config) ShowTipsEnabled() bool {
 }
 
 // QueueWhileBusyEnabled reports whether Enter while an agent turn is running
-// queues the typed prompt for the live agent's next turn (true when unset —
-// "queue_while_busy": false restores the hint-only behavior).
+// queues the typed prompt (steered into the running turn at its next
+// model-request boundary when plain, else flushed as the next turn —
+// ADR-0108; true when unset — "queue_while_busy": false restores the
+// hint-only behavior).
 func (c Config) QueueWhileBusyEnabled() bool {
 	return c.QueueWhileBusy == nil || *c.QueueWhileBusy
 }
