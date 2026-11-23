@@ -1,18 +1,63 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 )
 
+// TestThemeTextInksMarkdown: the text token is the body ink — the glamour
+// document colour follows it (off declares the classic ink, so its prose is
+// painted with the palette, not left to the terminal default). A theme that
+// declares no text keeps glamour's own standard document ink.
+func TestThemeTextInksMarkdown(t *testing.T) {
+	old := th
+	t.Cleanup(func() { applyThemeDef(old) })
+	applyThemeDef(&themeDef{name: "inked", text: themeColor{dark: "#ff0000", light: "#00ff00"}})
+	if out := colorizeGlamour("hello"); !strings.Contains(out, "38;2;255;0;0") {
+		t.Errorf("body ink must follow the text token, got %q", out)
+	}
+	applyThemeDef(&themeDef{name: "plain"})
+	if out := colorizeGlamour("hello"); strings.Contains(out, "38;2;255;0;0") {
+		t.Errorf("a text-less theme must keep glamour's own ink, got %q", out)
+	}
+}
+
+// TestThemeTerminalOSCs: the terminal palette is the theme's ground and
+// ink — off pushes the standard black background (#000000) and its body
+// ink, a theme with an explicit terminal block keeps it, and a theme with
+// neither pushes nothing (the terminal's own colours stand).
+func TestThemeTerminalOSCs(t *testing.T) {
+	old := th
+	t.Cleanup(func() { applyThemeDef(old) })
+
+	applyThemeDef(themeOff)
+	if got, want := themeTerminalOSCs(), []string{"11;#000000", "10;#d0d0d0", "12;#d0d0d0"}; !slices.Equal(got, want) {
+		t.Errorf("off palette = %v, want %v", got, want)
+	}
+	applyThemeDef(&themeDef{name: "bare"})
+	if got := themeTerminalOSCs(); len(got) != 0 {
+		t.Errorf("a palette-less theme must push nothing, got %v", got)
+	}
+	applyThemeDef(&themeDef{name: "term",
+		base:   themeColor{dark: "#111111", light: "#eeeeee"},
+		text:   themeColor{dark: "#cccccc", light: "#222222"},
+		termBg: "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
+	})
+	got := themeTerminalOSCs()
+	if len(got) < 3 || got[0] != "11;#f8f5ee" || got[1] != "10;#3f2a26" {
+		t.Errorf("an explicit terminal block must win, got %v", got)
+	}
+}
+
 func TestThemeOffKeepsOriginalLook(t *testing.T) {
 	t.Cleanup(func() { setTheme("off") })
 	if !setTheme("off") {
 		t.Fatal("off must be a valid theme")
 	}
-	if th.modern {
+	if th.skin {
 		t.Fatal("off theme must not be modern")
 	}
 	if got := userEcho("❯ ", "hi"); got != "❯ hi\n" {
@@ -29,7 +74,7 @@ func TestThemeOffKeepsOriginalLook(t *testing.T) {
 func TestThemeSwitchAndReject(t *testing.T) {
 	t.Cleanup(func() { setTheme("off") })
 	for _, name := range []string{"supermilk"} {
-		if !setTheme(name) || !th.modern || th.name != name {
+		if !setTheme(name) || !th.skin || th.name != name {
 			t.Fatalf("setTheme(%q) did not activate a modern theme", name)
 		}
 		if !strings.Contains(userEcho("❯ ", "hi"), "YOU") {
@@ -42,7 +87,7 @@ func TestThemeSwitchAndReject(t *testing.T) {
 	if th.name != "supermilk" {
 		t.Errorf("a rejected switch must keep the active theme, got %q", th.name)
 	}
-	if setTheme("OFF"); th.modern {
+	if setTheme("OFF"); th.skin {
 		t.Error("theme names are case-insensitive; OFF should switch back")
 	}
 }

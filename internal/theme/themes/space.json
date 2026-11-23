@@ -1,0 +1,145 @@
+{
+  "name": "space",
+  "derived_from": "off",
+  "look": "classic",
+  "tool_rows": "plain",
+  "scrollbar": "classic",
+  "tagline": "it's milk, captain.",
+  "colors": {
+    "base": {
+      "dark": "#06080f",
+      "light": "#f2f5fc"
+    },
+    "raised": {
+      "dark": "#0b1020",
+      "light": "#e8ecf7"
+    },
+    "toast": {
+      "dark": "#101c3d",
+      "light": "#dbe4f9"
+    },
+    "hairline": {
+      "dark": "#1c2547",
+      "light": "#c9d0e6"
+    },
+    "thumb": {
+      "dark": "#3d4a80",
+      "light": "#8d97c2"
+    },
+    "text": {
+      "dark": "#e6ecfb",
+      "light": "#0a0f22"
+    },
+    "muted": {
+      "dark": "#8b96c4",
+      "light": "#4a5578"
+    },
+    "accent": {
+      "dark": "#6ee0ff",
+      "light": "#0e7fa8"
+    },
+    "accent_lo": {
+      "dark": "#1a5f7d",
+      "light": "#bfe9ff"
+    },
+    "think": {
+      "dark": "#9fb4e8",
+      "light": "#3c4a78"
+    },
+    "focus": {
+      "dark": "#11224c",
+      "light": "#dde6fb"
+    }
+  },
+  "chrome": {
+    "header_bg": {
+      "dark": "#0a0e1c",
+      "light": "#eef1fa"
+    },
+    "panel_title": {
+      "dark": "#7fa8e8",
+      "light": "#2c5aa0"
+    },
+    "panel_section": {
+      "dark": "#5674b5",
+      "light": "#7290c9"
+    },
+    "border": {
+      "dark": "#2a3560",
+      "light": "#ccd5ee"
+    },
+    "panel_alt": {
+      "dark": "#090d1a",
+      "light": "#f7f9ff"
+    },
+    "think_surface": {
+      "dark": "#0b1330",
+      "light": "#d8e2f8"
+    },
+    "perm_fg": "#666700",
+    "perm_bg": {
+      "dark": "#ffba11",
+      "light": "#ffe34d"
+    },
+    "wordmark": {
+      "dark": "#d6ecff",
+      "light": "#1e5fc8"
+    },
+    "agent_sage": {
+      "dark": "#a5efd0",
+      "light": "#2fae77"
+    },
+    "agent_steel": {
+      "dark": "#bacfec",
+      "light": "#3e7acd"
+    },
+    "stale_fresh": {
+      "dark": "#eef4ff",
+      "light": "#7a8fc9"
+    },
+    "stale_mid": "#eea959",
+    "stale_warm": "#f25532",
+    "change_created": {
+      "dark": "#94e7a7",
+      "light": "#25d42c"
+    },
+    "change_modified": {
+      "dark": "#f4ce65",
+      "light": "#d7a500"
+    },
+    "change_deleted": {
+      "dark": "#faaba3",
+      "light": "#ed4230"
+    },
+    "change_renamed": {
+      "dark": "#c2dafd",
+      "light": "#4b7ee4"
+    },
+    "selection": {
+      "dark": "#24356e",
+      "light": "#b9c8f0"
+    },
+    "completion": {
+      "dark": "#1a2a5a",
+      "light": "#a9bceb"
+    },
+    "pulse": [
+      "#0d4f66",
+      "#115f7d",
+      "#16789b",
+      "#2098bb",
+      "#3db6d9",
+      "#64cce8",
+      "#8adff2",
+      "#aff0fa",
+      "#c9f7fe",
+      "#aff0fa",
+      "#8adff2",
+      "#64cce8",
+      "#3db6d9",
+      "#2098bb",
+      "#16789b",
+      "#115f7d"
+    ]
+  }
+}

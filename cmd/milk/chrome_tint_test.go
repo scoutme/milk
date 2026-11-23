@@ -18,7 +18,7 @@ func TestTintChrome_ReappliesBackgroundAfterResets(t *testing.T) {
 	isTTY = true
 	t.Cleanup(func() { isTTY = oldTTY })
 	oldTheme := th
-	th = themes["off"]
+	th = themeOff
 	t.Cleanup(func() { th = oldTheme })
 
 	bg := chromeHeaderBg.sgrBg()

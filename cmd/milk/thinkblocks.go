@@ -140,7 +140,7 @@ func thinkSurfaceLines(s, code string) string { return paintLines(s, code, true)
 
 // thinkHeaderLine styles a fold-header line: dim on the thinking surface.
 func thinkHeaderLine(s string) string {
-	if th.modern {
+	if th.skin {
 		return thinkSurfaceLines(s, ansiThinkBg+"\033[3m"+tkMuted.sgrFg())
 	}
 	return thinkSurfaceLines(s, ansiThinkBg+ansiDim)
@@ -149,7 +149,7 @@ func thinkHeaderLine(s string) string {
 // thinkBodyLine styles a reasoning body: full-contrast text on the thinking
 // surface (the background — not dimming — marks reasoning).
 func thinkBodyLine(s string) string {
-	if th.modern {
+	if th.skin {
 		return thinkSurfaceLines(compactBlankLines(s), ansiThinkBg+"\033[3m"+tkThink.sgrFg())
 	}
 	return thinkSurfaceLines(s, ansiThinkBg)
@@ -324,7 +324,7 @@ func foldHeaderStyleRow(row string) bool {
 	if !thinkSurfaceRow(row) {
 		return false
 	}
-	if th.modern {
+	if th.skin {
 		return strings.Contains(row, "\033[3m") &&
 			(strings.Contains(row, tkAccent.sgrFg()) || strings.Contains(row, tkMuted.sgrFg()))
 	}

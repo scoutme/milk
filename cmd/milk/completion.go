@@ -722,7 +722,7 @@ func (m *model) highlightHint() {
 	}
 	for i := range m.tabHints {
 		if i == m.hintIdx {
-			const bg = "\033[48;5;238m"
+			bg := rawBgCode(chromeCompletion)
 			if len(m.tabMatches) > 0 {
 				// Tab-cycling: base already has yellow/boldYellow/dim styling — preserve
 				// it and inject bg, re-applying after any full-reset mid-line.

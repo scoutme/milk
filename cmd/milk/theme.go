@@ -11,15 +11,19 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/scoutme/milk/internal/sgr"
+	"github.com/scoutme/milk/internal/theme"
 )
 
-// Switchable TUI themes. "off" (the default) is the original look, byte for
-// byte; "supermilk" is the opt-in skin (/theme supermilk or config "theme"):
-// milk-white ground, soft ink text, muted olive accent. A skin restyles only
-// the chrome (header, status bar, turn labels, panel titles, scrollbars),
-// paints the whole screen and, on exit, hands the terminal's own colours
-// back. Panel *layout* is theme-independent since ADR-0098 — the two skins
-// share the same free/grouped width budget.
+// Switchable TUI themes are registry data (internal/theme): the builtins
+// "off" and "supermilk" plus drop-in JSON themes from ~/.milk/themes/*.json
+// and <project>/.milk/themes/*.json. This file owns the *runtime* shape only
+// — themeDef and the tokens the render call sites read; the schema,
+// extends-resolution and derivations live in internal/theme (plan:
+// docs/internal/plans/config-themes-carousel-wizard-plan.md). A skin
+// restyles only the chrome (header, status bar, turn labels, panel titles,
+// scrollbars), paints the whole screen and, on exit, hands the terminal's
+// own colours back. Panel *layout* is theme-independent since ADR-0098 —
+// all themes share the same free/grouped width budget.
 
 type themeColor struct{ dark, light string }
 
@@ -49,8 +53,10 @@ func setDarkBackground(isDark bool) bool {
 
 // refreshThemeColors re-resolves everything derived from the background.
 func refreshThemeColors() {
+	resolveChrome()
 	applyThinkSurface()
 	pulseColors = buildPulse()
+	rebuildGlamour()
 	rebuildStyles()
 }
 
@@ -69,31 +75,45 @@ func (c themeColor) pick() string {
 }
 
 func hexRGB(h string) (r, g, b int) {
+	if len(h) < 7 { // empty or partial — absent tokens must never panic the render path
+		return 0, 0, 0
+	}
 	v, _ := strconv.ParseUint(h[1:], 16, 32)
 	return int(v >> 16), int(v >> 8 & 0xff), int(v & 0xff)
 }
 
 // sgrBg / sgrFg are raw truecolor escapes, "" when not a TTY.
 func (c themeColor) sgrBg() string {
-	if !isTTY {
+	h := c.pick()
+	if !isTTY || h == "" {
 		return ""
 	}
-	r, g, b := hexRGB(c.pick())
+	r, g, b := hexRGB(h)
 	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
 }
 
 func (c themeColor) sgrFg() string {
-	if !isTTY {
+	h := c.pick()
+	if !isTTY || h == "" {
 		return ""
 	}
-	r, g, b := hexRGB(c.pick())
+	r, g, b := hexRGB(h)
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
 }
 
 type themeDef struct {
-	name                                                                              string
-	modern                                                                            bool
+	name string
+	// skin is the resolved `look: skin` shape (the render call sites'
+	// shortcut; `look: classic` is the original shape). The schema's two
+	// per-theme cosmetic knobs below reach their own call sites — everything
+	// else that used to hang off "modern" is the look itself.
+	skin                                                                              bool
+	toolRows                                                                          theme.ToolRows
+	scrollbar                                                                         theme.Scrollbar
 	base, raised, toast, hairline, thumb, text, muted, accent, accentLo, think, focus themeColor
+	// chrome is the classic surface vocabulary (the schema's chrome block);
+	// the classic call sites read it via the chrome* vars below.
+	chrome theme.Chrome
 	// terminal colours handed to the emulator while the theme is active
 	tagline                    string // "" = defaultTagline
 	termBg, termFg, termCursor string
@@ -111,30 +131,13 @@ func taglineText() string {
 	return defaultTagline
 }
 
-// themeOff keeps colours in code by design (accentStyle, the alt-background
-// fallbacks) — focus is the one tint it declares as a token, so panel render
-// code never carries escapes for it either (issue #412).
-var themeOff = &themeDef{name: "off", focus: themeColor{dark: "#161d2e", light: "#e2e7f3"}}
-
-// supermilk: a milk-white ground with warm ink text, hairline separators and
-// a single muted olive accent; the ANSI ramp is pulled into the same family
-// so coloured text (code spans, links) stays readable on the light ground.
-var themeSuperMilk = &themeDef{
-	name: "supermilk", modern: true,
-	tagline: "Got models? Got milk.",
-	base:    fixed("#f8f5ee"), raised: fixed("#efebe0"), toast: fixed("#e8e3d5"),
-	hairline: fixed("#dcd7c9"), thumb: fixed("#c2bfb4"),
-	text: fixed("#3f2a26"), muted: fixed("#7d7b74"), think: fixed("#5d6f4a"),
-	accent: fixed("#6b6140"), accentLo: fixed("#c9c5b8"),
-	focus:  fixed("#e7e9f5"),
-	termBg: "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
-	termAnsi: [16]string{
-		"#f8f5ee", "#8a4b3c", "#5f6b3a", "#7a6a2e", "#4a6280", "#7a5a78", "#4a6f6a", "#3f2a26",
-		"#7d7b74", "#a85f4d", "#7a8a4e", "#9a8640", "#6482a8", "#9a7498", "#6a948c", "#2b1a17",
-	},
-}
-
-var themes = map[string]*themeDef{"off": themeOff, "supermilk": themeSuperMilk}
+// themeOff is the initial theme (and the /theme fallback): the original
+// look. Its colours stay in code by design on the classic path (accentStyle,
+// the alt-background fallbacks) — focus is the one tint the theme declares
+// as a token, so panel render code never carries escapes for it either
+// (issue #412). Both builtins resolve from internal/theme's data; the
+// pre-registry literals survive as goldens in theme_parity_test.go.
+var themeOff = mustThemeDef("off")
 
 // th is the active theme; tk* mirror its tokens for call sites.
 var (
@@ -143,34 +146,191 @@ var (
 	tkAccentLo, tkThink, tkFocus                                              themeColor
 )
 
-// setTheme activates a theme by name and rebuilds every style derived from
-// it. Unknown names are rejected.
-func setTheme(name string) bool {
-	t, ok := themes[strings.ToLower(strings.TrimSpace(name))]
-	if !ok {
-		return false
-	}
+// themeChanged marks the display stale after a theme (re)activation — the
+// switch tail every live path shares (/theme <name>, carousel confirm, the
+// builder's previews and save, cancel-restore). The per-turn colorized
+// transcript caches hold the PREVIOUS theme's colours keyed by raw text
+// alone: without dropping them here, a rebuild re-serves the old skin's
+// rows and only the chrome visibly changes (the missing live preview).
+func (m *model) themeChanged() {
+	m.colorizeForce = true
+	m.turnColorCache = nil
+	m.turnRawCache = nil
+	m.wrapCacheValid = false
+	m.viewportDirty = true
+}
+
+// applyThemeDef activates an already-resolved theme definition and rebuilds
+// every style derived from it — setTheme's tail. The theme builder previews
+// through here before its candidate is in any registry.
+func applyThemeDef(t *themeDef) {
 	th = t
 	tkBase, tkRaised, tkToast, tkHairline, tkThumb = t.base, t.raised, t.toast, t.hairline, t.thumb
 	tkText, tkMuted, tkAccent, tkAccentLo, tkThink, tkFocus = t.text, t.muted, t.accent, t.accentLo, t.think, t.focus
 	refreshThemeColors()
+}
+
+// setTheme activates a theme by name — registry lookup, so builtins and
+// drop-in JSON themes (~/.milk/themes, .milk/themes) alike — and rebuilds
+// every style derived from it. Unknown names are rejected.
+func setTheme(name string) bool {
+	t, ok := themeDefFor(name)
+	if !ok {
+		return false
+	}
+	applyThemeDef(t)
 	return true
 }
 
-// Chrome colors of the original look (theme "off"), light/dark by terminal
-// background. Styles and the per-row re-tint below read the same tokens.
+// Classic chrome of the original look — the fallbacks a palette-less classic
+// theme resolves to. off.json now declares these exact values as its palette
+// (themes-as-data: the classic path speaks the same token vocabulary as the
+// skin path), so a variant of off moves its chrome via Transform.
 var (
-	chromeHeaderBg = themeColor{dark: "#1b1b1f", light: "#e9e6df"}
-	chromeHeaderFg = themeColor{dark: "#b9b4a8", light: "#4a463e"}
-	chromeStatusBg = themeColor{dark: "#25252a", light: "#e5e3dd"}
+	classicHeaderBg     = themeColor{dark: "#1b1b1f", light: "#e9e6df"}
+	classicHeaderFg     = themeColor{dark: "#b9b4a8", light: "#4a463e"}
+	classicStatusBg     = themeColor{dark: "#25252a", light: "#e5e3dd"}
+	classicHeaderBorder = themeColor{dark: "#3a3a41", light: "#c4c0b6"}
+	classicAccent       = themeColor{dark: "#ffd03c", light: "#ffd03c"}
+	classicToast        = themeColor{dark: "#1a263a", light: "#d9e4f5"}
 )
+
+// Classic fallbacks for the schema's chrome block — the same values the
+// render layer carried as constants. A classic theme that declares a chrome
+// surface gets its own value instead (token-if-present); one that declares
+// none renders exactly as before.
+var (
+	classicPanelTitle     = themeColor{dark: "#888888", light: "#555555"}
+	classicPanelSection   = themeColor{dark: "#666666", light: "#777777"}
+	classicBorder         = themeColor{dark: "#555555", light: "#aaaaaa"}
+	classicPanelAlt       = themeColor{dark: "#18181c", light: "#ececef"}
+	classicThinkSurface   = themeColor{dark: "#262626", light: "#262626"}
+	classicPermFg         = themeColor{dark: "#1a1a00", light: "#1a1a00"}
+	classicPermBg         = themeColor{dark: "#b8860b", light: "#ffd700"}
+	classicWordmark       = themeColor{dark: "#ffd060", light: "#ffd060"}
+	classicAgentSage      = themeColor{dark: "#a8b58f", light: "#5f6b3a"}
+	classicAgentSteel     = themeColor{dark: "#93a9c7", light: "#3f5a80"}
+	classicStaleFresh     = themeColor{dark: "#dcdad7", light: "#dcdad7"}
+	classicStaleMid       = themeColor{dark: "#c38237", light: "#c38237"}
+	classicStaleWarm      = themeColor{dark: "#af4128", light: "#af4128"}
+	classicChangeCreated  = themeColor{dark: "#6fbf82", light: "#2f7d32"}
+	classicChangeModified = themeColor{dark: "#d0a93c", light: "#8a6a00"}
+	classicChangeDeleted  = themeColor{dark: "#e07b70", light: "#a5372b"}
+	classicChangeRenamed  = themeColor{dark: "#8ab0e8", light: "#3a5fa8"}
+	classicSelection      = themeColor{dark: "#585858", light: "#585858"}
+	classicCompletion     = themeColor{dark: "#444444", light: "#444444"}
+)
+
+// chrome* are the active classic chrome colors: the theme's tokens where it
+// declares them (token-if-present), the classic constants otherwise. Resolved
+// once per theme activation in resolveChrome(), so the call sites below keep
+// reading the same names. Slots that stay code (documented gaps — the pulse
+// ramp, staleness ramp, changeset colors, softSage/softSteel tags, think
+// surface, status-perm gold) are not in this map on purpose: one palette
+// slot cannot serve two distinct classic roles (off's panel titles are grey
+// while its accent is gold).
+var (
+	chromeHeaderBg       = classicHeaderBg
+	chromeHeaderFg       = classicHeaderFg
+	chromeStatusBg       = classicStatusBg
+	chromeHeaderBorder   = classicHeaderBorder
+	chromeAccent         = classicAccent
+	chromeToast          = classicToast
+	chromePanelTitle     = classicPanelTitle
+	chromePanelSection   = classicPanelSection
+	chromeBorder         = classicBorder
+	chromePanelAlt       = classicPanelAlt
+	chromeThinkSurface   = classicThinkSurface
+	chromePermFg         = classicPermFg
+	chromePermBg         = classicPermBg
+	chromeWordmark       = classicWordmark
+	chromeAgentSage      = classicAgentSage
+	chromeAgentSteel     = classicAgentSteel
+	chromeStaleFresh     = classicStaleFresh
+	chromeStaleMid       = classicStaleMid
+	chromeStaleWarm      = classicStaleWarm
+	chromeChangeCreated  = classicChangeCreated
+	chromeChangeModified = classicChangeModified
+	chromeChangeDeleted  = classicChangeDeleted
+	chromeChangeRenamed  = classicChangeRenamed
+	chromeSelection      = classicSelection
+	chromeCompletion     = classicCompletion
+	chromePulse          = originalPulse // [16]string — the theme's chrome.pulse when declared
+)
+
+// present reports whether a themeColor carries any variant at all.
+func (c themeColor) present() bool { return c.dark != "" || c.light != "" }
+
+// rawBgCode is a ground-picked background escape with no isTTY gate — for
+// the input/completion surfaces the original painted with fixed 256-colour
+// constants (the cube greys are exact hexes, so the truecolor form is
+// visually identical).
+func rawBgCode(c themeColor) string {
+	r, g, b := hexRGB(c.pick())
+	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
+}
+
+// resolveChrome points the classic chrome at the active theme's tokens and
+// chrome block, falling back to the classic constants for whatever it
+// declares nothing about. Run once per theme activation (refreshThemeColors)
+// so the call sites keep reading the same names.
+func resolveChrome() {
+	apply := func(dst *themeColor, src, fb themeColor) {
+		if !src.present() {
+			*dst = fb
+			return
+		}
+		*dst = src
+	}
+	applyC := func(dst *themeColor, src theme.Color, fb themeColor) {
+		apply(dst, themeColorOf(src), fb)
+	}
+	c := th.chrome
+	apply(&chromeHeaderBg, tkBase, classicHeaderBg)
+	// header_bg: a chrome surface that may differ from base (off's bar is
+	// #1b1b1f over its standard black base). Fallback: whatever base settled.
+	applyC(&chromeHeaderBg, c.HeaderBg, chromeHeaderBg)
+	apply(&chromeHeaderFg, tkMuted, classicHeaderFg)
+	apply(&chromeStatusBg, tkRaised, classicStatusBg)
+	apply(&chromeHeaderBorder, tkHairline, classicHeaderBorder)
+	apply(&chromeAccent, tkAccent, classicAccent)
+	apply(&chromeToast, tkToast, classicToast)
+	applyC(&chromePanelTitle, c.PanelTitle, classicPanelTitle)
+	applyC(&chromePanelSection, c.PanelSection, classicPanelSection)
+	applyC(&chromeBorder, c.Border, classicBorder)
+	applyC(&chromePanelAlt, c.PanelAlt, classicPanelAlt)
+	applyC(&chromeThinkSurface, c.ThinkSurface, classicThinkSurface)
+	applyC(&chromePermFg, c.PermFg, classicPermFg)
+	applyC(&chromePermBg, c.PermBg, classicPermBg)
+	applyC(&chromeWordmark, c.Wordmark, classicWordmark)
+	applyC(&chromeAgentSage, c.AgentSage, classicAgentSage)
+	applyC(&chromeAgentSteel, c.AgentSteel, classicAgentSteel)
+	applyC(&chromeStaleFresh, c.StaleFresh, classicStaleFresh)
+	applyC(&chromeStaleMid, c.StaleMid, classicStaleMid)
+	applyC(&chromeStaleWarm, c.StaleWarm, classicStaleWarm)
+	applyC(&chromeChangeCreated, c.ChangeCreated, classicChangeCreated)
+	applyC(&chromeChangeModified, c.ChangeModified, classicChangeModified)
+	applyC(&chromeChangeDeleted, c.ChangeDeleted, classicChangeDeleted)
+	applyC(&chromeChangeRenamed, c.ChangeRenamed, classicChangeRenamed)
+	applyC(&chromeSelection, c.Selection, classicSelection)
+	applyC(&chromeCompletion, c.Completion, classicCompletion)
+	chromePulse = originalPulse
+	if len(c.Pulse) == len(chromePulse) {
+		// Declared as hex; the spinner ramp is SGR foregrounds.
+		for i, hex := range c.Pulse {
+			r, g, b := hexRGB(hex)
+			chromePulse[i] = fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+		}
+	}
+	inputSelectionOn = rawBgCode(chromeSelection)
+}
 
 // tintChrome keeps a chrome bar's own colors behind its styled spans. Spans
 // close themselves with a full reset, which would drop the bar back to the
 // terminal's colors midway (a navy bar on a dark terminal showing navy only at
 // its ends). The skin ("modern") paints its own ground, so it is left alone.
 func tintChrome(bar string, colors ...string) string {
-	if th.modern || !isTTY {
+	if th.skin || !isTTY {
 		return bar
 	}
 	return sgr.WithBackground(bar, strings.Join(colors, ""))
@@ -180,31 +340,31 @@ func tintChrome(bar string, colors ...string) string {
 // these are the original definitions.
 func rebuildStyles() {
 	styleStatusBarPerm = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#1A1A00")).
-		Background(adaptiveColor("#FFD700", "#B8860B"))
-	if !th.modern {
+		Foreground(chromePermFg.adaptive()).
+		Background(chromePermBg.adaptive())
+	if !th.skin {
 		styleHeaderBar = lipgloss.NewStyle().
 			Background(chromeHeaderBg.adaptive()).
 			Foreground(chromeHeaderFg.adaptive()).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderBottom(true).
-			BorderForeground(adaptiveColor("#c4c0b6", "#3a3a41"))
+			BorderForeground(chromeHeaderBorder.adaptive())
 		styleStatusBar = lipgloss.NewStyle().
 			Background(chromeStatusBg.adaptive())
 		styleBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
-			BorderForeground(adaptiveColor("#AAA", "#555"))
+			BorderForeground(chromeBorder.adaptive())
 		stylePanelTitle = lipgloss.NewStyle().
-			Foreground(adaptiveColor("#555", "#888")).
+			Foreground(chromePanelTitle.adaptive()).
 			Bold(true)
 		stylePanelSection = lipgloss.NewStyle().
-			Foreground(adaptiveColor("#777", "#666"))
-		// Changeset (issue #331): dark-on-light tuned for the original skin.
-		styleChangeCreated = lipgloss.NewStyle().Foreground(adaptiveColor("#2f7d32", "#6fbf82"))
-		styleChangeModified = lipgloss.NewStyle().Foreground(adaptiveColor("#8a6a00", "#d0a93c"))
-		styleChangeDeleted = lipgloss.NewStyle().Foreground(adaptiveColor("#a5372b", "#e07b70"))
-		styleChangeRenamed = lipgloss.NewStyle().Foreground(adaptiveColor("#3a5fa8", "#8ab0e8"))
+			Foreground(chromePanelSection.adaptive())
+		// Changeset (issue #331): the chrome block's roles.
+		styleChangeCreated = lipgloss.NewStyle().Foreground(chromeChangeCreated.adaptive())
+		styleChangeModified = lipgloss.NewStyle().Foreground(chromeChangeModified.adaptive())
+		styleChangeDeleted = lipgloss.NewStyle().Foreground(chromeChangeDeleted.adaptive())
+		styleChangeRenamed = lipgloss.NewStyle().Foreground(chromeChangeRenamed.adaptive())
 		return
 	}
 	styleHeaderBar = lipgloss.NewStyle().
@@ -240,8 +400,8 @@ var originalPulse = [16]string{
 // buildPulse is the 16-step breathing gradient keyed to the spinner frame:
 // the original yellow ramp, or accent-floor → accent → floor for a theme.
 func buildPulse() [16]string {
-	if !th.modern {
-		return originalPulse
+	if !th.skin {
+		return chromePulse
 	}
 	var out [16]string
 	r0, g0, b0 := hexRGB(tkAccentLo.dark)
@@ -254,18 +414,22 @@ func buildPulse() [16]string {
 	return out
 }
 
-// accentStyle is the "gold" emphasis: original gold, or the theme accent.
+// accentStyle is the "gold" emphasis: the theme's accent (off declares the
+// original gold), or the theme accent on a skin. The classic form is one
+// combined SGR — the byte shape the original look always emitted.
 func accentStyle() string {
-	if !th.modern {
-		return "\033[1;38;2;255;208;60m"
+	if !th.skin {
+		r, g, b := hexRGB(chromeAccent.pick())
+		return fmt.Sprintf("\033[1;38;2;%d;%d;%dm", r, g, b)
 	}
 	return ansiBold + tkAccent.sgrFg()
 }
 
 // wordmark is the startup-banner "milk".
 func wordmark() string {
-	if !th.modern {
-		return "\033[1;38;2;255;208;96mmilk\033[0m"
+	if !th.skin {
+		r, g, b := hexRGB(chromeWordmark.pick())
+		return fmt.Sprintf("\033[1;38;2;%d;%d;%dm", r, g, b) + "milk\033[0m"
 	}
 	return boldGold("milk")
 }
@@ -274,13 +438,10 @@ func panelAltBackgroundCode() string {
 	if !isTTY {
 		return ""
 	}
-	if th.modern {
+	if th.skin {
 		return tkRaised.sgrBg()
 	}
-	if hasDarkBackground() {
-		return "\033[48;2;24;24;28m"
-	}
-	return "\033[48;2;236;236;239m"
+	return chromePanelAlt.sgrBg()
 }
 
 // focusBgCode is the focused side panel's tint (issue #412): a slightly
@@ -301,39 +462,40 @@ func toastBackgroundCode() string {
 	if !isTTY {
 		return ""
 	}
-	if th.modern {
+	if th.skin {
 		return tkToast.sgrBg()
 	}
-	if hasDarkBackground() {
-		return "\033[48;2;26;38;58m" // #1A263A
-	}
-	return "\033[48;2;217;228;245m" // #D9E4F5
+	// The classic toast ground: the theme's toast token (off declares the
+	// original #1A263A / #D9E4F5), or the classic constant.
+	return chromeToast.sgrBg()
 }
 
-// Scrollbars: original dim glyphs, or a hairline track with a slim thumb.
+// Scrollbars: original dim glyphs, or a hairline track with a slim thumb —
+// the schema's `scrollbar` knob (default: slim on a skin, classic on classic).
 func scrollTrackGlyph() string {
-	if !th.modern {
+	if th.scrollbar != theme.ScrollbarSlim {
 		return dim("│")
 	}
 	return colorize("│", tkHairline.sgrFg())
 }
 
 func scrollThumbGlyph() string {
-	if !th.modern {
+	if th.scrollbar != theme.ScrollbarSlim {
 		return dim("▌")
 	}
 	return colorize("┃", tkThumb.sgrFg())
 }
 
-// Muted tags for the original look's agent labels (no raw ANSI green/blue).
+// Muted tags for the original look's agent labels (no raw ANSI green/blue)
+// — the chrome block's agent_sage/agent_steel with the classic fallbacks.
 var (
-	softSage  = themeColor{dark: "#a8b58f", light: "#5f6b3a"}
-	softSteel = themeColor{dark: "#93a9c7", light: "#3f5a80"}
+	softSage  = classicAgentSage
+	softSteel = classicAgentSteel
 )
 
 // agentTag is the label before an agent's reply.
 func agentTag(name, role string) string {
-	if !th.modern {
+	if !th.skin {
 		if role == "escalation" {
 			return colorize(name+":", ansiBold+softSteel.sgrFg()) + " "
 		}
@@ -344,7 +506,7 @@ func agentTag(name, role string) string {
 
 // userEcho is the transcript echo of a submitted line.
 func userEcho(label, input string) string {
-	if !th.modern {
+	if !th.skin {
 		return label + input + "\n"
 	}
 	return "\n" + colorize("YOU", ansiBold+tkAccent.sgrFg()) + softRule() + "\n" + input + "\n"
@@ -355,21 +517,54 @@ func osc(format string, a ...any) {
 	fmt.Fprintf(os.Stdout, "\x1b]"+format+"\x1b\\", a...)
 }
 
-// applyThemeTerminal pushes the theme's colours into the terminal emulator:
-// default background/foreground/cursor and the 16-colour ANSI palette, so
-// everything milk does not paint itself (edge columns, scrollbar gutter,
-// ANSI-coloured text) matches. Returns the restore func. A no-op for "off".
-func applyThemeTerminal() func() {
-	if !isTTY || !th.modern {
-		return func() {}
+// themeTerminalOSCs is the OSC payload set for the active theme: the ground
+// (the theme's terminal block when declared, else the palette's base — for
+// off the standard black background), the ink (terminal fg, else text) and
+// the cursor, then the 16-colour ANSI ramp. Every theme now paints its own
+// ground — darken/lighten variants move it like every other surface — while
+// a theme that declares neither a terminal block nor a palette produces
+// nothing and the terminal keeps its own colours.
+func themeTerminalOSCs() []string {
+	bg := th.termBg
+	if bg == "" {
+		bg = th.base.pick()
 	}
-	osc("11;%s", th.termBg)
-	osc("10;%s", th.termFg)
-	osc("12;%s", th.termCursor)
+	ink := th.termFg
+	if ink == "" {
+		ink = th.text.pick()
+	}
+	cursor := th.termCursor
+	if cursor == "" {
+		cursor = ink
+	}
+	var out []string
+	for _, kv := range []struct{ code, val string }{
+		{"11", bg}, {"10", ink}, {"12", cursor},
+	} {
+		if kv.val != "" {
+			out = append(out, kv.code+";"+kv.val)
+		}
+	}
 	for i, c := range th.termAnsi {
 		if c != "" {
-			osc("4;%d;%s", i, c)
+			out = append(out, fmt.Sprintf("4;%d;%s", i, c))
 		}
+	}
+	return out
+}
+
+// applyThemeTerminal pushes the theme's colours into the terminal emulator:
+// background/foreground/cursor and the 16-colour ANSI palette, so everything
+// milk does not paint itself (edge columns, scrollbar gutter, ANSI-coloured
+// text) sits on the theme's ground with the theme's ink. Returns the restore
+// func. A no-op when the theme declares nothing (palette-less classic
+// drop-ins leave the terminal entirely alone).
+func applyThemeTerminal() func() {
+	if !isTTY {
+		return func() {}
+	}
+	for _, payload := range themeTerminalOSCs() {
+		osc("%s", payload)
 	}
 	return restoreTerminalColors
 }
@@ -388,7 +583,7 @@ func restoreTerminalColors() {
 // dimCode is the "recede" style: faint, or the theme's muted ink — SGR faint
 // washes out to near-invisible on a light ground.
 func dimCode() string {
-	if !th.modern {
+	if !th.skin {
 		return ansiDim
 	}
 	return tkMuted.sgrFg()
@@ -400,11 +595,18 @@ func softRule() string { return " " + colorize(strings.Repeat("─", 18), tkHair
 const originalThinkBgParams = "48;5;235"
 
 // applyThinkSurface points the thinking-surface background at the theme: the
-// original dark grey, or the raised surface of a skin (readable on light).
+// classic chrome's think_surface, or the raised surface of a skin (readable
+// on light). The classic constant stays as the fallback for themes that
+// declare no chrome.
 func applyThinkSurface() {
 	thinkBgParams = originalThinkBgParams
-	if th.modern {
-		r, g, b := hexRGB(tkRaised.dark)
+	if th.skin {
+		if tkRaised.pick() != "" {
+			r, g, b := hexRGB(tkRaised.pick())
+			thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
+		}
+	} else if !th.chrome.ThinkSurface.Absent() {
+		r, g, b := hexRGB(chromeThinkSurface.pick())
 		thinkBgParams = fmt.Sprintf("48;2;%d;%d;%d", r, g, b)
 	}
 	ansiThinkBg = "\033[" + thinkBgParams + "m"

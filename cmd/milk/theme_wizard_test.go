@@ -1,0 +1,296 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/testutil"
+)
+
+// The theme builder (plan PR 3): /theme new walks the steps, previews the
+// candidate through the real switch path, and saves a materialized JSON
+// theme with `derived_from` provenance. Esc restores the original theme.
+
+func wizardTestModel(t *testing.T) model {
+	t.Helper()
+	testutil.SandboxHome(t)
+	t.Setenv("USERPROFILE", t.TempDir())
+	old := th.name
+	t.Cleanup(func() { setTheme(old) })
+	// The registry is process-global and earlier tests may have saved themes
+	// into their own sandboxes — start each wizard test from builtins only.
+	loadThemeRegistry("")
+	m := layoutTestModel(t, 80, 24)
+	out, _ := m.handleThemeCmd("new")
+	m = out.(model)
+	if m.pendingThemeWizard == nil {
+		t.Fatal("/theme new must open the builder")
+	}
+	return m
+}
+
+func wizKey(m model, msg tea.KeyPressMsg) model {
+	out, _ := m.handleThemeWizardKey(msg)
+	return out.(model)
+}
+
+func wizDown(m model) model { return wizKey(m, tea.KeyPressMsg{Code: tea.KeyDown}) }
+
+func wizType(m model, text string) model {
+	m.ta.SetValue(text)
+	return wizKey(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+}
+
+func wizEnter(m model) model { return wizKey(m, tea.KeyPressMsg{Code: tea.KeyEnter}) }
+
+func TestThemeWizardFromScratchSaves(t *testing.T) {
+	m := wizardTestModel(t)
+
+	// mode: down → "from scratch", enter.
+	m = wizDown(m)
+	m = wizEnter(m)
+	// name
+	m = wizType(m, "mytheme")
+	// six core colours
+	for range 6 {
+		m = wizType(m, "#123456")
+	}
+	// more colors? no (sel 0) → terminal: derive (sel 0) → tagline
+	m = wizEnter(m)
+	m = wizEnter(m)
+	m = wizType(m, "hand-built")
+	// review: enter saves
+	m = wizEnter(m)
+
+	if m.pendingThemeWizard != nil {
+		t.Fatalf("builder must close after save (err %q)", m.pendingThemeWizard.err)
+	}
+	if th.name != "mytheme" || !th.skin {
+		t.Errorf("active theme = %q skin=%v, want the saved theme", th.name, th.skin)
+	}
+	if m.st.cfg.Theme != "mytheme" {
+		t.Errorf("cfg.Theme = %q, want mytheme", m.st.cfg.Theme)
+	}
+	rt, ok := themeRegistry.Get("mytheme")
+	if !ok {
+		t.Fatal("the saved theme must be in the registry")
+	}
+	if rt.Tagline != "hand-built" {
+		t.Errorf("tagline = %q", rt.Tagline)
+	}
+	if rt.Terminal == nil {
+		t.Error("derive mode must write a terminal block")
+	}
+	data, err := os.ReadFile(filepath.Join(mustThemesDir(t), "mytheme.json"))
+	if err != nil {
+		t.Fatalf("saved file: %v", err)
+	}
+	if !strings.Contains(string(data), `"base"`) || !strings.Contains(string(data), "#123456") {
+		t.Errorf("saved JSON must carry the typed colours:\n%s", data)
+	}
+}
+
+func TestThemeWizardVariantDerives(t *testing.T) {
+	m := wizardTestModel(t)
+
+	// mode: down ×2 → "darken/lighten variant", enter → base: down ×2 → supermilk
+	// (the base list is the registry order: off, space, supermilk).
+	m = wizDown(m)
+	m = wizDown(m)
+	m = wizEnter(m)
+	m = wizDown(m)
+	m = wizDown(m)
+	m = wizEnter(m)
+	// variant step: two lightness steps right.
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if dl := m.pendingThemeWizard.dl; dl != 0.10 {
+		t.Fatalf("lightness = %v, want 0.10", dl)
+	}
+	m = wizEnter(m)
+	m = wizType(m, "superlight")
+	m = wizEnter(m) // review → save
+
+	if m.pendingThemeWizard != nil {
+		t.Fatalf("builder must close after save (err %q)", m.pendingThemeWizard.err)
+	}
+	if th.name != "superlight" {
+		t.Errorf("active theme = %q, want superlight", th.name)
+	}
+	data, err := os.ReadFile(filepath.Join(mustThemesDir(t), "superlight.json"))
+	if err != nil {
+		t.Fatalf("saved file: %v", err)
+	}
+	if !strings.Contains(string(data), `"derived_from": "supermilk"`) {
+		t.Errorf("variant JSON must record its provenance:\n%s", data)
+	}
+	rt, _ := themeRegistry.Get("superlight")
+	if rt == nil {
+		t.Fatal("variant must resolve")
+	}
+	base, _ := themeRegistry.Get("supermilk")
+	if rt.Colors.Base == base.Colors.Base {
+		t.Error("the variant palette must be transformed, not copied")
+	}
+}
+
+func TestThemeWizardCancelRestores(t *testing.T) {
+	m := wizardTestModel(t)
+	orig := m.pendingThemeWizard.orig
+
+	// Pick a base so the preview switches the whole TUI away from it…
+	m = wizEnter(m) // mode: from existing
+	m = wizDown(m)
+	m = wizEnter(m) // base: space (second row, after off)
+	if th.name == orig {
+		t.Fatal("picking a base must live-preview it")
+	}
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyEscape}) // esc
+	if m.pendingThemeWizard != nil {
+		t.Fatal("esc must close the builder")
+	}
+	if th.name != orig {
+		t.Errorf("cancel left %q active, want %q restored", th.name, orig)
+	}
+}
+
+// TestThemeChangeInvalidatesColorizedTurnCache pins the missing-live-preview
+// bug: the per-turn colorized transcript cache is keyed by raw text alone,
+// so a theme change that only set colorizeForce re-served the PREVIOUS
+// theme's rows (the chrome changed, the transcript never did). Every theme
+// activation must drop the caches.
+func TestThemeChangeInvalidatesColorizedTurnCache(t *testing.T) {
+	m := layoutTestModel(t, 80, 24)
+	m.appendTranscript("turn one\n\nturn two\n\nturn three\n")
+	_ = m.wrappedTranscript() // prime the per-turn colorized caches
+	if len(m.turnColorCache) == 0 {
+		t.Fatal("fixture needs completed turns in the colorized cache")
+	}
+	m.turnColorCache[0] = "STALE-MARKER" // same raw key, old-theme colours
+
+	// The variant step's arrow presses run exactly this preview path.
+	w := &themeWizardState{mode: twVariant, step: twStepVariant, base: "supermilk", orig: "off"}
+	m.pendingThemeWizard = w
+	m.themeWizardPreview(w)
+
+	if strings.Contains(strings.Join(m.turnColorCache, "\n"), "STALE-MARKER") {
+		t.Error("a theme change must re-colorize cached turns — the old theme's rows are being re-served")
+	}
+}
+
+// TestThemeWizardVariantBaseListSkipsPaletteless pins the variant mode's
+// TestThemeWizardVariantBaseListSkipsPaletteless pins the base-step filter:
+// a variant needs a palette to transform. "off" now declares its palette
+// (classic chrome-as-data) and is offered; a palette-less drop-in is not —
+// its arrows would preview nothing.
+func TestThemeWizardVariantBaseListSkipsPaletteless(t *testing.T) {
+	m := wizardTestModel(t)
+	user := t.TempDir()
+	os.WriteFile(filepath.Join(user, "focus-only.json"),
+		[]byte(`{"name":"focus-only","look":"classic","colors":{"focus":"#000000"}}`), 0o644)
+	loadTestRegistry(t, user, "")
+	t.Cleanup(func() { loadThemeRegistry("") })
+	m = wizDown(m)
+	m = wizDown(m)
+	m = wizEnter(m) // mode → variant → base step
+	rows := m.pendingThemeWizard.choiceRows()
+	found := map[string]bool{}
+	for _, r := range rows {
+		found[r] = true
+	}
+	if !found["off"] || !found["supermilk"] {
+		t.Errorf("variant base list must offer the paletted builtins (off declares its palette now), got %v", rows)
+	}
+	if found["focus-only"] {
+		t.Error("variant base list must skip palette-less themes — arrows would preview nothing")
+	}
+	if got := m.pendingThemeWizard.choiceLen(); got != len(rows) {
+		t.Errorf("choiceLen = %d, want %d (the two must read the same list)", got, len(rows))
+	}
+}
+
+// TestVariantOfOffMovesChrome pins the point of paletting off: a darken/
+// lighten variant must visibly move the classic chrome (bars, border,
+// accent, toast ground), not just the box swatches — and esc restores the
+// original constants.
+func TestVariantOfOffMovesChrome(t *testing.T) {
+	// Open the builder on a deterministic theme: earlier tests' cleanups can
+	// leave the process-global th pointing at a theme this fixture's registry
+	// no longer resolves, which makes cancel-restore unresolvable.
+	testutil.SandboxHome(t)
+	t.Setenv("USERPROFILE", t.TempDir())
+	old := th.name
+	t.Cleanup(func() { setTheme(old) })
+	loadThemeRegistry("")
+	setTheme("off")
+	m := layoutTestModel(t, 80, 24)
+	out, _ := m.handleThemeCmd("new")
+	m = out.(model)
+	if m.pendingThemeWizard == nil {
+		t.Fatal("/theme new must open the builder")
+	}
+	// The chrome the builder opened with — cancel must land back here no
+	// matter which theme earlier tests left active.
+	origBg, origAccent, origToast := chromeHeaderBg, chromeAccent, chromeToast
+	origTitle, origStale, origPulse := chromePanelTitle, chromeStaleMid, chromePulse[8]
+	m = wizDown(m)
+	m = wizDown(m)
+	m = wizEnter(m) // mode → variant → base step
+	m = wizEnter(m) // base: off (first row)
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyRight}) // lightness +15%
+	if chromeHeaderBg == classicHeaderBg {
+		t.Error("a variant of off must move the header chrome")
+	}
+	if chromeAccent == classicAccent {
+		t.Error("a variant of off must move the accent")
+	}
+	if chromeToast == classicToast {
+		t.Error("a variant of off must move the toast ground")
+	}
+	if chromePanelTitle == classicPanelTitle {
+		t.Error("a variant of off must move the panel-title chrome")
+	}
+	if chromeStaleMid == classicStaleMid {
+		t.Error("a variant of off must move the staleness ramp")
+	}
+	if chromePulse[8] == originalPulse[8] {
+		t.Error("a variant of off must move the spinner ramp")
+	}
+	m = wizKey(m, tea.KeyPressMsg{Code: tea.KeyEscape}) // esc
+	if chromeHeaderBg != origBg || chromeAccent != origAccent || chromeToast != origToast {
+		t.Errorf("cancel must restore the chrome the builder opened with: bg %+v→%+v accent %+v→%+v toast %+v→%+v",
+			origBg, chromeHeaderBg, origAccent, chromeAccent, origToast, chromeToast)
+	}
+	if chromePanelTitle != origTitle || chromeStaleMid != origStale || chromePulse[8] != origPulse {
+		t.Error("cancel must restore the chrome-block surfaces too")
+	}
+}
+
+func TestParseTypedColor(t *testing.T) {
+	if c, ok := parseTypedColor("#a1b2c3"); !ok || c.Dark != "#a1b2c3" || c.Light != "#a1b2c3" {
+		t.Errorf("fixed parse = %+v %v", c, ok)
+	}
+	if c, ok := parseTypedColor("#111111/#eeeeee"); !ok || c.Dark != "#111111" || c.Light != "#eeeeee" {
+		t.Errorf("pair parse = %+v %v", c, ok)
+	}
+	if _, ok := parseTypedColor("nope"); ok {
+		t.Error("garbage must be rejected")
+	}
+}
+
+// mustThemesDir is the sandbox user theme dir the wizard saves into.
+func mustThemesDir(t *testing.T) string {
+	t.Helper()
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("state root: %v", err)
+	}
+	return filepath.Join(dir, "themes")
+}
