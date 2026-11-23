@@ -1,9 +1,12 @@
 # Config-driven themes, `/theme` carousel, and the theme-builder wizard — plan
 
-Status: **in progress** — PR 1 (Steps 1–2), PR 2 (Step 3 + `/theme
-view`) and PR 3 (Step 4, the builder incl. the darken/lighten variant mode)
-implemented and merged to `main`. Step 5 (ADR + docs) is the remaining
-planned work.
+Status: **complete** — PR 1 (Steps 1–2), PR 2 (Step 3 + `/theme view`),
+PR 3 (Step 4, the builder incl. the darken/lighten variant mode) and
+PR 4 (Step 5, ADR + docs: [ADR-0107](../../adr/0107-themes-as-data.md),
+spec.md `/theme` + theme-file schema, providers.md `theme` key,
+README/CLAUDE.md) implemented and merged to `main`, plus the follow-up
+passes below (chrome-as-data, the standard black ground, rendered
+ink/ground).
 
 Touchpoints: `cmd/milk/theme.go`, `cmd/milk/theme_chrome.go`, `cmd/milk/slashcmd.go`,
 `cmd/milk/interactive.go`, `internal/config/config.go`, new `internal/theme/`,
