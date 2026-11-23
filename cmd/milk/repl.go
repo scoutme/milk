@@ -3868,6 +3868,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		if setDarkBackground(msg.IsDark()) {
 			refreshThemeColors()
+			// The ground/ink pushed to the terminal follow the detected
+			// ground too (themeTerminalOSCs picks the variant) — re-push
+			// alongside the rebuild so the palette cannot go stale.
+			applyThemeTerminal()
 			m.colorizeForce = true
 			m.turnColorCache = nil
 			m.turnRawCache = nil

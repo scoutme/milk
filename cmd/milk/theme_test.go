@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,6 +22,33 @@ func TestThemeTextInksMarkdown(t *testing.T) {
 	applyThemeDef(&themeDef{name: "plain"})
 	if out := colorizeGlamour("hello"); strings.Contains(out, "38;2;255;0;0") {
 		t.Errorf("a text-less theme must keep glamour's own ink, got %q", out)
+	}
+}
+
+// TestThemeTerminalOSCs: the terminal palette is the theme's ground and
+// ink — off pushes the standard black background (#000000) and its body
+// ink, a theme with an explicit terminal block keeps it, and a theme with
+// neither pushes nothing (the terminal's own colours stand).
+func TestThemeTerminalOSCs(t *testing.T) {
+	old := th
+	t.Cleanup(func() { applyThemeDef(old) })
+
+	applyThemeDef(themeOff)
+	if got, want := themeTerminalOSCs(), []string{"11;#000000", "10;#d0d0d0", "12;#d0d0d0"}; !slices.Equal(got, want) {
+		t.Errorf("off palette = %v, want %v", got, want)
+	}
+	applyThemeDef(&themeDef{name: "bare"})
+	if got := themeTerminalOSCs(); len(got) != 0 {
+		t.Errorf("a palette-less theme must push nothing, got %v", got)
+	}
+	applyThemeDef(&themeDef{name: "term",
+		base:       themeColor{dark: "#111111", light: "#eeeeee"},
+		text:       themeColor{dark: "#cccccc", light: "#222222"},
+		termBg:     "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
+	})
+	got := themeTerminalOSCs()
+	if len(got) < 3 || got[0] != "11;#f8f5ee" || got[1] != "10;#3f2a26" {
+		t.Errorf("an explicit terminal block must win, got %v", got)
 	}
 }
 
