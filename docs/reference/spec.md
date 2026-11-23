@@ -223,15 +223,34 @@ New backends are appended to `agents` in `~/.milk/config.json` immediately; `/ag
 
 Persisted to config immediately, effective on next render.
 
-**/theme** switches the TUI skin:
+**/theme** manages TUI themes — configuration over a common basis, never code ([ADR-0107](../adr/0107-themes-as-data.md)):
 
 | Subcommand | Action |
 |---|---|
-| `/theme` | Show the active theme |
-| `/theme off` | The default look: neutral graphite chrome on dark terminals, warm cream chrome on light ones |
-| `/theme supermilk` | Semi-skimmed milk skin: milk-white ground, warm ink, hairline separators, muted olive accent |
+| `/theme` | Carousel: `←/→`/`↑↓`/wheel browse themes with the whole TUI live-previewing the candidate (terminal palette included), `enter` applies + persists, any other key closes and restores the original |
+| `/theme carousel` | The same browse flyover as bare `/theme` |
+| `/theme <name>` | Switch to a theme (builtin or drop-in) |
+| `/theme list` | Every theme with its source (builtin/user/project), look and tagline, plus load warnings for invalid theme files |
+| `/theme view [name]` | Print a theme's JSON to the transcript — builtins included, the copy-paste starting point for authors (defaults to the active theme) |
+| `/theme new` | Theme-builder wizard with live preview: from an existing theme / from scratch / darken-lighten variant (arrows step lightness, shift+arrows saturation); review shows the exact JSON; saves to `~/.milk/themes/<name>.json` |
+| `/theme reload` | Rescan the theme dirs — drop a JSON file in, no restart |
 
-A skin restyles chrome only — header, status bar, turn labels, panel titles, scrollbars, staleness ramp, tool rows and the reasoning surface. Slash commands, config keys and session files are unchanged. The choice is persisted as `theme` in `config.json` and applied live; `supermilk` also sets the terminal's default background/foreground/cursor and 16-colour ANSI ramp through OSC while active, and hands them back on `/theme off` or exit. `/theme` re-detects the terminal background after a switch, so `off` returns to the dark or light variant the terminal actually uses. See [ADR-0077](../adr/0077-tui-skins.md).
+**A theme file** is a JSON document (the working examples are `internal/theme/themes/off.json` and `supermilk.json`, printable via `/theme view`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Lowercase slug; the file's identity |
+| `extends` | Inherit from another theme (chain, cycle-checked); later fields override earlier ones |
+| `derived_from` | Provenance metadata written by the builder |
+| `look` | `classic` \| `skin` — the bounded shape choice; plus `tool_rows` (`plain`\|`accent`) and `scrollbar` (`classic`\|`slim`) |
+| `tagline` | Line under the wordmark |
+| `colors` | The 11-token palette: `base` (the ground), `raised`, `toast`, `hairline`, `thumb`, `text`, `muted`, `accent`, `accent_lo`, `think`, `focus` |
+| `chrome` | The surfaces one palette slot cannot serve: `header_bg`, `panel_title`, `panel_section`, `border`, `panel_alt`, `think_surface`, `perm_fg`/`perm_bg`, `wordmark`, `agent_sage`/`agent_steel`, `stale_*`, `change_*`, `selection`, `completion`, and the ≤16-entry `pulse` ramp |
+| `terminal` | The emulator palette pushed while active (OSC 10/11/12 + `ansi16`); omit to leave the terminal alone |
+
+A colour is `"#rrggbb"` (any ground) or `{"dark":"#rrggbb","light":"#rrggbb"}` (picked by the detected terminal background). Tokens left empty derive from the common basis (`raised`←lighten(`base`), `toast`←mix, `accent_lo`←mix, `focus`←mix, …), so a hand-written theme can be six colours; absent tokens stay absent. **Declared colours are rendered**: `text` inks the prose and tool-fold bodies (and feeds the terminal ink), `base` grounds the view and is pushed as the terminal background, `chrome` resolves per surface with the classic constants as fallbacks — a darken/lighten variant (`Transform`) moves palette, chrome and terminal ramp together.
+
+**Discovery** (later shadows earlier): builtins (`off`, `supermilk` — embedded JSON descriptors, the same schema) → `~/.milk/themes/*.json` → `<project>/.milk/themes/*.json`. Invalid files are skipped with a warning (`/theme list` shows it). The choice is persisted as `theme` in `config.json` and applied live; a theme that declares a terminal palette pushes it while active (ground/ink/cursor fall back to the palette) and hands it back on switch or exit. Every switch re-detects the terminal background, so the dark/light variant always matches the ground the terminal actually uses. See [ADR-0107](../adr/0107-themes-as-data.md) and, for the pre-data skins history, [ADR-0077](../adr/0077-tui-skins.md).
 
 **/think** manages reasoning/thinking blocks (issue #208, [ADR-0067](../adr/0067-thinking-first-class-view.md)): `/think` (status: block count and fold state), `/think expand` / `/think collapse` (pin every block open/closed), `/think view` (swap the main area to a thinking-only stream; Esc returns). Every reasoning run renders as a fold container whose header is information-only — `▸ thinking · N lines` folded, `▾ thinking · N lines` expanded (`· streaming` on a block opened while it is still arriving) — folded by default at all times, streaming or complete, with no auto-open: while reasoning streams in the header's line count updates live. Fold containers render on their own background (the thinking surface), visually distinct from the standard transcript at every fold state — full-row: every container row (header, body, blank and wrapped continuation rows) paints the background across the whole row width, not just behind the glyphs. Click a header to expand/collapse just that block; **Ctrl+T** toggles the most recent block (the streaming one, if any) — either action pins the block, so one opened mid-stream stays open when streaming ends. A new block keeps the folding status the previous one was left in (folded by default, open while the user is watching); a new turn collapses the previous turns' blocks while that status is folded — `/think expand` defines the current default and opts out of the tidy entirely, which never changes the status itself. There is no hidden mode: headers always render. `/think on|off` were removed with the fold model (a `/think on|off` typed in the TUI answers with a pointer to the fold commands). Applies to both primary-model `<think>` blocks and Claude extended thinking; loop detection consumes reasoning regardless of fold state. Over ACP, `/think on|off` keeps its data-plane meaning — relay or withhold `agent_thought_chunk` thought updates — the same state as the `think` session config option, seeded from `show_reasoning`; TUI fold state is independent of it. The *starting* fold status is itself configurable via `think_fold_default` (default `folded`; `"expanded"` seeds sessions so blocks arrive open and the tidy is opted out from the start — per-session actions still win). Pressing **Ctrl+T** twice within 400ms folds every fold container on screen — thinking and tool blocks alike (one gesture, `/think collapse` + `/tools collapse`).
 
