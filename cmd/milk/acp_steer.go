@@ -23,6 +23,7 @@ package main
 // Lock order: turnMu → steerMu → as.mu (never reversed).
 
 import (
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
@@ -102,6 +103,7 @@ func (as *acpSession) popSteer() []string {
 	// the model. The queue survives the refusal — the waiter's own turn
 	// runs it after this one ends.
 	if as.pendingInit != nil || as.pendingTelegram != nil {
+		obs.Debug("acp steer refuse", "reason", "setup wizard armed")
 		return nil
 	}
 
@@ -109,6 +111,7 @@ func (as *acpSession) popSteer() []string {
 	var batch []*acpQueuedPrompt
 	for _, e := range as.steerQueue {
 		if !steerablePrompt(e.text, false, mediaAttachments(e.media), as.cfg) {
+			obs.Debug("acp steer stop", "reason", "entry must flush", "preview", queuePreview(e.text))
 			break // order cannot skip: this entry keeps the flush path
 		}
 		e.delivered = true
@@ -145,10 +148,22 @@ func (as *acpSession) popSteer() []string {
 	texts := make([]string, 0, len(batch)+len(remote))
 	for _, e := range batch {
 		as.echoUserPrompt(e.echoID, e.text, nil)
+		// The conversation record catches up at turn end (recordUserTurn
+		// places these after the prompt) — queue the line now, on this
+		// turn's goroutine, so nothing depends on the waiter surviving.
+		if as.sess != nil {
+			as.sess.AddSteeredInput(e.text)
+		}
+		obs.Debug("acp steer deliver", "echo", string(e.echoID), "preview", queuePreview(e.text))
 		texts = append(texts, e.text)
 	}
 	for _, text := range remote {
-		as.echoUserPrompt(as.liveID("msg"), text, nil)
+		id := as.liveID("msg")
+		as.echoUserPrompt(id, text, nil)
+		if as.sess != nil {
+			as.sess.AddSteeredInput(text)
+		}
+		obs.Debug("acp steer deliver", "echo", string(id), "source", "remote", "preview", queuePreview(text))
 		texts = append(texts, text)
 	}
 	return texts

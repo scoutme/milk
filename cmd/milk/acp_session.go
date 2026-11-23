@@ -21,6 +21,7 @@ import (
 	"github.com/scoutme/milk/internal/events"
 	"github.com/scoutme/milk/internal/loop"
 	"github.com/scoutme/milk/internal/memory"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/router"
 	"github.com/scoutme/milk/internal/session"
@@ -648,11 +649,16 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 	// return the delivery's messageId (no second turn, exactly one echo);
 	// not delivered → dequeue and run as the next turn, exactly as the
 	// blocking path did. queue_while_busy:false and a full queue keep the
-	// plain serialize-behind-turnMu behaviour.
+	// plain serialize-behind-turnMu behaviour. Every disposition logs under
+	// "acp steer" (milk.log), so an after-the-fact message can be
+	// attributed: no line at all means the prompt arrived idle.
 	var queuedSteer *acpQueuedPrompt
-	if prompt != backgroundFollowupPrompt && as.turnBusy() && as.cfg.QueueWhileBusyEnabled() {
-		if e := as.enqueueSteer(prompt, media); e != nil {
+	if prompt != backgroundFollowupPrompt && as.turnBusy() {
+		if !as.cfg.QueueWhileBusyEnabled() {
+			obs.Debug("acp steer serialize", "reason", "queue_while_busy=false", "preview", queuePreview(prompt))
+		} else if e := as.enqueueSteer(prompt, media); e != nil {
 			queuedSteer = e
+			obs.Debug("acp steer enqueue", "preview", queuePreview(prompt))
 			extra := ""
 			if n := strings.Count(prompt, "\n") + 1; n > 1 {
 				extra += fmt.Sprintf(" ⋯ %d lines", n)
@@ -662,6 +668,8 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 			}
 			as.notify(acp.AgentMessageChunk(as.liveID("queue"), ansi.Strip(
 				milkTag()+fmt.Sprintf(" ⋯ queued — the agent picks it up on its next step — %q%s\n", queuePreview(prompt), extra))))
+		} else {
+			obs.Debug("acp steer serialize", "reason", "queue full", "preview", queuePreview(prompt))
 		}
 	}
 
@@ -673,8 +681,10 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 	}()
 	if queuedSteer != nil {
 		if echoID, delivered := as.steerResult(queuedSteer); delivered {
+			obs.Debug("acp steer resolved", "outcome", "delivered", "echo", string(echoID))
 			return acp.PromptResponse{MessageID: echoID}, nil
 		}
+		obs.Debug("acp steer resolved", "outcome", "fallback", "reason", "turn ended before the boundary took it")
 		as.dropSteer(queuedSteer)
 	}
 	return as.runTurn(ctx, strings.TrimSpace(text), media)

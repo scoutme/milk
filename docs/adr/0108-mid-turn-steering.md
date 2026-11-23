@@ -97,6 +97,17 @@ drain points, promotion as the universal fallback.
 - Queued input reaches the model even mid-reasoning — but only at the next
   boundary; the transcript shows the delivery line where the model's next
   round begins, which is the honest depiction of what happened.
+- Delivered input is persisted like any other user message (the gap the
+  first live ACP test exposed): the drain queues each line on the session
+  (`Session.AddSteeredInput`), and the turn's `recordUserTurn` writes it
+  into history right after the prompt it rode — `[prompt][steered…]
+  [assistant]`, exactly once, across TUI, ACP and Telegram deliveries.
+  Nothing enters the store mid-run, matching the prompt itself (also
+  recorded at turn end), so the session-history tool's mid-run view stays
+  consistent. Over ACP every disposition logs under `acp steer` in
+  `milk.log` (`enqueue`/`deliver`/`resolved`/`serialize`/`refuse`/`stop`),
+  so a queued-while-busy message is attributable after the fact — no line
+  at all means it arrived idle.
 - A steered message is not re-routed through command handling, PTY or
   attachment staging by construction; anything needing those paths can never
   be mis-delivered as model text.

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scoutme/milk/internal/session"
 	"github.com/scoutme/milk/internal/transport/acp"
 )
 
@@ -200,6 +201,36 @@ func TestACPSteer_QueuedPromptDeliversIntoRunningTurn(t *testing.T) {
 	if n := steerQueueLen(as); n != 0 {
 		t.Errorf("queue not drained: %d entries left", n)
 	}
+
+	// Persistence (ADR-0108): the delivered line must reach the session
+	// store at turn end — [prompt A][steered B][assistant], exactly once.
+	// Without the record the model saw B but a resume/escalation never would.
+	var steeredAt, promptAt, assistantAt = -1, -1, -1
+	for i, h := range as.sess.History {
+		switch {
+		case h.Role == session.RoleUser && h.Content == "original prompt":
+			promptAt = i
+		case h.Role == session.RoleUser && strings.Contains(h.Content, "steer me mid-turn"):
+			if steeredAt >= 0 {
+				t.Errorf("steered input recorded twice in history: %+v", as.sess.History)
+			}
+			steeredAt = i
+		case h.Role == session.RoleAssistant && assistantAt < 0:
+			assistantAt = i
+		}
+	}
+	if promptAt < 0 {
+		t.Fatalf("prompt record missing from history: %+v", as.sess.History)
+	}
+	if steeredAt < 0 {
+		t.Fatalf("steered input never reached the session store: %+v", as.sess.History)
+	}
+	if steeredAt < promptAt {
+		t.Errorf("steered record at %d precedes the prompt at %d — history must read [prompt][steered…][assistant]", steeredAt, promptAt)
+	}
+	if assistantAt >= 0 && steeredAt > assistantAt {
+		t.Errorf("steered record at %d follows the assistant at %d — it must sit before the turn's reply", steeredAt, assistantAt)
+	}
 }
 
 func TestACPSteer_NonSteerablePromptKeepsFlushPath(t *testing.T) {
@@ -347,7 +378,7 @@ func TestACPSteer_QueueCapFallsBackToBlocking(t *testing.T) {
 // prefix (echoing each) so Telegram input can act on the live turn too.
 func TestACPSteer_RemoteInputsDrainAfterPromptQueue(t *testing.T) {
 	conn := &fakeACPConn{}
-	as := &acpSession{conn: conn, runID: "test01"}
+	as := &acpSession{conn: conn, runID: "test01", sess: &session.Session{}}
 	if e := as.enqueueSteer("/tasks", nil); e == nil {
 		t.Fatal("enqueue failed")
 	}
@@ -365,6 +396,9 @@ func TestACPSteer_RemoteInputsDrainAfterPromptQueue(t *testing.T) {
 	got := as.popSteer()
 	if len(got) != 1 || got[0] != "telegram says hi" {
 		t.Fatalf("popSteer = %q, want the remote input once the prompt queue is empty", got)
+	}
+	if pend := as.sess.SteeredPending; len(pend) != 1 || pend[0] != "telegram says hi" {
+		t.Errorf("delivered remote input must queue its session-history record, got %#v", pend)
 	}
 	as.mu.Lock()
 	remaining := len(as.pendingRemoteInputs)

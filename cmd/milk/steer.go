@@ -12,6 +12,8 @@ package main
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/scoutme/milk/internal/config"
 	"github.com/scoutme/milk/internal/shelldetect"
 )
@@ -111,4 +113,31 @@ func (st *interactiveState) popSteer() []steerItem {
 		}
 	}
 	return items
+}
+
+// newSteerDrain builds the wiring closure the tool loop pulls from at its
+// model-request boundaries: pop this turn's share of the queue, hand each
+// item to Update (transcript echo + input histories, via steerDeliveredMsg)
+// and queue its conversation record — the session store catches up at turn
+// end, where recordUserTurn places each line right after the prompt it rode
+// (ADR-0108 persistence: delivered input must survive resume/escalation like
+// any other user message). Runs on the turn's own goroutine inside the loop,
+// before dispatch writes the turn's records — which is what makes the
+// unguarded SteeredPending append safe.
+func newSteerDrain(st *interactiveState, send func(tea.Msg)) func() []string {
+	return func() []string {
+		items := st.popSteer()
+		if len(items) == 0 {
+			return nil
+		}
+		texts := make([]string, 0, len(items))
+		for _, it := range items {
+			send(steerDeliveredMsg{item: it})
+			if st.sess != nil {
+				st.sess.AddSteeredInput(it.text)
+			}
+			texts = append(texts, it.text)
+		}
+		return texts
+	}
 }

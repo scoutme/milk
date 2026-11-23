@@ -5154,22 +5154,12 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		// Mid-turn steering (issue #441): the tool loop pulls queued input
 		// through this closure at its model-request boundaries; each drained
 		// item's transcript echo rides the tea queue, so it lands through
-		// Update exactly like the other live hooks. Applied to the session's
-		// local turn agents only — wireLocalAgent's field is deliberately not
-		// selected by buildToolRunner (nested tool calls never steal the
-		// session queue), and background clones drop it.
-		steerDrain: func() []string {
-			items := st.popSteer()
-			if len(items) == 0 {
-				return nil
-			}
-			texts := make([]string, 0, len(items))
-			for _, it := range items {
-				send(steerDeliveredMsg{item: it})
-				texts = append(texts, it.text)
-			}
-			return texts
-		},
+		// Update exactly like the other live hooks, and its session-history
+		// record queues for the turn-end write (newSteerDrain). Applied to
+		// the session's local turn agents only — wireLocalAgent's field is
+		// deliberately not selected by buildToolRunner (nested tool calls
+		// never steal the session queue), and background clones drop it.
+		steerDrain: newSteerDrain(st, send),
 	}
 	if agents.local != nil {
 		tuiLocalAgent := withMainToolCallView(wireLocalAgent(agents.local, wiring), send)

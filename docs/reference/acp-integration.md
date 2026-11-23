@@ -38,7 +38,14 @@ milk serve --acp
   its 20-entry cap. `queue_while_busy: false` restores pure serialization.
   Order rules mirror the TUI: the steerable prefix drains first and stops
   at the first flush-path entry; Telegram inputs drain only once the prompt
-  queue is empty.
+  queue is empty. Delivered input is **persisted**: at turn end it joins the
+  session store right after the prompt it rode (`[prompt][steered…]
+  [assistant]`, exactly once), so a resume or escalation replay carries it —
+  the same record TUI and Telegram deliveries write. Every disposition logs
+  under `acp steer` in `milk.log` — `enqueue`, `deliver`, `resolved
+  delivered|fallback`, `serialize`, `refuse`, `stop` — so an after-the-fact
+  message can be attributed: no line at all means the prompt arrived while
+  idle.
 
 ## What's implemented
 

@@ -242,3 +242,37 @@ func TestWorkflowThinkChunk_StaysOutOfMainTranscript(t *testing.T) {
 		t.Error("reasoning must count as workflow activity for the idle watchdog")
 	}
 }
+
+// TestRecordUserTurnFlushesSteeredInput: input delivered into a running turn
+// at a model-request boundary (issue #441, ADR-0108) enters the session store
+// when the turn's user record is written — right after the prompt it rode,
+// in delivery order, before this turn's assistant record. The pending list
+// drains, so a later turn's record can never re-append the same line: the
+// store must hold each delivery exactly once, the way the model saw it.
+func TestRecordUserTurnFlushesSteeredInput(t *testing.T) {
+	sess := &session.Session{}
+	sess.AddSteeredInput("first steer")
+	sess.AddSteeredInput("second steer")
+
+	recordUserTurn(sess, session.AgentLocal, "mimo", "the prompt", 0)
+	want := []string{"the prompt", "first steer", "second steer"}
+	if len(sess.History) != len(want) {
+		t.Fatalf("history = %d turns, want %d: %+v", len(sess.History), len(want), sess.History)
+	}
+	for i, w := range want {
+		if sess.History[i].Role != session.RoleUser || sess.History[i].Content != w {
+			t.Errorf("history[%d] = {%s %q}, want user %q", i, sess.History[i].Role, sess.History[i].Content, w)
+		}
+	}
+	if len(sess.SteeredPending) != 0 {
+		t.Errorf("pending must drain with the record, got %#v", sess.SteeredPending)
+	}
+
+	// A later turn records only its own prompt — the drained lines stay
+	// where they landed.
+	recordUserTurn(sess, session.AgentLocal, "mimo", "next prompt", 0)
+	if len(sess.History) != 4 {
+		t.Errorf("history = %d turns, want 4 (delivered input recorded exactly once): %+v",
+			len(sess.History), sess.History)
+	}
+}
