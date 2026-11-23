@@ -83,9 +83,17 @@ drain points, promotion as the universal fallback.
   `/queue` help reads "queued while the agent works". The ADR-0083 body
   keeps its original quotes with an amendment note.
 - Telegram input captured while busy can now act on the *live* turn — it
-  previously waited for idle. ACP parity (buffer instead of serializing
-  behind `turnMu`) is the follow-up half of issue #441 and is not in this
-  decision's shipped scope.
+  previously waited for idle. ACP parity shipped as the follow-up half of
+  issue #441 (same day): a busy `session/prompt` is buffered in the
+  session's own steer queue (`cmd/milk/acp_steer.go`) and pulled by the
+  running turn's `steerDrain` at a model-request boundary — while the
+  request itself keeps blocking on `turnMu`. Delivered, it returns the
+  delivery echo's `messageId` and runs no second turn; undelivered (or
+  non-steerable — slash command, media, a pending setup wizard, or the
+  20-entry cap) it dequeues itself and runs as the next turn exactly as
+  the blocking path did. `queue_while_busy: false` keeps pure
+  serialization; the prefix-stop and remote-after-prompts order rules
+  mirror the TUI's `popSteer`.
 - Queued input reaches the model even mid-reasoning — but only at the next
   boundary; the transcript shows the delivery line where the model's next
   round begins, which is the honest depiction of what happened.

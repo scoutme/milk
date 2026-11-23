@@ -162,6 +162,16 @@ type acpSession struct {
 	// flushRemoteInputs (acp_oversight.go). Guarded by mu.
 	pendingRemoteInputs []string
 
+	// steerMu guards steerQueue — the mid-turn steering queue (issue #441,
+	// ACP parity for ADR-0108): prompts captured while a turn runs, pulled
+	// by that turn's steerDrain at a model-request boundary and echoed to
+	// the client there; the waiter stays blocked on turnMu and on waking
+	// either returns the delivery's messageId or runs its own turn. The
+	// drain runs on the turn goroutine, the waiter holds neither lock —
+	// deliberately separate from mu. Lock order: turnMu → steerMu → as.mu.
+	steerMu    sync.Mutex
+	steerQueue []*acpQueuedPrompt
+
 	// lastActive is when this session last started a prompt: routes
 	// remote-oversight input to the session the user is actually using
 	// (acp_oversight.go's handleRemoteInput).
@@ -347,6 +357,13 @@ func (as *acpSession) buildRunners(cfg config.Config) error {
 		onThinking:   as.onThinking,
 		taskStore:    as.taskStore,
 		mgr:          as.mgr,
+		// Mid-turn steering (issue #441, ADR-0108): the session's local
+		// turn agents pull queued ACP prompts through this closure at their
+		// model-request boundaries; popSteer echoes each delivery to the
+		// client (conn writes are mutex-serialized). Nested tool agents
+		// rebuild their own wiring without this field (toolagent.go) — they
+		// never steal the queue.
+		steerDrain: as.popSteer,
 	}
 	wireLocal := func(a *local.Agent) *local.Agent {
 		return wireLocalAgent(a, wiring)
@@ -624,12 +641,42 @@ func (as *acpSession) prompt(ctx context.Context, req acp.PromptRequest) (acp.Pr
 		}
 	}
 
+	// Mid-turn steering over ACP (issue #441, ADR-0108): a prompt arriving
+	// while a turn runs is queued so the running turn's steerDrain can pull
+	// it at its next model-request boundary — the TUI/Telegram flow over
+	// ACP. The waiter below still blocks on turnMu; on waking: delivered →
+	// return the delivery's messageId (no second turn, exactly one echo);
+	// not delivered → dequeue and run as the next turn, exactly as the
+	// blocking path did. queue_while_busy:false and a full queue keep the
+	// plain serialize-behind-turnMu behaviour.
+	var queuedSteer *acpQueuedPrompt
+	if prompt != backgroundFollowupPrompt && as.turnBusy() && as.cfg.QueueWhileBusyEnabled() {
+		if e := as.enqueueSteer(prompt, media); e != nil {
+			queuedSteer = e
+			extra := ""
+			if n := strings.Count(prompt, "\n") + 1; n > 1 {
+				extra += fmt.Sprintf(" ⋯ %d lines", n)
+			}
+			if media != nil && len(media.images) > 0 {
+				extra += fmt.Sprintf(" + %d images", len(media.images))
+			}
+			as.notify(acp.AgentMessageChunk(as.liveID("queue"), ansi.Strip(
+				milkTag()+fmt.Sprintf(" ⋯ queued — the agent picks it up on its next step — %q%s\n", queuePreview(prompt), extra))))
+		}
+	}
+
 	as.turnMu.Lock()
 	defer func() {
 		as.releaseTurn()
 		as.flushPendingFollowup()
 		as.flushRemoteInputs()
 	}()
+	if queuedSteer != nil {
+		if echoID, delivered := as.steerResult(queuedSteer); delivered {
+			return acp.PromptResponse{MessageID: echoID}, nil
+		}
+		as.dropSteer(queuedSteer)
+	}
 	return as.runTurn(ctx, strings.TrimSpace(text), media)
 }
 
