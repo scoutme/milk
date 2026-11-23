@@ -168,6 +168,19 @@ type Session struct {
 	// notice must survive a restart before the next prompt.
 	PendingNotices []string `json:"pending_notices,omitempty"`
 
+	// SteeredPending holds input delivered into the running turn at a model
+	// request boundary (issue #441, ADR-0108): the tool loop's drain shows
+	// it to the agent immediately, but the conversation record is only
+	// written when the turn ends — so the delivered lines wait here and
+	// recordUserTurn appends them right after the prompt they rode, keeping
+	// history in [prompt][steered…][assistant] order across TUI, ACP and
+	// Telegram deliveries. Transient: never persisted (json:"-") — a crash
+	// mid-turn loses nothing the store already held, exactly like the model
+	// side of the same turn. Written and drained only by the turn's own
+	// goroutine (the drain runs inside the loop; the flush at turn end
+	// follows it), so no locking.
+	SteeredPending []string `json:"-"`
+
 	// RepetitionBaselineLocalTurns is the total user-turn count (all agents) at the
 	// moment the user last returned to the primary agent via /primary. The
 	// repeated-prompt check skips any user turns before this index so that prompts
@@ -772,6 +785,13 @@ func EscalationMostRecent(s *Session) bool {
 // AddNotice queues a milk-authored event for the next user turn (see PendingNotices).
 func (s *Session) AddNotice(n string) {
 	s.PendingNotices = append(s.PendingNotices, n)
+}
+
+// AddSteeredInput queues one delivered steering line for the turn-end
+// history record (see SteeredPending). Called from the tool-loop drain —
+// the running turn's own goroutine, before recordUserTurn runs.
+func (s *Session) AddSteeredInput(text string) {
+	s.SteeredPending = append(s.SteeredPending, text)
 }
 
 func (s *Session) AddTurn(t Turn) {

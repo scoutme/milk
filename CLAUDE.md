@@ -51,6 +51,7 @@ cmd/milk/acp_workflow.go      # ACP: runs workflows inside session/prompt (host 
 cmd/milk/acp_initwizard.go    # ACP: /config init input surfaces — elicitation forms (choices + pre-populated defaults), clickable choice prompts (session/request_permission options), typed chat floor with per-question 'default' hints
 cmd/milk/acp_followup.go      # ACP: automatic follow-up turn when background jobs finish
 cmd/milk/acp_oversight.go     # ACP: remote oversight (Telegram) — process notifier lifecycle, permission race vs the client, remote-input routing
+cmd/milk/acp_steer.go         # ACP mid-turn steering (issue #441, ADR-0108): busy session/prompt → session steer queue (steerMu), popSteer drains into the running turn's steerDrain (prefix stop, wizard refusal, remote-after-prompts), waiter returns the delivery echo's messageId or runs its own turn
 cmd/milk/acp_setup.go         # ACP: /setup telegram — status/enable/disable plus the interactive wizard (token as typed chat, confirm over elicitation/choice/typed floors; core is telegram_setup_core.go)
 cmd/milk/acp_signals.go       # ACP: route announcements and loop/consumption warnings
 cmd/milk/acp_update.go        # ACP: /update check|status|install|skip + the one-shot update-available notice (core is update_core.go)
@@ -64,7 +65,7 @@ cmd/milk/harness_import.go    # read-only scan of other harnesses' configs (Clau
 cmd/milk/configview.go        # host-independent /config surface (renderers + the "open" action rules), shared by TUI, CLI and ACP
 cmd/milk/idlewatch.go         # shared idle watchdog: activity-refreshed turn warning + opt-in deadline wrap-up, TUI and ACP (issue #305)
 cmd/milk/theme.go             # themes-as-data core (ADR-0107): themeDef tokens + chrome block, resolveChrome, rebuildStyles/pulse/glamour, applyThemeDef, themeTerminalOSCs (OSC push + restore) — family: theme_registry.go (registry seam), theme_chrome.go (setTheme/handleThemeCmd), theme_carousel.go, theme_wizard.go
-cmd/milk/steer.go             # mid-turn steering (issue #441, ADR-0108): steerable-prefix drain of the busy queues (steerMu, flush-path stop rule, global FIFO) + the delivery echo msg — agent side is local.WithSteerDrain + runToolLoop's two boundary drains
+cmd/milk/steer.go             # mid-turn steering (issue #441, ADR-0108): steerable-prefix drain of the busy queues (steerMu, flush-path stop rule, global FIFO) + the delivery echo msg — agent side is local.WithSteerDrain + runToolLoop's two boundary drains; ACP half is acp_steer.go (session steer queue + popSteer, waiter keeps blocking on turnMu)
 internal/tmux/                 # tmux session driver (send-keys + capture-pane polling) — state-synchronized terminal control shared by eval's claude adapter and the showcase recorder
 internal/showcase/              # showcase manifest (beats = keys + pane-state waits), calibration recorder + assertion verifier runners, vhs-tape generator, clean config root (ADR-0099)
 internal/transport/streamjson/ # typed §6 event model + JSONL encoder/decoder for --output-format stream-json

@@ -83,12 +83,31 @@ drain points, promotion as the universal fallback.
   `/queue` help reads "queued while the agent works". The ADR-0083 body
   keeps its original quotes with an amendment note.
 - Telegram input captured while busy can now act on the *live* turn — it
-  previously waited for idle. ACP parity (buffer instead of serializing
-  behind `turnMu`) is the follow-up half of issue #441 and is not in this
-  decision's shipped scope.
+  previously waited for idle. ACP parity shipped as the follow-up half of
+  issue #441 (same day): a busy `session/prompt` is buffered in the
+  session's own steer queue (`cmd/milk/acp_steer.go`) and pulled by the
+  running turn's `steerDrain` at a model-request boundary — while the
+  request itself keeps blocking on `turnMu`. Delivered, it returns the
+  delivery echo's `messageId` and runs no second turn; undelivered (or
+  non-steerable — slash command, media, a pending setup wizard, or the
+  20-entry cap) it dequeues itself and runs as the next turn exactly as
+  the blocking path did. `queue_while_busy: false` keeps pure
+  serialization; the prefix-stop and remote-after-prompts order rules
+  mirror the TUI's `popSteer`.
 - Queued input reaches the model even mid-reasoning — but only at the next
   boundary; the transcript shows the delivery line where the model's next
   round begins, which is the honest depiction of what happened.
+- Delivered input is persisted like any other user message (the gap the
+  first live ACP test exposed): the drain queues each line on the session
+  (`Session.AddSteeredInput`), and the turn's `recordUserTurn` writes it
+  into history right after the prompt it rode — `[prompt][steered…]
+  [assistant]`, exactly once, across TUI, ACP and Telegram deliveries.
+  Nothing enters the store mid-run, matching the prompt itself (also
+  recorded at turn end), so the session-history tool's mid-run view stays
+  consistent. Over ACP every disposition logs under `acp steer` in
+  `milk.log` (`enqueue`/`deliver`/`resolved`/`serialize`/`refuse`/`stop`),
+  so a queued-while-busy message is attributable after the fact — no line
+  at all means it arrived idle.
 - A steered message is not re-routed through command handling, PTY or
   attachment staging by construction; anything needing those paths can never
   be mis-delivered as model text.

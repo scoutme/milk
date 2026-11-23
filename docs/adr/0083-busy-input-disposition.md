@@ -7,7 +7,11 @@
   model-request boundary instead of waiting for the next turn; the
   one-per-turn flush below remains the path for everything that cannot steer
   and the fallback when the turn ends first. Receipt/hint wording changed
-  with it (`⋯ queued — the agent picks it up on its next step — …`).
+  with it (`⋯ queued — the agent picks it up on its next step — …`). The
+  ACP half followed in #446: a busy `session/prompt` now buffers in the
+  session's steer queue and is pulled by the running turn the same way, so
+  the "ACP parity is a non-goal" consequence below is this record's
+  original scope, superseded by the amendment.
 
 ## Context
 

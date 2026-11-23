@@ -246,6 +246,9 @@ over `handleAgentDone`'s priority order, mirroring `followup_core.go`'s
 - **ACP parity** — none needed: ACP `session/prompt` already queues behind
   `turnMu` (the "prompt queue" `acp_commands.go` refers to), so editors get
   queue semantics for free. The TUI is the gap this feature closes.
+  *(Update 2026-11-23: superseded — [ADR-0108](../../adr/0108-mid-turn-steering.md)
+  plus #446 gave ACP real mid-turn steering; serialization behind `turnMu` is
+  now ACP's fallback for what cannot steer, not its queue.)*
 - **Reordering/editing queued prompts** — drop + retype is enough for a queue
   whose lifetime is bounded by one turn; `promote`/`edit` can come later if
   live use demands it.

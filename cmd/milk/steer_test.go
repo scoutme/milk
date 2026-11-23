@@ -9,7 +9,10 @@ import (
 	"sync"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/session"
 )
 
 // TestSteerablePrompt pins the predicate to submitInput's own dispatch rule:
@@ -174,4 +177,42 @@ func TestSteerQueuePopAppendRace(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// TestSteerDrain_QueuesSessionRecord: the wiring drain hands every delivered
+// item to Update (transcript + input histories) AND queues its session-store
+// record — delivered steering must reach the conversation record like any
+// other user message (ADR-0108 persistence), with nothing left behind for a
+// later turn to re-append.
+func TestSteerDrain_QueuesSessionRecord(t *testing.T) {
+	st := &interactiveState{cfg: config.Config{}, sess: &session.Session{}}
+	st.queuedPrompts = []queuedPrompt{{text: "steer this"}}
+
+	var echoed []steerDeliveredMsg
+	send := func(m tea.Msg) {
+		if d, ok := m.(steerDeliveredMsg); ok {
+			echoed = append(echoed, d)
+		}
+	}
+	drain := newSteerDrain(st, send)
+
+	texts := drain()
+	if len(texts) != 1 || texts[0] != "steer this" {
+		t.Fatalf("drain = %#v, want the queued text once", texts)
+	}
+	if len(echoed) != 1 {
+		t.Errorf("each delivery must reach Update for the transcript echo, got %d", len(echoed))
+	}
+	if got := st.sess.SteeredPending; len(got) != 1 || got[0] != "steer this" {
+		t.Errorf("delivered input must queue its session-history record, got %#v", got)
+	}
+
+	// Nothing left to drain: empty pop, pending untouched (recordUserTurn
+	// owns the flush, not the next drain).
+	if more := drain(); len(more) != 0 {
+		t.Errorf("second drain over an empty queue = %#v, want none", more)
+	}
+	if len(st.sess.SteeredPending) != 1 {
+		t.Errorf("pending must survive until the turn's record, got %#v", st.sess.SteeredPending)
+	}
 }

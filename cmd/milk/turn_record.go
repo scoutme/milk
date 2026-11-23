@@ -153,9 +153,19 @@ func pendingEventsBlock(sess *session.Session) (string, int) {
 }
 
 // recordUserTurn adds the user's turn and consumes the nNotices notices that
-// were already shown to the agent in this turn's prompt.
+// were already shown to the agent in this turn's prompt. Input the running
+// turn already consumed through the steering drain (issue #441, ADR-0108)
+// joins the record immediately after the prompt, in delivery order — the
+// model saw those lines at their boundary; this is the store catching up at
+// turn end, before this turn's assistant record. Pending lines left by a
+// turn that never reached its own record (interrupted-read-only) ride the
+// next one, rather than being dropped.
 func recordUserTurn(sess *session.Session, agent session.Agent, agentName, content string, nNotices int) {
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: agent, AgentName: agentName, Content: content})
+	for _, text := range sess.SteeredPending {
+		sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: agent, AgentName: agentName, Content: text})
+	}
+	sess.SteeredPending = nil
 	sess.PendingNotices = sess.PendingNotices[min(nNotices, len(sess.PendingNotices)):]
 }
 
