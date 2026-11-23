@@ -350,6 +350,16 @@ and the header bar's own `#1b1b1f` moved to a `chrome.header_bg` slot
 supermilk's does. off also declares `text` (the classic body ink), which
 the swatch strip needs to show the full base/raised/text/accent quartet.
 
+Later fix (the "colors must be used" passes): the declared colors now
+*render*. `text` inks the prose (the glamour renderer is rebuilt per
+activation with its document colour on the token) and classic tool-fold
+bodies. `base` paints the ground on every look — the view body is tinted
+with it and `applyThemeTerminal` pushes it as the terminal background
+(ink/cursor from `text`), replacing the skin-only gate; palette-less
+classic themes still leave the terminal alone. The OSC set is derived at
+push time (`themeTerminalOSCs`), so it follows the detected dark/light
+ground and is re-pushed when detection flips.
+
 Boundaries (documented, not gaps): **ANSI semantic slots** — error red,
 spinner yellow, the bold-yellow highlight, status agent 1/3/8 — stay
 indexed and ride the terminal's own palette (`terminal.ansi16`, which

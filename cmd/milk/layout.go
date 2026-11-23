@@ -457,10 +457,12 @@ func (m model) viewString() string {
 	if !m.ready {
 		return ""
 	}
-	if th.skin {
-		if bg := tkBase.sgrBg(); bg != "" {
-			return tintBlock(m.viewBody(), m.width-1, bg) // last column left to the terminal default (same colour via OSC 11): a full-width row can double-advance on ConPTY
-		}
+	// The theme's ground paints the view body (base — for off the standard
+	// black background), any look: the last column stays unpainted for
+	// ConPTY (a full-width row can double-advance) and matches via the OSC
+	// background applyThemeTerminal pushes.
+	if bg := tkBase.sgrBg(); bg != "" {
+		return tintBlock(m.viewBody(), m.width-1, bg)
 	}
 	return m.viewBody()
 }

@@ -517,21 +517,54 @@ func osc(format string, a ...any) {
 	fmt.Fprintf(os.Stdout, "\x1b]"+format+"\x1b\\", a...)
 }
 
-// applyThemeTerminal pushes the theme's colours into the terminal emulator:
-// default background/foreground/cursor and the 16-colour ANSI palette, so
-// everything milk does not paint itself (edge columns, scrollbar gutter,
-// ANSI-coloured text) matches. Returns the restore func. A no-op for "off".
-func applyThemeTerminal() func() {
-	if !isTTY || !th.skin {
-		return func() {}
+// themeTerminalOSCs is the OSC payload set for the active theme: the ground
+// (the theme's terminal block when declared, else the palette's base — for
+// off the standard black background), the ink (terminal fg, else text) and
+// the cursor, then the 16-colour ANSI ramp. Every theme now paints its own
+// ground — darken/lighten variants move it like every other surface — while
+// a theme that declares neither a terminal block nor a palette produces
+// nothing and the terminal keeps its own colours.
+func themeTerminalOSCs() []string {
+	bg := th.termBg
+	if bg == "" {
+		bg = th.base.pick()
 	}
-	osc("11;%s", th.termBg)
-	osc("10;%s", th.termFg)
-	osc("12;%s", th.termCursor)
+	ink := th.termFg
+	if ink == "" {
+		ink = th.text.pick()
+	}
+	cursor := th.termCursor
+	if cursor == "" {
+		cursor = ink
+	}
+	var out []string
+	for _, kv := range []struct{ code, val string }{
+		{"11", bg}, {"10", ink}, {"12", cursor},
+	} {
+		if kv.val != "" {
+			out = append(out, kv.code+";"+kv.val)
+		}
+	}
 	for i, c := range th.termAnsi {
 		if c != "" {
-			osc("4;%d;%s", i, c)
+			out = append(out, fmt.Sprintf("4;%d;%s", i, c))
 		}
+	}
+	return out
+}
+
+// applyThemeTerminal pushes the theme's colours into the terminal emulator:
+// background/foreground/cursor and the 16-colour ANSI palette, so everything
+// milk does not paint itself (edge columns, scrollbar gutter, ANSI-coloured
+// text) sits on the theme's ground with the theme's ink. Returns the restore
+// func. A no-op when the theme declares nothing (palette-less classic
+// drop-ins leave the terminal entirely alone).
+func applyThemeTerminal() func() {
+	if !isTTY {
+		return func() {}
+	}
+	for _, payload := range themeTerminalOSCs() {
+		osc("%s", payload)
 	}
 	return restoreTerminalColors
 }
