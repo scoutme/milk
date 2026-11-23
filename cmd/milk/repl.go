@@ -1139,6 +1139,12 @@ type model struct {
 	// new walks mode → base → colors → terminal → tagline → review (or the
 	// variant carousel), previewing through the real switch path.
 	pendingThemeWizard *themeWizardState
+	// pendingTerminalApply defers the terminal palette push until the
+	// background query answers — the paint protocol spelled out in
+	// theme.go: startup and every /theme switch restore the terminal's own
+	// palette and stage the paint; BackgroundColorMsg (answer at native
+	// colours) or terminalPaintTimeout (no OSC 11 support) performs it.
+	pendingTerminalApply bool
 
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
@@ -2622,6 +2628,10 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		textarea.Blink,
 		tea.RequestBackgroundColor,
+		// Staged startup paint (theme.go's paint protocol): if the
+		// terminal never answers the query, paint anyway with the current
+		// verdict instead of never painting at all.
+		terminalPaintTimeout(),
 	}
 	// Memory panel redraw + content-driven auto-open (ADR-0078) — armed
 	// unconditionally (the panel starts closed and the tick is what notices
@@ -3902,16 +3912,31 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.BackgroundColorMsg:
-		if setDarkBackground(msg.IsDark()) {
+		changed := setDarkBackground(msg.IsDark())
+		if changed {
 			refreshThemeColors()
-			// The ground/ink pushed to the terminal follow the detected
-			// ground too (themeTerminalOSCs picks the variant) — re-push
-			// alongside the rebuild so the palette cannot go stale.
-			applyThemeTerminal()
 			m.colorizeForce = true
 			m.turnColorCache = nil
 			m.turnRawCache = nil
 			m.viewportDirty = true
+		}
+		// The answer arrived at native colours (the switch restored before
+		// asking — theme.go's paint protocol): rebuild done, now perform the
+		// staged paint — or re-push on a genuine verdict change (an
+		// unsolicited later answer, e.g. the terminal's own theme flipping),
+		// so the pushed palette can never go stale.
+		if m.pendingTerminalApply || changed {
+			m.pendingTerminalApply = false
+			applyThemeTerminal()
+		}
+		return m, nil
+
+	case terminalPaintTimeoutMsg:
+		// No answer (no OSC 11 support): paint with the current verdict —
+		// best effort instead of never — and clear the staging either way.
+		if m.pendingTerminalApply {
+			m.pendingTerminalApply = false
+			applyThemeTerminal()
 		}
 		return m, nil
 
@@ -5925,7 +5950,14 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 	loadThemeRegistry(sess.CWD)
 	setTheme(st.cfg.Theme)
 	animationsEnabled = isTTY && st.cfg.AnimationsEnabled()
-	defer applyThemeTerminal()()
+	// Paint protocol (theme.go): never push before the first query answers —
+	// the program has not started yet, so a sync push here would sit under
+	// Init's query and latch milk's own colour at birth. Stage it instead;
+	// BackgroundColorMsg (or the Init timeout) paints. Exit hands the
+	// terminal's palette back whether or not a paint ever happened (a reset
+	// to the terminal's own defaults is a no-op if milk never painted).
+	m.pendingTerminalApply = true
+	defer restoreTerminalColors()
 	p := tea.NewProgram(m)
 	clipboardProgram = p
 	st.program = p

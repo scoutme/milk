@@ -197,19 +197,21 @@ func (m model) openThemeWizard() (tea.Model, tea.Cmd) {
 func (m model) themeWizardCancel() (tea.Model, tea.Cmd) {
 	w := m.pendingThemeWizard
 	m.pendingThemeWizard = nil
-	if w != nil && th.name != w.orig {
-		if th.skin {
-			restoreTerminalColors()
+	if w != nil {
+		if th.name != w.orig {
+			setTheme(w.orig)
+			m.themeChanged()
 		}
-		setTheme(w.orig)
-		applyThemeTerminal()
-		m.themeChanged()
+		// Paint protocol (theme.go): restore the terminal's own palette and
+		// stage the repaint for the answer — never paint before the query.
+		restoreTerminalColors()
+		m.pendingTerminalApply = true
 	}
 	m.ta.Reset()
 	m.appendTranscript(milkTag() + " theme builder: cancelled\n")
 	m.refreshPrompt()
 	m.syncLayout()
-	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor)
+	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor, terminalPaintTimeout())
 }
 
 // themeWizardPreview applies the candidate through the real switch path
@@ -268,7 +270,10 @@ func (m model) themeWizardSave(w *themeWizardState) (tea.Model, tea.Cmd) {
 	m.pendingThemeWizard = nil
 	loadThemeRegistry(m.themeProjectDir())
 	setTheme(out.Name)
-	applyThemeTerminal()
+	// Paint protocol (theme.go): restore → ask → staged paint; the query
+	// below must be answered with the terminal's own ground, not this paint.
+	restoreTerminalColors()
+	m.pendingTerminalApply = true
 	m.st.cfg.Theme = th.name
 	m.themeChanged()
 	m.ta.Reset()
@@ -279,7 +284,7 @@ func (m model) themeWizardSave(w *themeWizardState) (tea.Model, tea.Cmd) {
 	}
 	m.appendTranscript(fmt.Sprintf("%s theme builder: saved %s → %s\n", milkTag(), bold(out.Name), path))
 	m.syncLayout()
-	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor)
+	return m, tea.Batch(tea.ClearScreen, tea.RequestBackgroundColor, terminalPaintTimeout())
 }
 
 // handleThemeWizardKey routes one key to the open builder.
