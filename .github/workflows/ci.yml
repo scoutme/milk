@@ -63,6 +63,17 @@ jobs:
       - name: go test -race
         run: go test -race ./cmd/milk ./internal/...
 
+  # The job that would have caught #440: install.sh must survive `set -e`
+  # (a silent exit before its first message is exactly the shipped bug).
+  shell:
+    name: shell (install scripts, #440)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install-script harness
+        run: sh scripts/test-install.sh
+
   windows:
     name: windows (build + vet blocking, tests advisory)
     runs-on: windows-latest

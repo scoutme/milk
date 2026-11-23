@@ -43,7 +43,11 @@ detect_platform() {
     esac
 
     EXT=""
-    [ "$GOOS" = "windows" ] && EXT=".exe"
+    # if/then, not `[ "$GOOS" = "windows" ] && EXT=".exe"`: as the function's
+    # last statement that idiom returns 1 whenever the test is false, and main
+    # calls detect_platform as a plain command under `set -e` — the script then
+    # died silently before its first message on Linux/macOS (issue #440).
+    if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
 }
 
 resolve_version() {
@@ -98,7 +102,10 @@ download_binary() {
             rm -rf "$TMP_DIR"
             error "Checksum mismatch for $BINARY_NAME (expected $EXPECTED, got $ACTUAL)."
         fi
-        [ -n "$ACTUAL" ] && success "Checksum verified"
+        # if/then, same set -e discipline as detect_platform (issue #440):
+        # `[ ... ] && success` would leave a failing list standing on shells
+        # that do not exempt the test inside an AND-OR list.
+        if [ -n "$ACTUAL" ]; then success "Checksum verified"; fi
     fi
 
     mkdir -p "$BIN_DIR"
