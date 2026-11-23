@@ -11,14 +11,13 @@ import (
 // path (parseTheme), so builtin-vs-drop-in differs only in *discovery*
 // (embedded dir vs filesystem dirs), never in representation. The descriptors
 // double as the working examples to copy when writing your own theme: what a
-// minimal classic theme declares (off.json) and what a fully explicit skin
-// carries (supermilk.json) are both real, loadable files in this repo — and
-// /theme view renders any theme's JSON uniformly (plan PR 2). Parity with
-// the pre-registry themeDef literals is pinned by cmd/milk's
-// theme_parity_test.go; "off" stays special only in what it declares: shape
-// classic, no terminal block, just the focus tint as a token — its hardcoded
-// chrome colours are the design (ADR-0077), so its other tokens stay absent
-// and the render layer keeps its own fallbacks.
+// minimal classic theme declares (off.json), a fully declared classic look
+// with its own palette, chrome block and tagline (space.json), and what a
+// fully explicit skin carries (supermilk.json) are all real, loadable files
+// in this repo — and /theme view renders any theme's JSON uniformly (plan
+// PR 2). Parity with the pre-registry themeDef literals is pinned by
+// cmd/milk's theme_parity_test.go for the two themes that predate the
+// registry (off, supermilk); space arrived as data and needs no golden.
 //
 //go:embed themes/*.json
 var themesFS embed.FS
@@ -28,8 +27,9 @@ var themesFS embed.FS
 var builtinRaw = map[string]string{}
 
 // builtins is the registry's seed, in embedded file-name order
-// (off.json < supermilk.json — alphabetical today; revisit if a third
-// builtin ever needs a different listing position).
+// (off.json < space.json < supermilk.json — alphabetical today, which lands
+// the shipped "space" look between the other two; revisit if a future
+// builtin needs a different listing position).
 var builtins = mustLoadBuiltins()
 
 func mustLoadBuiltins() []*Theme {
@@ -70,8 +70,8 @@ func builtin(name string) *Theme {
 	panic("theme: no builtin " + name)
 }
 
-// The two builtins by name, for tests and callers that mean exactly one of
-// them (resolution always goes through the Registry).
+// Builtins by name, for tests and callers that mean exactly one of them
+// (resolution always goes through the Registry).
 var (
 	builtinOff       = builtin("off")
 	builtinSuperMilk = builtin("supermilk")

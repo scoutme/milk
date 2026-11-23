@@ -219,6 +219,7 @@ var commandRegistry = []cmdSpec{
   /theme reload          rescan the theme dirs — drop-in themes, no restart
   /theme view [name]     print a theme's JSON (copy-paste starting point)
   /theme off             original look (default)
+  /theme space           deep space: void-navy ground, icy cyan accent
   /theme supermilk       milk-white skin, soft ink, hairlines`},
 	{name: cmdColorize, hosts: hostTUI, desc: "show or set the markdown colorization mode", hint: "[off|fenced|balanced|full]", help: `  /colorize              show current colorization mode
   /colorize off          no colorization

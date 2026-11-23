@@ -29,7 +29,7 @@ Resolution flattens the `extends` chain (later overrides earlier per non-empty f
 
 ### 2. Registry: embedded builtins, drop-in discovery
 
-`internal/theme`'s registry seeds from **embedded JSON descriptors** (`internal/theme/themes/off.json`, `supermilk.json`) — the exact same schema as drop-ins, going through the exact same parse/validate path (builtin-vs-drop-in differs only in *discovery*, never representation) and doubling as the working examples for theme authors (`/theme view` prints any theme's JSON in the same shape). Discovery layers: **builtin → `~/.milk/themes/*.json` (state root) → `<cwd>/.milk/themes/*.json`** — project shadows user shadows builtin. Invalid files are skipped with a warning that `/theme list` surfaces. `/theme reload` rescans the dirs; no auto-reload.
+`internal/theme`'s registry seeds from **embedded JSON descriptors** (`internal/theme/themes/off.json`, `space.json`, `supermilk.json`) — the exact same schema as drop-ins, going through the exact same parse/validate path (builtin-vs-drop-in differs only in *discovery*, never representation) and doubling as the working examples for theme authors (`/theme view` prints any theme's JSON in the same shape). Discovery layers: **builtin → `~/.milk/themes/*.json` (state root) → `<cwd>/.milk/themes/*.json`** — project shadows user shadows builtin. Invalid files are skipped with a warning that `/theme list` surfaces. `/theme reload` rescans the dirs; no auto-reload.
 
 ### 3. Declared colours must be *rendered*
 
