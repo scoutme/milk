@@ -132,30 +132,32 @@ func staleContentColor(ratio float64) string {
 	if ratio > 1 {
 		ratio = 1
 	}
-	if th.modern {
+	if th.skin {
 		// grey → dark grey: readable on a light ground, staleness reads as
 		// the text settling into the page
 		g := 150 + int(float64(58-150)*ratio)
 		return fmt.Sprintf("\033[0;38;2;%d;%d;%dm", g, g-2, g-6)
 	}
-	// Truecolor gradient, no \033[2m dim modifier:
-	//   ratio=0   → (220, 218, 215)  bright near-white  (full brightness, fresh)
-	//   ratio=0.5 → (195, 130, 55)   amber              (warming, mid-age)
-	//   ratio=1   → (175, 65,  40)   muted orange-red   (clearly stale)
+	// Truecolor gradient over the chrome block's staleness ramp (classic
+	// default: fresh near-white → amber → muted orange-red), no \033[2m dim
+	// modifier — full brightness at ratio=0 (fresh), clearly stale at 1.
 	lerp := func(a, b int, t float64) int {
 		return a + int(float64(b-a)*t)
 	}
+	r0, g0, b0 := hexRGB(chromeStaleFresh.pick())
+	r1, g1, b1 := hexRGB(chromeStaleMid.pick())
+	r2, g2, b2 := hexRGB(chromeStaleWarm.pick())
 	var r, g, b int
 	if ratio <= 0.5 {
 		t := ratio * 2
-		r = lerp(220, 195, t)
-		g = lerp(218, 130, t)
-		b = lerp(215, 55, t)
+		r = lerp(r0, r1, t)
+		g = lerp(g0, g1, t)
+		b = lerp(b0, b1, t)
 	} else {
 		t := (ratio - 0.5) * 2
-		r = lerp(195, 175, t)
-		g = lerp(130, 65, t)
-		b = lerp(55, 40, t)
+		r = lerp(r1, r2, t)
+		g = lerp(g1, g2, t)
+		b = lerp(b1, b2, t)
 	}
 	return fmt.Sprintf("\033[0;38;2;%d;%d;%dm", r, g, b)
 }

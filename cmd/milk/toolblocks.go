@@ -162,7 +162,7 @@ func (m *model) toolHeader(b *toolBlock) string {
 // surface — the accent keeps execution distinct from reasoning's muted
 // header on the same surface (ADR-0070's italic-tool-name vocabulary).
 func toolHeaderLine(s string) string {
-	if th.modern {
+	if th.skin {
 		return thinkSurfaceLines(s, ansiThinkBg+"\033[3m"+tkAccent.sgrFg())
 	}
 	return thinkSurfaceLines(s, ansiThinkBg+ansiDim)
@@ -172,8 +172,13 @@ func toolHeaderLine(s string) string {
 // fold surface (no reasoning tint, no italic — input/output is data, not
 // thought).
 func toolBodyLine(s string) string {
-	if th.modern {
+	if th.skin {
 		return thinkSurfaceLines(compactBlankLines(s), ansiThinkBg+tkText.sgrFg())
+	}
+	if tkText.present() {
+		// Body ink as data: a classic theme that declares text paints its
+		// tool data with it; palette-less themes keep the terminal default.
+		return thinkSurfaceLines(s, ansiThinkBg+tkText.sgrFg())
 	}
 	return thinkSurfaceLines(s, ansiThinkBg)
 }

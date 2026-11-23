@@ -33,25 +33,69 @@ func panelTabName(region panelRegion) string {
 	return ""
 }
 
-// handleThemeCmd handles /theme [off|supermilk]: switches the theme live,
-// pushes its colours into the terminal and persists the choice.
+// handleThemeCmd handles /theme [name|list|reload|view|carousel]: bare
+// /theme (and /theme carousel) opens the live-preview browse flyover,
+// <name> switches the theme live and persists the choice, `list` renders the
+// registry with each theme's source, `reload` rescans the theme dirs
+// (~/.milk/themes and <project>/.milk/themes) so a drop-in JSON theme
+// appears without a restart, and `view` prints a theme's JSON — the
+// copy-paste starting point for theme authors. The reserved words win over
+// a theme of the same name.
 func (m model) handleThemeCmd(arg string) (tea.Model, tea.Cmd) {
-	if arg == "" {
-		m.appendTranscript(fmt.Sprintf("%s theme: %s  (use /theme off|supermilk)\n", milkTag(), bold(th.name)))
+	fields := strings.Fields(arg)
+	switch {
+	case len(fields) == 0, len(fields) == 1 && fields[0] == "carousel":
+		return m.openThemeCarousel()
+	case len(fields) == 1 && strings.EqualFold(fields[0], "new"):
+		return m.openThemeWizard()
+	case len(fields) == 1 && fields[0] == "list":
+		m.appendTranscript(themeListText())
+		return m, nil
+	case len(fields) == 1 && fields[0] == "reload":
+		loadThemeRegistry(m.themeProjectDir())
+		note := fmt.Sprintf("%s theme dirs rescanned: %d themes", milkTag(), len(themeRegistry.Names()))
+		if w := themeRegistry.Warnings(); len(w) > 0 {
+			note += fmt.Sprintf(" (%d skipped)", len(w))
+		}
+		m.appendTranscript(note + "\n")
+		for _, warn := range themeRegistry.Warnings() {
+			m.appendTranscript(milkTag() + " warning: " + warn + "\n")
+		}
+		return m, nil
+	case len(fields) >= 1 && fields[0] == "view":
+		name := th.name
+		if len(fields) == 2 {
+			name = fields[1]
+		} else if len(fields) > 2 {
+			break // fall through to usage
+		}
+		body, ok := themeViewText(name)
+		if !ok {
+			m.appendTranscript(milkTag() + " usage: /theme view [name] — unknown theme\n")
+			return m, nil
+		}
+		m.appendTranscript(milkTag() + " theme " + name + ":\n" + body)
+		if !strings.HasSuffix(body, "\n") {
+			m.appendTranscript("\n")
+		}
 		return m, nil
 	}
-	if _, ok := themes[strings.ToLower(arg)]; !ok {
-		m.appendTranscript(milkTag() + " usage: /theme [off|supermilk]\n")
+	if len(fields) != 1 {
+		m.appendTranscript(milkTag() + " usage: /theme [name|list|reload|view|carousel]\n")
 		return m, nil
 	}
-	if th.modern {
+	arg = fields[0]
+	if _, ok := themeDefFor(arg); !ok {
+		m.appendTranscript(milkTag() + " usage: /theme [name|list|reload|view|carousel]\n")
+		return m, nil
+	}
+	if th.skin {
 		restoreTerminalColors()
 	}
 	setTheme(arg)
 	applyThemeTerminal()
 	m.st.cfg.Theme = th.name
-	m.colorizeForce = true
-	m.viewportDirty = true
+	m.themeChanged()
 	if err := saveLocalOrGlobal(m.st.cfg, activeConfigDir(m.st)); err != nil {
 		m.appendTranscript(fmt.Sprintf("%s theme: %s (config save failed: %v)\n", milkTag(), bold(th.name), err))
 	} else {

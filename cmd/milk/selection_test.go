@@ -84,7 +84,7 @@ func TestApplyInputHighlight_FullLine(t *testing.T) {
 	// Plain line, indent=0, select all.
 	line := "hello world"
 	result := applyInputHighlight(line, 0, 0, 11)
-	if !strings.Contains(result, "\x1b[48;5;240m") {
+	if !strings.Contains(result, inputSelectionOn) {
 		t.Error("expected selection highlight escape in output")
 	}
 	if !strings.Contains(result, "hello world") {
@@ -96,13 +96,13 @@ func TestApplyInputHighlight_PartialSelection(t *testing.T) {
 	line := "hello world"
 	result := applyInputHighlight(line, 0, 0, 5)
 	// Should highlight "hello" and leave " world" unhighlighted.
-	if !strings.Contains(result, "\x1b[48;5;240m") {
+	if !strings.Contains(result, inputSelectionOn) {
 		t.Error("expected selection highlight escape")
 	}
 	if !strings.Contains(result, "\x1b[49m") {
 		t.Error("expected background-reset escape after highlight")
 	}
-	plain := strings.ReplaceAll(strings.ReplaceAll(result, "\x1b[48;5;240m", ""), "\x1b[49m", "")
+	plain := strings.ReplaceAll(strings.ReplaceAll(result, inputSelectionOn, ""), "\x1b[49m", "")
 	if plain != "hello world" {
 		t.Errorf("expected plain text unchanged, got %q", plain)
 	}
@@ -112,7 +112,7 @@ func TestApplyInputHighlight_WithIndent(t *testing.T) {
 	// 5-char indent prefix + "hello world" content.
 	line := "     hello world"
 	result := applyInputHighlight(line, 5, 0, 5)
-	if !strings.Contains(result, "\x1b[48;5;240m") {
+	if !strings.Contains(result, inputSelectionOn) {
 		t.Error("expected selection highlight inside content")
 	}
 	// Prefix should be preserved.
@@ -145,7 +145,7 @@ func TestApplyInputHighlight_NegativeLo(t *testing.T) {
 	line := "hello world"
 	// Negative selLo should be clamped to 0.
 	result := applyInputHighlight(line, 0, -3, 5)
-	if !strings.Contains(result, "\x1b[48;5;240m") {
+	if !strings.Contains(result, inputSelectionOn) {
 		t.Error("expected highlight for negative selLo clamped to 0")
 	}
 }

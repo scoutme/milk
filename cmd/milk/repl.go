@@ -1131,6 +1131,14 @@ type model struct {
 
 	// pending bare /plugins marketplace browse (flyover, install on enter)
 	pendingPluginBrowse *pluginBrowseState
+	// pendingThemeCarousel is the open /theme browse flyover (PR 2 of the
+	// themes plan): arrows/wheel live-preview candidates, enter applies,
+	// any other key restores and closes.
+	pendingThemeCarousel *themeCarouselState
+	// pendingThemeWizard is the open theme-builder session (PR 3): /theme
+	// new walks mode → base → colors → terminal → tagline → review (or the
+	// variant carousel), previewing through the real switch path.
+	pendingThemeWizard *themeWizardState
 
 	// pending /setup telegram wizard
 	pendingTelegramSetup *telegramSetupState
@@ -2225,6 +2233,41 @@ func enableMouseTracking() {
 }
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// The theme carousel hijacks the mouse while open (plan PR 2): the wheel
+	// cycles candidates with live preview and any press closes the browse
+	// like any other key — before the panel/transcript scroll handlers, so a
+	// wheel tick can never scroll the transcript under the flyover.
+	if m.pendingThemeCarousel != nil {
+		ev := newMouseEvent(msg)
+		switch {
+		case ev.Button == tea.MouseWheelUp:
+			return m.themeCarouselStep(-1)
+		case ev.Button == tea.MouseWheelDown:
+			return m.themeCarouselStep(+1)
+		case ev.Action == mousePress:
+			return m.themeCarouselClose()
+		}
+		return m, nil
+	}
+	// The builder's variant step borrows the same gesture: the wheel steps
+	// lightness like the carousel steps themes; a press cancels the build.
+	if m.pendingThemeWizard != nil {
+		ev := newMouseEvent(msg)
+		w := m.pendingThemeWizard
+		switch {
+		case ev.Button == tea.MouseWheelUp, ev.Button == tea.MouseWheelDown:
+			delta := 0.05
+			if ev.Button == tea.MouseWheelUp {
+				delta = -0.05
+			}
+			w.dl = clampf(w.dl+delta, -0.25, 0.25)
+			m.themeWizardPreview(w)
+			return m, nil
+		case ev.Action == mousePress:
+			return m.themeWizardCancel()
+		}
+		return m, nil
+	}
 	if m.ptyPane != nil {
 		// The PTY pane's View() branch takes over the whole main area and
 		// renders no side panels (see layout.go), but mainWidth()/regionAt
@@ -2774,6 +2817,12 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingTool != nil {
 			return m.handleAgentToolWizardKey(msg)
+		}
+		if m.pendingThemeCarousel != nil {
+			return m.handleThemeCarouselKey(msg)
+		}
+		if m.pendingThemeWizard != nil {
+			return m.handleThemeWizardKey(msg)
 		}
 		if m.pendingPluginBrowse != nil {
 			return m.handlePluginBrowseKey(msg)
@@ -3855,6 +3904,10 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		if setDarkBackground(msg.IsDark()) {
 			refreshThemeColors()
+			// The ground/ink pushed to the terminal follow the detected
+			// ground too (themeTerminalOSCs picks the variant) — re-push
+			// alongside the rebuild so the palette cannot go stale.
+			applyThemeTerminal()
 			m.colorizeForce = true
 			m.turnColorCache = nil
 			m.turnRawCache = nil
@@ -5866,6 +5919,10 @@ func runREPL(cfg config.Config, cwd string, initialFlagNew bool, initialFlagSess
 		}
 	}
 
+	// Themes are registry data: scan ~/.milk/themes + <project>/.milk/themes
+	// first, then apply the configured one (an unknown name falls back to
+	// "off" by staying on the initial theme).
+	loadThemeRegistry(sess.CWD)
 	setTheme(st.cfg.Theme)
 	animationsEnabled = isTTY && st.cfg.AnimationsEnabled()
 	defer applyThemeTerminal()()

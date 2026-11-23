@@ -457,10 +457,12 @@ func (m model) viewString() string {
 	if !m.ready {
 		return ""
 	}
-	if th.modern {
-		if bg := tkBase.sgrBg(); bg != "" {
-			return tintBlock(m.viewBody(), m.width-1, bg) // last column left to the terminal default (same colour via OSC 11): a full-width row can double-advance on ConPTY
-		}
+	// The theme's ground paints the view body (base — for off the standard
+	// black background), any look: the last column stays unpainted for
+	// ConPTY (a full-width row can double-advance) and matches via the OSC
+	// background applyThemeTerminal pushes.
+	if bg := tkBase.sgrBg(); bg != "" {
+		return tintBlock(m.viewBody(), m.width-1, bg)
 	}
 	return m.viewBody()
 }
@@ -495,6 +497,8 @@ func (m model) viewBody() string {
 	mainArea = m.overlayToasts(mainArea)
 	mainArea = m.overlayPalette(mainArea)
 	mainArea = m.overlayAgentPicker(mainArea)
+	mainArea = m.overlayThemeCarousel(mainArea)
+	mainArea = m.overlayThemeWizard(mainArea)
 	if hints := m.hintRegion(); len(hints) > 0 {
 		return m.headerBar() + "\n" + mainArea + "\n" + strings.Join(hints, "\n") + "\n" + m.statusBar()
 	}

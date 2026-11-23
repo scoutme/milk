@@ -1,0 +1,29 @@
+{
+  "name": "supermilk",
+  "look": "skin",
+  "tagline": "Got models? Got milk.",
+  "colors": {
+    "base": "#f8f5ee",
+    "raised": "#efebe0",
+    "toast": "#e8e3d5",
+    "hairline": "#dcd7c9",
+    "thumb": "#c2bfb4",
+    "text": "#3f2a26",
+    "muted": "#7d7b74",
+    "think": "#5d6f4a",
+    "accent": "#6b6140",
+    "accent_lo": "#c9c5b8",
+    "focus": "#e7e9f5"
+  },
+  "terminal": {
+    "bg": "#f8f5ee",
+    "fg": "#3f2a26",
+    "cursor": "#3f2a26",
+    "ansi16": [
+      "#f8f5ee", "#8a4b3c", "#5f6b3a", "#7a6a2e",
+      "#4a6280", "#7a5a78", "#4a6f6a", "#3f2a26",
+      "#7d7b74", "#a85f4d", "#7a8a4e", "#9a8640",
+      "#6482a8", "#9a7498", "#6a948c", "#2b1a17"
+    ]
+  }
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/glamour"
+	gstyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
 	rw "github.com/mattn/go-runewidth"
 
@@ -832,14 +833,33 @@ func tableContentRow(cells []string, colWidths []int, isHeader bool) string {
 
 var glamourRenderer *glamour.TermRenderer
 
-func init() {
+// rebuildGlamour (re)builds the markdown renderer: glamour's standard
+// dark/light style for the detected ground, with the document ink pointed
+// at the theme's text token (the body ink — supermilk's is its own terminal
+// fg). A theme that declares no text keeps glamour's standard document
+// colour. Run from refreshThemeColors, so theme activation, builder
+// previews and background flips all re-ink the prose; the renderer used to
+// be built once at startup and could lag every one of them.
+func rebuildGlamour() {
+	cfg := gstyles.DarkStyleConfig
+	if !hasDarkBackground() {
+		cfg = gstyles.LightStyleConfig
+	}
+	if tkText.present() {
+		ink := tkText.pick()
+		cfg.Document.Color = &ink
+	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStyles(cfg),
 		glamour.WithWordWrap(0), // milk handles its own wrapping
 	)
 	if err == nil {
 		glamourRenderer = r
 	}
+}
+
+func init() {
+	rebuildGlamour()
 }
 
 // colorizeGlamour renders the entire text through glamour. Falls back to

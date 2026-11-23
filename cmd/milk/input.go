@@ -354,9 +354,11 @@ func wrapLineIntoRows(runes []rune, width int) [][]rune {
 }
 
 // Input selection uses a background colour rather than reverse video so it
-// doesn't conflict with the cursor, which is also reverse video.
-const (
-	inputSelectionOn  = "\x1b[48;5;240m"
+// doesn't conflict with the cursor, which is also reverse video. The ground
+// is the chrome block's selection surface — resolveChrome rebinds the escape
+// on every theme activation (classic default: the original #585858).
+var (
+	inputSelectionOn  = rawBgCode(classicSelection)
 	inputSelectionOff = "\x1b[49m"
 )
 
