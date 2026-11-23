@@ -353,11 +353,12 @@ the swatch strip needs to show the full base/raised/text/accent quartet.
 Boundaries (documented, not gaps): **ANSI semantic slots** — error red,
 spinner yellow, the bold-yellow highlight, status agent 1/3/8 — stay
 indexed and ride the terminal's own palette (`terminal.ansi16`, which
-`Transform` shifts when a theme declares one). **glamour's markdown body
-styling** is the rendering engine's style sheet, not chrome; wiring it to
-the palette is its own piece of work. The 256-colour cube constants (think
-surface `48;5;235`, selection `240`, completion `238`) are now expressed as
-their exact truecolor hexes when a theme declares them.
+`Transform` shifts when a theme declares one). The markdown body ink is no
+longer a boundary: the glamour renderer is rebuilt per theme activation
+and paints its document ink with `text` (glamour's other roles — headings,
+links, code — remain the engine's own). The 256-colour cube constants
+(think surface `48;5;235`, selection `240`, completion `238`) are now
+expressed as their exact truecolor hexes when a theme declares them.
 
 ## Out of scope
 
