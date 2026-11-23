@@ -175,7 +175,10 @@ func (m *model) statusBar() string {
 		}
 	}
 	if m.st != nil {
-		if n := len(m.st.queuedPrompts); n > 0 {
+		m.st.steerMu.Lock()
+		n := len(m.st.queuedPrompts)
+		m.st.steerMu.Unlock()
+		if n > 0 {
 			left += dim(fmt.Sprintf(" [» %d queued]", n))
 		}
 	}

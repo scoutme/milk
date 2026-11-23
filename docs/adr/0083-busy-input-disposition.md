@@ -2,6 +2,12 @@
 
 - **Status:** accepted
 - **Date:** 2026-10-26
+- **Amended by:** [ADR-0108](0108-mid-turn-steering.md) — steerable queue
+  entries (plain prompt text) now drain into the *running* turn at its next
+  model-request boundary instead of waiting for the next turn; the
+  one-per-turn flush below remains the path for everything that cannot steer
+  and the fallback when the turn ends first. Receipt/hint wording changed
+  with it (`⋯ queued — the agent picks it up on its next step — …`).
 
 ## Context
 

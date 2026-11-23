@@ -330,16 +330,24 @@ type interactiveState struct {
 	notifier      oversight.Notifier
 
 	// pendingRemoteInputs queues messages received from the remote oversight
-	// interface (e.g. Telegram) while a turn is in progress. Drained one at a
-	// time by handleAgentDone once the current turn completes.
+	// interface (e.g. Telegram) while a turn is in progress. Steerable ones
+	// are drained into the RUNNING turn at its next model-request boundary
+	// (steer.go, issue #441); whatever can't steer (slash commands, …) is
+	// drained one at a time by handleAgentDone once the current turn
+	// completes. Guarded by steerMu with queuedPrompts.
 	pendingRemoteInputs []string
 
 	// queuedPrompts holds Enter-while-busy inputs — the queue half of the
-	// busy-input disposition (Enter queues for this agent's next turn,
-	// Ctrl+Enter forks to a background agent). In-memory only (cap 20),
-	// drained one per turn by handleAgentDone before the background-followup
-	// and remote-input chain, dropped on session switch with a notice.
+	// busy-input disposition (Enter queues it, Ctrl+Enter forks to a
+	// background agent). Steerable entries (plain prompt text) are drained
+	// into the RUNNING turn at its next model-request boundary (steer.go,
+	// issue #441); the rest — attachments, commands — flush one per turn via
+	// handleAgentDone before the background-followup and remote-input chain.
+	// In-memory only (cap 20), dropped on session switch with a notice.
+	// steerMu guards this slice and pendingRemoteInputs: the agent goroutine
+	// pops (popSteer) while the UI goroutine queues, drops and reviews.
 	queuedPrompts []queuedPrompt
+	steerMu       sync.Mutex
 
 	// lastEscalationContextHash is a short hash of the last per-turn context block
 	// prepended to a resumed CLI escalation prompt. Used to avoid appending the same

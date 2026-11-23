@@ -1584,13 +1584,18 @@ func isCtrlEnterCSI(s string) bool {
 // a hint at the cap, the typed text kept in the input box).
 const queuePromptCap = 20
 
-// queuePrompt captures typed input for the live agent's next turn — the
-// Enter disposition of the busy-input feature (Ctrl+Enter forks instead).
+// queuePrompt captures typed input for the live agent — the Enter
+// disposition of the busy-input feature (Ctrl+Enter forks instead).
+// Steerable entries (plain prompt text) are pulled into the RUNNING turn at
+// its next model-request boundary (steer.go, issue #441); entries the flush
+// path must own — attachments, commands — wait for the next turn as before.
 // The entry takes the staged attachments and paste provenance with it (they
 // were staged for this typed input); the receipt line is the proof the input
 // was not dropped and names the /queue review surface.
 func (m *model) queuePrompt(input string) {
+	m.st.steerMu.Lock()
 	if len(m.st.queuedPrompts) >= queuePromptCap {
+		m.st.steerMu.Unlock()
 		m.busyHint = fmt.Sprintf("queue is full (%d) — /queue drop some, or Ctrl+Enter to fork", queuePromptCap)
 		return
 	}
@@ -1603,6 +1608,7 @@ func (m *model) queuePrompt(input string) {
 	m.pendingAttachments = nil
 	m.leadingPasted = false
 	m.st.queuedPrompts = append(m.st.queuedPrompts, q)
+	m.st.steerMu.Unlock()
 
 	// Enter both histories at queue time (issue #368): the typed text must
 	// stay retrievable (Up / Ctrl+R) if the queued request never runs —
@@ -1627,7 +1633,7 @@ func (m *model) queuePrompt(input string) {
 	if n := len(q.attachments); n > 0 {
 		extra += fmt.Sprintf(" + %d attachments", n)
 	}
-	m.appendTranscript(milkTag() + fmt.Sprintf("⋯ queued for next turn — %q%s · /queue to review\n", queuePreview(input), extra))
+	m.appendTranscript(milkTag() + fmt.Sprintf("⋯ queued — the agent picks it up on its next step — %q%s · /queue to review\n", queuePreview(input), extra))
 }
 
 // queuePreview returns the first input line clipped to 60 display columns.
@@ -1647,11 +1653,14 @@ func queuePreview(input string) string {
 // joins the flushed turn (the staging field's own contract: staged files are
 // context for the next turn).
 func (m model) drainQueuedPrompt() (tea.Model, tea.Cmd, bool) {
+	m.st.steerMu.Lock()
 	if len(m.st.queuedPrompts) == 0 {
+		m.st.steerMu.Unlock()
 		return m, nil, false
 	}
 	q := m.st.queuedPrompts[0]
 	m.st.queuedPrompts = m.st.queuedPrompts[1:]
+	m.st.steerMu.Unlock()
 	m.pendingBackgroundFollowup = false
 	m.pendingUserBackgroundFollowup = false
 	m.queuedHistoryRecorded = true // history was written at queue time (#368)
@@ -1769,7 +1778,7 @@ func (m model) handleBusyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busyEnterArmed = true
-		m.busyHint = "agent is working — Enter again to queue it for the next turn · Ctrl+Enter to spawn a background agent with this"
+		m.busyHint = "agent is working — Enter again to queue it (the agent picks it up on its next step) · Ctrl+Enter to spawn a background agent with this"
 		return m, busyHintClearCmd()
 	case "ctrl+enter", "ctrl+j":
 		// Bubble Tea v2 parses the extended Ctrl+Enter encodings (kitty
@@ -2176,8 +2185,10 @@ func (m model) handleAgentDone(msg agentDoneMsg) (tea.Model, tea.Cmd) {
 		return m.maybeAutoFollowupBackgroundJobs(true)
 	}
 	if len(m.st.pendingRemoteInputs) > 0 {
+		m.st.steerMu.Lock()
 		next := m.st.pendingRemoteInputs[0]
 		m.st.pendingRemoteInputs = m.st.pendingRemoteInputs[1:]
+		m.st.steerMu.Unlock()
 		return m.submitInput(next, dim("[telegram]")+" ")
 	}
 	return m, nil
@@ -2845,6 +2856,29 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKey(msg)
 
+	// Mid-turn steering (issue #441): input queued while the turn ran was
+	// just drained at a model-request boundary — render the echo exactly
+	// like its flush would (label + tokens), feed the loop detector as any
+	// user turn does (submitInput's bookkeeping), and record remote input's
+	// histories now — queue-time recording (#368) already owns the rest.
+	case steerDeliveredMsg:
+		if m.loopDetector != nil {
+			m.loopDetector.Feed(loop.TurnSummary{
+				Text:       msg.item.text,
+				Timestamp:  time.Now(),
+				IsUserTurn: true,
+			})
+			m.loopInterrupt = false
+			m.loopInterruptLabel = ""
+			m.loopWarning = ""
+		}
+		if msg.item.recordHistory {
+			m.sessionHistory = appendDeduped(m.sessionHistory, msg.item.text, maxPersistedHistory)
+			m.globalHistory = appendDeduped(m.globalHistory, msg.item.text, maxPersistedHistory)
+		}
+		m.appendTranscript(userEcho(msg.item.label, colorizeTokens(msg.item.text)))
+		return m, nil
+
 	case remoteInputMsg:
 		if msg.text == "" {
 			return m, nil
@@ -2860,7 +2894,9 @@ func (m model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.busy {
+			m.st.steerMu.Lock()
 			m.st.pendingRemoteInputs = append(m.st.pendingRemoteInputs, msg.text)
+			m.st.steerMu.Unlock()
 			return m, nil
 		}
 		return m.submitInput(msg.text, dim("[telegram]")+" ")
@@ -4407,12 +4443,17 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	// counterpart to the receipt line): one press per entry, before any of
 	// the stages below. The chain is therefore: drop last queued prompt →
 	// clear input → interrupt the turn → quit (each press advances one).
-	if m.st != nil && len(m.st.queuedPrompts) > 0 {
-		m.st.queuedPrompts = m.st.queuedPrompts[:len(m.st.queuedPrompts)-1]
-		m.busyEnterArmed = false
-		m.appendTranscript(milkTag() + fmt.Sprintf("⋯ removed the last queued prompt (%d left) · /queue to review\n", len(m.st.queuedPrompts)))
-		m.syncLayout()
-		return m, nil
+	if m.st != nil {
+		m.st.steerMu.Lock()
+		if len(m.st.queuedPrompts) > 0 {
+			m.st.queuedPrompts = m.st.queuedPrompts[:len(m.st.queuedPrompts)-1]
+			m.busyEnterArmed = false
+			m.appendTranscript(milkTag() + fmt.Sprintf("⋯ removed the last queued prompt (%d left) · /queue to review\n", len(m.st.queuedPrompts)))
+			m.st.steerMu.Unlock()
+			m.syncLayout()
+			return m, nil
+		}
+		m.st.steerMu.Unlock()
 	}
 	if m.selText != "" {
 		copyToClipboard(m.selText)
@@ -5110,6 +5151,25 @@ func (m model) buildTUIAgents(send func(tea.Msg), ir0 *tuiInputReader) (dispatch
 		onReasoningPromoted: func() { send(reasoningPromotedMsg{}) },
 		taskStore:           m.taskStore,
 		mgr:                 agents.backgroundMgr,
+		// Mid-turn steering (issue #441): the tool loop pulls queued input
+		// through this closure at its model-request boundaries; each drained
+		// item's transcript echo rides the tea queue, so it lands through
+		// Update exactly like the other live hooks. Applied to the session's
+		// local turn agents only — wireLocalAgent's field is deliberately not
+		// selected by buildToolRunner (nested tool calls never steal the
+		// session queue), and background clones drop it.
+		steerDrain: func() []string {
+			items := st.popSteer()
+			if len(items) == 0 {
+				return nil
+			}
+			texts := make([]string, 0, len(items))
+			for _, it := range items {
+				send(steerDeliveredMsg{item: it})
+				texts = append(texts, it.text)
+			}
+			return texts
+		},
 	}
 	if agents.local != nil {
 		tuiLocalAgent := withMainToolCallView(wireLocalAgent(agents.local, wiring), send)

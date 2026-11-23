@@ -728,6 +728,16 @@ type Agent struct {
 	// iteration boundaries and injects each message as a user message. nil
 	// everywhere except a background-job clone.
 	bgInbox chan string
+	// steerDrain pops user input queued while this session's turn was
+	// running (issue #441 — mid-turn steering): runToolLoop calls it at
+	// every model-request boundary and before a would-be-final round,
+	// injecting each returned string as a user message so the model
+	// integrates new elements into the SAME turn instead of the user
+	// cancelling and re-sending. nil everywhere it is not wired —
+	// background clones drop it (cloneForBackground's explicit list) and
+	// agent-as-tool runners never receive it (buildToolRunner's selective
+	// wiring), because neither owns the session queue it would pop.
+	steerDrain func() []string
 }
 
 // TryBestRecorder is the interface for the try-best loop detector.
@@ -1418,6 +1428,18 @@ func (a *Agent) WithOnToolResult(fn func(id, name, result string, isError bool))
 	return &copy
 }
 
+// WithSteerDrain returns a shallow copy of the agent whose tool loop drains
+// fn at every model-request boundary (issue #441): whatever the host's busy
+// input queue hands back is injected as plain user messages into the SAME
+// turn. fn pops-and-returns everything it delivers — the host owns the
+// receipt/echo side (the loop writes no transcript of its own). nil fn
+// disables steering. Session turn agents only.
+func (a *Agent) WithSteerDrain(fn func() []string) *Agent {
+	copy := *a
+	copy.steerDrain = fn
+	return &copy
+}
+
 // WithOnToolCallView returns a shallow copy of the agent that offers each
 // tool call to fn before dispatch, letting the host take over its transcript
 // rendering (see the field's doc). The bool return decides whether the
@@ -2094,6 +2116,14 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// green ball" without respawning. nil (every non-job loop) skips.
 		msgs = drainFollowups(msgs, a.bgInbox)
 
+		// Mid-turn steering (issue #441): user input queued while THIS turn
+		// runs drains at the same boundary — after the previous round's
+		// tool results, before the next request — so the model integrates it
+		// into the running turn (the Claude Code-style queue-while-working
+		// flow). nil steerDrain (background clones, tool agents, CLI-backed
+		// agents) skips.
+		msgs, _ = a.drainSteer(ctx, msgs)
+
 		// Liveness + graceful wrap-up (issue #305): every iteration boundary
 		// is real activity for the host's idle watchdog (a turn that keeps
 		// iterating is not stalled), and a wrap-up signal — the opt-in turn
@@ -2265,6 +2295,20 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				a.onResponseSegment(resp)
 			}
 			msgs = append(msgs, Message{Role: "assistant", Content: resp, ReasoningContent: reasoningText})
+			// Mid-turn steering (issue #441): the model finished without tool
+			// calls while the host's queue holds input typed during this very
+			// response — keep the same turn alive: drain the queue and go
+			// around again instead of returning, so a steered continuation
+			// request carries the answer-so-far plus the new input. Each
+			// continuation costs one iteration of the budget like any other
+			// round; past the budget nothing is popped, so the queue survives
+			// and the host promotes it to the next turn as before.
+			if maxIter < 0 || i+1 < maxIter {
+				if n, delivered := a.drainSteer(ctx, msgs); delivered > 0 {
+					msgs = n
+					continue
+				}
+			}
 			return msgs, nil
 		}
 
@@ -2556,6 +2600,31 @@ func drainFollowups(msgs []Message, inbox chan string) []Message {
 		}
 	}
 	return msgs
+}
+
+// drainSteer injects everything the host's busy-input queue holds as plain
+// user messages (issue #441): at the iteration boundary that follows a tool
+// round, or — at the terminal no-tool-calls branch — right after the
+// response that was streaming when the input was queued. It returns the
+// appended messages plus how many were delivered, so the terminal caller can
+// distinguish an empty drain (fall through to return) from a delivering one
+// (go around again). A nil steerDrain is the common case and costs nothing.
+func (a *Agent) drainSteer(ctx context.Context, msgs []Message) ([]Message, int) {
+	if a.steerDrain == nil {
+		return msgs, 0
+	}
+	queued := a.steerDrain()
+	for _, text := range queued {
+		msgs = append(msgs, Message{Role: "user", Content: text})
+	}
+	if len(queued) > 0 {
+		obs.Inc(ctx, inferenceScope, "milk.steer.delivered",
+			attribute.Int("count", len(queued)),
+			attribute.String("model", a.model),
+			attribute.String("agent", a.logRole()),
+		)
+	}
+	return msgs, len(queued)
 }
 
 // backgroundFollowupPrefix marks a send_background_agent message when it is

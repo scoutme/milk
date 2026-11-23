@@ -63,9 +63,12 @@ func (m model) handleSlashInput(cmd, rest string) (tea.Model, tea.Cmd) {
 			m.appendTranscript(milkTag() + fmt.Sprintf(" dropped %d staged attachment(s) — staged files do not survive %s\n", len(m.pendingAttachments), cmd))
 			m.pendingAttachments = nil
 		}
-		if len(m.st.queuedPrompts) > 0 {
-			m.appendTranscript(milkTag() + fmt.Sprintf(" dropped %d queued prompt(s) — queued input does not survive %s\n", len(m.st.queuedPrompts), cmd))
-			m.st.queuedPrompts = nil
+		m.st.steerMu.Lock()
+		nQueued := len(m.st.queuedPrompts)
+		m.st.queuedPrompts = nil
+		m.st.steerMu.Unlock()
+		if nQueued > 0 {
+			m.appendTranscript(milkTag() + fmt.Sprintf(" dropped %d queued prompt(s) — queued input does not survive %s\n", nQueued, cmd))
 		}
 	}
 	if cmd == cmdHistory {
@@ -2234,8 +2237,13 @@ func (m model) handleServerCmd(arg string) (tea.Model, tea.Cmd) {
 
 // handleQueueCmd runs the /queue review surface for the Enter-while-busy
 // prompt queue: list|show <n>|drop <n|last|all>|clear. Busy-safe — it only
-// ever inspects or drops entries.
+// ever inspects or drops entries. steerMu is held for the whole command: the
+// list must be a consistent snapshot against the agent goroutine's popSteer,
+// and every mutation below writes under the same lock (appendTranscript does
+// not re-enter the queue).
 func (m model) handleQueueCmd(rest string) model {
+	m.st.steerMu.Lock()
+	defer m.st.steerMu.Unlock()
 	q := m.st.queuedPrompts
 	args := strings.Fields(rest)
 	sub := "list"
@@ -2251,7 +2259,7 @@ func (m model) handleQueueCmd(rest string) model {
 	switch sub {
 	case "", "list":
 		if len(q) == 0 {
-			m.appendTranscript(milkTag() + " no queued prompts — Enter while busy queues one for the next turn\n")
+			m.appendTranscript(milkTag() + " no queued prompts — Enter while busy queues one for the agent\n")
 			return m
 		}
 		m.appendTranscript(milkTag() + fmt.Sprintf(" %d queued prompt(s):\n", len(q)))

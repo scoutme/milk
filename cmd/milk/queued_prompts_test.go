@@ -65,7 +65,7 @@ func TestQueuePrompt_ReceiptLine(t *testing.T) {
 	m := busyQueueModel(t, true)
 	m.queuePrompt("first line\nsecond line")
 
-	if !strings.Contains(m.transcript.String(), "queued for next turn") {
+	if !strings.Contains(m.transcript.String(), "picks it up on its next step") {
 		t.Errorf("missing receipt line:\n%s", m.transcript.String())
 	}
 	if !strings.Contains(m.transcript.String(), "/queue to review") {

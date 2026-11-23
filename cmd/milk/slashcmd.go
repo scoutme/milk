@@ -236,7 +236,7 @@ var commandRegistry = []cmdSpec{
   /tools expand          expand every tool block (full input + output)
   /tools collapse        fold every tool block
   /tools view            swap the main area to a tool-only stream`},
-	{name: cmdQueue, hosts: hostTUI, desc: "review or edit the prompts queued for the next turn", hint: "[list|show <n>|drop <n|last|all>|clear]", help: `  /queue               list the prompts queued for the next turn
+	{name: cmdQueue, hosts: hostTUI, desc: "review or edit the prompts queued while the agent works", hint: "[list|show <n>|drop <n|last|all>|clear]", help: `  /queue               list the prompts queued while the agent works (steered on its next step)
   /queue show <n>      print queued prompt <n> in full
   /queue drop <n>      drop queued prompt <n> (also: last, all)
   /queue clear         drop every queued prompt`},
