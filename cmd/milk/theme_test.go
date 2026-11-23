@@ -42,9 +42,9 @@ func TestThemeTerminalOSCs(t *testing.T) {
 		t.Errorf("a palette-less theme must push nothing, got %v", got)
 	}
 	applyThemeDef(&themeDef{name: "term",
-		base:       themeColor{dark: "#111111", light: "#eeeeee"},
-		text:       themeColor{dark: "#cccccc", light: "#222222"},
-		termBg:     "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
+		base:   themeColor{dark: "#111111", light: "#eeeeee"},
+		text:   themeColor{dark: "#cccccc", light: "#222222"},
+		termBg: "#f8f5ee", termFg: "#3f2a26", termCursor: "#3f2a26",
 	})
 	got := themeTerminalOSCs()
 	if len(got) < 3 || got[0] != "11;#f8f5ee" || got[1] != "10;#3f2a26" {
