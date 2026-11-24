@@ -156,10 +156,80 @@ func TestArmOversight_VerifiesThenStartsPolling(t *testing.T) {
 	}
 }
 
+// TestArmOversight_RetriesTransientPingFailure: the verification ping is no
+// one-shot (issue #439) — a backend that fails twice and then answers is
+// eventually verified, so a transient startup blip can no longer disable
+// oversight for the whole session. Fail-closed fires only after the schedule
+// is exhausted (TestArmOversight_FailureNeverStartsPolling covers that path).
+func TestArmOversight_RetriesTransientPingFailure(t *testing.T) {
+	prev := oversightRetrySchedule
+	oversightRetrySchedule = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+	t.Cleanup(func() { oversightRetrySchedule = prev })
+
+	var getMe, getUpdates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			if getMe.Add(1) <= 2 { // fail the first two attempts (the blip)
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"ok":false}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true}}`))
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			getUpdates.Add(1)
+			_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+		}
+	}))
+	defer srv.Close()
+	useTelegramAPI(t, srv)
+
+	n := newNotifier(telegramTestConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	failed := make(chan error, 1)
+	armOversight(ctx, n, nil, func(err error) {
+		select {
+		case failed <- err:
+		default:
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for getUpdates.Load() == 0 {
+		select {
+		case err := <-failed:
+			t.Fatalf("transient blip disabled oversight — onFailed fired: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("polling never started after retries (getMe calls: %d)", getMe.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c := getMe.Load(); c < 3 {
+		t.Errorf("getMe calls = %d, want ≥3 (two failures + one retry success)", c)
+	}
+	select {
+	case err := <-failed:
+		t.Errorf("onFailed fired despite recovery: %v", err)
+	default:
+	}
+}
+
 // TestArmOversight_FailureNeverStartsPolling pins the fail-closed verdict:
 // a backend that rejects the ping reports through onFailed, and polling
 // never starts — the same outcome the old synchronous startup ping produced.
 func TestArmOversight_FailureNeverStartsPolling(t *testing.T) {
+	// Shrink the retry schedule (issue #439): production retries over
+	// ~100s; this test wants the fail-closed verdict at once.
+	prev := oversightRetrySchedule
+	oversightRetrySchedule = []time.Duration{5 * time.Millisecond}
+	t.Cleanup(func() { oversightRetrySchedule = prev })
+
 	var getUpdates atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/getMe") {

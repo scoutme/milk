@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/oversight"
 	"github.com/scoutme/milk/internal/oversight/telegram"
 )
@@ -22,6 +23,15 @@ var telegramAPIBase = ""
 // fail-closed "oversight disabled" outcome — within this window, while
 // startup itself never waits on it.
 const oversightVerifyTimeout = 10 * time.Second
+
+// oversightRetrySchedule holds verification retries after a failed ping
+// (issue #439): the original one-shot attempt got exactly one 10s window, so
+// a transient DNS/connect blip at startup failed verification for the WHOLE
+// session — every later notification went to oversight.Noop with no trace.
+// Attempts: the immediate ping, then these delays; only after they all fail
+// does onFailed fire its fail-closed verdict (issue #388 semantics kept).
+// Tests shrink this slice.
+var oversightRetrySchedule = []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
 
 // newNotifier constructs the appropriate Notifier from config.
 // Returns oversight.Noop when remote oversight is disabled or misconfigured.
@@ -59,15 +69,16 @@ func newNotifier(cfg config.Config) oversight.Notifier {
 
 // armOversight wires and verifies a freshly built notifier without ever
 // blocking the caller (issue #388): input routing registers immediately, the
-// backend is Pinged in the background (bounded by oversightVerifyTimeout),
-// and the poll loop starts only for a backend that answered — the same
-// fail-closed verdict the old synchronous startup ping produced (onFailed
-// hands the owner the error so it can swap in oversight.Noop), just without
-// holding up startup. On success the "oversight active" announcement fires
-// from the background goroutine too. Backends that don't expose Ping (Noop,
-// test fakes) start polling immediately, exactly as before; a verification
-// that ends because ctx was cancelled (notifier replaced, process shutting
-// down) reports nothing.
+// backend is Pinged in the background (bounded by oversightVerifyTimeout,
+// retried per oversightRetrySchedule — issue #439: one transient blip used to
+// fail the whole session), and the poll loop starts only for a backend that
+// answered — the fail-closed verdict fires only after every attempt is
+// exhausted (onFailed hands the owner the error so it can swap in
+// oversight.Noop), all without holding up startup. On success the "oversight
+// active" announcement fires from the background goroutine too. Backends that
+// don't expose Ping (Noop, test fakes) start polling immediately, exactly as
+// before; a verification that ends because ctx was cancelled (notifier
+// replaced, process shutting down) reports nothing.
 func armOversight(ctx context.Context, n oversight.Notifier, onInput func(string), onFailed func(error)) {
 	verified, ok := n.(interface {
 		SetOnInput(func(string))
@@ -90,17 +101,31 @@ func armOversight(ctx context.Context, n oversight.Notifier, onInput func(string
 		verified.SetOnInput(onInput)
 	}
 	go func() {
-		pingCtx, cancel := context.WithTimeout(ctx, oversightVerifyTimeout)
-		err := verified.Ping(pingCtx)
-		cancel()
-		if err != nil {
+		start := time.Now()
+		var err error
+		for attempt := 0; ; attempt++ {
+			pingCtx, cancel := context.WithTimeout(ctx, oversightVerifyTimeout)
+			err = verified.Ping(pingCtx)
+			cancel()
+			if err == nil {
+				break
+			}
 			if ctx.Err() != nil {
 				return // cancelled before the verdict: replaced or shutting down
 			}
-			if onFailed != nil {
-				onFailed(err)
+			if attempt >= len(oversightRetrySchedule) {
+				if onFailed != nil {
+					onFailed(fmt.Errorf("%w (after %d attempts over %s)", err,
+						attempt+1, time.Since(start).Round(time.Second)))
+				}
+				return
 			}
-			return
+			obs.Debug("oversight verification retry", "attempt", attempt+2, "err", err.Error())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(oversightRetrySchedule[attempt]):
+			}
 		}
 		notifyAnnouncement(n, "milk", "startup", "oversight active")
 		verified.StartPolling(ctx)
