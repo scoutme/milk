@@ -1,10 +1,12 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,6 +214,66 @@ func TestFloodSummaryWhenGateClears(t *testing.T) {
 	}
 	if got := n.Stats()["flood_dropped"]; got != 1 {
 		t.Errorf("flood_dropped = %d, want 1", got)
+	}
+}
+
+// TestChunkHeaderEscapesPartMarker: the "(n/m)" part marker must reach
+// the wire escaped — Telegram rejects an unescaped '(' with 400 "Character
+// '(' is reserved and must be escaped" (verified against the live API),
+// which used to drop EVERY chunked response through the silent-swallow path:
+// the original vanished-analysis mechanism behind issue #439.
+func TestChunkHeaderEscapesPartMarker(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		bodies = append(bodies, payload.Text)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "result": map[string]any{"message_id": int64(len(bodies))},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	n := New(Config{Token: "t", ChatID: 1, APIBase: srv.URL})
+
+	// Long enough to force several chunks (mirrors a real analysis reply).
+	text := strings.Repeat("line with **bold** and `code` and (parens) here\n", 300)
+	n.NotifyResponse(context.Background(), "agent-x", text)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(bodies)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d chunk(s) sent — the payload must force a multi-chunk response", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	chunks := 0
+	for _, body := range bodies {
+		if !strings.Contains(body, "💬") {
+			continue
+		}
+		chunks++
+		if strings.Contains(body, " (") && !strings.Contains(body, `\(`) {
+			t.Errorf("chunk header carries an unescaped paren — Telegram will 400 it: %.60q", body)
+		}
+		if !strings.Contains(body, `\(`) {
+			t.Errorf("chunk header must carry the escaped part marker: %.60q", body)
+		}
+	}
+	if chunks < 2 {
+		t.Errorf("saw %d chunk headers, want ≥2", chunks)
 	}
 }
 

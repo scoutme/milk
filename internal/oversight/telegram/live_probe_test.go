@@ -185,9 +185,9 @@ func TestLiveProbe(t *testing.T) {
 		payload, source = string(b), f
 	}
 	// Mirror NotifyResponse's budget exactly (header = 💬 *escMD(agent)*,
-	// worst-case " (n/m)" suffix room −10) so the log says how many messages
-	// to expect in the chat.
-	budget := maxMessageUnits - utf16Len("💬 *"+escMD("mimo-pro-local")+"*") - 10
+	// worst-case ESCAPED part marker " (9999/9999)" = 14 units) so the log
+	// says how many messages to expect in the chat.
+	budget := maxMessageUnits - utf16Len("💬 *"+escMD("mimo-pro-local")+"*") - utf16Len(escMD(" (9999/9999)"))
 	if budget < 256 {
 		budget = 256
 	}

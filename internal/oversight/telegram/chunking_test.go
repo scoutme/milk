@@ -211,8 +211,10 @@ func TestNotifyResponseChunksInOrderUntrimmed(t *testing.T) {
 		if !strings.HasPrefix(m, "💬 *agent*") {
 			t.Fatalf("message %d missing header: %q", i, m)
 		}
-		if len(msgs) > 1 && !strings.Contains(m, "("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(msgs))+")") {
-			t.Fatalf("message %d missing part marker: %q", i, m)
+		// The part marker ships ESCAPED since #439: an unescaped '(' is a
+		// reserved character and Telegram 400s the whole chunk.
+		if len(msgs) > 1 && !strings.Contains(m, `\(`+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(msgs))+`\)`) {
+			t.Fatalf("message %d missing (escaped) part marker: %q", i, m)
 		}
 		parts := strings.SplitN(m, "\n", 2)
 		if len(parts) != 2 {

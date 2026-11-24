@@ -864,7 +864,10 @@ func toolResultMessage(toolName, summary string, isError bool) string {
 // NotifyResponse relays the agent's response in full. Text longer than one
 // Telegram message is split into ordered chunks (each its own sendMessage),
 // never trimmed — see issue #253. Chunks go through the FIFO send queue, so
-// they arrive in order, as do back-to-back notifications.
+// they arrive in order, as do back-to-back notifications. The part marker
+// "(n/m)" is escaped (issue #439 — the unescaped parens made EVERY chunked
+// message fail with 400 "Character '(' is reserved", which the old sendOnce
+// then dropped silently: the original vanished-analysis bug).
 func (n *Notifier) NotifyResponse(_ context.Context, agent, text string) {
 	if text == "" {
 		return
@@ -873,9 +876,10 @@ func (n *Notifier) NotifyResponse(_ context.Context, agent, text string) {
 	// then does the native "typing…" chat action run).
 	n.setStatus(statusTyping)
 	header := "💬 *" + escMD(agent) + "*"
-	// Reserve room for the worst-case header suffix " (n/m)" on chunked sends
-	// so that header + escaped chunk always fits the Telegram limit.
-	budget := maxMessageUnits - utf16Len(header) - 10
+	// Reserve room for the worst-case escaped part marker " (9999/9999)"
+	// (14 units after escMD) on chunked sends so that header + escaped
+	// chunk always fits the Telegram limit.
+	budget := maxMessageUnits - utf16Len(header) - utf16Len(escMD(" (9999/9999)"))
 	if budget < 256 {
 		budget = 256
 	}
@@ -883,7 +887,7 @@ func (n *Notifier) NotifyResponse(_ context.Context, agent, text string) {
 	for i, chunk := range chunks {
 		h := header
 		if len(chunks) > 1 {
-			h = fmt.Sprintf("💬 *%s* (%d/%d)", escMD(agent), i+1, len(chunks))
+			h = header + " " + escMD(fmt.Sprintf("(%d/%d)", i+1, len(chunks)))
 		}
 		n.sendAsync(h + "\n" + escMD(chunk))
 	}
