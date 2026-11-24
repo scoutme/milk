@@ -99,7 +99,7 @@ func splitTurns(text string) []string {
 			}
 		}
 
-		if !inFence && i+3 <= len(text) && text[i:i+3] == "```" && (i == 0 || text[i-1] == '\n') {
+		if !inFence && i+3 <= len(text) && text[i:i+3] == "```" && fenceOpensAt(text, i) {
 			inFence = true
 			i += 3
 			// skip the language tag to the end of the opening-fence line
@@ -231,15 +231,79 @@ func styledSpanStart(s string) int {
 // boundary (position 0 or immediately after \n). Returns -1 if not found.
 // This prevents treating ``` embedded mid-line (e.g. inside an inline code
 // span like `ansiDim + "```" + lang`) as a block-level code fence.
+// fenceOpensAt reports whether a "```" starting at byte i opens a fenced
+// block — the one predicate splitTurns and the colorize fence finders share,
+// so they can never disagree about where a block starts (a disagreement
+// inverts fence parity for every later turn and renders the rest of the
+// transcript verbatim). True at the start of the text, at the start of a
+// line (the CommonMark fence rule, up to three leading spaces), or after an
+// agent/prompt tag — milk's own writers emit `<tag SGR>name:<reset> ` and
+// then content that starts with a fence (a reply opening with a quoted
+// shell block), and parsers that only accept a line start split right
+// through that block.
+func fenceOpensAt(text string, i int) bool {
+	j := i
+	for j > 0 && j-i < 4 && (text[j-1] == ' ' || text[j-1] == '\t') {
+		j-- // CommonMark allows up to three spaces before a fence
+	}
+	if j == 0 || text[j-1] == '\n' {
+		return true
+	}
+	if j < 4 || text[j-1] != 'm' { // an SGR sequence's final byte
+		return false
+	}
+	// Walk back over the CSI parameter (0x30–0x3F) and intermediate
+	// (0x20–0x2F) bytes to the '[' and its ESC.
+	k := j - 2
+	for k >= 0 && text[k] >= 0x20 && text[k] <= 0x3F {
+		k--
+	}
+	return k >= 1 && text[k] == '[' && text[k-1] == 0x1B
+}
+
+// findOpenFence returns the byte index of the first fenced-block opener in
+// text (see fenceOpensAt for what counts as one), or -1.
 func findOpenFence(text string) int {
-	if strings.HasPrefix(text, "```") {
-		return 0
+	for start := 0; start+3 <= len(text); {
+		idx := strings.Index(text[start:], "```")
+		if idx == -1 {
+			return -1
+		}
+		pos := start + idx
+		if fenceOpensAt(text, pos) {
+			return pos
+		}
+		start = pos + 3
 	}
-	idx := strings.Index(text, "\n```")
-	if idx == -1 {
-		return -1
+	return -1
+}
+
+// balanceFences closes a dangling code fence: a message whose "```" markers
+// count odd — most often because textbudget.SummarizeLong capped it mid-block
+// while windowing a resume seed — would otherwise leave every parser of the
+// turn treating its remainder as an incomplete block, which by design renders
+// everything after it verbatim: raw markdown for the rest of the transcript.
+// Used by the seed; live content is completed by its writer instead.
+func balanceFences(s string) string {
+	n := 0
+	for start := 0; start+3 <= len(s); {
+		idx := strings.Index(s[start:], "```")
+		if idx == -1 {
+			break
+		}
+		pos := start + idx
+		if fenceOpensAt(s, pos) {
+			n++
+		}
+		start = pos + 3
 	}
-	return idx + 1 // position of the first backtick
+	if n%2 == 0 {
+		return s
+	}
+	if !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return s + "```\n"
 }
 
 // findClosingFence returns the byte index of the first closing code fence in s.
@@ -555,53 +619,98 @@ func injectANSIAfterResets(s, context string) string {
 	return strings.ReplaceAll(s, ansiReset, ansiReset+context)
 }
 
+// cutTurnLabel separates a transcript row's turn label — the first SGR span
+// ending in ":" ("<tag SGR>mimo-local:<reset>" every writer puts in front of
+// a response's first line) — from the content sharing that row, so the block
+// rules in styleLine apply to the content as if it opened the line. A message
+// whose FIRST line is "## Title" (or a bullet, quote, hr) must colorize like
+// the same construct on any later line; without this the label prefix defeats
+// every block rule on the tag row and the title renders as common text.
+// Conservative shape so prose never matches: the line starts with SGR, the
+// first reset closes the label span, and the span strips to ≤32 chars of
+// [A-Za-z0-9._-] ending in ":". Prose lines (no leading SGR) and
+// carried-context rows (dim/bg prefix before text without a "tag:" shape)
+// never qualify.
+func cutTurnLabel(line string) (label, body string, ok bool) {
+	if !strings.HasPrefix(line, "\x1b[") {
+		return "", line, false
+	}
+	end := strings.Index(line, ansiReset)
+	if end <= 0 || end > 96 {
+		return "", line, false
+	}
+	name := ansi.Strip(line[:end])
+	if !strings.HasSuffix(name, ":") {
+		return "", line, false
+	}
+	name = strings.TrimSuffix(name, ":")
+	if name == "" || len(name) > 32 {
+		return "", line, false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_') {
+			return "", line, false
+		}
+	}
+	return line[:end+len(ansiReset)], line[end+len(ansiReset):], true
+}
+
+// styleLine applies the block rules to one line. When the row carries a turn
+// label (its first line), the label is kept as-is and the rules run on the
+// content after it — see cutTurnLabel; inline spans fall through on the same
+// split, which matches styling the whole row (the label holds no markers).
 func styleLine(line string) string {
-	stripped := strings.TrimLeft(line, " \t")
+	label, content := "", line
+	if l, c, ok := cutTurnLabel(line); ok {
+		label, content = l, c
+	}
+	stripped := strings.TrimLeft(content, " \t")
 
 	// ATX headings.
 	if strings.HasPrefix(stripped, "### ") {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 	if strings.HasPrefix(stripped, "## ") {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 	if strings.HasPrefix(stripped, "# ") {
-		return ansiBold + ansiMagenta + line + ansiReset
+		return label + ansiBold + ansiMagenta + content + ansiReset
 	}
 
 	// Setext headings (===, ---) — style the preceding line's underline.
 	if reSetextEquals.MatchString(stripped) {
-		return ansiBold + ansiMagenta + line + ansiReset
+		return label + ansiBold + ansiMagenta + content + ansiReset
 	}
 	if reSetextDash.MatchString(stripped) {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 
 	// Unordered list bullets.
 	if strings.HasPrefix(stripped, "- ") || strings.HasPrefix(stripped, "* ") || strings.HasPrefix(stripped, "+ ") {
-		prefix := line[:len(line)-len(stripped)]
+		prefix := content[:len(content)-len(stripped)]
 		marker := stripped[0]
 		rest := stripped[2:]
 		rest = styleInlineSpans(rest)
-		return prefix + ansiDim + string(marker) + ansiReset + " " + rest
+		return label + prefix + ansiDim + string(marker) + ansiReset + " " + rest
 	}
 
 	// Ordered list items (1. 2. etc.).
-	if m := reOrderedItem.FindStringIndex(line); m != nil {
-		return line[:m[1]] + styleInlineSpans(line[m[1]:])
+	if m := reOrderedItem.FindStringIndex(content); m != nil {
+		return label + content[:m[1]] + styleInlineSpans(content[m[1]:])
 	}
 
 	// Blockquote.
 	if strings.HasPrefix(stripped, "> ") {
-		return ansiDim + ansiItalic + line + ansiReset
+		return label + ansiDim + ansiItalic + content + ansiReset
 	}
 
 	// Horizontal rule.
 	if reHRule.MatchString(stripped) {
-		return ansiDim + line + ansiReset
+		return label + ansiDim + content + ansiReset
 	}
 
-	return styleInlineSpans(line)
+	return label + styleInlineSpans(content)
 }
 
 // styleInlineSpans applies bold/italic/inline-code ANSI to a single line span.

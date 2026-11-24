@@ -583,6 +583,10 @@ func seedTranscriptText(st *interactiveState, switched bool) string {
 
 func writeSeedTurn(b *strings.Builder, st *interactiveState, t session.Turn) {
 	text := textbudget.SummarizeLong(t.Content, replayMaxMessageChars)
+	// The cap can end mid-code-block: an odd "```" count would poison the
+	// whole turn (and, through splitTurns parity, everything after it) with
+	// incomplete-block verbatim rendering — close what the cap left open.
+	text = balanceFences(text)
 	switch t.Role {
 	case session.RoleUser:
 		if text == "" {
