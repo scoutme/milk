@@ -462,12 +462,15 @@ func fencedFallback(lang, code string) string {
 // reInlineCode matches `inline code` spans (not crossing newlines).
 var reInlineCode = regexp.MustCompile("`([^`\n]+)`")
 
-// reStrongEM matches ***text*** (bold+italic).
+// reStrongEM matches ***text*** (bold+italic) — star-free content, so the
+// triple form never overlaps the run-aware ** / * passes in styleInlineSpans.
 var reStrongEM = regexp.MustCompile(`\*\*\*([^*\n]+)\*\*\*`)
 
-// reStrong matches **text** only (double asterisk). __text__ is excluded to
-// avoid false positives on snake_case identifiers with underscores.
-var reStrong = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+// **bold** and *italic* are NOT regexes: Go's regexp has no lookarounds, so
+// the delimiter boundaries that make "**bold with *nested em***" close
+// correctly (issue #453) need a scan over star runs — see styleStrongRuns /
+// styleEmRuns in styleInlineSpans. __text__ stays unstyled to avoid snake_case
+// identifiers picking up emphasis.
 
 // reSetextEquals / reSetextDash detect setext-style heading underlines.
 var reSetextEquals = regexp.MustCompile(`^[=]{3,}\s*$`)
@@ -734,14 +737,163 @@ func styleInlineSpans(s string) string {
 		return ansiBold + ansiItalic + inner + ansiReset
 	})
 
-	// **bold** / __bold__.
-	s = reStrong.ReplaceAllStringFunc(s, func(m string) string {
-		// Trim the two-char delimiters on each side.
-		inner := m[2 : len(m)-2]
-		return ansiBold + inner + ansiReset
-	})
+	// **bold** then *italic*, run-aware (CommonMark delimiter sharing): a
+	// strong span may contain inner emphasis and close on a shared run of
+	// three — "**bold with *nested single emphasis***" styles as bold with
+	// italic inside, markers consumed (#453; was fully raw behind the old
+	// star-free-content regex).
+	s = styleStrongRuns(s)
+	s = styleEmRuns(s)
 
 	return s
+}
+
+// starRunAt returns the run of consecutive '*' starting at i as [start, end).
+func starRunAt(s string, i int) (int, int) {
+	j := i
+	for j < len(s) && s[j] == '*' {
+		j++
+	}
+	return i, j
+}
+
+// isFlankSpace reports whether b breaks an emphasis flanking boundary.
+func isFlankSpace(b byte) bool { return b == ' ' || b == '\t' }
+
+// oddSingleRuns reports whether s holds a single-star run of odd multiplicity,
+// i.e. an emphasis still open when the text ends — the case where a closing
+// run of three shares its first star with the content (CommonMark sharing).
+func oddSingleRuns(s string) bool {
+	n := 0
+	for i := 0; i < len(s); {
+		if s[i] != '*' {
+			i++
+			continue
+		}
+		_, e := starRunAt(s, i)
+		if e-i == 1 {
+			n++
+		}
+		i = e
+	}
+	return n%2 == 1
+}
+
+// styleStrongRuns styles **bold** runs. Openers are runs of exactly two stars;
+// closers a run of two, or of three — a three-star close hands its first star
+// to the content when an inner emphasis is still open there (so
+// "**a *b***" closes both), and leaves it literal when it is not (so "**a***"
+// stays bold(a) plus a plain star, as CommonMark renders it). No closer means
+// the opener stays raw; scanning resumes after it, so a later balanced pair
+// still styles.
+func styleStrongRuns(s string) string {
+	var out []byte
+	i := 0
+	for i < len(s) {
+		p := i
+		for p < len(s) && s[p] != '*' {
+			p++
+		}
+		if p >= len(s) {
+			break
+		}
+		_, oe := starRunAt(s, p)
+		if oe-p != 2 {
+			// openers are runs of exactly two (*** is reStrongEM's) — emit
+			// the skipped prefix+run raw and keep scanning after it
+			out = append(out, s[i:oe]...)
+			i = oe
+			continue
+		}
+		cs, ce := 0, 0
+		found := false
+		for j := oe; j < len(s); j++ {
+			if s[j] != '*' {
+				continue
+			}
+			a, b := starRunAt(s, j)
+			if b-a == 2 || b-a == 3 {
+				cs, ce, found = a, b, true
+				break
+			}
+			j = b - 1 // skip the whole run (for-loop j++)
+		}
+		if !found {
+			out = append(out, s[i:oe]...)
+			i = oe
+			continue
+		}
+		contentEnd := cs
+		share := ce-cs == 3 && oddSingleRuns(s[oe:cs])
+		if share {
+			contentEnd = cs + 1
+		}
+		content := s[oe:contentEnd]
+		if content == "" || strings.Contains(content, "\n") {
+			out = append(out, s[i:oe]...)
+			i = oe
+			continue
+		}
+		out = append(out, s[i:p]...)
+		out = append(out, ansiBold...)
+		out = append(out, content...)
+		out = append(out, ansiReset...)
+		if ce-cs == 3 && !share {
+			i = cs + 2 // strong close only; the third star stays for the em pass
+		} else {
+			i = ce
+		}
+	}
+	out = append(out, s[i:]...)
+	return string(out)
+}
+
+// styleEmRuns styles *italic* runs with CommonMark flanking: the opener must
+// not be followed by a space, the closer not preceded by one. Runs of two or
+// more stars belong to the strong pass and are skipped here.
+func styleEmRuns(s string) string {
+	var out []byte
+	i := 0
+	for i < len(s) {
+		p := i
+		for p < len(s) && s[p] != '*' {
+			p++
+		}
+		if p >= len(s) {
+			break
+		}
+		_, oe := starRunAt(s, p)
+		if oe-p != 1 || oe >= len(s) || isFlankSpace(s[oe]) {
+			out = append(out, s[i:oe]...)
+			i = oe
+			continue
+		}
+		cs, ce := 0, 0
+		found := false
+		for j := oe; j < len(s); j++ {
+			if s[j] != '*' {
+				continue
+			}
+			a, b := starRunAt(s, j)
+			if b-a == 1 {
+				cs, ce, found = a, b, true
+				break
+			}
+			j = b - 1
+		}
+		if !found || cs <= oe || isFlankSpace(s[cs-1]) || strings.Contains(s[oe:cs], "\n") {
+			out = append(out, s[i:oe]...)
+			i = oe
+			continue
+		}
+		out = append(out, s[i:p]...)
+		out = append(out, ansiItalic...)
+		out = append(out, s[oe:cs]...)
+		out = append(out, ansiReset...)
+		i = ce
+	}
+	out = append(out, s[i:]...)
+	return string(out)
 }
 
 // --- table rendering (balanced mode) ---
