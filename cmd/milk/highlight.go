@@ -99,7 +99,7 @@ func splitTurns(text string) []string {
 			}
 		}
 
-		if !inFence && i+3 <= len(text) && text[i:i+3] == "```" && (i == 0 || text[i-1] == '\n') {
+		if !inFence && i+3 <= len(text) && text[i:i+3] == "```" && fenceOpensAt(text, i) {
 			inFence = true
 			i += 3
 			// skip the language tag to the end of the opening-fence line
@@ -231,15 +231,79 @@ func styledSpanStart(s string) int {
 // boundary (position 0 or immediately after \n). Returns -1 if not found.
 // This prevents treating ``` embedded mid-line (e.g. inside an inline code
 // span like `ansiDim + "```" + lang`) as a block-level code fence.
+// fenceOpensAt reports whether a "```" starting at byte i opens a fenced
+// block — the one predicate splitTurns and the colorize fence finders share,
+// so they can never disagree about where a block starts (a disagreement
+// inverts fence parity for every later turn and renders the rest of the
+// transcript verbatim). True at the start of the text, at the start of a
+// line (the CommonMark fence rule, up to three leading spaces), or after an
+// agent/prompt tag — milk's own writers emit `<tag SGR>name:<reset> ` and
+// then content that starts with a fence (a reply opening with a quoted
+// shell block), and parsers that only accept a line start split right
+// through that block.
+func fenceOpensAt(text string, i int) bool {
+	j := i
+	for j > 0 && j-i < 4 && (text[j-1] == ' ' || text[j-1] == '\t') {
+		j-- // CommonMark allows up to three spaces before a fence
+	}
+	if j == 0 || text[j-1] == '\n' {
+		return true
+	}
+	if j < 4 || text[j-1] != 'm' { // an SGR sequence's final byte
+		return false
+	}
+	// Walk back over the CSI parameter (0x30–0x3F) and intermediate
+	// (0x20–0x2F) bytes to the '[' and its ESC.
+	k := j - 2
+	for k >= 0 && text[k] >= 0x20 && text[k] <= 0x3F {
+		k--
+	}
+	return k >= 1 && text[k] == '[' && text[k-1] == 0x1B
+}
+
+// findOpenFence returns the byte index of the first fenced-block opener in
+// text (see fenceOpensAt for what counts as one), or -1.
 func findOpenFence(text string) int {
-	if strings.HasPrefix(text, "```") {
-		return 0
+	for start := 0; start+3 <= len(text); {
+		idx := strings.Index(text[start:], "```")
+		if idx == -1 {
+			return -1
+		}
+		pos := start + idx
+		if fenceOpensAt(text, pos) {
+			return pos
+		}
+		start = pos + 3
 	}
-	idx := strings.Index(text, "\n```")
-	if idx == -1 {
-		return -1
+	return -1
+}
+
+// balanceFences closes a dangling code fence: a message whose "```" markers
+// count odd — most often because textbudget.SummarizeLong capped it mid-block
+// while windowing a resume seed — would otherwise leave every parser of the
+// turn treating its remainder as an incomplete block, which by design renders
+// everything after it verbatim: raw markdown for the rest of the transcript.
+// Used by the seed; live content is completed by its writer instead.
+func balanceFences(s string) string {
+	n := 0
+	for start := 0; start+3 <= len(s); {
+		idx := strings.Index(s[start:], "```")
+		if idx == -1 {
+			break
+		}
+		pos := start + idx
+		if fenceOpensAt(s, pos) {
+			n++
+		}
+		start = pos + 3
 	}
-	return idx + 1 // position of the first backtick
+	if n%2 == 0 {
+		return s
+	}
+	if !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return s + "```\n"
 }
 
 // findClosingFence returns the byte index of the first closing code fence in s.
