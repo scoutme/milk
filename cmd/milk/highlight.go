@@ -283,7 +283,14 @@ func findOpenFence(text string) int {
 // while windowing a resume seed — would otherwise leave every parser of the
 // turn treating its remainder as an incomplete block, which by design renders
 // everything after it verbatim: raw markdown for the rest of the transcript.
-// Used by the seed; live content is completed by its writer instead.
+// (splitTurns stops splitting at blank lines while a fence is open, so one
+// phantom opener glues every LATER message into the same verbatim stretch — a
+// single truncated background-job result could flatten the whole session until
+// the next restart re-seeds through here; that's what the 2026-11-24
+// colorization report traced.)
+// Used by the seed AND by every live writer that truncates into the shared
+// transcript (background_ui/dispatch/turn_record — the #450 contract: live
+// content is completed by its writer).
 func balanceFences(s string) string {
 	n := 0
 	for start := 0; start+3 <= len(s); {

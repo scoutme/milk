@@ -46,13 +46,13 @@ func renderBackgroundJobDoneBlock(j *local.Job) string {
 		// the failure) — same wording as drainBackgroundJobs' prompt-side
 		// notice, but here with the text itself shown.
 		fmt.Fprintf(&b, "%s partial result preserved:\n%s\n", milkTag(),
-			textbudget.SummarizeLong(j.Result, backgroundJobResultMaxChars))
+			balanceFences(textbudget.SummarizeLong(j.Result, backgroundJobResultMaxChars)))
 	default:
 		fmt.Fprintf(&b, "\n%s background agent %q completed%s\n", milkTag(), j.Label, meta.String())
 		if strings.TrimSpace(text) == "" {
 			fmt.Fprintf(&b, "%s (no result text)\n", milkTag())
 		} else {
-			fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(text, backgroundJobResultMaxChars))
+			fmt.Fprintf(&b, "%s\n", balanceFences(textbudget.SummarizeLong(text, backgroundJobResultMaxChars)))
 		}
 	}
 	if len(j.Result) > backgroundJobResultMaxChars && j.ID != "" {
@@ -80,7 +80,7 @@ func renderBgShowShell(s local.ShellInfo) string {
 	if strings.TrimSpace(out) == "" {
 		fmt.Fprintf(&b, "%s (no output)\n", milkTag())
 	} else {
-		fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(out, backgroundJobResultMaxChars))
+		fmt.Fprintf(&b, "%s\n", balanceFences(textbudget.SummarizeLong(out, backgroundJobResultMaxChars)))
 	}
 	return b.String()
 }
@@ -110,7 +110,7 @@ func renderShellDoneBlock(info local.ShellInfo, tail string) string {
 	if strings.TrimSpace(tail) == "" {
 		fmt.Fprintf(&b, "%s (no output)\n", milkTag())
 	} else {
-		fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(tail, backgroundJobResultMaxChars))
+		fmt.Fprintf(&b, "%s\n", balanceFences(textbudget.SummarizeLong(tail, backgroundJobResultMaxChars)))
 	}
 	return b.String()
 }
@@ -128,7 +128,7 @@ func renderShellNotices(events []local.ShellEvent) string {
 		what := fmt.Sprintf("background shell %s (%q) — %s", e.Info.ID, e.Info.Command, e.Info.StatusLabel())
 		fmt.Fprintf(&b, "[shell-finished] %s\n", what)
 		if tail := strings.TrimRight(e.Tail, "\n"); strings.TrimSpace(tail) != "" {
-			fmt.Fprintf(&b, "%s\n", textbudget.SummarizeLong(tail, backgroundJobResultMaxChars))
+			fmt.Fprintf(&b, "%s\n", balanceFences(textbudget.SummarizeLong(tail, backgroundJobResultMaxChars)))
 		}
 	}
 	return b.String()

@@ -80,7 +80,7 @@ func drainBackgroundJobs(ctx context.Context, mgr *local.Manager, sess *session.
 		if filesTouched != "" {
 			fmt.Fprintf(&meta, " files_touched=%s", filesTouched)
 		}
-		fmt.Fprintf(&b, "[background agent %q completed%s: %s]\n", j.Label, meta.String(), textbudget.SummarizeLong(text, backgroundJobResultMaxChars))
+		fmt.Fprintf(&b, "[background agent %q completed%s: %s]\n", j.Label, meta.String(), balanceFences(textbudget.SummarizeLong(text, backgroundJobResultMaxChars)))
 	}
 	if b.Len() > 0 {
 		b.WriteString("\n")
