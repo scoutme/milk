@@ -176,7 +176,7 @@ func historyUserContent(events, sessionContent string) string {
 	if events == "" {
 		return sessionContent
 	}
-	return textbudget.SummarizeLong(strings.TrimRight(events, "\n"), recordedEventsMaxChars) + "\n\n" + sessionContent
+	return balanceFences(textbudget.SummarizeLong(strings.TrimRight(events, "\n"), recordedEventsMaxChars)) + "\n\n" + sessionContent
 }
 
 // workflowCompletionNotice summarizes how a workflow run ended, for the
@@ -192,7 +192,7 @@ func workflowCompletionNotice(name, task string, runErr error, cp *interp.Checkp
 		outcome = "stopped with an error: " + runErr.Error()
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Workflow %q %s. Task: %s", name, outcome, textbudget.SummarizeLong(task, 200))
+	fmt.Fprintf(&b, "Workflow %q %s. Task: %s", name, outcome, balanceFences(textbudget.SummarizeLong(task, 200)))
 	if cp != nil && len(cp.Trace) > 0 {
 		stages := make([]string, 0, len(cp.Trace))
 		var last string
@@ -208,7 +208,7 @@ func workflowCompletionNotice(name, task string, runErr error, cp *interp.Checkp
 		}
 		fmt.Fprintf(&b, "\nStages run: %s.", strings.Join(stages, ", "))
 		if last != "" {
-			fmt.Fprintf(&b, "\nLast stage output: %s", textbudget.SummarizeLong(strings.TrimSpace(last), workflowResultMaxChars))
+			fmt.Fprintf(&b, "\nLast stage output: %s", balanceFences(textbudget.SummarizeLong(strings.TrimSpace(last), workflowResultMaxChars)))
 		}
 	}
 	return b.String()

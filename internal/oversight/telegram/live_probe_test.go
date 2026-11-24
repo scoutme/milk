@@ -30,23 +30,20 @@ import (
 //	P1 control  plain escMD one-liner — must be ok:true (Fatalf otherwise:
 //	             without a working control nothing else is interpretable)
 //	P2 control  turnStartMessage, single-line prompt — must be ok:true
-//	P3 suspect  turnStartMessage, multi-line prompt whose newline lands
-//	             inside the 117-rune code-span preview (turnStartMessage
-//	             bypasses codeText, which exists because multi-line
-//	             MarkdownV2 code spans parse unreliably). Latent by design:
-//	             log-only — a "can't parse entities" rejection here is bug
-//	             #439 class 4 reproducing, and in production sendOnce would
-//	             drop the message without a trace (bug #2)
-//	P4 suspect  literal backslashes through escMD (escMD never escapes '\',
-//	             so MarkdownV2 re-parses C:\Users as an escape sequence).
-//	             Must be ok:true — accepted is the point: the corruption is
-//	             in the RENDERING (chat shows C:Userstestfile), so verify by
-//	             eye until #439's escMD fix lands
-//	P5          NotifyResponse over a long reply (chunked, escaped, FIFO) —
-//	             TG_ANALYSIS_FILE when set, else a synthetic payload sized to
-//	             force chunking (TestSyntheticProbePayloadChunks pins that).
-//	             Nothing assertable: sendOnce swallows failures by design
-//	             (bug #2), so count the chunks in the chat.
+//	P3 control  turnStartMessage, multi-line prompt — must be ok:true since
+//	             #439's fix: turnStartMessage flattens through codeText, so
+//	             no newline can reach the code span (pre-fix this probe was
+//	             the latent-bug reproducer; a rejection here now means the
+//	             flatten regressed)
+//	P4 control  literal backslashes through escMD — must be ok:true AND
+//	             render verbatim (#439's escMD now escapes '\'): "C:\Users"
+//	             must not appear as "C:Users" in the chat
+//	P5          NotifyResponse over a long reply (chunked, escaped, FIFO,
+//	             paced) — TG_ANALYSIS_FILE when set, else a synthetic payload
+//	             sized to force chunking (TestSyntheticProbePayloadChunks
+//	             pins that). sendOnce now counts every outcome (Stats), so a
+//	             log-side flood/failure would be visible there — but the
+//	             chat is still the oracle for chunk count/order/completeness.
 //
 // TestSyntheticProbePayloadChunks runs offline (no credentials) and guards
 // the harness's own payload machinery.
@@ -150,27 +147,29 @@ func TestLiveProbe(t *testing.T) {
 		t.Errorf("control turn-start (single-line) must be accepted: %s", p2)
 	}
 
-	// 3 — suspect: turn-start shape, multi-line prompt whose newline lands
-	// inside the 117-rune code-span preview (codeText exists because
-	// multi-line MarkdownV2 code spans parse unreliably, but turnStartMessage
-	// bypasses it). Log-only: acceptance is latent — a rejection here is bug
-	// #439 class 4 reproducing, and would be a silent drop in production.
-	t.Logf("P3 turn-start multi-line: %s", rawSend(t, token, chat,
+	// 3 — control: turn-start shape, multi-line prompt. Since #439's fix
+	// turnStartMessage flattens through codeText, so this must be accepted;
+	// a rejection means the flatten regressed.
+	p3 := rawSend(t, token, chat,
 		turnStartMessage("mimo-pro-local", "escalation",
-			"It seems to me that current theme management implies new code for every theme (currently \"off\").\nThemes should be configuration over a common basis, and new themes should be simple add-ons.\nA theme builder via wizard would be neat.")))
+			"It seems to me that current theme management implies new code for every theme (currently \"off\").\nThemes should be configuration over a common basis, and new themes should be simple add-ons.\nA theme builder via wizard would be neat."))
+	t.Logf("P3 turn-start multi-line: %s", p3)
+	if !probeOK(p3) {
+		t.Errorf("multi-line turn-start must be accepted after the codeText fix: %s", p3)
+	}
 
-	// 4 — suspect: literal backslashes through escMD (escMD never escapes a
-	// literal backslash, so MarkdownV2 re-parses it as an escape char). The
-	// label is escaped too so only the payload's backslashes are under test.
-	// Accepted is expected; the corruption is visual — read the chat.
+	// 4 — control: literal backslashes through escMD (#439: escMD now
+	// escapes '\' so MarkdownV2 cannot re-parse C:\ as an escape). The
+	// label is escaped too so only the payload's backslashes are under
+	// test. Accepted + verbatim rendering both required.
 	p4 := rawSend(t, token, chat,
 		escMD("[oversight probe 4/5] escMD with backslashes")+"\n"+
 			escMD(`JSON: {"a": "x"} `+` and Windows path C:\Users\test\file.txt and regex \d+ and a trailing \ `))
 	t.Logf("P4 backslashes: %s", p4)
 	if !probeOK(p4) {
-		t.Errorf("backslash probe must be accepted (its bug is corrupted rendering, not rejection): %s", p4)
+		t.Errorf("backslash probe must be accepted: %s", p4)
 	} else {
-		t.Log(`P4 accepted — verify in the chat: backslashes must render verbatim; "C:Userstestfile" means issue #439 escMD bug still open`)
+		t.Log(`P4 accepted — verify in the chat: backslashes must render verbatim ("C:\Users", not "C:Users") — #439 escMD fix`)
 	}
 
 	// 5 — the real payload shape: NotifyResponse over a long reply (chunked,
@@ -186,9 +185,9 @@ func TestLiveProbe(t *testing.T) {
 		payload, source = string(b), f
 	}
 	// Mirror NotifyResponse's budget exactly (header = 💬 *escMD(agent)*,
-	// worst-case " (n/m)" suffix room −10) so the log says how many messages
-	// to expect in the chat.
-	budget := maxMessageUnits - utf16Len("💬 *"+escMD("mimo-pro-local")+"*") - 10
+	// worst-case ESCAPED part marker " (9999/9999)" = 14 units) so the log
+	// says how many messages to expect in the chat.
+	budget := maxMessageUnits - utf16Len("💬 *"+escMD("mimo-pro-local")+"*") - utf16Len(escMD(" (9999/9999)"))
 	if budget < 256 {
 		budget = 256
 	}
@@ -196,6 +195,6 @@ func TestLiveProbe(t *testing.T) {
 		len(chunkMessage(payload, budget)))
 	n := New(Config{Token: token, ChatID: chat})
 	n.NotifyResponse(context.Background(), "mimo-pro-local", payload)
-	time.Sleep(20 * time.Second) // let the FIFO queue drain (no completion signal exists)
-	t.Log("P5 chunks enqueued — verify in the chat: count/order/completeness (sendOnce reports nothing)")
+	time.Sleep(20 * time.Second) // let the FIFO queue drain (paced; no completion signal exists)
+	t.Logf("P5 chunks enqueued — verify in the chat: count/order/completeness; Stats: %v", n.Stats())
 }

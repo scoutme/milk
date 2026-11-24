@@ -73,8 +73,8 @@ func TestSend_LongCooldownDropsAndGatesTheWire(t *testing.T) {
 	if c := calls.Load(); c != 1 {
 		t.Fatalf("server calls after first 429 = %d, want 1 (the 429 itself)", c)
 	}
-	if wait := time.Until(n.notBefore); wait < 3500*time.Second {
-		t.Fatalf("cooldown gate not armed: notBefore in %v, want ~3600s", wait)
+	if wait := time.Until(n.gateUntil()); wait < 3500*time.Second {
+		t.Fatalf("cooldown gate not armed: gateUntil in %v, want ~3600s", wait)
 	}
 
 	// Further sends — including concurrent ones from the queue-full overflow
@@ -120,7 +120,7 @@ func TestSend_Non429FailureKeepsHistoricalBehavior(t *testing.T) {
 	if c := calls.Load(); c != 1 {
 		t.Fatalf("server calls = %d, want 1 — non-429 failures must not retry", c)
 	}
-	if !n.notBefore.IsZero() {
+	if !n.gateUntil().IsZero() {
 		t.Fatal("non-429 failure must not arm the cooldown gate")
 	}
 }
