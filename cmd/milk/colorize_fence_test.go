@@ -115,3 +115,52 @@ func TestSeedTurnBalanceFences(t *testing.T) {
 		t.Errorf("mid-line non-opener fences must not count (they never open a block)")
 	}
 }
+
+// The turn label sits in front of the response's FIRST line, so every block
+// rule (heading, bullet, quote) must run on the content after it — otherwise
+// a message opening with "## Title" renders as common text (the user's
+// "titles are white" report).
+func TestCutTurnLabelPredicate(t *testing.T) {
+	tag := "\x1b[0;1m\x1b[38;2;168;181;143mmimo-local:\x1b[0m ## Open issues"
+	if label, body, ok := cutTurnLabel(tag); !ok || label == "" || body != " ## Open issues" {
+		t.Errorf("classic tag row: ok=%v label=%q body=%q", ok, label, body)
+	}
+	for _, plain := range []string{
+		"plain prose, no SGR",
+		"## Heading without a label",
+		"\x1b[2mNote: carried dim without its own reset",
+		"mimo-local: heading without SGR (off-mode row)",
+	} {
+		if _, _, ok := cutTurnLabel(plain); ok {
+			t.Errorf("must not match %q", plain)
+		}
+	}
+	// A tag name with a space is prose, not a turn label.
+	if _, _, ok := cutTurnLabel("\x1b[1mmy note:\x1b[0m ## x"); ok {
+		t.Error("space in the name must not match")
+	}
+}
+
+// End-to-end through the seed writer: a message whose FIRST line is a
+// heading gets the heading style right after the tag, markers preserved —
+// the same styling the heading gets on any later line.
+func TestTagLineHeadingStyles(t *testing.T) {
+	oldTTY := isTTY
+	isTTY = true
+	t.Cleanup(func() { isTTY = oldTTY })
+
+	var b strings.Builder
+	writeSeedTurn(&b, &interactiveState{sess: &session.Session{}}, session.Turn{
+		Role:      session.RoleAssistant,
+		AgentName: "mimo-local",
+		Content:   "## Open issues on scoutme/milk\n\nrest **bold**",
+	})
+	first := strings.Split(colorizeSingleWidth(b.String(), ColorizeBalanced, 120), "\n")[0]
+	want := "\x1b[1m\x1b[36m ## Open issues on scoutme/milk\x1b[0m"
+	if !strings.Contains(first, want) {
+		t.Errorf("tag-line heading must carry the heading style after the label:\n%s", first)
+	}
+	if !strings.Contains(first, "mimo-local:") {
+		t.Errorf("label lost: %q", first)
+	}
+}

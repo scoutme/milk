@@ -619,53 +619,98 @@ func injectANSIAfterResets(s, context string) string {
 	return strings.ReplaceAll(s, ansiReset, ansiReset+context)
 }
 
+// cutTurnLabel separates a transcript row's turn label — the first SGR span
+// ending in ":" ("<tag SGR>mimo-local:<reset>" every writer puts in front of
+// a response's first line) — from the content sharing that row, so the block
+// rules in styleLine apply to the content as if it opened the line. A message
+// whose FIRST line is "## Title" (or a bullet, quote, hr) must colorize like
+// the same construct on any later line; without this the label prefix defeats
+// every block rule on the tag row and the title renders as common text.
+// Conservative shape so prose never matches: the line starts with SGR, the
+// first reset closes the label span, and the span strips to ≤32 chars of
+// [A-Za-z0-9._-] ending in ":". Prose lines (no leading SGR) and
+// carried-context rows (dim/bg prefix before text without a "tag:" shape)
+// never qualify.
+func cutTurnLabel(line string) (label, body string, ok bool) {
+	if !strings.HasPrefix(line, "\x1b[") {
+		return "", line, false
+	}
+	end := strings.Index(line, ansiReset)
+	if end <= 0 || end > 96 {
+		return "", line, false
+	}
+	name := ansi.Strip(line[:end])
+	if !strings.HasSuffix(name, ":") {
+		return "", line, false
+	}
+	name = strings.TrimSuffix(name, ":")
+	if name == "" || len(name) > 32 {
+		return "", line, false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_') {
+			return "", line, false
+		}
+	}
+	return line[:end+len(ansiReset)], line[end+len(ansiReset):], true
+}
+
+// styleLine applies the block rules to one line. When the row carries a turn
+// label (its first line), the label is kept as-is and the rules run on the
+// content after it — see cutTurnLabel; inline spans fall through on the same
+// split, which matches styling the whole row (the label holds no markers).
 func styleLine(line string) string {
-	stripped := strings.TrimLeft(line, " \t")
+	label, content := "", line
+	if l, c, ok := cutTurnLabel(line); ok {
+		label, content = l, c
+	}
+	stripped := strings.TrimLeft(content, " \t")
 
 	// ATX headings.
 	if strings.HasPrefix(stripped, "### ") {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 	if strings.HasPrefix(stripped, "## ") {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 	if strings.HasPrefix(stripped, "# ") {
-		return ansiBold + ansiMagenta + line + ansiReset
+		return label + ansiBold + ansiMagenta + content + ansiReset
 	}
 
 	// Setext headings (===, ---) — style the preceding line's underline.
 	if reSetextEquals.MatchString(stripped) {
-		return ansiBold + ansiMagenta + line + ansiReset
+		return label + ansiBold + ansiMagenta + content + ansiReset
 	}
 	if reSetextDash.MatchString(stripped) {
-		return ansiBold + ansiCyan + line + ansiReset
+		return label + ansiBold + ansiCyan + content + ansiReset
 	}
 
 	// Unordered list bullets.
 	if strings.HasPrefix(stripped, "- ") || strings.HasPrefix(stripped, "* ") || strings.HasPrefix(stripped, "+ ") {
-		prefix := line[:len(line)-len(stripped)]
+		prefix := content[:len(content)-len(stripped)]
 		marker := stripped[0]
 		rest := stripped[2:]
 		rest = styleInlineSpans(rest)
-		return prefix + ansiDim + string(marker) + ansiReset + " " + rest
+		return label + prefix + ansiDim + string(marker) + ansiReset + " " + rest
 	}
 
 	// Ordered list items (1. 2. etc.).
-	if m := reOrderedItem.FindStringIndex(line); m != nil {
-		return line[:m[1]] + styleInlineSpans(line[m[1]:])
+	if m := reOrderedItem.FindStringIndex(content); m != nil {
+		return label + content[:m[1]] + styleInlineSpans(content[m[1]:])
 	}
 
 	// Blockquote.
 	if strings.HasPrefix(stripped, "> ") {
-		return ansiDim + ansiItalic + line + ansiReset
+		return label + ansiDim + ansiItalic + content + ansiReset
 	}
 
 	// Horizontal rule.
 	if reHRule.MatchString(stripped) {
-		return ansiDim + line + ansiReset
+		return label + ansiDim + content + ansiReset
 	}
 
-	return styleInlineSpans(line)
+	return label + styleInlineSpans(content)
 }
 
 // styleInlineSpans applies bold/italic/inline-code ANSI to a single line span.
