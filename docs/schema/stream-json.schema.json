@@ -226,6 +226,14 @@
           "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
           "type": "string"
         },
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/payload_info"
+            }
+          ],
+          "description": "first-request payload composition (result line only; omitted for providers that don't assemble milk's tool schemas)"
+        },
         "percept_id": {
           "type": "string"
         },
@@ -377,6 +385,34 @@
       "required": [
         "role",
         "content"
+      ],
+      "type": "object"
+    },
+    "payload_info": {
+      "additionalProperties": false,
+      "properties": {
+        "diet": {
+          "description": "effective tool-description tier: full | compact | lean",
+          "type": "string"
+        },
+        "messages_bytes": {
+          "description": "sum of all message text content (system included); total ≈ this + tools_bytes + JSON framing",
+          "type": "integer"
+        },
+        "system_bytes": {
+          "description": "rendered system prompt bytes (issue #462 meter)",
+          "type": "integer"
+        },
+        "tools_bytes": {
+          "description": "serialized tool-schema array bytes — the share the tool_description_tier diet moves",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "system_bytes",
+        "tools_bytes",
+        "messages_bytes",
+        "diet"
       ],
       "type": "object"
     },
@@ -655,6 +691,14 @@
     "parent_tool_use_id": {
       "description": "present exactly when the actor is nested (sub-agent, tool-agent, workflow stage) — makes F3/F4-style tree views reconstructable",
       "type": "string"
+    },
+    "payload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload_info"
+        }
+      ],
+      "description": "first-request payload composition (result line only; omitted for providers that don't assemble milk's tool schemas)"
     },
     "percept_id": {
       "type": "string"

@@ -190,6 +190,16 @@ func (r *localRunner) Name() string { return r.name }
 func (r *localRunner) IsCLI() bool  { return false }
 func (r *localRunner) Ping() error  { return r.agent.Ping(context.Background()) }
 
+// FirstPayload exposes the wrapped agent's first-request payload
+// composition (issue #462's meter) so one-shot stream-json output can carry
+// it on the result line. Nil-agent runners report none.
+func (r *localRunner) FirstPayload() (local.PayloadInfo, bool) {
+	if r == nil || r.agent == nil {
+		return local.PayloadInfo{}, false
+	}
+	return r.agent.FirstPayload()
+}
+
 func (r *localRunner) Execute(
 	ctx context.Context,
 	cfg config.Config,

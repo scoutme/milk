@@ -199,6 +199,16 @@ func htmlScenarioSection(b *strings.Builder, sr ScenarioResult, agentNames []str
 		if hops := routeHopLabels(ar); len(hops) > 0 {
 			fmt.Fprintf(b, "<p class=\"meta\">Routing [%s]: %s</p>\n", esc(name), esc(strings.Join(hops, " → ")))
 		}
+		// --- First-request payload composition (issue #462's meter) ---
+		if p := firstPayload(ar); p != nil {
+			estTok := (p.MessagesBytes + p.ToolsBytes) / 4
+			diet := p.Diet
+			if diet == "" {
+				diet = "full"
+			}
+			fmt.Fprintf(b, "<p class=\"meta\">Payload [%s]: ~%s tok first request — system %s B, tools %s B, msgs %s B (diet: %s)</p>\n",
+				esc(name), fmtCount(estTok), fmtBytes(p.SystemBytes), fmtBytes(p.ToolsBytes), fmtBytes(p.MessagesBytes), esc(diet))
+		}
 	}
 
 	// --- Per-turn cache breakdown (multi-turn scenarios) ---

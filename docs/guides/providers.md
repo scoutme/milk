@@ -518,6 +518,25 @@ The tier is also the first knob the [layered context-reduction ladder](#layered-
 
 ---
 
+### Tool description diet (`tool_description_tier`)
+
+Every request re-sends milk's tool-schema array. Measured on the built-in set without backing stores (2026-11-25), descriptions alone are **15,064 bytes ≈ 3.8k tokens** — around 70% of a first request — and they ride along on *every* iteration of a turn. `tool_description_tier` trims the descriptions config-side without ever touching tool names, ordering, parameter names/types or `required` lists:
+
+| Value | What the model sees | Tools payload | vs full |
+|---|---|---|---|
+| `"full"` | Verbatim descriptions (default when omitted) | 15,064 B | — |
+| `"compact"` | First sentence of every description, ≤120 runes — the same compaction the [context-reduction ladder](#layered-context-reduction-context_reduction) applies under pressure, applied from the first request | 10,414 B | −31% |
+| `"lean"` | Compact, plus parameter descriptions dropped entirely (names, types, enums and `required` survive) | 6,139 B | −59% |
+
+```json
+{ "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
+  "context_window_tokens": 8192, "system_prompt_tier": "minimal", "tool_description_tier": "compact" }
+```
+
+Measure before adopting (issue #462): `compact` keeps every description's leading semantics and is the low-risk step; `lean` trades parameter docs for size and should be validated against your own workload — the eval harness records the composition per run (`result.payload` → `payload` in `results.json`, `Payload [agent]: …` in reports) so a with/without comparison is direct. Unknown values warn at startup (`config.Validate`) and fall back to `full`. The tier covers milk's own injected schemas (including MCP tools) on HTTP agents; `claude-cli`/subprocess providers manage their own tool schemas and ignore it, and the ladder's mid-turn compaction still applies on top.
+
+---
+
 ### Project map context (`project_map_context`)
 
 The [`project_map` tool](tooling.md#built-in-tools) is a *pull*: the agent calls it when it wants structure. `project_map_context` adds a small *push* on top — project-structure context rebuilt into the system prompt every turn (ADR-0081):
@@ -742,6 +761,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `prompt_caching` | bool | Bedrock-only, experimental — see [Prompt caching](#prompt-caching-prompt_caching--️-experimental-not-live-tested) |
 | `context_window_tokens` | int | See [Context window declaration](#context-window-declaration-context_window_tokens) |
 | `system_prompt_tier` | string | See [System prompt verbosity](#system-prompt-verbosity-system_prompt_tier) |
+| `tool_description_tier` | string | See [Tool description diet](#tool-description-diet-tool_description_tier) |
 | `project_map_context` | string/bool | See [Project map context](#project-map-context-project_map_context) |
 | `context_reduction` | object | See [Layered context reduction](#layered-context-reduction-context_reduction) |
 | `disable_project_instructions` | bool | See [Project instructions](#project-instructions-disable_project_instructions) |

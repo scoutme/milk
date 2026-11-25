@@ -151,7 +151,12 @@ type Event struct {
 	RouteHistory []RouteHop        `json:"route_history,omitempty"`
 	Usage        *Usage            `json:"usage,omitempty"`
 	ModelUsage   map[string]*Usage `json:"model_usage,omitempty"`
-	TotalCostUSD *float64          `json:"total_cost_usd,omitempty"` // reserved; emitted only with a pricing table
+	// Payload is the turn's first-request payload composition (issue #462's
+	// meter): the stable prefix a tool diet moves. Omitted when the turn ran
+	// on a provider that doesn't assemble milk's own tool schemas (e.g.
+	// claude-cli) or when no local-provider request was made.
+	Payload      *PayloadInfo `json:"payload,omitempty"`
+	TotalCostUSD *float64     `json:"total_cost_usd,omitempty"` // reserved; emitted only with a pricing table
 	// Throughput of the turn's generation: output tokens per decode-second and
 	// mean time-to-first-token across the turn's measured completion requests.
 	// Omitted (not zeroed) when no timing was reported.
@@ -193,6 +198,20 @@ type RouteHop struct {
 	Turn   int64  `json:"turn"`
 	Target string `json:"target"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// PayloadInfo is the first-request payload composition on a result line
+// (result.payload, issue #462): byte counts of the stable prefix — the
+// system prompt, the serialized tool-schema array and all message text
+// (system included), plus the effective tool-description diet
+// (full | compact | lean). Bytes, not tokens: tokenizer-agnostic; divide
+// by ~4 for a token estimate. Total ≈ messages_bytes + tools_bytes +
+// per-message JSON framing.
+type PayloadInfo struct {
+	SystemBytes   int64  `json:"system_bytes"`
+	ToolsBytes    int64  `json:"tools_bytes"`
+	MessagesBytes int64  `json:"messages_bytes"`
+	Diet          string `json:"diet"`
 }
 
 // Command is one available slash command (system/commands).

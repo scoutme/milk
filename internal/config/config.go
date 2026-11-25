@@ -741,6 +741,22 @@ type AgentConfig struct {
 	// Empty string is treated as "standard".
 	SystemPromptTier string `json:"system_prompt_tier,omitempty"`
 
+	// ToolDescriptionTier selects how much of each tool schema's description
+	// text this agent's requests carry (payload diet, issue #462). Valid
+	// values: "full" (default), "compact", "lean".
+	//   "full"    — verbatim descriptions; byte-for-byte status quo.
+	//   "compact" — every description cut to its first sentence, capped at
+	//               120 runes (contextreduce.CompactTools — the same
+	//               compaction the context-reduction ladder applies under
+	//               pressure, applied from the first request on).
+	//   "lean"    — compact, plus parameter descriptions dropped entirely
+	//               (names, types and required stay). Smallest payload;
+	//               intended for eval A/B runs before adoption (issue #462).
+	// Empty string is treated as "full". Applies to milk's own injected tool
+	// schemas (incl. MCP tools) on HTTP agents — claude-cli/subprocess
+	// providers manage their own tool schemas and ignore this.
+	ToolDescriptionTier string `json:"tool_description_tier,omitempty"`
+
 	// ProjectMapContext selects how much pushed project-structure context
 	// this agent's prompt carries around the project_map tool (ADR-0081).
 	// Valid values: "minimal" (default), "off", "full"; boolean aliases
@@ -3387,6 +3403,14 @@ func Validate(cfg Config) []ValidationWarning {
 		case "", ProjectMapOff, ProjectMapMinimal, ProjectMapFull:
 		default:
 			warn(a.Name, fmt.Sprintf("project_map_context %q is not a valid mode (valid: minimal, off, full — true/false accepted) — treating as minimal", a.ProjectMapContext))
+		}
+
+		// tool_description_tier is a plain string field; warn on typos so a
+		// mistyped diet silently falling back to "full" is visible.
+		switch strings.ToLower(strings.TrimSpace(a.ToolDescriptionTier)) {
+		case "", "full", "compact", "lean":
+		default:
+			warn(a.Name, fmt.Sprintf("tool_description_tier %q is not a valid tier (valid: full, compact, lean) — treating as full", a.ToolDescriptionTier))
 		}
 
 		// HTTP providers must have a url.

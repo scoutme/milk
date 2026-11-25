@@ -326,15 +326,18 @@ func buildErrorEvent(sessionID string, turnErr error) *streamjson.Event {
 // emitOneShotOutcome writes a finished one-shot turn's terminal sequence for
 // --output-format stream-json: the assistant message whenever any text was
 // captured (including a killed turn's partial stream), the system/error
-// banner when the turn failed, and exactly one result event last.
-func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router.Target, reason string, turnErr error, captured string, durationMS, numTurns int64, before, after map[string]session.TokenUsage) {
+// banner when the turn failed, and exactly one result event last. payload
+// (issue #462's meter) is attached to the result line when non-nil.
+func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router.Target, reason string, turnErr error, captured string, durationMS, numTurns int64, before, after map[string]session.TokenUsage, payload *streamjson.PayloadInfo) {
 	if captured != "" {
 		emit(enc, buildAssistantEvent(sessionID, captured))
 	}
 	if turnErr != nil {
 		emit(enc, buildErrorEvent(sessionID, turnErr))
 	}
-	emit(enc, buildResultEvent(sessionID, target, reason, turnErr, oneShotResultText(captured, turnErr), durationMS, numTurns, before, after))
+	ev := buildResultEvent(sessionID, target, reason, turnErr, oneShotResultText(captured, turnErr), durationMS, numTurns, before, after)
+	ev.Payload = payload
+	emit(enc, ev)
 }
 
 // resultHopReason is the "why" recorded on the result line's route_history

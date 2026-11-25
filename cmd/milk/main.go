@@ -390,9 +390,10 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, ev := range buildToolTrailEvents(sess.ID, trail) {
 			emit(enc, ev)
 		}
-		emitOneShotOutcome(enc, sess.ID, target, resultHopReason(decision, target), turnErr, capture.text, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
+		emitOneShotOutcome(enc, sess.ID, target, resultHopReason(decision, target), turnErr, capture.text, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot(), turnPayloadInfo(target, primaryRunner, escalationRunner))
 	} else if fmtVal == formatJSON {
 		resEv := buildResultEvent(sess.ID, target, resultHopReason(decision, target), turnErr, oneShotResultText(capture.text, turnErr), durationMS, 1, before, sess.TokensSnapshot())
+		resEv.Payload = turnPayloadInfo(target, primaryRunner, escalationRunner)
 		resEv.TS = nowTS()
 		b, _ := json.MarshalIndent(resEv, "", "  ") //nolint:errcheck // Event always marshals
 		os.Stdout.Write(append(b, '\n'))            //nolint:errcheck // stdout write
@@ -424,6 +425,33 @@ func oneShotBudgetErr(err error, budget time.Duration) error {
 		return err
 	}
 	return fmt.Errorf("turn budget of %s exceeded (--turn-timeout, 0 disables): %w", budget, err)
+}
+
+// turnPayloadInfo returns the first-request payload composition (issue
+// #462's meter) for the runner that served this turn, or nil when that
+// runner is not a local HTTP agent (claude-cli / subprocess manage their
+// own tool schemas) or assembled no request yet.
+func turnPayloadInfo(target router.Target, primary, escalation TurnRunner) *streamjson.PayloadInfo {
+	r := primary
+	if target == router.TargetEscalation {
+		r = escalation
+	}
+	src, ok := r.(interface {
+		FirstPayload() (local.PayloadInfo, bool)
+	})
+	if !ok {
+		return nil
+	}
+	p, ok := src.FirstPayload()
+	if !ok {
+		return nil
+	}
+	return &streamjson.PayloadInfo{
+		SystemBytes:   p.SystemBytes,
+		ToolsBytes:    p.ToolsBytes,
+		MessagesBytes: p.MessagesBytes,
+		Diet:          p.Diet,
+	}
 }
 
 // buildPrimaryRunner constructs the TurnRunner for the primary agent role.

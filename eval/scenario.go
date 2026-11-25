@@ -70,6 +70,20 @@ type CacheExpect struct {
 }
 
 // RunResult captures one turn's output from an adapter.
+// PayloadInfo is the first-request payload composition a milk-tui run
+// reports on its result line (result.payload, issue #462's meter): byte
+// counts of the stable prefix — rendered system prompt, serialized
+// tool-schema array and all message text (system included) — plus the
+// effective tool-description diet (full | compact | lean). Bytes, not
+// tokens: divide by ~4 for a token estimate (total ≈ MessagesBytes +
+// ToolsBytes + per-message JSON framing).
+type PayloadInfo struct {
+	SystemBytes   int64  `json:"system_bytes"`
+	ToolsBytes    int64  `json:"tools_bytes"`
+	MessagesBytes int64  `json:"messages_bytes"`
+	Diet          string `json:"diet"`
+}
+
 type RunResult struct {
 	Response    string        `json:"response"`
 	Tokens      TokenUsage    `json:"tokens"`
@@ -97,6 +111,10 @@ type RunResult struct {
 	// line's model_usage keys) — the billing truth when a routing hop ran a
 	// different model from the session primary that Model reports.
 	ModelsUsed []string `json:"models_used,omitempty"`
+	// Payload is the first-request payload composition when the run's milk
+	// build reports it (result.payload — issue #462's meter). Nil on older
+	// builds and on providers that don't assemble milk's tool schemas.
+	Payload *PayloadInfo `json:"payload,omitempty"`
 	// TTFTMS is the mean time-to-first-token across the turn's measured
 	// completion requests; OutputTokensPerSecond is the generation throughput.
 	// Both are 0 when no timing source reported (never fabricated).

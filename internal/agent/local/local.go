@@ -670,6 +670,18 @@ type Agent struct {
 	// systemPromptTier selects the verbosity level of the system prompt.
 	// Valid values: "minimal", "standard" (default), "full". Empty = "standard".
 	systemPromptTier string
+	// toolDescTier selects the tool-schema description diet (issue #462):
+	// ""/"full" (default) verbatim, "compact" first-sentence-capped,
+	// "lean" compact + parameter descriptions dropped. Stable config
+	// (AgentConfig.ToolDescriptionTier).
+	toolDescTier string
+	// firstPayload holds the first assembled request's composition (nil
+	// until the first Run assembles one) — issue #462's meter. A pointer
+	// to the atomic: the shallow-copy helpers (WithMCPToolSet,
+	// cloneForBackground, …) copy the Agent struct, and a non-pointer
+	// atomic.Pointer would trip vet's copylocks; sharing one slot across
+	// copies is also the wanted semantics (one agent, one prefix).
+	firstPayload *atomic.Pointer[PayloadInfo]
 	// projectMapContext is the pushed project-structure mode (ADR-0081):
 	// ""/"minimal" (default) framing + top-level tree per turn, "off" tool
 	// only, "full" a budgeted Aider-style map per turn. Stable config
@@ -1127,6 +1139,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			sigv4:                      sv4,
 			limits:                     ac.Limits,
 			systemPromptTier:           ac.SystemPromptTier,
+			toolDescTier:               ac.ToolDescriptionTier,
 			projectMapContext:          ac.ProjectMapContext,
 			disableProjectInstructions: ac.DisableProjectInstructions,
 			bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -1137,6 +1150,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			payloadCompactionThreshold: config.DefaultPayloadTrimCompactionThreshold,
 			escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 			usedTools:                  newToolUseTracker(),
+			firstPayload:               new(atomic.Pointer[PayloadInfo]),
 		}
 	}
 
@@ -1157,6 +1171,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		backgroundClient:           &http.Client{Transport: bgTransport},
 		limits:                     ac.Limits,
 		systemPromptTier:           ac.SystemPromptTier,
+		toolDescTier:               ac.ToolDescriptionTier,
 		projectMapContext:          ac.ProjectMapContext,
 		disableProjectInstructions: ac.DisableProjectInstructions,
 		bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -1166,6 +1181,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		payloadCompactionThreshold: config.DefaultPayloadTrimCompactionThreshold,
 		escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 		usedTools:                  newToolUseTracker(),
+		firstPayload:               new(atomic.Pointer[PayloadInfo]),
 	}
 }
 
@@ -1962,6 +1978,10 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		tools = append(tools, spawnBackgroundAgentSchema(a.backgroundPeerNames()), cancelBackgroundAgentSchema(),
 			statusBackgroundAgentSchema(), waitBackgroundAgentSchema(), sendBackgroundAgentSchema())
 	}
+	// Tool-description diet (issue #462): config-gated, applied once here so
+	// every schema source (built-ins, board, MCP, background) is covered and
+	// never re-ordered or dropped. ""/"full" returns the input untouched.
+	tools = applyToolDescDiet(tools, a.toolDescTier)
 
 	// Assemble the system prompt from its components (sysPromptBuilder) so
 	// the layered context-reduction ladder (issue #236, reduction.go) can
@@ -2047,6 +2067,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
+	// First-request payload composition (issue #462's meter): recorded once,
+	// before the tool loop starts re-sending this prefix.
+	a.noteFirstPayload(systemPrompt, msgs, tools)
 
 	if a.tagNonce != "" {
 		if a.onNeed != nil {

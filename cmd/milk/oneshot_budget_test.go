@@ -166,7 +166,7 @@ func TestEmitOneShotOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			enc := streamjson.NewEncoder(&buf)
-			emitOneShotOutcome(enc, "sess_1", router.TargetLocal, "default", tc.turnErr, tc.captured, 42, 1, nil, nil)
+			emitOneShotOutcome(enc, "sess_1", router.TargetLocal, "default", tc.turnErr, tc.captured, 42, 1, nil, nil, nil)
 
 			dec := streamjson.NewDecoder(&buf)
 			var got []string
