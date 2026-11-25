@@ -676,9 +676,14 @@ func execOtel(sub string, st *interactiveState) string {
 		return milkTag() + " otel files archived — starting fresh"
 	case "off":
 		st.cfg.Otel.Enabled = false
+		obs.SetEnabled(false)
 		return milkTag() + " OTel disabled for this session"
 	case "on":
 		st.cfg.Otel.Enabled = true
+		if !obs.Initialized() {
+			return milkTag() + " OTel did not start this session (otel.enabled off or otel.max_mb exceeded at startup) — /otel trim first if the files are large, then restart milk"
+		}
+		obs.SetEnabled(true)
 		return milkTag() + " OTel re-enabled for this session"
 	case "debug enable":
 		if err := runOtelDebug(true); err != nil {

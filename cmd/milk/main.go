@@ -989,7 +989,10 @@ func initObs(cfg config.Config) (shutdown func(context.Context) error) {
 
 	if warn, exceeded := obs.CheckFileSizes(cfg.Otel, otelDir); exceeded {
 		fmt.Fprintln(os.Stderr, milkTag()+" "+warn)
-		// Hard cap exceeded — skip OTel for this session.
+		// Hard cap exceeded — skip OTel for this session and mark the
+		// emission gate closed so /otel status agrees (#458); /otel trim +
+		// restart re-enables.
+		obs.SetEnabled(false)
 		return func(context.Context) error { return nil }
 	} else if warn != "" {
 		fmt.Fprintln(os.Stderr, milkTag()+" warning: "+warn)

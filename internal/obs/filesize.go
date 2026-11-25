@@ -2,11 +2,15 @@ package obs
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/scoutme/milk/internal/config"
 )
 
 // SignalFileStat describes a single OTel signal file.
@@ -116,23 +120,25 @@ func FormatStats(otelDir string) string {
 		fmt.Fprintln(&b)
 	}
 	fmt.Fprintf(&b, "  %-16s %8s\n", "total", formatBytes(totalBytes))
+	switch {
+	case sizeTrip.Load():
+		fmt.Fprintln(&b, "  state: DISABLED — otel.max_mb exceeded; /otel trim archives the files and reopens the gate")
+	case off.Load():
+		fmt.Fprintln(&b, "  state: disabled for this session (/otel on to resume)")
+	}
 	fmt.Fprint(&b, "hint: /otel trim to archive and reset, /otel off to disable for this session")
 	return b.String()
 }
 
 func Trim(otelDir string) error {
-	date := time.Now().Format("2006-01-02")
 	names := []string{"traces.jsonl", "metrics.jsonl", "logs.jsonl", "milk.log"}
 	for _, name := range names {
 		src := filepath.Join(otelDir, name)
 		if _, err := os.Stat(src); os.IsNotExist(err) {
 			continue
 		}
-		ext := filepath.Ext(name)
-		base := strings.TrimSuffix(name, ext)
-		dst := filepath.Join(otelDir, fmt.Sprintf("%s.%s%s", base, date, ext))
-		if err := archiveAndTruncate(src, dst); err != nil {
-			return fmt.Errorf("trim %s: %w", name, err)
+		if err := trimOne(src, name); err != nil {
+			return err
 		}
 	}
 	// Also trim the 3 debug log files that live in ~/.milk/ (not otelDir).
@@ -140,28 +146,83 @@ func Trim(otelDir string) error {
 		if _, err := os.Stat(dbgPath); os.IsNotExist(err) {
 			continue
 		}
-		name := filepath.Base(dbgPath)
-		ext := filepath.Ext(name)
-		base := strings.TrimSuffix(name, ext)
-		dir := filepath.Dir(dbgPath)
-		dst := filepath.Join(dir, fmt.Sprintf("%s.%s%s", base, date, ext))
-		if err := archiveAndTruncate(dbgPath, dst); err != nil {
-			return fmt.Errorf("trim %s: %w", name, err)
+		if err := trimOne(dbgPath, filepath.Base(dbgPath)); err != nil {
+			return err
 		}
 	}
 	// Retention (#378): archiving without pruning is what grew
 	// ~/.milk/otel to 3.7 GB — sweep old datestamped archives right
 	// after archiving so the directory stays self-limiting.
 	PruneArchives(otelDir)
+	// The size cap that auto-closed the emission gate (#457) tripped on data
+	// this trim just archived: reopen the gate. A manual /otel off survives —
+	// its own flag (off) stays set.
+	sizeTrip.Store(false)
 	return nil
 }
 
+// errArchiveExists signals the candidate archive path is already taken (a
+// second trim the same day); trimOne tries the next candidate name instead of
+// overwriting the earlier archive (#457).
+var errArchiveExists = errors.New("obs: archive name already exists")
+
+// trimOne archives src's content into a free, atomically claimed archive
+// name and truncates the live file in place.
+func trimOne(src, name string) error {
+	now := time.Now()
+	var last error
+	for _, dst := range archiveCandidates(src, now) {
+		err := archiveAndTruncate(src, dst)
+		if errors.Is(err, errArchiveExists) {
+			last = err
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("trim %s: %w", name, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("trim %s: no free archive name: %w", name, last)
+}
+
+// archiveCandidates lists the archive paths to try for src, in order:
+// <base>.<date>.<ext> first (the shape splitArchiveName has always
+// recognized), then <base>.<date>.<HHMMSS>.<ext> and numbered variants for
+// trims that already claimed the earlier names today. All are recognized by
+// splitArchiveName, so every candidate still prunes.
+func archiveCandidates(src string, now time.Time) []string {
+	dir := filepath.Dir(src)
+	ext := filepath.Ext(src)
+	base := strings.TrimSuffix(filepath.Base(src), ext)
+	day := now.Format("2006-01-02")
+	clock := now.Format("150405")
+	out := make([]string, 0, 101)
+	out = append(out, filepath.Join(dir, base+"."+day+ext))
+	out = append(out, filepath.Join(dir, base+"."+day+"."+clock+ext))
+	for i := 1; i <= 99; i++ {
+		out = append(out, filepath.Join(dir, fmt.Sprintf("%s.%s.%s.%d%s", base, day, clock, i, ext)))
+	}
+	return out
+}
+
+// archiveAndTruncate copies src's content into dst and empties src in place.
+//
+// Three properties matter for concurrent milk sessions (#457):
+//
+//   - dst is claimed with O_EXCL: two sessions trimming the same day never
+//     overwrite each other's archive (errArchiveExists moves Trim to the
+//     next candidate name).
+//   - The copy streams to EOF and the truncate follows immediately, so the
+//     window in which a concurrent append can be lost shrank from "the
+//     whole archive write" to one syscall after the final read.
+//   - src is truncated in place, never renamed: other sessions hold
+//     O_APPEND descriptors on this inode and must keep writing to the live
+//     path (TestTrim_TruncatesInPlaceForOpenWriters pins that contract).
+//     Cooperating writers (RotatingWriter, a concurrent trim) serialize on
+//     the "<file>.lock" sidecar; OTel exporters don't lock, which is why the
+//     window is minimized rather than eliminated.
 func archiveAndTruncate(src, dst string) error {
 	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	content, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
@@ -169,14 +230,45 @@ func archiveAndTruncate(src, dst string) error {
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := os.WriteFile(dst, content, mode); err != nil {
-		return err
+	if unlock, lerr := config.LockSidecar(src + ".lock"); lerr == nil {
+		defer unlock()
+	} else {
+		Debug("obs: trim lock unavailable", "file", src, "err", lerr)
 	}
-	f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return f.Close()
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		if os.IsExist(err) {
+			return errArchiveExists
+		}
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst) // a half-written archive must not squat the name
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+
+	_ = in.Close()
+	wf, err := os.OpenFile(src, os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	err = wf.Truncate(0)
+	if cerr := wf.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func formatBytes(b int64) string {

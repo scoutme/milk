@@ -279,6 +279,10 @@ func turnSource(st *interactiveState) string {
 // recordTurn emits the per-turn metrics. source should be captured before the
 // turn runs (turnSource), since the turn can change the pins.
 func recordTurn(ctx context.Context, target router.Target, source string, start time.Time, turnErr error) {
+	// Shared-file size cap (#457): the startup check can't keep up with N
+	// sessions feeding the same files — stat-only, throttled, and shared by
+	// the TUI and ACP because both record turns here.
+	obs.MaybeEnforceSizeCap()
 	label := string(target)
 	obs.Inc(ctx, milkScope, "milk.turns.total",
 		attribute.String("target", label),
