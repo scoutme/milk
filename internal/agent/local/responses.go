@@ -418,15 +418,11 @@ func (a *Agent) scanResponsesSSE(
 
 // responsesClassify classifies a prompt using the Responses API (non-streaming).
 func (a *Agent) responsesClassify(ctx context.Context, prompt string) (bool, error) {
-	classifyPrompt := `Respond with exactly one word: "primary" or "escalate".
-Use "escalate" only when the task clearly requires complex multi-file refactoring, architectural design decisions, or deep reasoning beyond coding assistance.
-Use "primary" for shell commands, file reading, grep, simple code questions, debugging, and writing small functions.
-
-Task: ` + prompt
+	classifyPromptText := classifyPrompt(prompt)
 
 	req := responsesRequest{
 		Model:       a.model,
-		Input:       []responsesInput{{Role: "user", Content: classifyPrompt}},
+		Input:       []responsesInput{{Role: "user", Content: classifyPromptText}},
 		Stream:      false,
 		Temperature: 0,
 	}

@@ -5260,16 +5260,12 @@ func (a *Agent) Classify(ctx context.Context, prompt string) (bool, error) {
 	if a.useResponsesAPI {
 		return a.responsesClassify(ctx, prompt)
 	}
-	classifyPrompt := `Respond with exactly one word: "primary" or "escalate".
-Use "escalate" only when the task clearly requires complex multi-file refactoring, architectural design decisions, or deep reasoning beyond coding assistance.
-Use "primary" for shell commands, file reading, grep, simple code questions, debugging, and writing small functions.
-
-Task: ` + prompt
+	classifyPromptText := classifyPrompt(prompt)
 
 	req := chatRequest{
 		Model: a.model,
 		Messages: []Message{
-			{Role: "user", Content: classifyPrompt},
+			{Role: "user", Content: classifyPromptText},
 		},
 		Stream:      false,
 		Temperature: 0,
