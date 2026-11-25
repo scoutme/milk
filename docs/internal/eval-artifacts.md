@@ -13,9 +13,10 @@ another milk user or contributor benefit from this, and does its meaning not
 depend on one machine's config or one specific run?*
 
 - **Harness code**: `eval/*.go` — adapters (`claude-code`, `milk-tui`,
-  `mimo-code`, …), harness, judge, report, cache, experiment engine, plus all
+  `mimo-code`, `pi`, …), harness, judge, report, cache, experiment engine, plus all
   `*_test.go`.
-- **Recorded stream fixtures**: `eval/testdata/**` (e.g. `testdata/mimo/*.jsonl`).
+- **Recorded stream fixtures**: `eval/testdata/**` (e.g. `testdata/mimo/*.jsonl`,
+  `testdata/pi/*.jsonl`).
   Real captured outputs, but pinned golden *inputs* for parser tests: small,
   reviewable, deterministic. Keep them trimmed to what the test asserts on.
 - **The standard scenario suite**: `eval/scenarios/**` including `_base.yaml`.

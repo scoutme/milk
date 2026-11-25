@@ -77,7 +77,7 @@ type Experiment struct {
 	//
 	// Keys match run model names (exact, or path-qualified like
 	// xiaomi/mimo-v2.6-pro). Feeds eval's computed-cost adapter (milk);
-	// claude-code and mimo-code report their own cost and ignore it.
+	// claude-code, mimo-code and pi report their own cost and ignore it.
 	Pricing map[string]ModelPricing `yaml:"pricing,omitempty"`
 	// Versions is the milk version matrix: one labeled milk-tui adapter per
 	// entry, all running the same suite side by side (see ResolveAdapterSpecs).
