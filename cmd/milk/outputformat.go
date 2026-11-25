@@ -327,14 +327,33 @@ func buildErrorEvent(sessionID string, turnErr error) *streamjson.Event {
 // --output-format stream-json: the assistant message whenever any text was
 // captured (including a killed turn's partial stream), the system/error
 // banner when the turn failed, and exactly one result event last.
-func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router.Target, turnErr error, captured string, durationMS, numTurns int64, before, after map[string]session.TokenUsage) {
+func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router.Target, reason string, turnErr error, captured string, durationMS, numTurns int64, before, after map[string]session.TokenUsage) {
 	if captured != "" {
 		emit(enc, buildAssistantEvent(sessionID, captured))
 	}
 	if turnErr != nil {
 		emit(enc, buildErrorEvent(sessionID, turnErr))
 	}
-	emit(enc, buildResultEvent(sessionID, target, turnErr, oneShotResultText(captured, turnErr), durationMS, numTurns, before, after))
+	emit(enc, buildResultEvent(sessionID, target, reason, turnErr, oneShotResultText(captured, turnErr), durationMS, numTurns, before, after))
+}
+
+// resultHopReason is the "why" recorded on the result line's route_history
+// hop (RouteHop.Reason). It mirrors routeReason's honesty rules
+// (turn_routing.go) for the one-shot path: when the availability fallback
+// resolved a different target than the router chose, liveness — not the
+// router's reasoning — picked the agent and the hop says so; otherwise the
+// router's own decision reason is recorded verbatim.
+func resultHopReason(decision router.Decision, resolved router.Target) string {
+	if resolved != decision.Target {
+		if resolved == router.TargetEscalation {
+			return "primary unavailable"
+		}
+		return "escalation unavailable"
+	}
+	if decision.Reason != "" {
+		return decision.Reason
+	}
+	return "routing decision"
 }
 
 // buildResultEvent builds the terminal, always-exactly-one result line
@@ -342,8 +361,10 @@ func emitOneShotOutcome(enc *streamjson.Encoder, sessionID string, target router
 // iterations (1 + the tool-calling iterations recorded in the trail — see
 // buildToolTrailEvents) and RouteHistory is a single hop — this run has no
 // role-aware signal to detect a mid-run self-escalation hand-off (see this
-// file's companion status note).
-func buildResultEvent(sessionID string, target router.Target, turnErr error, lastText string, durationMS int64, numTurns int64, before, after map[string]session.TokenUsage) *streamjson.Event {
+// file's companion status note). The hop carries the decision reason (see
+// resultHopReason) so consumers can tell why the run routed the way it did
+// without replaying the router.
+func buildResultEvent(sessionID string, target router.Target, reason string, turnErr error, lastText string, durationMS int64, numTurns int64, before, after map[string]session.TokenUsage) *streamjson.Event {
 	isError := turnErr != nil
 	subtype := streamjson.ResultSuccess
 	stopReason := "end_turn"
@@ -367,7 +388,7 @@ func buildResultEvent(sessionID string, target router.Target, turnErr error, las
 		DurationMS:   durationMS,
 		Result:       lastText,
 		StopReason:   stopReason,
-		RouteHistory: []streamjson.RouteHop{{Turn: 0, Target: wireTarget(target)}},
+		RouteHistory: []streamjson.RouteHop{{Turn: 0, Target: wireTarget(target), Reason: reason}},
 		Usage:        usage,
 		ModelUsage:   modelUsage,
 	}

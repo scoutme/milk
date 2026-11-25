@@ -401,6 +401,10 @@
     "route_hop": {
       "additionalProperties": false,
       "properties": {
+        "reason": {
+          "description": "why this target handled the turn: the router's decision reason (rules/classifier/confirmation/state), the forced flag's label, or the availability fallback",
+          "type": "string"
+        },
         "target": {
           "type": "string"
         },

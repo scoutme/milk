@@ -185,10 +185,14 @@ type RouteDecision struct {
 	Conclusive bool   `json:"conclusive,omitempty"`
 }
 
-// RouteHop records which agent handled one turn of the run (result.route_history).
+// RouteHop records which agent handled one turn of the run and why
+// (result.route_history). Reason is the router's decision reason, the forced
+// flag's honest label, or the availability fallback ("primary unavailable") —
+// the same vocabulary as system/init's route.reason.
 type RouteHop struct {
 	Turn   int64  `json:"turn"`
 	Target string `json:"target"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // Command is one available slash command (system/commands).
