@@ -80,12 +80,13 @@ type milkStreamRun struct {
 	NumTurns     int64
 	DurationMS   int64
 	StopReason   string
-	RouteHist    []string // route_history targets, one per turn hop
-	RouteReasons []string // hop reasons, sourced from InitReason (one decision per run)
-	InitReason   string   // system/init route.reason — the run's own routing decision
-	ModelsUsed   []string // distinct model_usage keys on the result (billing truth)
-	TTFTMS       int64    // result.ttft_ms — mean time-to-first-token
-	OutputTPS    float64  // result.output_tokens_per_second — generation throughput
+	RouteHist    []string     // route_history targets, one per turn hop
+	RouteReasons []string     // hop reasons, sourced from InitReason (one decision per run)
+	InitReason   string       // system/init route.reason — the run's own routing decision
+	ModelsUsed   []string     // distinct model_usage keys on the result (billing truth)
+	TTFTMS       int64        // result.ttft_ms — mean time-to-first-token
+	OutputTPS    float64      // result.output_tokens_per_second — generation throughput
+	Payload      *PayloadInfo // result.payload — first-request composition (issue #462)
 
 	// system/init + system/state mapping (onto the eval report shapes):
 	// model identity + config warnings from init, and the session-state
@@ -230,6 +231,14 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 			run.StopReason = ev.StopReason
 			run.TTFTMS = ev.TTFTMS
 			run.OutputTPS = ev.OutputTokensPerSecond
+			if ev.Payload != nil {
+				run.Payload = &PayloadInfo{
+					SystemBytes:   ev.Payload.SystemBytes,
+					ToolsBytes:    ev.Payload.ToolsBytes,
+					MessagesBytes: ev.Payload.MessagesBytes,
+					Diet:          ev.Payload.Diet,
+				}
+			}
 			for _, hop := range ev.RouteHistory {
 				run.RouteHist = append(run.RouteHist, hop.Target)
 			}
@@ -574,6 +583,7 @@ func milkRunResult(run *milkStreamRun, start time.Time, beforeFiles, afterFiles 
 		ModelsUsed:            run.ModelsUsed,
 		TTFTMS:                run.TTFTMS,
 		OutputTokensPerSecond: run.OutputTPS,
+		Payload:               run.Payload,
 		Warnings:              run.Warnings,
 	}
 	if run.IsError {

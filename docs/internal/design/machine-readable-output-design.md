@@ -477,6 +477,7 @@ history ring.
  "num_turns":3,"duration_ms":8123,
  "result":"final assistant text","stop_reason":"end_turn",
  "route_history":[{"turn":0,"target":"primary"},{"turn":2,"target":"escalation"}],
+ "payload":{"system_bytes":6400,"tools_bytes":15100,"messages_bytes":6700,"diet":"full"},
  "usage":{"input_tokens":1234,"output_tokens":567,"cache_read":8000,"cache_creation":200},
  "model_usage":{"qwen2.5-coder-32b":{"input_tokens":…,"output_tokens":…,"cache_read":…},
                 "claude-sonnet-5":{"input_tokens":…,"output_tokens":…}}}
@@ -485,7 +486,12 @@ history ring.
 `cache_read`/`cache_creation` are milk's existing snake_case token-cache keys
 (session store + `eval/adapter_milk.go` schema) — kept as-is rather than
 Anthropic's `cache_read_input_tokens`, with the rationale documented at the
-schema level. `subtype` open-set: `success | error_during_execution |
+schema level. `payload` (optional; local-provider turns only — a claude-cli
+turn assembles no milk tool schemas) is the first-request payload
+composition: byte counts of the rendered system prompt, the serialized
+tool-schema array and all message text (system included) plus the effective
+tool-description diet (`full | compact | lean`) — issue #462's meter, the
+input the eval's with/without-diet comparison reads. `subtype` open-set: `success | error_during_execution |
 error_max_turns | interrupted | refused` (Claude Code vocabulary) — `is_error`
 remains the boolean contract per milk's `is_error` convention. For
 `--output-format json` this object (indented) *is* the whole output.

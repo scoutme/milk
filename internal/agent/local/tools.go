@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/scoutme/milk/internal/config"
+	"github.com/scoutme/milk/internal/contextreduce"
 	"github.com/scoutme/milk/internal/memory"
 	"github.com/scoutme/milk/internal/obs"
 	"github.com/scoutme/milk/internal/selfdocs"
@@ -155,6 +156,62 @@ func workflowToolDescription() string {
 		return base + " No workflows are currently registered."
 	}
 	return base + " Available: " + strings.Join(names, ", ") + ". Runs independently in the background: its progress and result appear in the transcript for the user, but — unlike spawn_background_agent — are not automatically added to your own context, so don't wait on or assume its outcome in this turn."
+}
+
+// applyToolDescDiet applies the config-gated tool-description diet
+// (AgentConfig.ToolDescriptionTier, issue #462) to a freshly assembled tool
+// list. It never reorders or drops tools and never mutates the input:
+//
+//	"" / "full"  — returned untouched (byte-for-byte status quo)
+//	"compact"    — every description cut to its first sentence, ≤120 runes
+//	              (contextreduce.CompactTools — deep copy)
+//	"lean"       — compact, plus every "description" key inside each
+//	              function's parameters subtree dropped (names, types,
+//	              enums and required survive)
+//
+// Unknown values behave as "full" (config.Validate warns on them).
+func applyToolDescDiet(tools []map[string]any, tier string) []map[string]any {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case "compact":
+		return contextreduce.CompactTools(tools)
+	case "lean":
+		return stripParameterDescriptions(contextreduce.CompactTools(tools))
+	default:
+		return tools
+	}
+}
+
+// stripParameterDescriptions removes every "description" key inside each
+// tool's function.parameters schema, in place — callers pass the deep copies
+// returned by contextreduce.CompactTools, never a caller-owned list.
+// The function-level description (already compacted) is intentionally left.
+func stripParameterDescriptions(tools []map[string]any) []map[string]any {
+	for _, t := range tools {
+		fn, ok := t["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if params, ok := fn["parameters"].(map[string]any); ok {
+			deleteDescriptions(params)
+		}
+	}
+	return tools
+}
+
+// deleteDescriptions recursively strips the "description" key from a schema
+// fragment (the parameters subtree only — never called on function level).
+func deleteDescriptions(v any) {
+	switch n := v.(type) {
+	case map[string]any:
+		delete(n, "description")
+		for _, child := range n {
+			deleteDescriptions(child)
+		}
+	case []any:
+		for _, child := range n {
+			deleteDescriptions(child)
+		}
+	}
 }
 
 // schemas returns the OpenAI function schemas for all built-in tools,

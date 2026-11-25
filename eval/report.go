@@ -131,6 +131,10 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 		// Routing/model attribution per turn — the "why" behind route_history.
 		b.WriteString(buildRoutingLines(sr, agentNames))
 
+		// First-request payload composition (issue #462's meter): what the
+		// stable prefix cost before any tool iteration re-sent it.
+		b.WriteString(buildPayloadLines(sr, agentNames))
+
 		// Metric-budget verdicts (the automated pass/fail check).
 		b.WriteString(buildBudgetVerdicts(sr, agentNames))
 
@@ -1219,19 +1223,20 @@ type JSONAgentResult struct {
 
 // JSONRunResult is a serializable per-turn result.
 type JSONRunResult struct {
-	Response              string     `json:"response"`
-	Tokens                TokenUsage `json:"tokens"`
-	CostUSD               float64    `json:"cost_usd"`
-	Duration              float64    `json:"duration_sec"`
-	ToolCalls             []ToolCall `json:"tool_calls,omitempty"`
-	Model                 string     `json:"model,omitempty"`
-	NumTurns              int64      `json:"num_turns,omitempty"`
-	StopReason            string     `json:"stop_reason,omitempty"`
-	RouteHistory          []string   `json:"route_history,omitempty"`
-	RouteReasons          []string   `json:"route_reasons,omitempty"`
-	ModelsUsed            []string   `json:"models_used,omitempty"`
-	TTFTMS                int64      `json:"ttft_ms,omitempty"`
-	OutputTokensPerSecond float64    `json:"output_tokens_per_second,omitempty"`
+	Response              string       `json:"response"`
+	Tokens                TokenUsage   `json:"tokens"`
+	CostUSD               float64      `json:"cost_usd"`
+	Duration              float64      `json:"duration_sec"`
+	ToolCalls             []ToolCall   `json:"tool_calls,omitempty"`
+	Model                 string       `json:"model,omitempty"`
+	NumTurns              int64        `json:"num_turns,omitempty"`
+	StopReason            string       `json:"stop_reason,omitempty"`
+	RouteHistory          []string     `json:"route_history,omitempty"`
+	RouteReasons          []string     `json:"route_reasons,omitempty"`
+	ModelsUsed            []string     `json:"models_used,omitempty"`
+	Payload               *PayloadInfo `json:"payload,omitempty"`
+	TTFTMS                int64        `json:"ttft_ms,omitempty"`
+	OutputTokensPerSecond float64      `json:"output_tokens_per_second,omitempty"`
 }
 
 // JSONAggregate holds cross-scenario summary statistics.
@@ -1308,6 +1313,7 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 					RouteHistory:          r.RouteHistory,
 					RouteReasons:          r.RouteReasons,
 					ModelsUsed:            r.ModelsUsed,
+					Payload:               r.Payload,
 					TTFTMS:                r.TTFTMS,
 					OutputTokensPerSecond: r.OutputTokensPerSecond,
 				})
@@ -1623,6 +1629,63 @@ func buildRoutingLines(sr ScenarioResult, agentNames []string) string {
 			continue
 		}
 		b.WriteString(fmt.Sprintf("Routing [%s]: %s\n", name, strings.Join(hops, " → ")))
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// firstPayload returns the first turn's reported payload composition (the
+// stable prefix a diet moves), or nil when no turn reported one (older
+// builds, non-HTTP providers).
+func firstPayload(ar AgentResult) *PayloadInfo {
+	for _, r := range ar.RunResults {
+		if r.Payload != nil {
+			return r.Payload
+		}
+	}
+	return nil
+}
+
+// fmtBytes renders a byte count compactly ("950", "8.7k", "1.2M").
+func fmtBytes(n int64) string { return fmtCount(n) }
+
+// fmtCount renders a count compactly ("950", "8.7k", "1.2M") — shared by
+// byte and token-estimate rendering.
+func fmtCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// buildPayloadLines renders the first-request payload composition behind the
+// metrics table, one line per agent that reports it (issue #462's meter).
+// The token estimate is (messages + tools)/4 — messages already include the
+// system prompt, so it is not added twice.
+func buildPayloadLines(sr ScenarioResult, agentNames []string) string {
+	var b strings.Builder
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok {
+			continue
+		}
+		p := firstPayload(ar)
+		if p == nil {
+			continue
+		}
+		estTok := (p.MessagesBytes + p.ToolsBytes) / 4
+		diet := p.Diet
+		if diet == "" {
+			diet = "full"
+		}
+		b.WriteString(fmt.Sprintf("Payload [%s]: ~%s tok first request — system %s B, tools %s B, msgs %s B (diet: %s)\n",
+			name, fmtCount(estTok), fmtBytes(p.SystemBytes), fmtBytes(p.ToolsBytes), fmtBytes(p.MessagesBytes), diet))
 	}
 	if b.Len() > 0 {
 		b.WriteString("\n")

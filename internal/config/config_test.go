@@ -999,6 +999,36 @@ func TestValidate_BothPromptAndPromptFile(t *testing.T) {
 	}
 }
 
+// TestValidate_ToolDescriptionTier pins the payload-diet tier check
+// (issue #462): valid values warn nothing (case/space-insensitive), a typo
+// warns instead of silently falling back to full.
+func TestValidate_ToolDescriptionTier(t *testing.T) {
+	mk := func(tier string) Config {
+		return Config{Agents: []AgentConfig{{
+			Name: "local", Provider: "local", URL: "http://localhost:8080", Model: "qwen",
+			ToolDescriptionTier: tier,
+		}}}
+	}
+	dietWarnings := func(ws []ValidationWarning) []string {
+		var out []string
+		for _, w := range ws {
+			if w.Agent == "local" && containsSubstr(w.Message, "tool_description_tier") {
+				out = append(out, w.Message)
+			}
+		}
+		return out
+	}
+	for _, tier := range []string{"", "full", "compact", "lean", " COMPACT "} {
+		if got := dietWarnings(Validate(mk(tier))); len(got) != 0 {
+			t.Errorf("tier %q should not warn, got %v", tier, got)
+		}
+	}
+	got := dietWarnings(Validate(mk("lite")))
+	if len(got) != 1 || !containsSubstr(got[0], "valid: full, compact, lean") {
+		t.Errorf("tier \"lite\" warnings = %v, want one hinting the valid tiers", got)
+	}
+}
+
 func TestValidate_OnlyPromptNoWarning(t *testing.T) {
 	cfg := Config{
 		Agents: []AgentConfig{
