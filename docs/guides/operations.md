@@ -72,11 +72,21 @@ Config mutations are part of that record ([#404](https://github.com/scoutme/milk
 
 | Command | Action |
 |---|---|
-| `/metrics` | Latest value for each metric+label combination |
-| `/otel` | File sizes, record counts, timestamp bounds |
-| `/otel trim` | Archive current files, recreate empty ones, keep only the 3 newest archives per file (old archives are pruned at startup too) |
+| `/metrics` | Latest value for each metric+label combination (aggregated across concurrent sessions — see below) |
+| `/otel` | File sizes, record counts, timestamp bounds, emission-gate state |
+| `/otel off` / `/otel on` | Close/reopen this session's emission gate immediately — every signal write and `milk.log` line is discarded while closed, no restart needed (`/otel on` says so if OTel never started this session) |
+| `/otel trim` | Archive current files, recreate empty ones, keep only the 3 newest archives per file (old archives are pruned at startup too); same-day re-trims claim a fresh time-suffixed archive name instead of overwriting the first one, and a size-cap auto-disable is lifted |
 | `search_signals` (tool) | Case-insensitive search over the raw JSONL |
 | `/usage` | Token usage report — cumulative, this session, since start — broken down by agent role and model, with a `tok/s` throughput column |
+
+### Concurrent sessions
+
+Several milk sessions (TUI, `milk serve --acp`, background jobs) can share one config root and therefore the same `~/.milk/otel/` files. The observability layer is built for that:
+
+- **Attribution.** Every exported record's `Resource` carries `service.instance.id` (`<pid>-<nonce>`) and `process.pid`; every `milk.log` line carries `pid=`; spans started under a turn's context (TUI and ACP both stamp it) carry `session_id`. Filter on those to separate writers — plain `slog` WARN lines emitted outside a turn only carry `pid` (session tagging for those is tracked in the escalation/context plan doc).
+- **Readouts.** `/metrics` resolves the latest datapoint *per writer instance* and then aggregates: cumulative counters are summed across instances (each process's counter covers its own lifetime → the sum is the true total since the last trim), gauges/last-value instruments take the newest datapoint (sessions observe the same file/store — summing would multiply it). `/usage`'s cumulative table sums `milk.tokens.*` across instances the same way. Both were previously last-writer-wins: a second session's flush silently replaced the first's numbers (#455, #456; `/usage`'s separate flush-vs-store double count is #459).
+- **Sizing.** `otel.max_mb` is re-checked at turn boundaries (stat-only, throttled to once a minute) instead of only at startup; exceeding it closes the emission gate with one last `otel.disabled_file_cap` record in `milk.log`, `/otel` shows the state, and `/otel trim` reopens the gate (#457).
+- **Trim/rotation.** `/otel trim` claims its archive name atomically (`<file>.<date>.jsonl`, then `<file>.<date>.<HHMMSS>.jsonl` and numbered variants), streams the copy before truncating in place (open append descriptors keep working — trim never renames the live file), and serializes against `milk.log`/debug-log rotation on a `<file>.lock` sidecar. Rotation is sized off the *shared* file's stat size, so N sessions rotate once at the cap instead of each racing its own byte count (#457).
 
 ### Throughput (tok/s)
 
