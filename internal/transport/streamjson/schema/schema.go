@@ -75,6 +75,7 @@ var fieldDocs = map[string]string{
 	"Event.TotalCostUSD":        "reserved — emitted only once milk has a pricing table",
 	"Event.Extension":           "reserved extension point: the ONLY home for provider-specific detail",
 	"Event.Meta":                "reserved _meta field: host/implementation metadata (also the only other home for provider detail)",
+	"RouteHop.Reason":           "why this target handled the turn: the router's decision reason (rules/classifier/confirmation/state), the forced flag's label, or the availability fallback",
 	"Usage.CacheRead":           "milk's snake_case token-cache key (session store + eval reports) — kept as-is rather than Anthropic's cache_read_input_tokens (design §6.4)",
 	"Usage.CacheCreation":       "milk's snake_case token-cache key (session store + eval reports) — kept as-is rather than Anthropic's cache_creation_input_tokens (design §6.4)",
 	"StreamPayload.Type":        "content_block_delta | tool_args_delta (open set)",

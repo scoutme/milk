@@ -390,9 +390,9 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, ev := range buildToolTrailEvents(sess.ID, trail) {
 			emit(enc, ev)
 		}
-		emitOneShotOutcome(enc, sess.ID, target, turnErr, capture.text, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
+		emitOneShotOutcome(enc, sess.ID, target, resultHopReason(decision, target), turnErr, capture.text, durationMS, int64(1+len(trail)), before, sess.TokensSnapshot())
 	} else if fmtVal == formatJSON {
-		resEv := buildResultEvent(sess.ID, target, turnErr, oneShotResultText(capture.text, turnErr), durationMS, 1, before, sess.TokensSnapshot())
+		resEv := buildResultEvent(sess.ID, target, resultHopReason(decision, target), turnErr, oneShotResultText(capture.text, turnErr), durationMS, 1, before, sess.TokensSnapshot())
 		resEv.TS = nowTS()
 		b, _ := json.MarshalIndent(resEv, "", "  ") //nolint:errcheck // Event always marshals
 		os.Stdout.Write(append(b, '\n'))            //nolint:errcheck // stdout write
