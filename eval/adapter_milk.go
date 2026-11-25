@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/scoutme/milk/internal/config"
@@ -70,18 +71,21 @@ var milkBinary = func() (string, error) {
 // milkStreamRun is everything one `--output-format stream-json` run reports on
 // stdout, extracted from the §6 event catalog.
 type milkStreamRun struct {
-	Response   string // result.result, falling back to concatenated assistant text
-	Text       string // concatenated assistant text blocks
-	Tokens     TokenUsage
-	ToolCalls  []ToolCall
-	Subtype    string // result subtype (open set)
-	IsError    bool
-	NumTurns   int64
-	DurationMS int64
-	StopReason string
-	RouteHist  []string // route_history targets, one per turn hop
-	TTFTMS     int64    // result.ttft_ms — mean time-to-first-token
-	OutputTPS  float64  // result.output_tokens_per_second — generation throughput
+	Response     string // result.result, falling back to concatenated assistant text
+	Text         string // concatenated assistant text blocks
+	Tokens       TokenUsage
+	ToolCalls    []ToolCall
+	Subtype      string // result subtype (open set)
+	IsError      bool
+	NumTurns     int64
+	DurationMS   int64
+	StopReason   string
+	RouteHist    []string // route_history targets, one per turn hop
+	RouteReasons []string // hop reasons, sourced from InitReason (one decision per run)
+	InitReason   string   // system/init route.reason — the run's own routing decision
+	ModelsUsed   []string // distinct model_usage keys on the result (billing truth)
+	TTFTMS       int64    // result.ttft_ms — mean time-to-first-token
+	OutputTPS    float64  // result.output_tokens_per_second — generation throughput
 
 	// system/init + system/state mapping (onto the eval report shapes):
 	// model identity + config warnings from init, and the session-state
@@ -140,6 +144,9 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 					run.Model = agent.Model
 				}
 				run.Warnings = append(run.Warnings, ev.Warnings...)
+				if ev.Route != nil && ev.Route.Reason != "" && run.InitReason == "" {
+					run.InitReason = ev.Route.Reason
+				}
 			case streamjson.SubtypeState:
 				// ADR-0050: state events carry `session_state` (the same key
 				// as init) + `stop_reason` on idle.
@@ -226,6 +233,12 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 			for _, hop := range ev.RouteHistory {
 				run.RouteHist = append(run.RouteHist, hop.Target)
 			}
+			if len(ev.ModelUsage) > 0 {
+				for m := range ev.ModelUsage {
+					run.ModelsUsed = append(run.ModelsUsed, m)
+				}
+				sort.Strings(run.ModelsUsed)
+			}
 			run.Response = ev.Result
 			if ev.Usage != nil {
 				run.Tokens = usageToTokens(ev.Usage)
@@ -257,6 +270,17 @@ func parseMilkStream(r io.Reader) (*milkStreamRun, error) {
 
 	if run.Response == "" {
 		run.Response = run.Text
+	}
+	// Per-hop route reasons come from the run's init route decision: one milk
+	// batch run makes exactly one routing decision, so the init reason is the
+	// turn's reason for every hop. (Newer stream-json builds also carry the
+	// reason per result hop in the same vocabulary — init is the portable
+	// source that works against any build.)
+	if len(run.RouteHist) > 0 {
+		run.RouteReasons = make([]string, len(run.RouteHist))
+		for i := range run.RouteReasons {
+			run.RouteReasons[i] = run.InitReason
+		}
 	}
 	// system/state's idle stop_reason fills in for a missing result.stop_reason.
 	if run.StopReason == "" {
@@ -546,6 +570,8 @@ func milkRunResult(run *milkStreamRun, start time.Time, beforeFiles, afterFiles 
 		NumTurns:              run.NumTurns,
 		StopReason:            run.StopReason,
 		RouteHistory:          run.RouteHist,
+		RouteReasons:          run.RouteReasons,
+		ModelsUsed:            run.ModelsUsed,
 		TTFTMS:                run.TTFTMS,
 		OutputTokensPerSecond: run.OutputTPS,
 		Warnings:              run.Warnings,

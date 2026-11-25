@@ -98,6 +98,12 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 		// Score comparison table.
 		b.WriteString(buildScoreTable(sr, agentNames))
 
+		// Winner badge — same honest label as the HTML report: equal top
+		// scores render as a cost tie-break, not a quality win.
+		if v := scenarioWinner(sr); v.Agent != "" {
+			b.WriteString(fmt.Sprintf("\n%s\n", v.label()))
+		}
+
 		// Surface *why* any "ERR" cells above are ERR, not a real 0 — the
 		// judge never scored this scenario/agent, so its WeightedScore is
 		// excluded from every aggregate below rather than treated as data —
@@ -121,6 +127,9 @@ func GenerateReport(scenarioResults []ScenarioResult) string {
 
 		// The tool-call list behind the count: names in call order, per agent.
 		b.WriteString(buildToolCallList(sr, agentNames))
+
+		// Routing/model attribution per turn — the "why" behind route_history.
+		b.WriteString(buildRoutingLines(sr, agentNames))
 
 		// Metric-budget verdicts (the automated pass/fail check).
 		b.WriteString(buildBudgetVerdicts(sr, agentNames))
@@ -909,9 +918,12 @@ func buildCacheAggregateTable(sr ScenarioResult, agentNames []string) string {
 	}
 	b.WriteString(row + "\n")
 
-	// Winner.
-	winner := pickWinner(sr)
-	b.WriteString(fmt.Sprintf("\nWinner: %s\n", winner))
+	// Winner — honest about ties: when the top weighted scores are equal the
+	// pick is a cost tie-break, not a quality win (the milk-vs-pi run's
+	// "8–2" headline was seven such tie-breaks).
+	if v := scenarioWinner(sr); v.Agent != "" {
+		b.WriteString(fmt.Sprintf("\n%s\n", v.label()))
+	}
 
 	return b.String()
 }
@@ -1080,59 +1092,8 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 	b.WriteString("\n")
 
 	if len(agentNames) > 0 {
-		bestAgent := agentNames[0]
-		bestScore := -1.0
-		bestCost := 1e18
-		for _, name := range agentNames {
-			var score float64
-			var cost float64
-			count := 0
-			for _, sr := range scenarioResults {
-				if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
-					score += ar.WeightedScore
-					for _, r := range ar.RunResults {
-						cost += r.CostUSD
-					}
-					count++
-				}
-			}
-			avgScore := 0.0
-			if count > 0 {
-				avgScore = score / float64(count)
-			}
-			if avgScore > bestScore || (avgScore == bestScore && cost < bestCost) {
-				bestScore = avgScore
-				bestCost = cost
-				bestAgent = name
-			}
-		}
-
-		// Find runner-up cost for the comparison note.
-		runnerUpCost := 0.0
-		for _, name := range agentNames {
-			if name == bestAgent {
-				continue
-			}
-			var cost float64
-			for _, sr := range scenarioResults {
-				if ar, ok := sr.AgentResults[name]; ok {
-					for _, r := range ar.RunResults {
-						cost += r.CostUSD
-					}
-				}
-			}
-			if runnerUpCost == 0 || cost < runnerUpCost {
-				runnerUpCost = cost
-			}
-		}
-
-		note := ""
-		if bestCost > 0 && runnerUpCost > 0 && runnerUpCost > bestCost {
-			ratio := runnerUpCost / bestCost
-			note = fmt.Sprintf(" (%.0fx cheaper)", ratio)
-		}
-
-		b.WriteString(fmt.Sprintf("Overall winner: %s%s\n", bestAgent, note))
+		v := overallWinner(scenarioResults, agentNames)
+		b.WriteString(v.overallLabel() + cheaperNote(v) + "\n")
 	}
 
 	return b.String()
@@ -1267,6 +1228,8 @@ type JSONRunResult struct {
 	NumTurns              int64      `json:"num_turns,omitempty"`
 	StopReason            string     `json:"stop_reason,omitempty"`
 	RouteHistory          []string   `json:"route_history,omitempty"`
+	RouteReasons          []string   `json:"route_reasons,omitempty"`
+	ModelsUsed            []string   `json:"models_used,omitempty"`
 	TTFTMS                int64      `json:"ttft_ms,omitempty"`
 	OutputTokensPerSecond float64    `json:"output_tokens_per_second,omitempty"`
 }
@@ -1343,6 +1306,8 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 					NumTurns:              r.NumTurns,
 					StopReason:            r.StopReason,
 					RouteHistory:          r.RouteHistory,
+					RouteReasons:          r.RouteReasons,
+					ModelsUsed:            r.ModelsUsed,
 					TTFTMS:                r.TTFTMS,
 					OutputTokensPerSecond: r.OutputTokensPerSecond,
 				})
@@ -1449,17 +1414,88 @@ func collectAgentNames(srs []ScenarioResult) []string {
 	return names
 }
 
-// pickWinner returns the agent name with the highest weighted score.
-// Ties are broken by lower total cost.
 // pickWinner returns the agent name with the best WeightedScore (cost as
 // tie-break), skipping any agent the judge failed to score at all — an
 // unjudged scenario has no real WeightedScore to compare. Returns "" if every
-// agent's judging failed.
+// agent's judging failed. Reports should prefer scenarioWinner: it carries
+// the tie evidence pickWinner throws away.
 func pickWinner(sr ScenarioResult) string {
-	best := ""
-	bestScore := -1.0
-	bestCost := 1e18
+	return scenarioWinner(sr).Agent
+}
 
+// winnerVerdict is the honest outcome of a winner comparison: the picked
+// agent plus the evidence — the top two scores and whether they were equal.
+// A pick made on equal scores is a cost tie-break, not a quality win, and
+// must be labeled as one.
+type winnerVerdict struct {
+	Agent      string
+	Best       float64 // top judged weighted score (per-scenario) or judged mean (overall)
+	Runner     float64 // second-best score (0 when only one judged agent)
+	BestCost   float64 // real total spend of the picked agent (all scenarios)
+	RunnerCost float64 // cheapest spend among the other agents (cost-note source)
+	Tie        bool    // top scores equal at comparison precision
+	count      int     // judged candidates compared
+}
+
+// label is the per-scenario badge.
+func (v winnerVerdict) label() string {
+	if v.count < 2 {
+		return fmt.Sprintf("Winner: %s", v.Agent)
+	}
+	if v.Tie {
+		return fmt.Sprintf("Winner: %s (score tie — cost tie-break)", v.Agent)
+	}
+	return fmt.Sprintf("Winner: %s", v.Agent)
+}
+
+// overallLabel is the aggregate line. Means are shown at two decimals so a
+// gap hidden by the table's one-decimal display (2.53 vs 2.52 both rendered
+// 2.5) cannot produce an unexplained winner.
+func (v winnerVerdict) overallLabel() string {
+	head := fmt.Sprintf("Overall winner: %s", v.Agent)
+	switch {
+	case v.count < 2:
+		return fmt.Sprintf("%s (%.2f)", head, v.Best)
+	case v.Tie:
+		why := "cost tie-break"
+		if v.Best != v.Runner {
+			why = "gap below display precision"
+		}
+		return fmt.Sprintf("%s (tie: %.2f vs %.2f — %s)", head, v.Best, v.Runner, why)
+	default:
+		return fmt.Sprintf("%s (%.2f vs %.2f)", head, v.Best, v.Runner)
+	}
+}
+
+// cheaperNote is the cost parenthetical for the overall winner line: how
+// much more the cheapest other agent spent ("" when not cheaper).
+func cheaperNote(v winnerVerdict) string {
+	if v.BestCost > 0 && v.RunnerCost > 0 && v.RunnerCost > v.BestCost {
+		return fmt.Sprintf(" (%.0fx cheaper)", v.RunnerCost/v.BestCost)
+	}
+	return ""
+}
+
+// sortCands orders winner candidates: score desc, cost asc, name asc (the
+// pickWinner tie-break made deterministic).
+func sortCands(names []string, scores, costs map[string]float64) []string {
+	sort.SliceStable(names, func(i, j int) bool {
+		if scores[names[i]] != scores[names[j]] {
+			return scores[names[i]] > scores[names[j]]
+		}
+		if costs[names[i]] != costs[names[j]] {
+			return costs[names[i]] < costs[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	return names
+}
+
+// scenarioWinner picks the best WeightedScore for one scenario (cost as
+// tie-break), skipping agents the judge failed entirely. Ties are exact:
+// per-scenario weighted scores are rubric arithmetic, not estimates.
+func scenarioWinner(sr ScenarioResult) winnerVerdict {
+	names, scores, costs := []string{}, map[string]float64{}, map[string]float64{}
 	for name, ar := range sr.AgentResults {
 		if ar.JudgeError != "" {
 			continue
@@ -1468,13 +1504,130 @@ func pickWinner(sr ScenarioResult) string {
 		for _, r := range ar.RunResults {
 			cost += r.CostUSD
 		}
-		if ar.WeightedScore > bestScore || (ar.WeightedScore == bestScore && cost < bestCost) {
-			bestScore = ar.WeightedScore
-			bestCost = cost
-			best = name
+		names = append(names, name)
+		scores[name] = ar.WeightedScore
+		costs[name] = cost
+	}
+	return verdictFrom(names, scores, costs, func(a, b float64) bool { return a == b })
+}
+
+// overallWinner picks the best judged mean weighted score across scenarios
+// (cost as tie-break), mirroring the aggregate's judged-only score
+// accounting over real all-scenario spend. A tie is declared when the two
+// means round to the same value at the report's one-decimal display
+// precision: a gap the report's own rounding hides is not a win.
+func overallWinner(srs []ScenarioResult, agentNames []string) winnerVerdict {
+	names, scores, costs := []string{}, map[string]float64{}, map[string]float64{}
+	for _, name := range agentNames {
+		score := 0.0
+		count := 0
+		var cost float64
+		for _, sr := range srs {
+			if ar, ok := sr.AgentResults[name]; ok {
+				for _, r := range ar.RunResults {
+					cost += r.CostUSD
+				}
+				if ar.JudgeError == "" {
+					score += ar.WeightedScore
+					count++
+				}
+			}
+		}
+		if count == 0 {
+			continue
+		}
+		names = append(names, name)
+		scores[name] = score / float64(count)
+		costs[name] = cost
+	}
+	return verdictFrom(names, scores, costs, func(a, b float64) bool {
+		return math.Round(a*10) == math.Round(b*10)
+	})
+}
+
+// verdictFrom turns sorted candidates into a winnerVerdict under a given
+// tie predicate. Cost spend outside judged scenarios counts toward
+// BestCost/RunnerCost — real spend is real spend.
+func verdictFrom(names []string, scores, costs map[string]float64, tie func(a, b float64) bool) winnerVerdict {
+	names = sortCands(names, scores, costs)
+	if len(names) == 0 {
+		return winnerVerdict{}
+	}
+	v := winnerVerdict{
+		Agent:    names[0],
+		Best:     scores[names[0]],
+		BestCost: costs[names[0]],
+		count:    len(names),
+	}
+	if len(names) > 1 {
+		v.Runner = scores[names[1]]
+		v.Tie = tie(v.Best, v.Runner)
+		v.RunnerCost = costs[names[1]]
+		for _, n := range names[2:] {
+			if costs[n] < v.RunnerCost {
+				v.RunnerCost = costs[n]
+			}
 		}
 	}
-	return best
+	return v
+}
+
+// routeHopLabels renders one agent's per-turn routing/model attribution:
+// "T1 escalation/mimo-v2.6-pro (model classifier)". The reason is the
+// router's recorded decision — without it a routing cost shows up as pure
+// overhead (the milk-vs-pi analysis could see escalation spending but not
+// why). Turns with no route/model data render nothing; older results.json
+// files simply produce shorter lists.
+func routeHopLabels(ar AgentResult) []string {
+	var hops []string
+	for i, r := range ar.RunResults {
+		for j, target := range r.RouteHistory {
+			hop := ""
+			if j == 0 {
+				hop = fmt.Sprintf("T%d ", i+1)
+				switch {
+				case len(r.ModelsUsed) == 1:
+					hop += target + "/" + r.ModelsUsed[0]
+				case len(r.ModelsUsed) > 1:
+					hop += target + "/" + strings.Join(r.ModelsUsed, "+")
+				default:
+					hop += target
+				}
+				if len(r.RouteReasons) > 0 && r.RouteReasons[0] != "" {
+					hop += " (" + r.RouteReasons[0] + ")"
+				}
+			} else {
+				hop += target
+			}
+			hops = append(hops, hop)
+		}
+		// Model data without a recorded route (non-milk adapters).
+		if len(r.RouteHistory) == 0 && len(r.ModelsUsed) > 0 {
+			hops = append(hops, fmt.Sprintf("T%d %s", i+1, strings.Join(r.ModelsUsed, "+")))
+		}
+	}
+	return hops
+}
+
+// buildRoutingLines renders the routing/model attribution behind the metrics
+// table, one line per agent (sibling of buildToolCallList).
+func buildRoutingLines(sr ScenarioResult, agentNames []string) string {
+	var b strings.Builder
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok {
+			continue
+		}
+		hops := routeHopLabels(ar)
+		if len(hops) == 0 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("Routing [%s]: %s\n", name, strings.Join(hops, " → ")))
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // alignMode controls text alignment within a column.
