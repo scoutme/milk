@@ -119,8 +119,8 @@ func htmlScenarioSection(b *strings.Builder, sr ScenarioResult, agentNames []str
 	fmt.Fprintf(b, "<span>%s</span><span>%s</span>\n", esc(sr.Category), esc(sr.Difficulty))
 	b.WriteString("</p>\n")
 
-	if w := pickWinner(sr); w != "" {
-		fmt.Fprintf(b, "<p><span class=\"winner\">Winner: %s</span></p>\n", esc(w))
+	if v := scenarioWinner(sr); v.Agent != "" {
+		fmt.Fprintf(b, "<p><span class=\"winner\">%s</span></p>\n", esc(v.label()))
 	}
 
 	// --- Score table (shared grid with the text report) ---
@@ -188,6 +188,17 @@ func htmlScenarioSection(b *strings.Builder, sr ScenarioResult, agentNames []str
 		}
 		fmt.Fprintf(b, "<details><summary>Tools [%s] (%d)</summary><code>%s</code></details>\n",
 			esc(name), len(names), esc(list))
+	}
+
+	// --- Routing / model attribution per turn ---
+	for _, name := range agentNames {
+		ar, ok := sr.AgentResults[name]
+		if !ok {
+			continue
+		}
+		if hops := routeHopLabels(ar); len(hops) > 0 {
+			fmt.Fprintf(b, "<p class=\"meta\">Routing [%s]: %s</p>\n", esc(name), esc(strings.Join(hops, " → ")))
+		}
 	}
 
 	// --- Per-turn cache breakdown (multi-turn scenarios) ---
@@ -595,57 +606,9 @@ func htmlAggregateSection(b *strings.Builder, scenarioResults []ScenarioResult, 
 	})
 	b.WriteString("</tbody></table></div>\n")
 
-	// Winner banner — same tie-break as buildAggregateReport: best judged-only
-	// average score, lower total cost on ties.
-	if len(agentNames) > 0 {
-		bestAgent := agentNames[0]
-		bestScore := -1.0
-		bestCost := 1e18
-		for _, name := range agentNames {
-			var score, cost float64
-			count := 0
-			for _, sr := range scenarioResults {
-				if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
-					score += ar.WeightedScore
-					for _, r := range ar.RunResults {
-						cost += r.CostUSD
-					}
-					count++
-				}
-			}
-			avgScore := 0.0
-			if count > 0 {
-				avgScore = score / float64(count)
-			}
-			if avgScore > bestScore || (avgScore == bestScore && cost < bestCost) {
-				bestScore = avgScore
-				bestCost = cost
-				bestAgent = name
-			}
-		}
-		runnerUpCost := 0.0
-		for _, name := range agentNames {
-			if name == bestAgent {
-				continue
-			}
-			var cost float64
-			for _, sr := range scenarioResults {
-				if ar, ok := sr.AgentResults[name]; ok {
-					for _, r := range ar.RunResults {
-						cost += r.CostUSD
-					}
-				}
-			}
-			if runnerUpCost == 0 || cost < runnerUpCost {
-				runnerUpCost = cost
-			}
-		}
-		note := ""
-		if bestCost > 0 && runnerUpCost > 0 && runnerUpCost > bestCost {
-			note = fmt.Sprintf(" (%.0fx cheaper)", runnerUpCost/bestCost)
-		}
-		fmt.Fprintf(b, "<p class=\"overall\">Overall winner: <strong>%s</strong>%s</p>\n",
-			esc(bestAgent), esc(note))
+	// Winner banner — same honest tie handling as the text report.
+	if v := overallWinner(scenarioResults, agentNames); v.Agent != "" {
+		fmt.Fprintf(b, "<p class=\"overall\">%s%s</p>\n", esc(v.overallLabel()), esc(cheaperNote(v)))
 	}
 	b.WriteString("</section>\n")
 }

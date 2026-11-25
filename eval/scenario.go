@@ -88,6 +88,15 @@ type RunResult struct {
 	// RouteHistory lists the routing targets that served the turn
 	// ("primary" / "escalation"), one entry per hop.
 	RouteHistory []string `json:"route_history,omitempty"`
+	// RouteReasons carries the "why" behind each RouteHistory hop, one per
+	// hop: the router's decision reason ("model classifier", "signals: …"),
+	// the forced flag's label, or the availability fallback. Entries may be
+	// empty when the run's milk build predates hop reasons.
+	RouteReasons []string `json:"route_reasons,omitempty"`
+	// ModelsUsed lists the distinct models that billed the turn (the result
+	// line's model_usage keys) — the billing truth when a routing hop ran a
+	// different model from the session primary that Model reports.
+	ModelsUsed []string `json:"models_used,omitempty"`
 	// TTFTMS is the mean time-to-first-token across the turn's measured
 	// completion requests; OutputTokensPerSecond is the generation throughput.
 	// Both are 0 when no timing source reported (never fabricated).

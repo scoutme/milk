@@ -53,7 +53,8 @@ type SandboxConfig struct {
 // state root. The harness applies an experiment's sandbox: section through
 // this interface; adapters that don't implement it (claude-code — a tmux
 // session against the real ~/.claude; mimo-code — batch runs against the
-// live ~/.mimocode) simply run unsandboxed.
+// live ~/.mimocode; pi — batch runs against the live ~/.pi) simply run
+// unsandboxed.
 type Sandboxable interface {
 	SetSandbox(SandboxConfig)
 }

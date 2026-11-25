@@ -92,7 +92,7 @@ internal/plugin/              # Agent Plugins v1.0.0 loader + distribution (ADR-
 internal/obs/                 # OpenTelemetry file exporters (~/.milk/otel/)
 cmd/showcase/                 # `task showcase:record` (calibrate → demo/demo.tape → GIF) + `task showcase:run` (-verify: same beats asserted, PASS/FAIL, -beats subset), from demo/showcase.yaml (issue #387, ADR-0099)
 demo/                          # showcase: showcase.yaml (the beat manifest, single source of truth) + generated demo.tape (replayable as-is; edit the manifest, not the tape)
-eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui, mimo-code), judge, report (see docs/reference/eval.md)
+eval/                          # `milk eval` subcommand — harness, adapters (claude-code, milk-tui, mimo-code, pi), judge, report (see docs/reference/eval.md)
 ```
 
 ## Key design decisions
