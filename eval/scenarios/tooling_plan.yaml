@@ -1,0 +1,627 @@
+# Tooling scenarios — multi-turn. Category `tooling` probes how harness
+# tooling (navigation, search, test-run verification, multi-file editing)
+# shows up in outcomes: the fixture is sized and shaped so tool selection
+# and verification discipline materially affect the score, while the model
+# is held constant across harnesses.
+category: tooling
+
+scenarios:
+  - name: tooling-plan-and-iterate
+    description: >
+      Three-turn planning + iteration probe around the orderflow service.
+      Turn 1 asks for a plan-first implementation of a new internal/events
+      package (append-only log with a mandated API surface) wired into the
+      service and cmd/server. Turn 2 changes the requirements underneath
+      that design: JSONL persistence with a strict reader (ErrSeqGap,
+      ErrTruncated) and a per-confirm flush. Turn 3 splits the reader into
+      strict (Load) and crash-tolerant (Recover) semantics, adds startup
+      restoration, and pins recovery against a planted 23-line capture
+      file whose last line is truncated (must yield 22 events, next Seq
+      23). Scoring rewards up-front planning, exact API adherence across
+      evolving requirements, and low-churn iteration on the agent's own
+      work; the model is held constant across harnesses.
+    difficulty: hard
+    multi_turn: true
+    setup:
+      files:
+        - path: go.mod
+          content: |
+            module example.com/orderflow
+
+            go 1.21
+        - path: README.md
+          content: |
+            # orderflow
+
+            Small order reservation service used by the storefront.
+
+            ## Layout
+
+            - `cmd/server` — HTTP entry point
+            - `internal/store` — reservation ledger
+            - `internal/audit` — audit trail
+            - `internal/notify` — lifecycle notifications
+            - `internal/service` — order lifecycle (confirm)
+            - `data/` — ops artifacts (crash capture samples)
+
+            ## CI
+
+            CI runs `go test ./...` from the repo root; the pipeline must be green.
+        - path: internal/store/store.go
+          content: |
+            // Package store keeps the order reservation ledger in memory.
+            package store
+
+            import "errors"
+
+            var (
+            	// ErrNotFound is returned when a reference is not in the expected set.
+            	ErrNotFound = errors.New("order not found")
+            	// ErrConflict is returned when a reference is already reserved
+            	// or confirmed.
+            	ErrConflict = errors.New("order already reserved")
+            )
+
+            // Store is an in-memory reservation ledger. A reference is
+            // reserved while an order is in flight and confirmed once
+            // committed; confirmed orders hold their reference until refunded.
+            type Store struct {
+            	reserved  map[string]bool
+            	committed map[string]bool
+            }
+
+            // New returns an empty ledger.
+            func New() *Store {
+            	return &Store{
+            		reserved:  map[string]bool{},
+            		committed: map[string]bool{},
+            	}
+            }
+
+            // Reserve marks ref as reserved. Conflicts with an active
+            // reservation or a confirmed order.
+            func (s *Store) Reserve(ref string) error {
+            	if s.reserved[ref] || s.committed[ref] {
+            		return ErrConflict
+            	}
+            	s.reserved[ref] = true
+            	return nil
+            }
+
+            // Commit moves ref from the reserved set to the confirmed set.
+            func (s *Store) Commit(ref string) error {
+            	if !s.reserved[ref] {
+            		return ErrNotFound
+            	}
+            	delete(s.reserved, ref)
+            	s.committed[ref] = true
+            	return nil
+            }
+
+            // Release drops an unused reservation.
+            func (s *Store) Release(ref string) error {
+            	if !s.reserved[ref] {
+            		return ErrNotFound
+            	}
+            	delete(s.reserved, ref)
+            	return nil
+            }
+
+            // Committed reports whether ref belongs to a confirmed order.
+            func (s *Store) Committed(ref string) bool { return s.committed[ref] }
+
+            // Pending reports how many reservations are still open.
+            func (s *Store) Pending() int { return len(s.reserved) }
+        - path: internal/store/store_test.go
+          content: |
+            package store
+
+            import "testing"
+
+            func TestReserveConflict(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            		t.Fatalf("first reserve: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != ErrConflict {
+            		t.Fatalf("second reserve = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestReserveConflictsWithCommitted(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            		t.Fatalf("reserve: %v", err)
+            	}
+            	if err := s.Commit("ord-1"); err != nil {
+            		t.Fatalf("commit: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != ErrConflict {
+            		t.Fatalf("reserve after commit = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestReleaseFreesRef(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            		t.Fatalf("reserve: %v", err)
+            	}
+            	if err := s.Release("ord-1"); err != nil {
+            		t.Fatalf("release: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != nil {
+            		t.Fatalf("re-reserve after release: %v", err)
+            	}
+            }
+
+            func TestCommitUnknownRef(t *testing.T) {
+            	s := New()
+            	if err := s.Commit("ord-1"); err != ErrNotFound {
+            		t.Fatalf("commit unknown ref = %v, want ErrNotFound", err)
+            	}
+            }
+        - path: internal/audit/audit.go
+          content: |
+            // Package audit records order lifecycle events.
+            package audit
+
+            // Log is an ordered audit trail of lifecycle events.
+            type Log struct {
+            	entries []string
+            }
+
+            // New returns an empty log.
+            func New() *Log { return &Log{} }
+
+            // Append records one event.
+            func (l *Log) Append(event string) {
+            	l.entries = append(l.entries, event)
+            }
+
+            // Entries returns the recorded events in order.
+            func (l *Log) Entries() []string {
+            	out := make([]string, len(l.entries))
+            	copy(out, l.entries)
+            	return out
+            }
+        - path: internal/notify/notify.go
+          content: |
+            // Package notify delivers order lifecycle notifications.
+            package notify
+
+            // Notifier receives order lifecycle events. Implementations
+            // must be safe for sequential use by the service.
+            type Notifier interface {
+            	OrderConfirmed(ref string)
+            }
+
+            // Recorder is a Notifier that keeps every delivered event in
+            // order. Wire a real delivery implementation in production.
+            type Recorder struct {
+            	Events []string
+            }
+
+            // OrderConfirmed records a confirmation event.
+            func (r *Recorder) OrderConfirmed(ref string) {
+            	r.Events = append(r.Events, "confirmed:"+ref)
+            }
+        - path: internal/service/service.go
+          content: |
+            // Package service implements the order lifecycle.
+            package service
+
+            import (
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/store"
+            )
+
+            // Service runs the order lifecycle against the ledger.
+            type Service struct {
+            	store  *store.Store
+            	audit  *audit.Log
+            	notify notify.Notifier
+            }
+
+            // New wires a Service.
+            func New(st *store.Store, lg *audit.Log, nt notify.Notifier) *Service {
+            	return &Service{store: st, audit: lg, notify: nt}
+            }
+
+            // ConfirmOrder reserves and confirms one order reference.
+            func (s *Service) ConfirmOrder(ref string) error {
+            	if err := s.store.Reserve(ref); err != nil {
+            		return err
+            	}
+            	if err := s.store.Commit(ref); err != nil {
+            		_ = s.store.Release(ref)
+            		return err
+            	}
+            	s.audit.Append("order " + ref + " confirmed")
+            	s.notify.OrderConfirmed(ref)
+            	return nil
+            }
+        - path: internal/service/service_test.go
+          content: |
+            package service
+
+            import (
+            	"testing"
+
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/store"
+            )
+
+            func newSvc() (*Service, *store.Store, *audit.Log, *notify.Recorder) {
+            	st := store.New()
+            	lg := audit.New()
+            	nt := &notify.Recorder{}
+            	return New(st, lg, nt), st, lg, nt
+            }
+
+            func TestConfirmOrderAudits(t *testing.T) {
+            	svc, _, lg, _ := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	entries := lg.Entries()
+            	if len(entries) != 1 || entries[0] != "order ord-1001 confirmed" {
+            		t.Fatalf("audit entries = %v, want [order ord-1001 confirmed]", entries)
+            	}
+            }
+
+            func TestConfirmOrderNotifies(t *testing.T) {
+            	svc, _, _, nt := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if len(nt.Events) != 1 || nt.Events[0] != "confirmed:ord-1001" {
+            		t.Fatalf("notifier events = %v, want [confirmed:ord-1001]", nt.Events)
+            	}
+            }
+
+            func TestConfirmOrderClearsPendingReservation(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if got := st.Pending(); got != 0 {
+            		t.Fatalf("pending reservations after confirm = %d, want 0 (the confirmed reference must leave the reservation set)", got)
+            	}
+            }
+
+            func TestConfirmOrderKeepsOtherReservations(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := st.Reserve("ord-100"); err != nil {
+            		t.Fatalf("reserving unrelated order: %v", err)
+            	}
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if err := st.Reserve("ord-100"); err != store.ErrConflict {
+            		t.Fatalf("unrelated reservation lost after confirming ord-1001: Reserve(ord-100) = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestConfirmOrderSurfacesReserveConflict(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := st.Reserve("ord-3003"); err != nil {
+            		t.Fatalf("reserving: %v", err)
+            	}
+            	if err := svc.ConfirmOrder("ord-3003"); err != store.ErrConflict {
+            		t.Fatalf("ConfirmOrder on an already-reserved ref = %v, want ErrConflict", err)
+            	}
+            }
+        - path: internal/config/config.go
+          content: |
+            // Package config loads service configuration.
+            package config
+
+            import "strings"
+
+            // Config holds service settings.
+            type Config struct {
+            	ListenAddr string
+            }
+
+            // Load parses KEY=VALUE lines, tolerating comments and blanks.
+            // TODO: this parser is fragile — replace with a real one before
+            // the v2 config format lands.
+            func Load(data string) Config {
+            	cfg := Config{ListenAddr: ":8080"}
+            	for _, line := range strings.Split(data, "\n") {
+            		line = strings.TrimSpace(line)
+            		if line == "" || strings.HasPrefix(line, "#") {
+            			continue
+            		}
+            		k, v, ok := strings.Cut(line, "=")
+            		if !ok {
+            			continue
+            		}
+            		if strings.TrimSpace(k) == "listen" {
+            			cfg.ListenAddr = strings.TrimSpace(v)
+            		}
+            	}
+            	return cfg
+            }
+        - path: cmd/server/main.go
+          content: |
+            // Command server runs the orderflow HTTP API.
+            package main
+
+            import (
+            	"log"
+            	"net/http"
+
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/service"
+            	"example.com/orderflow/internal/store"
+            )
+
+            // FIXME: shutdown order is racy with in-flight requests.
+
+            func main() {
+            	st := store.New()
+            	lg := audit.New()
+            	nt := &notify.Recorder{} // TODO: replace with real delivery
+            	svc := service.New(st, lg, nt)
+
+            	http.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
+            		if err := svc.ConfirmOrder(r.URL.Query().Get("ref")); err != nil {
+            			http.Error(w, err.Error(), http.StatusConflict)
+            			return
+            		}
+            		w.WriteHeader(http.StatusOK)
+            	})
+
+            	log.Println("orderflow listening on :8080")
+            	log.Fatal(http.ListenAndServe(":8080", nil))
+            }
+        - path: data/capture.jsonl
+          content: |
+            {"Seq":1,"Kind":"confirmed","Ref":"ord-1001","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":2,"Kind":"confirmed","Ref":"ord-1002","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":3,"Kind":"confirmed","Ref":"ord-1003","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":4,"Kind":"confirmed","Ref":"ord-1004","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":5,"Kind":"confirmed","Ref":"ord-1005","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":6,"Kind":"confirmed","Ref":"ord-1006","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":7,"Kind":"reserved","Ref":"ord-1007","Detail":null}
+            {"Seq":8,"Kind":"confirmed","Ref":"ord-1008","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":9,"Kind":"confirmed","Ref":"ord-1009","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":10,"Kind":"confirmed","Ref":"ord-1010","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":11,"Kind":"confirmed","Ref":"ord-1011","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":12,"Kind":"confirmed","Ref":"ord-1012","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":13,"Kind":"confirmed","Ref":"ord-1013","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":14,"Kind":"confirmed","Ref":"ord-1014","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":15,"Kind":"confirmed","Ref":"ord-1015","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":16,"Kind":"confirmed","Ref":"ord-1016","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":17,"Kind":"confirmed","Ref":"ord-1017","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":18,"Kind":"confirmed","Ref":"ord-1018","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":19,"Kind":"confirmed","Ref":"ord-1019","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":20,"Kind":"confirmed","Ref":"ord-1020","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":21,"Kind":"confirmed","Ref":"ord-1021","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":22,"Kind":"confirmed","Ref":"ord-1022","Detail":{"via":"ConfirmOrder"}}
+            {"Seq":23,"Kind":"conf
+    turns:
+      - prompt: >
+          We want an auditable order event log. Before writing any code,
+          sketch a brief implementation plan (which packages and files you
+          expect to touch and why), then implement it.
+
+          New package `internal/events` with exactly this surface:
+
+          - `type Event struct { Seq uint64; Kind string; Ref string; Detail map[string]string }`
+          - `type Log struct` — an in-memory, append-only event log (no
+            mutation or deletion API).
+          - `func (l *Log) Append(kind, ref string, detail map[string]string) Event`
+            — appends one event and returns it; `Seq` starts at 1 and
+            increases by exactly 1 per append; a nil `Detail` is allowed.
+          - `func (l *Log) All() []Event` — every event in `Seq` order, as a
+            defensive copy (mutating the result must not affect the log).
+          - `func (l *Log) Filter(kind string) []Event` — events of the given
+            kind, in `Seq` order, defensive copy.
+
+          Wiring in `internal/service`:
+
+          - `func (s *Service) SetEventLog(l *events.Log)` and
+            `func (s *Service) EventLog() *events.Log`.
+          - A successful `ConfirmOrder` appends exactly one event: `Kind`
+            "confirmed", `Ref` = the order reference.
+          - With no event log set, everything must keep working exactly as
+            today (nil-safe). Do not change the constructor `New`, and do
+            not modify or delete the existing tests.
+          - Wire the event log in `cmd/server` alongside the other
+            collaborators.
+
+          Tests: add `internal/events/log_test.go` and extend the service
+          tests in the existing suite style, covering at least `Seq`
+          continuity/order, `Filter`, defensive copies, nil `Detail`, and
+          the confirmed event. Finish by running `go test ./...` from the
+          repo root and paste the output.
+        rubric:
+          - criterion: planning
+            description: >
+              Does the response sketch a coherent implementation plan
+              (packages/files to touch and why) before coding, and does the
+              delivered code follow it? Reward a plan that covers the
+              cross-package touch points (new events package, service
+              wiring, cmd/server, tests) and survives contact with the
+              code (no major silent rework). Penalize jumping straight to
+              code or a plan the implementation contradicts.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: api_adherence
+            description: >
+              Binary. The mandated surface exists with the mandated
+              semantics: Event struct with Seq/Kind/Ref/Detail; Log.Append
+              assigns Seq starting at 1, contiguous (+1 per append), and
+              returns the event; All() returns every event in Seq order as
+              a defensive copy; Filter(kind) returns matching events in Seq
+              order as a defensive copy; the log exposes no mutation or
+              deletion API.
+            weight: 3
+            scoring: binary
+          - criterion: service_wiring
+            description: >
+              Binary. Service gains SetEventLog/EventLog; each successful
+              ConfirmOrder appends exactly one event (Kind "confirmed",
+              Ref = the order ref); with no event log set nothing breaks
+              (nil-safe); New is unchanged and the existing service tests
+              are unmodified and green; cmd/server wires the event log
+              alongside the other collaborators.
+            weight: 2
+            scoring: binary
+          - criterion: new_tests
+            description: >
+              Are the new tests in the existing suite style and do they
+              cover Seq continuity/order, Filter, defensive copies, nil
+              Detail, and the service confirmed event? Reward tests that
+              would fail against a wrong implementation (e.g. checking
+              defensive-copy semantics by mutating the returned slice).
+            weight: 2
+            scoring: scale_1_5
+          - criterion: suite_green
+            description: >
+              Binary. The response reports a backed `go test ./...` run
+              (output pasted) that is green.
+            weight: 2
+            scoring: binary
+      - prompt: >
+          Requirements update — persistence. The log must survive restarts
+          as JSONL:
+
+          - `func (l *Log) Save(path string) error` — writes one JSON object
+            per line (fields Seq/Kind/Ref/Detail), creating parent
+            directories as needed.
+          - `func Load(path string) (*Log, error)` — strict reader.
+            Save→Load must round-trip `Seq`, `Kind` and `Ref` exactly, and a
+            nil `Detail` must load back as an empty (non-nil) map. `Seq`
+            must start at 1 and be contiguous — a gap is an exported error
+            `ErrSeqGap` (usable with errors.Is). A line that is not a valid
+            JSON event is an exported error `ErrTruncated`. A missing file
+            returns the underlying filesystem error.
+          - The service must flush the log to `data/events.jsonl` after
+            every successful `ConfirmOrder` (parent dirs created as
+            needed). A flush failure must not crash the service or corrupt
+            state silently — surface it (return it from ConfirmOrder or log
+            it clearly) and say in your report which you chose.
+
+          Everything from the previous turn keeps working: don't break the
+          existing API or tests. Add tests covering the new behavior
+          (round-trip, gap rejection, truncation rejection, flush), then
+          run `go test ./...` and paste the output.
+        rubric:
+          - criterion: persistence
+            description: >
+              Binary. Save writes one JSON object per line and creates
+              parent directories; Load round-trips Seq/Kind/Ref exactly and
+              maps a nil Detail to an empty non-nil map; Save→Load of a log
+              containing a nil-Detail event preserves everything per spec.
+            weight: 3
+            scoring: binary
+          - criterion: validation
+            description: >
+              Binary. ErrSeqGap and ErrTruncated are exported and
+              errors.Is-comparable; Load returns ErrSeqGap when Seq does
+              not start at 1 or has a gap; Load returns ErrTruncated for a
+              line that is not a valid JSON event; Load on a missing file
+              surfaces the underlying filesystem error (not ErrTruncated
+              and not an empty log).
+            weight: 2
+            scoring: binary
+          - criterion: flush_wiring
+            description: >
+              Binary. After every successful ConfirmOrder the log is
+              flushed to data/events.jsonl (parent dirs created as needed);
+              a flush failure does not crash or silently corrupt state and
+              is surfaced (returned from ConfirmOrder or logged clearly —
+              either acceptable, the response must say which).
+            weight: 2
+            scoring: binary
+          - criterion: iteration_discipline
+            description: >
+              How well does the agent iterate on its own previous work?
+              Reward extending the turn-1 design (same API, same style)
+              with minimal churn: turn-1 tests still green and unmodified
+              except additions, no gratuitous rewrite of the events
+              package or service, changes scoped to what the new
+              requirements need. Penalize large rewrites, renamed
+              previously-mandated API, or deleted/weakened earlier tests.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: suite_green
+            description: >
+              Binary. The response reports a backed `go test ./...` run
+              (output pasted) that is green.
+            weight: 2
+            scoring: binary
+      - prompt: >
+          Ops needs crash recovery, and it must be forgiving about torn
+          writes but nothing else:
+
+          - `func Recover(path string) (*Log, error)` — like `Load`, except
+            a TRUNCATED FINAL LINE (a partial write at the tail) is dropped
+            silently and the valid events are returned. A missing file is
+            not an error: return an empty log. Everything `Load` rejects (a
+            gap in Seq, malformed content that is not a truncated final
+            line) `Recover` also rejects with the same errors.
+          - The recovered log must continue seamlessly: appending after
+            `Recover` continues the Seq after the last recovered event.
+          - `Load` stays strict — do not relax it.
+          - `func (s *Service) RestoreFrom(path string) error` — startup
+            recovery: `Recover` the file and install the recovered log as
+            the service's event log (replacing any current one). Wire it in
+            `cmd/server` before serving, against `data/events.jsonl` (a
+            missing file must simply give an empty log).
+
+          A sample crash capture from ops is at `data/capture.jsonl`: 23
+          lines where the last one is truncated. Recovering it must yield
+          exactly 22 events with Seq 1–22, and the next `Append` must get
+          Seq 23. Write a test against that file.
+
+          Update the rest of the tests as needed, run `go test ./...` and
+          paste the output.
+        rubric:
+          - criterion: recovery
+            description: >
+              Binary. Recover drops a truncated final line silently and
+              returns the valid events; a missing file yields an empty log
+              and nil error; Recover(data/capture.jsonl) yields exactly 22
+              events with Seq 1-22 and the next Append gets Seq 23; a gap
+              or mid-file malformed content is still rejected with the
+              same errors as Load.
+            weight: 3
+            scoring: binary
+          - criterion: strict_load
+            description: >
+              Binary. Load remains strict after the change: a truncated
+              final line is still ErrTruncated (not silently dropped), gaps
+              are still ErrSeqGap; the strict/lenient split is a real
+              behavioral distinction, not two names for one implementation.
+            weight: 2
+            scoring: binary
+          - criterion: restore_wiring
+            description: >
+              Binary. Service.RestoreFrom(path) error exists, installs the
+              recovered log as the service's event log (replacing any
+              current one) and continues Seq; cmd/server calls it against
+              data/events.jsonl before serving; a missing file simply gives
+              an empty log (startup must not fail on a fresh deploy).
+            weight: 2
+            scoring: binary
+          - criterion: tests_and_verification
+            description: >
+              Do the tests cover recovery vs strictness against the planted
+              capture file (22-of-23, Seq 23 continuation) and the
+              Load/Recover distinction? Does the response report a backed
+              `go test ./...` run (output pasted)?
+            weight: 2
+            scoring: scale_1_5
+          - criterion: suite_green
+            description: >
+              Binary. The final `go test ./...` run reported in the
+              response is green.
+            weight: 2
+            scoring: binary
