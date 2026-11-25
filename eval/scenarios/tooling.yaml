@@ -1,0 +1,481 @@
+# Tooling scenarios — multi-turn. Category `tooling` probes how harness
+# tooling (navigation, search, test-run verification, multi-file editing)
+# shows up in outcomes: the fixture is sized and shaped so tool selection
+# and verification discipline materially affect the score, while the model
+# is held constant across harnesses.
+category: tooling
+
+scenarios:
+  - name: tooling-debug-and-extend
+    description: >
+      Two-turn tooling probe around a small Go order service. Turn 1:
+      CI is red — two tests in internal/service fail, but the defect is an
+      off-by-one map key inside internal/store's Commit (it deletes
+      ref[:len(ref)-1] from the reserved set instead of the exact ref),
+      leaving a stale reservation and deleting a wrong key that can corrupt
+      an unrelated reservation. The failing assertions are two hops from
+      the defect and the store's own tests never cover it, so the fix
+      requires tracing service -> store and reasoning about what is not
+      tested. Turn 2: extend the lifecycle (RefundOrder) following the
+      codebase's existing conventions — a store operation, the
+      notify.Notifier interface, the audit message style, and the
+      cmd/server wiring — across five files, with a test in suite style.
+      Red herrings: a TODO-marked config parser and a FIXME in main.go
+      that look suspicious but are unrelated.
+    difficulty: hard
+    multi_turn: true
+    setup:
+      files:
+        - path: go.mod
+          content: |
+            module example.com/orderflow
+
+            go 1.21
+        - path: README.md
+          content: |
+            # orderflow
+
+            Small order reservation service used by the storefront.
+
+            ## Layout
+
+            - `cmd/server` — HTTP entry point
+            - `internal/store` — reservation ledger
+            - `internal/audit` — audit trail
+            - `internal/notify` — lifecycle notifications
+            - `internal/service` — order lifecycle (confirm)
+
+            ## CI
+
+            CI runs `go test ./...` from the repo root; the pipeline must be green.
+        - path: internal/store/store.go
+          content: |
+            // Package store keeps the order reservation ledger in memory.
+            package store
+
+            import "errors"
+
+            var (
+            	// ErrNotFound is returned when a reference is not in the expected set.
+            	ErrNotFound = errors.New("order not found")
+            	// ErrConflict is returned when a reference is already reserved
+            	// or confirmed.
+            	ErrConflict = errors.New("order already reserved")
+            )
+
+            // Store is an in-memory reservation ledger. A reference is
+            // reserved while an order is in flight and confirmed once
+            // committed; confirmed orders hold their reference until refunded.
+            type Store struct {
+            	reserved  map[string]bool
+            	committed map[string]bool
+            }
+
+            // New returns an empty ledger.
+            func New() *Store {
+            	return &Store{
+            		reserved:  map[string]bool{},
+            		committed: map[string]bool{},
+            	}
+            }
+
+            // Reserve marks ref as reserved. Conflicts with an active
+            // reservation or a confirmed order.
+            func (s *Store) Reserve(ref string) error {
+            	if s.reserved[ref] || s.committed[ref] {
+            		return ErrConflict
+            	}
+            	s.reserved[ref] = true
+            	return nil
+            }
+
+            // Commit moves ref from the reserved set to the confirmed set.
+            func (s *Store) Commit(ref string) error {
+            	if !s.reserved[ref] {
+            		return ErrNotFound
+            	}
+            	delete(s.reserved, ref[:len(ref)-1])
+            	s.committed[ref] = true
+            	return nil
+            }
+
+            // Release drops an unused reservation.
+            func (s *Store) Release(ref string) error {
+            	if !s.reserved[ref] {
+            		return ErrNotFound
+            	}
+            	delete(s.reserved, ref)
+            	return nil
+            }
+
+            // Committed reports whether ref belongs to a confirmed order.
+            func (s *Store) Committed(ref string) bool { return s.committed[ref] }
+
+            // Pending reports how many reservations are still open.
+            func (s *Store) Pending() int { return len(s.reserved) }
+
+            // LegacyReserve answers v1 API probes against the old key format.
+            // Deprecated: use Reserve.
+            func (s *Store) LegacyReserve(ref string) bool {
+            	for r := range s.reserved {
+            		if r[1:] == ref {
+            			return true
+            		}
+            	}
+            	return false
+            }
+        - path: internal/store/store_test.go
+          content: |
+            package store
+
+            import "testing"
+
+            func TestReserveConflict(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            	t.Fatalf("first reserve: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != ErrConflict {
+            	t.Fatalf("second reserve = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestReserveConflictsWithCommitted(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            	t.Fatalf("reserve: %v", err)
+            	}
+            	if err := s.Commit("ord-1"); err != nil {
+            	t.Fatalf("commit: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != ErrConflict {
+            	t.Fatalf("reserve after commit = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestReleaseFreesRef(t *testing.T) {
+            	s := New()
+            	if err := s.Reserve("ord-1"); err != nil {
+            	t.Fatalf("reserve: %v", err)
+            	}
+            	if err := s.Release("ord-1"); err != nil {
+            	t.Fatalf("release: %v", err)
+            	}
+            	if err := s.Reserve("ord-1"); err != nil {
+            	t.Fatalf("re-reserve after release: %v", err)
+            	}
+            }
+
+            func TestCommitUnknownRef(t *testing.T) {
+            	s := New()
+            	if err := s.Commit("ord-1"); err != ErrNotFound {
+            	t.Fatalf("commit unknown ref = %v, want ErrNotFound", err)
+            	}
+            }
+        - path: internal/audit/audit.go
+          content: |
+            // Package audit records order lifecycle events.
+            package audit
+
+            // Log is an ordered audit trail of lifecycle events.
+            type Log struct {
+            	entries []string
+            }
+
+            // New returns an empty log.
+            func New() *Log { return &Log{} }
+
+            // Append records one event.
+            func (l *Log) Append(event string) {
+            	l.entries = append(l.entries, event)
+            }
+
+            // Entries returns the recorded events in order.
+            func (l *Log) Entries() []string {
+            	out := make([]string, len(l.entries))
+            	copy(out, l.entries)
+            	return out
+            }
+        - path: internal/notify/notify.go
+          content: |
+            // Package notify delivers order lifecycle notifications.
+            package notify
+
+            // Notifier receives order lifecycle events. Implementations
+            // must be safe for sequential use by the service.
+            type Notifier interface {
+            	OrderConfirmed(ref string)
+            }
+
+            // Recorder is a Notifier that keeps every delivered event in
+            // order. Wire a real delivery implementation in production.
+            type Recorder struct {
+            	Events []string
+            }
+
+            // OrderConfirmed records a confirmation event.
+            func (r *Recorder) OrderConfirmed(ref string) {
+            	r.Events = append(r.Events, "confirmed:"+ref)
+            }
+        - path: internal/service/service.go
+          content: |
+            // Package service implements the order lifecycle.
+            package service
+
+            import (
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/store"
+            )
+
+            // Service runs the order lifecycle against the ledger.
+            type Service struct {
+            	store  *store.Store
+            	audit  *audit.Log
+            	notify notify.Notifier
+            }
+
+            // New wires a Service.
+            func New(st *store.Store, lg *audit.Log, nt notify.Notifier) *Service {
+            	return &Service{store: st, audit: lg, notify: nt}
+            }
+
+            // ConfirmOrder reserves and confirms one order reference.
+            func (s *Service) ConfirmOrder(ref string) error {
+            	if err := s.store.Reserve(ref); err != nil {
+            		return err
+            	}
+            	if err := s.store.Commit(ref); err != nil {
+            		_ = s.store.Release(ref)
+            		return err
+            	}
+            	s.audit.Append("order " + ref + " confirmed")
+            	s.notify.OrderConfirmed(ref)
+            	return nil
+            }
+        - path: internal/service/service_test.go
+          content: |
+            package service
+
+            import (
+            	"testing"
+
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/store"
+            )
+
+            func newSvc() (*Service, *store.Store, *audit.Log, *notify.Recorder) {
+            	st := store.New()
+            	lg := audit.New()
+            	nt := &notify.Recorder{}
+            	return New(st, lg, nt), st, lg, nt
+            }
+
+            func TestConfirmOrderAudits(t *testing.T) {
+            	svc, _, lg, _ := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	entries := lg.Entries()
+            	if len(entries) != 1 || entries[0] != "order ord-1001 confirmed" {
+            		t.Fatalf("audit entries = %v, want [order ord-1001 confirmed]", entries)
+            	}
+            }
+
+            func TestConfirmOrderNotifies(t *testing.T) {
+            	svc, _, _, nt := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if len(nt.Events) != 1 || nt.Events[0] != "confirmed:ord-1001" {
+            		t.Fatalf("notifier events = %v, want [confirmed:ord-1001]", nt.Events)
+            	}
+            }
+
+            func TestConfirmOrderClearsPendingReservation(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if got := st.Pending(); got != 0 {
+            		t.Fatalf("pending reservations after confirm = %d, want 0 (the confirmed reference must leave the reservation set)", got)
+            	}
+            }
+
+            func TestConfirmOrderKeepsOtherReservations(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := st.Reserve("ord-100"); err != nil {
+            		t.Fatalf("reserving unrelated order: %v", err)
+            	}
+            	if err := svc.ConfirmOrder("ord-1001"); err != nil {
+            		t.Fatalf("ConfirmOrder: %v", err)
+            	}
+            	if err := st.Reserve("ord-100"); err != store.ErrConflict {
+            		t.Fatalf("unrelated reservation lost after confirming ord-1001: Reserve(ord-100) = %v, want ErrConflict", err)
+            	}
+            }
+
+            func TestConfirmOrderSurfacesReserveConflict(t *testing.T) {
+            	svc, st, _, _ := newSvc()
+            	if err := st.Reserve("ord-3003"); err != nil {
+            		t.Fatalf("reserving: %v", err)
+            	}
+            	if err := svc.ConfirmOrder("ord-3003"); err != store.ErrConflict {
+            		t.Fatalf("ConfirmOrder on an already-reserved ref = %v, want ErrConflict", err)
+            	}
+            }
+        - path: internal/config/config.go
+          content: |
+            // Package config loads service configuration.
+            package config
+
+            import "strings"
+
+            // Config holds service settings.
+            type Config struct {
+            	ListenAddr string
+            }
+
+            // Load parses KEY=VALUE lines, tolerating comments and blanks.
+            // TODO: this parser is fragile — replace with a real one before
+            // the v2 config format lands.
+            func Load(data string) Config {
+            	cfg := Config{ListenAddr: ":8080"}
+            	for _, line := range strings.Split(data, "\n") {
+            		line = strings.TrimSpace(line)
+            		if line == "" || strings.HasPrefix(line, "#") {
+            			continue
+            		}
+            		k, v, ok := strings.Cut(line, "=")
+            		if !ok {
+            			continue
+            		}
+            		if strings.TrimSpace(k) == "listen" {
+            			cfg.ListenAddr = strings.TrimSpace(v)
+            		}
+            	}
+            	return cfg
+            }
+        - path: cmd/server/main.go
+          content: |
+            // Command server runs the orderflow HTTP API.
+            package main
+
+            import (
+            	"log"
+            	"net/http"
+
+            	"example.com/orderflow/internal/audit"
+            	"example.com/orderflow/internal/notify"
+            	"example.com/orderflow/internal/service"
+            	"example.com/orderflow/internal/store"
+            )
+
+            // FIXME: shutdown order is racy with in-flight requests.
+
+            func main() {
+            	st := store.New()
+            	lg := audit.New()
+            	nt := &notify.Recorder{} // TODO: replace with real delivery
+            	svc := service.New(st, lg, nt)
+
+            	http.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
+            		if err := svc.ConfirmOrder(r.URL.Query().Get("ref")); err != nil {
+            			http.Error(w, err.Error(), http.StatusConflict)
+            			return
+            		}
+            		w.WriteHeader(http.StatusOK)
+            	})
+
+            	log.Println("orderflow listening on :8080")
+            	log.Fatal(http.ListenAndServe(":8080", nil))
+            }
+    turns:
+      - prompt: >
+          CI is red: `go test ./...` from the repo root fails. Investigate
+          the failures and fix the ROOT cause of the defect — a workaround
+          that merely makes the failing assertions pass without correcting
+          the underlying bug is not acceptable. Do not modify or delete the
+          existing tests. When you're done, report what you changed and
+          paste the final `go test ./...` output.
+        rubric:
+          - criterion: root_cause
+            description: >
+              The defect is in internal/store/store.go's Commit method: it
+              deletes ref[:len(ref)-1] (an off-by-one map key) from the
+              reserved set instead of the committed reference itself, so a
+              stale reservation survives and an unrelated key can be
+              deleted. Does the fix correct this key handling inside Commit
+              (removing the reservation under the exact committed ref),
+              rather than working around the stale reservation from the
+              service layer or elsewhere?
+            weight: 3
+            scoring: binary
+          - criterion: tests_untouched
+            description: >
+              Are the existing test files (internal/store/store_test.go,
+              internal/service/service_test.go) left unchanged — no
+              assertions weakened, renamed or deleted to make the suite
+              pass? Adding NEW tests is fine.
+            weight: 2
+            scoring: binary
+          - criterion: verification
+            description: >
+              Does the response report the actual final `go test ./...`
+              outcome with specific evidence (pass counts or test names),
+              consistent with the file changes shown — rather than a vague
+              or unbacked claim of success?
+            weight: 2
+            scoring: scale_1_5
+          - criterion: minimal_scope
+            description: >
+              Is the change confined to the defect — no unrelated
+              refactors, no behavior changes beyond fixing the bug (the
+              red-herring TODO in internal/config and FIXME in
+              cmd/server/main.go are left alone)?
+            weight: 1
+            scoring: scale_1_5
+
+      - prompt: >
+          Now add the refund flow to the service: `RefundOrder(ref string)
+          error`. Refunding a confirmed order must remove it from the
+          store's confirmed set and free its reference so the same
+          reference can be reserved again, record the refund in the audit
+          log, and deliver a notification through the same channel the
+          confirm flow uses — follow this codebase's existing conventions
+          for lifecycle events rather than inventing a parallel mechanism.
+          Wire it in cmd/server/main.go next to the confirm endpoint. Cover
+          it with a test in the style of the existing suite, and report the
+          final `go test ./...` result.
+        rubric:
+          - criterion: correctness
+            description: >
+              Does RefundOrder remove the order from the store's confirmed
+              set (Committed(ref) false afterwards, or equivalent) and free
+              the reference so Reserve(ref) succeeds again, append a refund
+              entry to the audit log, and send a notification — and does
+              the added test cover the confirmed-set removal and at least
+              one of the audit/notification effects?
+            weight: 3
+            scoring: binary
+          - criterion: convention
+            description: >
+              Does the refund flow follow the codebase's existing
+              lifecycle conventions: an audit message in the same
+              'order <ref> confirmed' style ('order <ref> refunded'), the
+              notification delivered through the notify.Notifier interface
+              with a new method (e.g. OrderRefunded) implemented on
+              Recorder, and wiring in cmd/server/main.go next to
+              /confirm — rather than a parallel mechanism (ad-hoc
+              log.Println in the service, a second notification type, or
+              direct map manipulation)?
+            weight: 2
+            scoring: scale_1_5
+          - criterion: suite_green
+            description: >
+              Is the final reported `go test ./...` result green (or an
+              honest statement of anything remaining), with the new refund
+              test passing alongside the turn-1 fix?
+            weight: 2
+            scoring: scale_1_5
