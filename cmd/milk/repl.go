@@ -5269,6 +5269,13 @@ func firstInputReader(ir []inputReader) inputReader {
 
 // runTurn routes a prompt to the appropriate agent, writing output to out.
 func runTurn(ctx context.Context, st *interactiveState, rtr *router.Router, agents *dispatchAgents, input string, out io.Writer, ir ...inputReader) error {
+	// Attribution (#455): spans started under this turn's context carry the
+	// session id (obs.StartSpan reads it), so records in the shared signal
+	// files stay separable per session — several milk sessions append to the
+	// same ~/.milk/otel files.
+	if st != nil && st.sess != nil {
+		ctx = obs.ContextWithSessionID(ctx, st.sess.ID)
+	}
 	// sessionContent is the compact version stored in history (with
 	// attachment placeholders); it falls back to input when no override is
 	// set. Consume the override up front: everything below can early-return

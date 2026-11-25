@@ -37,6 +37,11 @@ var active providers
 // flushes and closes all providers.
 func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context) error, err error) {
 	if !cfg.Enabled {
+		// No writers will exist this session: close the gate so /otel status
+		// and Enabled() agree, and leave the runtime size-guard unarmed.
+		off.Store(true)
+		initd.Store(false)
+		runtimeState.dir = ""
 		return func(context.Context) error { return nil }, nil
 	}
 
@@ -44,8 +49,23 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		return nil, err
 	}
 
+	// Emission gate + turn-boundary size guard state (#457, #458): only on
+	// the path that actually builds writers.
+	off.Store(false)
+	sizeTrip.Store(false)
+	runtimeState.dir = otelDir
+	runtimeState.cfg = cfg
+
+	// service.instance.id (pid + per-process nonce) and process.pid on every
+	// exported record's Resource: the signal files are shared by all milk
+	// sessions on this config root, and readers need to tell the writers
+	// apart (#455).
 	res, err := resource.New(context.Background(),
-		resource.WithAttributes(semconv.ServiceName("milk")),
+		resource.WithAttributes(
+			semconv.ServiceName("milk"),
+			semconv.ServiceInstanceID(instanceID),
+			semconv.ProcessPID(os.Getpid()),
+		),
 	)
 	if err != nil {
 		return nil, err
@@ -59,7 +79,7 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		if err != nil {
 			return nil, err
 		}
-		te, err := stdouttrace.New(stdouttrace.WithWriter(tf), stdouttrace.WithPrettyPrint())
+		te, err := stdouttrace.New(stdouttrace.WithWriter(&gatedWriter{w: tf}), stdouttrace.WithPrettyPrint())
 		if err != nil {
 			return nil, err
 		}
@@ -82,7 +102,7 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		if err != nil {
 			return nil, err
 		}
-		me, err := stdoutmetric.New(stdoutmetric.WithWriter(mf))
+		me, err := stdoutmetric.New(stdoutmetric.WithWriter(&gatedWriter{w: mf}))
 		if err != nil {
 			return nil, err
 		}
@@ -112,7 +132,7 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 		if err != nil {
 			return nil, err
 		}
-		le, err := stdoutlog.New(stdoutlog.WithWriter(lf))
+		le, err := stdoutlog.New(stdoutlog.WithWriter(&gatedWriter{w: lf}))
 		if err != nil {
 			return nil, err
 		}
@@ -133,8 +153,10 @@ func Init(cfg config.OtelConfig, otelDir string) (shutdown func(context.Context)
 	if err != nil {
 		return nil, err
 	}
+	initd.Store(true)
 
 	return func(ctx context.Context) error {
+		initd.Store(false)
 		stopDebug()
 		var last error
 		for _, fn := range shutdowns {

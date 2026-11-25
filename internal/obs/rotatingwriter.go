@@ -6,10 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/scoutme/milk/internal/config"
 )
 
 // RotatingWriter is an io.WriteCloser that appends to a file and rotates it
-// when a size threshold is reached, keeping a bounded number of rotated files.
+// when the *shared* file's size reaches a threshold, keeping a bounded
+// number of rotated files. Rotation is sized off the file's actual stat size
+// (not a per-process byte counter) and serialized across processes on a
+// "<file>.lock" sidecar, so several milk sessions writing the same log
+// rotate it once at the cap instead of each racing its own count (#457).
 type RotatingWriter struct {
 	mu       sync.Mutex
 	basePath string // primary log file path, e.g. "~/.milk/claude_debug.ndjson"
@@ -18,9 +24,8 @@ type RotatingWriter struct {
 	maxBytes int64
 	maxFiles int
 
-	file    *os.File
-	written int64 // bytes written to the current file since last rotation
-	closed  bool
+	file   *os.File
+	closed bool
 }
 
 // NewRotatingWriter creates a RotatingWriter. It ensures the parent directory
@@ -39,12 +44,6 @@ func NewRotatingWriter(basePath string, maxBytes int64, maxFiles int) (*Rotating
 		return nil, fmt.Errorf("rotatingwriter: open %s: %w", basePath, err)
 	}
 
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("rotatingwriter: stat %s: %w", basePath, err)
-	}
-
 	return &RotatingWriter{
 		basePath: basePath,
 		ext:      ext,
@@ -52,12 +51,12 @@ func NewRotatingWriter(basePath string, maxBytes int64, maxFiles int) (*Rotating
 		maxBytes: maxBytes,
 		maxFiles: maxFiles,
 		file:     f,
-		written:  info.Size(),
 	}, nil
 }
 
-// Write appends p to the current log file. If the cumulative bytes written
-// since the last rotation reach maxBytes, the files are rotated.
+// Write appends p to the current log file. The rotation decision uses the
+// file's actual size (including bytes other processes appended), not this
+// process's own byte count.
 func (rw *RotatingWriter) Write(p []byte) (n int, err error) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
@@ -65,14 +64,14 @@ func (rw *RotatingWriter) Write(p []byte) (n int, err error) {
 	if rw.closed {
 		return 0, fmt.Errorf("rotatingwriter: write to closed writer")
 	}
-	if err := rw.reopenIfStaleLocked(); err != nil {
+	size, err := rw.reopenIfStaleLocked()
+	if err != nil {
 		return 0, err
 	}
 
 	n, err = rw.file.Write(p)
-	rw.written += int64(n)
 
-	if rw.written >= rw.maxBytes {
+	if size+int64(n) >= rw.maxBytes {
 		if rerr := rw.rotate(); rerr != nil && err == nil {
 			err = rerr
 		}
@@ -93,8 +92,25 @@ func (rw *RotatingWriter) Close() error {
 	return rw.file.Close()
 }
 
-// rotate performs log rotation. Caller must hold rw.mu.
+// rotate performs log rotation. Caller must hold rw.mu. The rename chain runs
+// under the "<basePath>.lock" sidecar so two processes (or a rotation racing
+// a /otel trim) serialize instead of interleaving their shifts, and the size
+// is re-checked under the lock: if another process already rotated or a trim
+// emptied the file, there is nothing to shift.
 func (rw *RotatingWriter) rotate() error {
+	if unlock, lerr := config.LockSidecar(rw.basePath + ".lock"); lerr == nil {
+		defer unlock()
+	} else {
+		Debug("rotatingwriter: lock unavailable", "file", rw.basePath, "err", lerr)
+	}
+
+	if _, err := rw.reopenIfStaleLocked(); err != nil {
+		return err
+	}
+	if info, serr := rw.file.Stat(); serr == nil && info.Size() < rw.maxBytes {
+		return nil // another process already rotated (or the file was trimmed)
+	}
+
 	// Close current file.
 	if err := rw.file.Close(); err != nil {
 		return fmt.Errorf("rotatingwriter: close before rotate: %w", err)
@@ -132,54 +148,54 @@ func (rw *RotatingWriter) rotate() error {
 	}
 
 	rw.file = f
-	rw.written = 0
 	return nil
 }
 
 // reopenIfStaleLocked reopens the active path when another process or writer
-// has renamed/recreated it while this writer still holds the old descriptor.
+// has renamed/recreated it while this writer still holds the old descriptor,
+// and returns the current file's size (after any reopen) — the value the
+// rotation decision is based on, so it reflects bytes every session wrote.
 // Caller must hold rw.mu.
-func (rw *RotatingWriter) reopenIfStaleLocked() error {
+func (rw *RotatingWriter) reopenIfStaleLocked() (int64, error) {
 	current, err := rw.file.Stat()
 	if err != nil {
-		return fmt.Errorf("rotatingwriter: stat current file: %w", err)
+		return 0, fmt.Errorf("rotatingwriter: stat current file: %w", err)
 	}
 	active, err := os.Stat(rw.basePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("rotatingwriter: stat active file: %w", err)
+			return 0, fmt.Errorf("rotatingwriter: stat active file: %w", err)
 		}
 		return rw.reopenLocked()
 	}
 	if os.SameFile(current, active) {
-		return nil
+		return current.Size(), nil
 	}
 	return rw.reopenLocked()
 }
 
 // reopenLocked closes the current descriptor and appends to the active path.
-// Caller must hold rw.mu.
-func (rw *RotatingWriter) reopenLocked() error {
+// Caller must hold rw.mu. Returns the reopened file's size.
+func (rw *RotatingWriter) reopenLocked() (int64, error) {
 	if err := rw.file.Close(); err != nil {
-		return fmt.Errorf("rotatingwriter: close stale file: %w", err)
+		return 0, fmt.Errorf("rotatingwriter: close stale file: %w", err)
 	}
 	f, err := os.OpenFile(rw.basePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("rotatingwriter: reopen active file: %w", err)
+		return 0, fmt.Errorf("rotatingwriter: reopen active file: %w", err)
 	}
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return fmt.Errorf("rotatingwriter: stat reopened file: %w", err)
+		return 0, fmt.Errorf("rotatingwriter: stat reopened file: %w", err)
 	}
 	rw.file = f
-	rw.written = info.Size()
-	return nil
+	return info.Size(), nil
 }
 
 // rotatedPath returns the path for the nth rotated file, preserving the
-// original extension. For example, with basePath "debug.ndjson" and n=1,
-// it returns "debug.1.ndjson".
+// original extension. For example, with basePath "debug.ndjson" and n=1, it
+// returns "debug.1.ndjson".
 func (rw *RotatingWriter) rotatedPath(n int) string {
 	base := strings.TrimSuffix(filepath.Base(rw.basePath), rw.ext)
 	return filepath.Join(rw.dir, fmt.Sprintf("%s.%d%s", base, n, rw.ext))

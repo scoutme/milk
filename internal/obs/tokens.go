@@ -281,7 +281,10 @@ func SessionTimingByRolePrefix(prefix string) (ttftSec, decodeSec float64, reqs 
 	return
 }
 
-type tkey struct{ metric, model, agent string }
+// tkey identifies one metric's data point for one (model, agent) pair from
+// one writer instance — instance-scoped so concurrent sessions' cumulative
+// counters are summed instead of overwriting each other (#456).
+type tkey struct{ metric, model, agent, instance string }
 
 type SessionTokenEntry struct {
 	Model, Agent             string
@@ -314,6 +317,10 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 			}
 		}
 		f.Close()
+		// Sum across writer instances: each process's cumulative counter
+		// covers its own lifetime, so the sum is the true all-session
+		// total — last-writer-wins (the old behavior) let one session's
+		// flush hide another's (#456).
 		for k, v := range latest {
 			if k.metric != "milk.tokens.prompt" && k.metric != "milk.tokens.completion" {
 				continue
@@ -325,9 +332,9 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 				rowMap[rk] = r
 			}
 			if k.metric == "milk.tokens.prompt" {
-				r.prompt = v
+				r.prompt += v
 			} else {
-				r.completion = v
+				r.completion += v
 			}
 		}
 	}
@@ -448,6 +455,12 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 
 func parseTokenMetricLine(line string, out map[tkey]float64) {
 	var root struct {
+		Resource []struct {
+			Key   string `json:"Key"`
+			Value struct {
+				Value any `json:"Value"`
+			} `json:"Value"`
+		} `json:"Resource"`
 		ScopeMetrics []struct {
 			Metrics []struct {
 				Name string `json:"Name"`
@@ -468,6 +481,12 @@ func parseTokenMetricLine(line string, out map[tkey]float64) {
 	if err := json.Unmarshal([]byte(line), &root); err != nil {
 		return
 	}
+	instance := ""
+	for _, a := range root.Resource {
+		if a.Key == "service.instance.id" {
+			instance = fmt.Sprintf("%v", a.Value.Value)
+		}
+	}
 	for _, sm := range root.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			if !strings.HasPrefix(m.Name, "milk.tokens.") {
@@ -483,7 +502,7 @@ func parseTokenMetricLine(line string, out map[tkey]float64) {
 						agent = fmt.Sprintf("%v", a.Value.Value)
 					}
 				}
-				out[tkey{m.Name, model, agent}] = dp.Value
+				out[tkey{m.Name, model, agent, instance}] = dp.Value
 			}
 		}
 	}

@@ -151,6 +151,18 @@ func writeFileAtomic(path string, data []byte) error {
 // fallback build has no locking (writes remain atomic).
 func lockConfig(path string) (release func(), err error) { return lockSidecar(path + ".lock") }
 
+// LockSidecar takes the advisory cross-process lock on an arbitrary sidecar
+// path (pass a stable "<file>.lock" name — never the data file itself, which
+// may be renamed or truncated beneath open descriptors). It exists for
+// consumers outside this package that serialize their own multi-step file
+// surgery against each other and against config saves — internal/obs uses it
+// to serialize log rotation chains against trims across milk sessions. The
+// returned release unlocks and closes; the fallback build has no locking
+// (callers keep their current best-effort behavior). Never lock the same
+// sidecar twice in one goroutine (flock on a second descriptor blocks
+// against the first).
+func LockSidecar(path string) (release func(), err error) { return lockSidecar(path) }
+
 // writeConfigFileLocked assumes the caller holds the lock for path: when
 // withBackup, rotates the backup from the current bytes (global scope —
 // local overlays deliberately keep no backup, matching SaveLocalIn's

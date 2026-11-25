@@ -70,15 +70,23 @@ func pruneDirArchives(dir string, bases map[string]bool) (removed int, freed int
 		if !ok {
 			continue
 		}
-		_ = date // order comes from the lexicographic name sort below
+		_ = date // retention orders by mod time (see the sort below)
 		byFamily[base] = append(byFamily[base], e)
 	}
 	for _, group := range byFamily {
 		if len(group) <= archiveKeep {
 			continue
 		}
-		// base.YYYY-MM-DD.ext sorts newest-date-first when reversed.
+		// Newest first by modification time: same-day trims may carry a
+		// time/counter suffix in the name (#457), which pure name order
+		// doesn't reflect; identical timestamps fall back to name order so
+		// the result stays deterministic.
 		sort.Slice(group, func(i, j int) bool {
+			ii, ierr := group[i].Info()
+			ji, jerr := group[j].Info()
+			if ierr == nil && jerr == nil && !ii.ModTime().Equal(ji.ModTime()) {
+				return ii.ModTime().After(ji.ModTime())
+			}
 			return group[i].Name() > group[j].Name()
 		})
 		for _, e := range group[archiveKeep:] {
@@ -100,28 +108,70 @@ func pruneDirArchives(dir string, bases map[string]bool) (removed int, freed int
 
 // splitArchiveName reports whether name is a datestamped archive of one of
 // the given families and, if so, returns the family base and the date.
-// Shape: <base>.YYYY-MM-DD.<log|jsonl> — the date must be exactly 10 chars
-// with dashes at 3 and 6, and the extension must be one archives actually
-// use (milk.1.log and friends carry no date and never match).
+// Shape: <base>.YYYY-MM-DD[.HHMMSS[.N]].<log|jsonl> — the date must be
+// exactly 10 chars with dashes at 3 and 6, and the tail must be an extension
+// archives actually use, optionally preceded by the clock and collision
+// counter that same-day trims append (milk.1.log and friends carry no date
+// and never match; metrics.2026-01-012.jsonl fails the tail rule).
 func splitArchiveName(name string, bases map[string]bool) (base, date string, ok bool) {
 	for b := range bases {
 		if !strings.HasPrefix(name, b+".") {
 			continue
 		}
 		rest := name[len(b)+1:] // "2026-08-27.log"
-		if len(rest) < len("YYYY-MM-DD")+1 {
+		if len(rest) < len("YYYY-MM-DD.log") {
 			continue
 		}
-		d, ext := rest[:10], rest[10:]
+		d, tail := rest[:10], rest[10:]
 		if !isDate(d) {
 			continue
 		}
-		if ext != ".log" && ext != ".jsonl" {
+		if !validArchiveTail(tail) {
 			continue
 		}
 		return b, d, true
 	}
 	return "", "", false
+}
+
+// validArchiveTail matches what may follow the date in an archive name:
+// ".log"/".jsonl" plain, or the same with a ".HHMMSS" clock and optional
+// ".N" collision counter before it — exactly the candidates
+// archiveCandidates can claim when several trims land on one day (#457).
+func validArchiveTail(tail string) bool {
+	if !strings.HasPrefix(tail, ".") {
+		return false
+	}
+	parts := strings.Split(tail[1:], ".")
+	if len(parts) > 3 {
+		return false
+	}
+	ext := parts[len(parts)-1]
+	if ext != "log" && ext != "jsonl" {
+		return false
+	}
+	mids := parts[:len(parts)-1]
+	for i, m := range mids {
+		if !isDigits(m) {
+			return false
+		}
+		if i == 0 && len(m) != 6 { // the first suffix is a 6-digit clock
+			return false
+		}
+	}
+	return true
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isDate(s string) bool {

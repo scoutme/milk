@@ -710,6 +710,10 @@ func (as *acpSession) runTurn(ctx context.Context, prompt string, media *acpProm
 	as.notify(acp.RunningState())
 
 	turnCtx, cancel := context.WithCancel(ctx)
+	// Attribution (#455): spans started under this turn's context carry the
+	// session id — one ACP process hosts many sessions writing to the same
+	// signal files.
+	turnCtx = obs.ContextWithSessionID(turnCtx, string(as.id))
 	// Multimodal input: image blocks ride the turn as multipart vision
 	// content parts on the per-call ctx (issue #297 — the agents are shared
 	// with background work, never an instance field), so whichever local

@@ -60,8 +60,14 @@ func defaultDebugLogPaths() []string {
 	return paths
 }
 
-// StartSpan is a convenience wrapper for starting a named span.
+// StartSpan is a convenience wrapper for starting a named span. When the
+// context carries a session id (ContextWithSessionID — set at the TUI/ACP
+// turn entry points) the span is stamped with it, so records in the shared
+// traces file stay attributable per session (#455).
 func StartSpan(ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, oteltrace.Span) {
+	if sid := SessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String("session_id", sid))
+	}
 	return Tracer(instrumentationScope).Start(ctx, spanName,
 		oteltrace.WithAttributes(attrs...),
 	)

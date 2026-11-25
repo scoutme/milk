@@ -47,20 +47,48 @@ func initMilkLogger(cfg config.OtelConfig, otelDir string) (shutdown func(), err
 	}
 
 	opts := &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}
-	milkLogger = slog.New(newLogHandler(format, rw, opts))
+	// The gate wrapper makes /otel off stop milk.log too — the log lives in
+	// the otel directory and is archived by /otel trim, so it belongs to the
+	// same emission gate as the signal files (#458).
+	milkLogger = slog.New(newLogHandler(format, &gatedWriter{w: rw}, opts))
 	return func() { rw.Close() }, nil //nolint:errcheck
 }
 
-// newLogHandler picks the handler for a validated format name.
+// newLogHandler picks the handler for a validated format name and stamps
+// every record it builds with the writing process's pid. milk.log is shared
+// by all milk sessions on a config root; with no session tag available on the
+// plain-slog paths (most call sites have no context), pid is the unambiguous
+// "who wrote this line" (#455 — per-line session tagging for the remaining
+// WARN sites is tracked in
+// docs/internal/plans/escalation-and-context-enhancements-plan.md).
 func newLogHandler(format string, w io.Writer, opts *slog.HandlerOptions) slog.Handler {
+	var h slog.Handler
 	switch format {
 	case "json":
-		return slog.NewJSONHandler(w, opts)
+		h = slog.NewJSONHandler(w, opts)
 	case LogFormatPretty:
-		return newPrettyHandler(w, opts.Level.Level())
+		h = newPrettyHandler(w, opts.Level.Level())
 	default:
-		return slog.NewTextHandler(w, opts)
+		h = slog.NewTextHandler(w, opts)
 	}
+	return &pidAttrHandler{Handler: h}
+}
+
+// pidAttrHandler injects pid= into every record. Handle receives the record
+// by value, so adding attributes mutates only the copy being emitted.
+type pidAttrHandler struct{ slog.Handler }
+
+func (h *pidAttrHandler) Handle(ctx context.Context, r slog.Record) error {
+	r.AddAttrs(slog.Int("pid", os.Getpid()))
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *pidAttrHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &pidAttrHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h *pidAttrHandler) WithGroup(name string) slog.Handler {
+	return &pidAttrHandler{Handler: h.Handler.WithGroup(name)}
 }
 
 func parseLogLevel(s string) slog.Level {
