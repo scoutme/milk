@@ -13,7 +13,11 @@ import (
 // in systemPromptShared and systemPromptSharedLean, so every non-minimal tier
 // (including lean) and both roles get it verbatim.
 func TestBuildSystemPrompt_CompletionClaimVerification(t *testing.T) {
-	want := "verify the claim with a fresh tool call"
+	wants := []string{
+		"verify the claim with a fresh tool call",
+		"Match the check to the claim's scope",
+		"case-insensitive search",
+	}
 
 	for _, tier := range []string{"lean", "standard", "full"} {
 		for _, tc := range []struct {
@@ -27,8 +31,10 @@ func TestBuildSystemPrompt_CompletionClaimVerification(t *testing.T) {
 		} {
 			t.Run(tc.label+"/"+tier, func(t *testing.T) {
 				got := buildSystemPrompt("/tmp/repo", "mimo-local", tc.escalationName, tc.workflow, tier, false)
-				if !strings.Contains(got, want) {
-					t.Errorf("prompt (tier=%q, %s) missing completion-claim verification rule %q", tier, tc.label, want)
+				for _, want := range wants {
+					if !strings.Contains(got, want) {
+						t.Errorf("prompt (tier=%q, %s) missing completion-claim verification rule %q", tier, tc.label, want)
+					}
 				}
 			})
 		}
