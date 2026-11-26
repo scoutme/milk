@@ -1706,7 +1706,7 @@ func (a *Agent) ownsConversationFromStart(sess *session.Session) bool {
 func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bool, tier string, disableProjectInstructions bool, projInstructionsTrim int, ownedFromStart bool) string {
 	// Normalise tier.
 	switch tier {
-	case "minimal", "full":
+	case "minimal", "lean", "full":
 		// keep
 	default:
 		tier = "standard"
@@ -1720,69 +1720,74 @@ func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bo
 	}
 
 	var base string
-	switch {
-	case workflowRole:
-		if tier == "minimal" {
-			base = "You are a coding and shell automation assistant."
-		} else {
-			base = systemPromptWorkflow
-		}
-	case escalationName != "":
-		// Escalation role: selfName == escalationName here.
-		//
-		// Two framings, keyed to what actually happened in the session rather
-		// than to the role alone. The hand-off narrative is only true when the
-		// primary agent produced work (or handed off with a brief): narrating it
-		// in a session that started pinned to the escalation agent frames the
-		// agent's own earlier turns as received material — the recap
-		// amplification ("What was implemented…") the context-parity work chased.
-		if ownedFromStart {
+	if tier == "lean" {
+		base = buildLeanBase(selfName, escalationName, workflowRole, ownedFromStart)
+	} else {
+		switch {
+		case workflowRole:
 			if tier == "minimal" {
+				base = "You are a coding and shell automation assistant."
+			} else {
+				base = systemPromptWorkflow
+			}
+		case escalationName != "":
+			// Escalation role: selfName == escalationName here.
+			//
+			// Two framings, keyed to what actually happened in the session rather
+			// than to the role alone. The hand-off narrative is only true when the
+			// primary agent produced work (or handed off with a brief): narrating it
+			// in a session that started pinned to the escalation agent frames the
+			// agent's own earlier turns as received material — the recap
+			// amplification ("What was implemented…") the context-parity work chased.
+			if ownedFromStart {
+				if tier == "minimal" {
+					base = fmt.Sprintf(
+						`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+						selfName,
+					)
+				} else {
+					base = fmt.Sprintf(
+						`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
+							sharedBlock+`
+- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+						selfName,
+					)
+				}
+			} else if tier == "minimal" {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+					`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
 					selfName,
 				)
 			} else {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
+					`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
 						sharedBlock+`
-- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-					selfName,
-				)
-			}
-		} else if tier == "minimal" {
-			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
-				selfName,
-			)
-		} else {
-			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
-					sharedBlock+`
 - If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
 - You are the escalation target — do not attempt to escalate further.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-				selfName,
-			)
-		}
-	default:
-		if tier == "minimal" {
-			base = fmt.Sprintf(
-				`You are %s, acting as the primary agent in a multi-agent system.`,
-				selfName,
-			)
-		} else {
-			base = fmt.Sprintf(
-				`You are %s, acting as the primary agent in a multi-agent system.`+
-					sharedBlock+`
+					selfName,
+				)
+			}
+		default:
+			if tier == "minimal" {
+				base = fmt.Sprintf(
+					`You are %s, acting as the primary agent in a multi-agent system.`,
+					selfName,
+				)
+			} else {
+				base = fmt.Sprintf(
+					`You are %s, acting as the primary agent in a multi-agent system.`+
+						sharedBlock+`
 - If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
 - Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
 **MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-				selfName,
-			)
+					selfName,
+				)
+			}
 		}
+
 	}
 
 	// Append extra verbose guidance for "full" tier.
@@ -2017,22 +2022,32 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		ownedFromStart:             a.ownsConversationFromStart(sess),
 	}
 	if a.backgroundManager != nil {
-		spb.guidance = append(spb.guidance, backgroundAgentGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, backgroundAgentGuidance)
+		}
 		if len(a.backgroundPeerNames()) > 0 {
-			spb.guidance = append(spb.guidance, backgroundPeerGuidance)
+			if includeFamilyGuidance(a.systemPromptTier) {
+				spb.guidance = append(spb.guidance, backgroundPeerGuidance)
+			}
 		}
 	}
 	if a.taskStore != nil {
-		spb.guidance = append(spb.guidance, taskToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, taskToolGuidance)
+		}
 	}
 	// The memory-tool mandate is included only when the memory tools actually
 	// survived schema construction + limits filtering — never mandate a tool
 	// the agent doesn't have (issue #172).
 	if hasToolNamed(tools, "get_memory") {
-		spb.guidance = append(spb.guidance, memoryToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, memoryToolGuidance)
+		}
 	}
 	if hasToolNamed(tools, "board_claim") {
-		spb.guidance = append(spb.guidance, boardToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, boardToolGuidance)
+		}
 	}
 	if hasToolNamed(tools, "project_map") {
 		spb.guidance = append(spb.guidance, projectMapGuidance)

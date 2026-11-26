@@ -733,10 +733,13 @@ type AgentConfig struct {
 	ExtraArgs []string `json:"extra_args,omitempty"`
 
 	// SystemPromptTier selects the verbosity level of the system prompt sent to
-	// this agent. Valid values: "minimal", "standard" (default), "full".
+	// this agent. Valid values: "minimal", "standard" (default), "lean", "full".
 	//   "minimal"  — role framing only; tool-use instructions and reasoning
 	//                guidance sections are omitted.
 	//   "standard" — current default behaviour (role framing + full tool rules).
+	//   "lean"     — behavioral core only: tool discipline + completion-claim
+	//                verification + conciseness; the MANDATORY protocol prose
+	//                and tool-family guidance blocks are omitted (issue #462).
 	//   "full"     — standard plus additional verbose guidance.
 	// Empty string is treated as "standard".
 	SystemPromptTier string `json:"system_prompt_tier,omitempty"`
@@ -3421,6 +3424,14 @@ func Validate(cfg Config) []ValidationWarning {
 		case "", "full", "compact", "lean":
 		default:
 			warn(a.Name, fmt.Sprintf("tool_description_tier %q is not a valid tier (valid: full, compact, lean) — treating as full", a.ToolDescriptionTier))
+		}
+
+		// system_prompt_tier is a plain string field; warn on typos so a mistyped
+		// tier silently falling back to "standard" is visible.
+		switch strings.ToLower(strings.TrimSpace(a.SystemPromptTier)) {
+		case "", "minimal", "standard", "lean", "full":
+		default:
+			warn(a.Name, fmt.Sprintf("system_prompt_tier %q is not a valid tier (valid: minimal, standard, lean, full) — treating as standard", a.SystemPromptTier))
 		}
 
 		// cache_warming is a plain string field; warn on typos so a mistyped

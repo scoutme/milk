@@ -505,9 +505,10 @@ milk's default system prompt (`standard`) is tuned for capable models. Smaller l
 
 | Value | Approx. size | Contents |
 |---|---|---|
-| `"minimal"` | ~60 tokens | Core task framing only |
-| `"standard"` | ~700 tokens | Full default (default when omitted) |
-| `"full"` | ~900 tokens | Standard plus verbose guidance |
+| `"minimal"` | ~35 tokens | Core task framing only |
+| `"lean"` | ~350 tokens | Behavioral core only: tool discipline, the completion-claim verification rule, end-of-turn summary, conciseness — plus compressed per-role directives |
+| `"standard"` | ~1.7k tokens | Full default (default when omitted) |
+| `"full"` | ~1.8k tokens | Standard plus verbose guidance |
 
 ```json
 { "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
@@ -515,6 +516,8 @@ milk's default system prompt (`standard`) is tuned for capable models. Smaller l
 ```
 
 The tier is also the first knob the [layered context-reduction ladder](#layered-context-reduction-context_reduction) turns dynamically: under context pressure it steps the tier down for you, so a fixed `"minimal"` is only needed when you want it even at low pressure.
+
+`"lean"` (issue #462, system side) keeps only the behavioral rules the evals measured as paying and drops the rest into tool semantics: the MANDATORY protocol prose (current_need, git, memory mandates), the history-label rule and the tool-family guidance blocks (background/task/memory/board) are omitted — their when-to-use content is carried by the tool schemas themselves. The [project_map guidance](#tool-description-diet-tool_description_tier) stays (measured planning value). Size is measured per request via `result.payload` → `system_bytes` and the `Payload [agent]: …` report lines, so a with/without comparison is direct. Default remains `"standard"` — adopt `"lean"` only after an A/B on your own workload. Unknown values warn at startup (`config.Validate`) and fall back to `"standard"`.
 
 ---
 
