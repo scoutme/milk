@@ -1169,8 +1169,11 @@ func (m model) handleAgentCmd(arg string) (model, tea.Cmd) {
 	// Explicit save scope (--local/--global — the CLI flags' spelling);
 	// consumed by this family's config saves, including later wizard commits.
 	arg, m.st.saveScope = takeScopeFlag(arg)
-	// Re-read config so externally added providers are visible.
-	if fresh, err := config.Load(); err == nil {
+	// Re-read config so externally added providers are visible — merged
+	// against the active dir's project-local overlay (Load() is global-only:
+	// it silently drops .milk/config.json agents, making /agent add write
+	// agents the same family then reports as "unknown").
+	if fresh, err := config.LoadMergedIn(activeConfigDir(m.st)); err == nil {
 		// Preserve the in-session active selection if the user hasn't changed it.
 		if m.st.cfg.Agent != "" {
 			fresh.Agent = m.st.cfg.Agent
