@@ -684,9 +684,11 @@ type Agent struct {
 	// it off. State lives in warm. Stable config (AgentConfig.CacheWarming).
 	cacheWarming string
 	warm         *cacheWarmState
-	// warmDelay/warmMinBytes override the scheduling constants in tests.
+	// warmDelay/warmMinBytes/warmMaxIdle override the scheduling constants
+	// in tests.
 	warmDelay    time.Duration
 	warmMinBytes int
+	warmMaxIdle  time.Duration
 	// firstPayload holds the first assembled request's composition (nil
 	// until the first Run assembles one) — issue #462's meter. A pointer
 	// to the atomic: the shallow-copy helpers (WithMCPToolSet,

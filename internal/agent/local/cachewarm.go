@@ -20,12 +20,15 @@ import (
 // session that pauses between turns (thinking, reading, meetings) pays a cold
 // cache on the next request even though nothing about the prefix changed.
 //
-// When the per-agent mode is "auto", a settled turn schedules exactly one
-// replay of its last request prefix (same model/messages/tools, max_tokens=1,
+// When the per-agent mode is "auto", a settled turn schedules a replay of
+// its last request prefix (same model/messages/tools, max_tokens=1,
 // non-streaming) after cacheWarmIdleDelay — cheap enough to matter, timed to
-// land before typical provider TTLs (5–10 min). The next real turn then reads
-// the prefix from cache. The replay is cancelled the moment a new turn starts:
-// a real request re-primes the prefix by itself.
+// land before typical provider TTLs (5–10 min). While the session stays idle
+// the replay re-arms after each success (pi's cache-warmer.ts max-age
+// pattern), bounded by cacheWarmMaxIdle, so the prefix survives pauses of any
+// length. The next real turn reads the prefix from cache; the chain is
+// cancelled the moment a new turn starts: a real request re-primes the
+// prefix by itself.
 //
 // Config: AgentConfig.CacheWarming ("off" default | "auto"). Not applicable to
 // the Bedrock native path (which has its own PromptCaching knob) or to clone
@@ -36,6 +39,11 @@ const (
 	// little under the common 5-minute provider TTL keeps the prefix hot for
 	// a user who returns shortly after the cache would have lapsed.
 	cacheWarmIdleDelay = 4 * time.Minute
+	// cacheWarmMaxIdle bounds the re-arm chain: replays stop once the
+	// session has been continuously idle this long (pi's max-age analog).
+	// Covers a lunch break; beyond that the session is likely parked and
+	// the replays are waste.
+	cacheWarmMaxIdle = 30 * time.Minute
 	// cacheWarmMinBodyBytes skips warming for small prefixes: at a few
 	// hundred tokens the cold/warm delta is less than the replay costs.
 	cacheWarmMinBodyBytes = 2048
@@ -54,6 +62,11 @@ type cacheWarmState struct {
 	msgs    []Message
 	tools   []map[string]any
 	bodyLen int
+	// idleSince is when the current idle window opened (last turn settle).
+	// The re-arm chain runs only while it is non-zero: cancelCacheWarm
+	// zeroes it so a send finishing concurrently with a new turn cannot
+	// schedule behind it.
+	idleSince time.Time
 }
 
 // warmUsage is the slice of a non-streaming chat completion response the
@@ -80,6 +93,13 @@ func (a *Agent) cacheWarmDelay() time.Duration {
 		return a.warmDelay
 	}
 	return cacheWarmIdleDelay
+}
+
+func (a *Agent) cacheWarmMaxIdleWindow() time.Duration {
+	if a.warmMaxIdle > 0 {
+		return a.warmMaxIdle
+	}
+	return cacheWarmMaxIdle
 }
 
 func (a *Agent) cacheWarmFloor() int {
@@ -112,6 +132,11 @@ func (a *Agent) withCacheWarmDelay(d time.Duration) *Agent {
 
 func (a *Agent) withCacheWarmMinBytes(n int) *Agent {
 	a.warmMinBytes = n
+	return a
+}
+
+func (a *Agent) withCacheWarmMaxIdle(d time.Duration) *Agent {
+	a.warmMaxIdle = d
 	return a
 }
 
@@ -160,6 +185,7 @@ func (a *Agent) cancelCacheWarm() {
 		st.timer.Stop()
 		st.timer = nil
 	}
+	st.idleSince = time.Time{}
 }
 
 // armCacheWarm schedules the single idle replay after a successfully settled
@@ -177,6 +203,7 @@ func (a *Agent) armCacheWarm() {
 	if st.timer != nil {
 		st.timer.Stop()
 	}
+	st.idleSince = time.Now()
 	st.timer = time.AfterFunc(a.cacheWarmDelay(), a.sendCacheWarm)
 }
 
@@ -238,4 +265,13 @@ func (a *Agent) sendCacheWarm() {
 	obs.Inc(ctx, inferenceScope, "milk.inference.cache_warm",
 		attribute.String("model", a.model),
 		attribute.String("agent", a.logRole()))
+
+	// Re-arm while the session stays idle, bounded by the max-idle window.
+	// The mutex check against idleSince (cleared by cancelCacheWarm) keeps a
+	// replay that raced a new turn start from scheduling behind it.
+	st.mu.Lock()
+	if !st.idleSince.IsZero() && time.Since(st.idleSince)+a.cacheWarmDelay() <= a.cacheWarmMaxIdleWindow() {
+		st.timer = time.AfterFunc(a.cacheWarmDelay(), a.sendCacheWarm)
+	}
+	st.mu.Unlock()
 }

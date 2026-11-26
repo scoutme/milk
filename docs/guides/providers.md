@@ -544,7 +544,7 @@ OpenAI-compatible providers (MiMo included) cache the request prefix server-side
 | Value | Behavior |
 |---|---|
 | `"off"` (default, `""`) | Nothing — status quo |
-| `"auto"` | After a successfully settled turn, once the session has been idle 4 minutes, the exact last request prefix is re-sent once with `max_tokens: 1` (non-streaming) to re-prime the provider cache. Cancelled the moment the next real turn starts — a real request re-primes the prefix itself. |
+| `"auto"` | After a successfully settled turn, once the session has been idle 4 minutes, the exact last request prefix is re-sent with `max_tokens: 1` (non-streaming) to re-prime the provider cache — and re-sent again every 4 minutes while the session stays idle, bounded at 30 minutes of continuous idle (pi's max-age pattern), so the prefix survives pauses of any length. The chain is cancelled the moment the next real turn starts — a real request re-primes the prefix itself. |
 
 The replay costs one prompt evaluation — at cached-discount rates far less than the cold recompute it prevents — and a 2 KB body floor keeps small prompts out of it entirely. Skipped for the Bedrock native path (that's [`prompt_caching`](#prompt-caching-prompt_caching--️-experimental-not-live-tested)'s job), for clone runs (tool agents, workflow executors, background jobs), and for turns with image attachments (a replay would re-upload base64). Every replay logs `cache warm replay sent` with the prompt size and provider-reported `cached_tokens`, and counts under `milk.inference.cache_warm` in metrics — enable `auto` on one agent and read those to confirm the effect before adopting broadly.
 

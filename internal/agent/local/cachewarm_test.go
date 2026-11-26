@@ -77,7 +77,7 @@ func decodeBody(t *testing.T, body []byte) map[string]any {
 }
 
 // TestCacheWarm_ReplaysExactPrefixAfterIdle is the happy path: a settled turn
-// with cache_warming=auto schedules exactly one replay, and the replay's
+// with cache_warming=auto schedules a replay, and the replay's
 // model/messages/tools are the real request's — only stream/max_tokens differ.
 func TestCacheWarm_ReplaysExactPrefixAfterIdle(t *testing.T) {
 	srv, rec := cacheWarmServer(t)
@@ -85,6 +85,7 @@ func TestCacheWarm_ReplaysExactPrefixAfterIdle(t *testing.T) {
 	agent := New(srv.URL, "test-model").
 		WithCacheWarming("auto").
 		withCacheWarmDelay(60 * time.Millisecond).
+		withCacheWarmMaxIdle(80 * time.Millisecond). // shorter than 2x delay: exactly one send
 		withCacheWarmMinBytes(1)
 	sess := &session.Session{}
 	var out strings.Builder
@@ -193,5 +194,33 @@ func TestCacheWarm_SkipsSmallPrefixes(t *testing.T) {
 	_, warm := rec.counts()
 	if warm != 0 {
 		t.Errorf("prefix below the floor still triggered %d replay(s)", warm)
+	}
+}
+
+// TestCacheWarm_ReArmsWhileIdleBounded pins the idle chain: while no new turn
+// starts, each successful replay schedules the next one — and the chain stops
+// at the max-idle bound instead of warming forever.
+func TestCacheWarm_ReArmsWhileIdleBounded(t *testing.T) {
+	srv, rec := cacheWarmServer(t)
+
+	agent := New(srv.URL, "test-model").
+		WithCacheWarming("auto").
+		withCacheWarmDelay(50 * time.Millisecond).
+		withCacheWarmMinBytes(1).
+		withCacheWarmMaxIdle(170 * time.Millisecond)
+	sess := &session.Session{}
+	var out strings.Builder
+
+	if _, err := agent.Run(context.Background(), nil, "do the thing", &out, sess, nil); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+	_, warm := rec.counts()
+	if warm < 2 {
+		t.Errorf("idle chain did not re-arm: %d replay(s) in the idle window, want >= 2", warm)
+	}
+	if warm > 5 {
+		t.Errorf("idle chain ran unbounded: %d replay(s), max-idle bound not enforced", warm)
 	}
 }
