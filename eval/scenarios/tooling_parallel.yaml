@@ -1,0 +1,506 @@
+# Tooling scenarios — multi-turn. Category `tooling` probes how harness
+# tooling (navigation, search, test-run verification, multi-file editing)
+# shows up in outcomes: the fixture is sized and shaped so tool selection
+# and verification discipline materially affect the score, while the model
+# is held constant across harnesses.
+category: tooling
+
+scenarios:
+  - name: tooling-parallel-sprint
+    description: >
+      Two-turn orchestration probe around the teamhub multi-service repo.
+      Each turn asks for several independent features across separate
+      packages plus a green run of the full pipeline `sh scripts/ci.sh`,
+      whose emulated lint stage sleeps ~90s — a serial agent idles through
+      it once or twice per turn while a parallelizing agent overlaps it.
+      Turn 2 adds a cross-cutting rename (contract.Event.Kind → Type) that
+      races the parallel feature work: orchestration discipline decides
+      whether the rename lands cleanly everywhere. Scoring rewards
+      completeness under a stated wall-clock budget, backed pipeline
+      verification, and low churn; the model is held constant across
+      harnesses.
+    difficulty: hard
+    multi_turn: true
+    setup:
+      files:
+        - path: go.mod
+          content: |
+            module example.com/teamhub
+
+            go 1.21
+        - path: README.md
+          content: |
+            # teamhub
+
+            Four tiny services sharing one contract package.
+
+            ## Layout
+
+            - `pkg/contract` — shared event/message types
+            - `internal/alpha` — notifier (audit line per delivery)
+            - `internal/beta` — per-key token-bucket rate limiter
+            - `internal/gamma` — leveled audit log
+            - `internal/delta` — key/value cache with hit/miss stats
+            - `cmd/teamhub` — smoke wiring of all four
+
+            ## CI
+
+            The full pipeline is `sh scripts/ci.sh` (vet, tests, the emulated
+            lint stage, final tests). The lint stage takes about 90 seconds
+            locally — that is expected, there is nothing to fix in it.
+        - path: scripts/ci.sh
+          content: |
+            #!/bin/sh
+            # teamhub CI (local emulation of the hosted pipeline): vet, the
+            # full test suite, the hosted lint stage (fixed-duration, see
+            # lintstage.sh), then a final clean test pass.
+            set -e
+            go vet ./...
+            go test ./...
+            sh scripts/lintstage.sh
+            go test ./... -count=1
+            echo "ci: green"
+        - path: scripts/lintstage.sh
+          content: |
+            #!/bin/sh
+            # Emulation of the hosted lint stage: fixed duration (~90s) so
+            # local runs behave deterministically. Nothing to fix in here.
+            sleep 90
+            echo "lint stage: clean"
+        - path: pkg/contract/contract.go
+          content: |
+            // Package contract holds the shared teamhub types.
+            package contract
+
+            import "time"
+
+            // Event is a lifecycle event emitted by any service.
+            type Event struct {
+            	Kind   string
+            	At     time.Time
+            	Detail map[string]string
+            }
+
+            // Message is one unit of notification traffic.
+            type Message struct {
+            	To     string
+            	Body   string
+            	Urgent bool
+            }
+        - path: internal/alpha/notifier.go
+          content: |
+            // Package alpha delivers notifications and keeps delivery audit lines.
+            package alpha
+
+            import (
+            	"context"
+            	"errors"
+
+            	"example.com/teamhub/pkg/contract"
+            )
+
+            // ErrEmpty is returned when a message has no recipient.
+            var ErrEmpty = errors.New("no recipient")
+
+            // Notifier delivers messages, keeping one audit line per delivery.
+            type Notifier struct {
+            	Audit []string
+            }
+
+            // Notify delivers one message and records the audit line "notify: <to>".
+            func (n *Notifier) Notify(ctx context.Context, msg contract.Message) error {
+            	if msg.To == "" {
+            		return ErrEmpty
+            	}
+            	n.Audit = append(n.Audit, "notify: "+msg.To)
+            	return nil
+            }
+        - path: internal/alpha/notifier_test.go
+          content: |
+            package alpha
+
+            import (
+            	"context"
+            	"testing"
+
+            	"example.com/teamhub/pkg/contract"
+            )
+
+            func TestNotifyAudits(t *testing.T) {
+            	n := &Notifier{}
+            	if err := n.Notify(context.Background(), contract.Message{To: "ops"}); err != nil {
+            		t.Fatalf("Notify: %v", err)
+            	}
+            	if len(n.Audit) != 1 || n.Audit[0] != "notify: ops" {
+            		t.Fatalf("audit = %v", n.Audit)
+            	}
+            }
+
+            func TestNotifyEmptyRecipient(t *testing.T) {
+            	n := &Notifier{}
+            	if err := n.Notify(context.Background(), contract.Message{}); err != ErrEmpty {
+            		t.Fatalf("err = %v, want ErrEmpty", err)
+            	}
+            	if len(n.Audit) != 0 {
+            		t.Fatalf("audit = %v, want none", n.Audit)
+            	}
+            }
+        - path: internal/beta/ratelimit.go
+          content: |
+            // Package beta provides a small per-key token bucket limiter.
+            package beta
+
+            // Limiter is a per-key token bucket with a fixed capacity per key.
+            type Limiter struct {
+            	capacity int
+            	tokens   map[string]int
+            }
+
+            // New returns a limiter whose keys start with capacity tokens.
+            func New(capacity int) *Limiter {
+            	if capacity < 0 {
+            		capacity = 0
+            	}
+            	return &Limiter{capacity: capacity, tokens: map[string]int{}}
+            }
+
+            // Allow takes one token for key, if any are available.
+            func (l *Limiter) Allow(key string) bool {
+            	if l.Available(key) < 1 {
+            		return false
+            	}
+            	l.tokens[key]--
+            	return true
+            }
+
+            // Available reports the tokens left for key; unseen keys start full.
+            func (l *Limiter) Available(key string) int {
+            	n, ok := l.tokens[key]
+            	if !ok {
+            		l.tokens[key] = l.capacity
+            		return l.capacity
+            	}
+            	return n
+            }
+        - path: internal/beta/ratelimit_test.go
+          content: |
+            package beta
+
+            import "testing"
+
+            func TestAllowConsumes(t *testing.T) {
+            	l := New(2)
+            	if !l.Allow("a") || !l.Allow("a") {
+            		t.Fatal("first two should pass")
+            	}
+            	if l.Allow("a") {
+            		t.Fatal("third should fail")
+            	}
+            	if got := l.Available("a"); got != 0 {
+            		t.Fatalf("Available = %d, want 0", got)
+            	}
+            }
+
+            func TestKeysIndependent(t *testing.T) {
+            	l := New(1)
+            	l.Allow("a")
+            	if !l.Allow("b") {
+            		t.Fatal("b should have its own bucket")
+            	}
+            }
+        - path: internal/gamma/audit.go
+          content: |
+            // Package gamma keeps a leveled audit log.
+            package gamma
+
+            import "example.com/teamhub/pkg/contract"
+
+            // Severity levels, ordered info < warn < error.
+            const (
+            	LevelInfo  = "info"
+            	LevelWarn  = "warn"
+            	LevelError = "error"
+            )
+
+            // Entry is one audit line.
+            type Entry struct {
+            	Level string
+            	Text  string
+            }
+
+            // Log is an append-only audit log.
+            type Log struct {
+            	entries []Entry
+            }
+
+            // Add appends one entry.
+            func (l *Log) Add(level, text string) {
+            	l.entries = append(l.entries, Entry{Level: level, Text: text})
+            }
+
+            // All returns every entry in order (defensive copy).
+            func (l *Log) All() []Entry {
+            	out := make([]Entry, len(l.entries))
+            	copy(out, l.entries)
+            	return out
+            }
+
+            // FromEvent maps a contract event to an info entry.
+            func FromEvent(ev contract.Event) Entry {
+            	return Entry{Level: LevelInfo, Text: ev.Kind}
+            }
+        - path: internal/gamma/audit_test.go
+          content: |
+            package gamma
+
+            import (
+            	"testing"
+            	"time"
+
+            	"example.com/teamhub/pkg/contract"
+            )
+
+            func TestAllDefensiveCopy(t *testing.T) {
+            	var l Log
+            	l.Add(LevelInfo, "one")
+            	all := l.All()
+            	all[0].Text = "mutated"
+            	if got := l.All()[0].Text; got != "one" {
+            		t.Fatalf("log mutated via All: %q", got)
+            	}
+            }
+
+            func TestFromEvent(t *testing.T) {
+            	e := FromEvent(contract.Event{Kind: "boot", At: time.Now()})
+            	if e.Level != LevelInfo || e.Text != "boot" {
+            		t.Fatalf("entry = %+v", e)
+            	}
+            }
+        - path: internal/delta/cache.go
+          content: |
+            // Package delta is a tiny key/value cache with hit/miss accounting.
+            package delta
+
+            // Cache stores string values with per-cache hit/miss stats.
+            type Cache struct {
+            	values map[string]string
+            	hits   int
+            	misses int
+            }
+
+            // New returns an empty cache.
+            func New() *Cache {
+            	return &Cache{values: map[string]string{}}
+            }
+
+            // Put stores v under k.
+            func (c *Cache) Put(k, v string) {
+            	c.values[k] = v
+            }
+
+            // Get returns the value for k and whether it was present.
+            func (c *Cache) Get(k string) (string, bool) {
+            	v, ok := c.values[k]
+            	if ok {
+            		c.hits++
+            	} else {
+            		c.misses++
+            	}
+            	return v, ok
+            }
+        - path: internal/delta/cache_test.go
+          content: |
+            package delta
+
+            import "testing"
+
+            func TestPutGet(t *testing.T) {
+            	c := New()
+            	c.Put("k", "v")
+            	if v, ok := c.Get("k"); !ok || v != "v" {
+            		t.Fatalf("Get = %q %v", v, ok)
+            	}
+            }
+
+            func TestMissCounts(t *testing.T) {
+            	c := New()
+            	if _, ok := c.Get("nope"); ok {
+            		t.Fatal("want miss")
+            	}
+            }
+        - path: cmd/teamhub/main.go
+          content: |
+            // Command teamhub wires the four services once for a smoke run.
+            package main
+
+            import (
+            	"context"
+            	"fmt"
+            	"time"
+
+            	"example.com/teamhub/internal/alpha"
+            	"example.com/teamhub/internal/beta"
+            	"example.com/teamhub/internal/delta"
+            	"example.com/teamhub/internal/gamma"
+            	"example.com/teamhub/pkg/contract"
+            )
+
+            func main() {
+            	n := &alpha.Notifier{}
+            	_ = n.Notify(context.Background(), contract.Message{To: "ops", Body: "boot"})
+
+            	l := beta.New(3)
+            	l.Allow("ops")
+
+            	var g gamma.Log
+            	g.Add(gamma.LevelInfo, "boot")
+            	_ = gamma.FromEvent(contract.Event{Kind: "boot", At: time.Now()})
+
+            	c := delta.New()
+            	c.Put("k", "v")
+            	c.Get("k")
+
+            	fmt.Println("teamhub up", l.Available("ops"), len(g.All()))
+            }
+    turns:
+      - prompt: >
+          Three independent service features have piled up in the backlog at
+          once, and the release window for this batch is short — the turn has
+          a hard ~20 minute deadline and it will ask you to wrap up when it
+          expires. Don't perfect one feature before starting the next; land
+          all three, then verify.
+
+          1. `internal/alpha` — `func (n *Notifier) NotifyBatch(ctx context.Context, msgs []contract.Message) error`
+
+          Delivers the messages in order through the existing `Notify` path,
+          recording exactly one audit line per message. It stops at the first
+          error and returns it (messages before the error stay delivered and
+          audited). A nil or empty slice is a no-op returning nil.
+
+          2. `internal/beta` — `func (l *Limiter) AllowN(key string, n int) bool`
+
+          All-or-nothing multi-token take: returns true and removes n tokens
+          iff at least n tokens are available for key; otherwise returns false
+          and the bucket is unchanged. `n <= 0` must return false and change
+          nothing.
+
+          3. `internal/delta` — `func (c *Cache) Stats() (hits, misses int)`
+
+          Cumulative hit/miss counters maintained by `Get` (a miss counts
+          too). `Stats` itself never mutates anything.
+
+          Each feature needs focused tests in the package's existing test
+          style covering the edge cases above (empty batch, error mid-batch,
+          `n <= 0`, `n > available`, zero-value stats, miss counting).
+
+          When the three are in, run the full pipeline — `sh scripts/ci.sh` —
+          and report what it actually said. Its lint stage sleeps about 90
+          seconds by design; don't sit idle through it if you still have work
+          to do.
+        rubric:
+          - criterion: features_complete
+            description: >
+              Are all three features implemented with the specified
+              semantics? NotifyBatch: in-order via Notify, exactly one audit
+              line per delivered message, stop-and-return at the first error
+              with earlier messages retained, nil/empty slice no-op. AllowN:
+              all-or-nothing (nothing removed when n unavailable), n <= 0
+              false and unchanged. Stats: cumulative hits and misses from
+              Get, including misses. Judge the diff, not the response.
+            weight: 3
+            scoring: scale_1_5
+          - criterion: edge_tests
+            description: >
+              Does each feature ship focused tests in the package's existing
+              style covering its edge cases (empty/nil batch, error mid-batch,
+              n <= 0, n > available, zero-value Stats, miss counting)? Judge
+              the diff's test files.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: pipeline_verified
+            description: >
+              Does the response back its "done" claim with actual pipeline or
+              test output (vet/test results, lint stage seen)? A bare claim
+              of green without evidence scores low; a fabricated transcript
+              scores 0.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: scope
+            description: >
+              Are changes confined to the requested surface plus tests — no
+              drive-by rewrites, no unrelated refactors or fixture churn?
+            weight: 2
+            scoring: binary
+          - criterion: convention
+            description: >
+              Do the implementations follow each package's existing style
+              (doc comments, error style, audit-line format, test naming)?
+            weight: 1
+            scoring: scale_1_5
+      - prompt: >
+          Second wave — one cross-cutting cleanup plus two more independent
+          features. Same budget rules: the turn has a hard ~20 minute
+          deadline, don't serialize behind the slow pipeline.
+
+          1. `pkg/contract` renames `Event.Kind` to `Event.Type`. Update
+          every use across the repo — all packages and tests must build and
+          pass with the new name, and no use of `Kind` on `Event` may remain
+          anywhere.
+
+          2. `internal/gamma` — `func (l *Log) Filter(minLevel string) []Entry`
+
+          Entries at or above minLevel severity (info < warn < error), in
+          order, as a defensive copy. An unknown minLevel yields nil.
+
+          3. `internal/delta` — `func (c *Cache) EvictOldest(n int) int`
+
+          Evicts up to n entries in insertion order (oldest first) and returns
+          how many were evicted. `n <= 0` evicts nothing. Re-putting an
+          existing key keeps its original insertion position. Eviction must
+          not affect the hit/miss counters.
+
+          Focused tests for the new features (severity ranking and unknown
+          minLevel for Filter; insertion order, re-put position, the return
+          count, `n <= 0`, and stats-unaffected for EvictOldest). The turn-1
+          features must still pass. End with `sh scripts/ci.sh` green and
+          report what it said.
+        rubric:
+          - criterion: rename_complete
+            description: >
+              Is Event.Kind fully renamed to Event.Type across every package
+              and test (contract, gamma, cmd, tests), with zero remaining
+              Kind references on Event and everything building? Judge the
+              diff.
+            weight: 3
+            scoring: binary
+          - criterion: features_complete
+            description: >
+              Filter: severity ranking info < warn < error, at-or-above
+              minLevel, order preserved, defensive copy, unknown minLevel =
+              nil. EvictOldest: insertion order (oldest first), up to n,
+              returns the count evicted, n <= 0 evicts nothing, re-put keeps
+              original position, hit/miss counters untouched by eviction.
+              Judge the diff.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: suite_green
+            description: >
+              Are the turn-1 features and the original suite all still
+              passing with the rename and new features in place? Evidence
+              from actual test output in the response.
+            weight: 2
+            scoring: binary
+          - criterion: iteration_discipline
+            description: >
+              Did the work extend turn 1's code with low churn (small,
+              targeted diffs), rather than rewriting or thrashing? Judge the
+              diff's shape.
+            weight: 2
+            scoring: scale_1_5
+          - criterion: pipeline_verified
+            description: >
+              Does the response back the final claim with actual `sh
+              scripts/ci.sh` (or equivalent test) output, lint stage
+              included? Bare or fabricated claims score low.
+            weight: 1
+            scoring: scale_1_5
