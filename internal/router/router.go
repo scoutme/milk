@@ -31,6 +31,10 @@ func routerRule(reason string) string {
 		return "hard_threshold"
 	case strings.Contains(reason, "signals"):
 		return "soft_score"
+	case strings.Contains(reason, "classifier error"):
+		// A classifier failure defaulted to local is not a decision the
+		// classifier made — it is the no-decision default.
+		return "default"
 	case strings.Contains(reason, "classifier"), strings.Contains(reason, "model classifier"):
 		return "classifier"
 	default:
@@ -131,15 +135,23 @@ func (r *Router) fallbackDecision(ctx context.Context, text string) Decision {
 			classifyElapsed := time.Since(classifyStart)
 			if err != nil {
 				fmt.Printf("[router] classifier error: %v — defaulting to local\n", err)
-			} else {
-				obs.RecordDuration(ctx, instrumentationScope, "milk.router.classify_latency_ms", classifyElapsed,
-					attribute.String("model", r.cfg.ActiveAgent().Model),
-				)
-				if escalate {
-					return Decision{Target: TargetEscalation, Conclusive: true, Reason: "model classifier"}
-				}
+				// Honest reason: this is a failure default, not a
+				// classifier verdict. The bare "default" catch-all
+				// could not tell the two apart in route reason data
+				// (route-reason probe, 2026-11-25).
+				return Decision{Target: TargetLocal, Conclusive: true, Reason: "classifier error — defaulted local"}
 			}
+			obs.RecordDuration(ctx, instrumentationScope, "milk.router.classify_latency_ms", classifyElapsed,
+				attribute.String("model", r.cfg.ActiveAgent().Model),
+			)
+			if escalate {
+				return Decision{Target: TargetEscalation, Conclusive: true, Reason: "model classifier"}
+			}
+			// Classifier said "primary" explicitly — say so in the reason
+			// instead of the ambiguous "default" catch-all.
+			return Decision{Target: TargetLocal, Conclusive: true, Reason: "classifier: primary"}
 		}
 	}
+	// No classifier wired (or fallback disabled): the neutral default.
 	return Decision{Target: TargetLocal, Conclusive: true, Reason: "default"}
 }
