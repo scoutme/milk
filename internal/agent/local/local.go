@@ -1545,10 +1545,12 @@ func (a *Agent) WithDebugLog(w io.Writer) *Agent {
 	return &copy
 }
 
-// systemPromptShared is the role-independent core: tool rules, memory rules,
-// file/directory conventions, and git protocol. Both primary and escalation
-// agents receive this verbatim.
-const systemPromptShared = `Rules:
+// systemPromptRulesCore is the behavioral restraint half of the shared rules
+// block: tool-call discipline, the completion-claim verification rule and the
+// act-first principle. Every non-minimal tier receives it verbatim — "lean"
+// is built from this segment (see system_prompt_lean.go), so a rule changed
+// here changes every tier at once.
+const systemPromptRulesCore = `Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - To find files by name or pattern (e.g. "*_test.go", "*.md", "Makefile") use find_files — never use grep for this. Use grep only to search inside file contents.
@@ -1556,11 +1558,27 @@ const systemPromptShared = `Rules:
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output. Do not narrate or summarize between individual tool calls in a multi-step sequence — keep issuing tool calls silently until the task is done.
 - Do not announce that you have "the full picture" or are "ready to start" and then keep investigating: either make the edit now, or make the next read. When a change is decided, put its content directly in the edit_file/write_file call — never draft the full code or file text in your reasoning first and write it a second time in the tool call. Never write a tool call as literal markup text or inside your reasoning; only a proper tool call runs.
 - Once you have no more tool calls left to make for the current task, you MUST end the turn with a short text response for the user. Never let a turn end with only tool calls and no reply — always close out with at least a brief summary of what you did or found.
-- Before reporting a task complete, verify the claim with a fresh tool call in this turn — grep for what should no longer exist, re-read what you changed, run the check you are citing. Never report "fixed", "done", or "no remaining occurrences" from memory.
+- Before reporting a task complete, verify the claim with a fresh tool call in this turn — grep for what should no longer exist, re-read what you changed, run the check you are citing. Never report "fixed", "done", or "no remaining occurrences" from memory.`
+
+// systemPromptToolboxMeta are the milk-toolbox protocol mandates (goal
+// tracking, history-label hygiene, observability lookup) — "standard"/"full"
+// only; "lean" drops them (the harness enforces their behavior and the A/B
+// measured the mandate prose as wander-inducing bulk).
+const systemPromptToolboxMeta = `
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 **MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session. Only summarize a goal the user actually stated in words — never invent or infer one from an image/attachment alone. If the user's turn has no accompanying text stating a goal (e.g. an image-only paste), leave current_need unchanged.
-- Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.
-- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
+- Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.`
+
+// systemPromptActFirst is the act-first rule: never bounce work back to the
+// user that the tree can answer. Kept at "lean" — restraint, not protocol.
+const systemPromptActFirst = `
+- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.`
+
+// systemPromptToolboxProtocols are the milk-toolbox protocols: GitHub
+// plumbing, the git provenance protocol, table-rendering rules and config
+// write safety — "standard"/"full" only; "lean" keeps a distilled commit-
+// honesty line alone (see system_prompt_lean.go).
+const systemPromptToolboxProtocols = `
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:
 1. Call bash with "git status" and "git diff --stat HEAD" to see what is staged or changed.
@@ -1570,6 +1588,40 @@ const systemPromptShared = `Rules:
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.
 - ` + escalation.TableGuidance + `
 - To manage milk's own configuration (agents, MCP servers, memory, routing, etc.), call milk_config_help(topic) for docs instead of guessing config.json's schema. To write changes use bash with "milk config mcp add|remove|assign|unassign ..." or "milk config agent add|remove ..." — ` + escalation.ConfigWriteWarning
+
+// systemPromptShared is the role-independent core: tool rules, memory rules,
+// file/directory conventions, and git protocol. Both primary and escalation
+// agents receive this verbatim at "standard"/"full"; "lean" receives the
+// restraint segments only (see system_prompt_lean.go).
+const systemPromptShared = systemPromptRulesCore + systemPromptToolboxMeta + systemPromptActFirst + systemPromptToolboxProtocols
+
+// Role framings and role tails are shared by the standard builder and the
+// "lean" tier's buildLeanBase: the role directives the A/B measured as
+// restraint mechanisms (vague-reference discipline, escalation scope, the
+// unknown-recent-work fabrication guard) stay byte-identical across tiers and
+// cannot drift apart.
+const (
+	primaryFraming = `You are %s, acting as the primary agent in a multi-agent system.`
+
+	primaryRoleTail = `
+- If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
+- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+	escalationOwnedFraming = `You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`
+
+	escalationOwnedRoleTail = `
+- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+	escalationHandoffFraming = `You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`
+
+	escalationHandoffRoleTail = `
+- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+)
 
 // systemPromptWorkflow is used for workflow step executors (designer, generator,
 // evaluator). No escalation framing, no session orientation — the workflow
@@ -1742,47 +1794,38 @@ func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bo
 			if ownedFromStart {
 				if tier == "minimal" {
 					base = fmt.Sprintf(
-						`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+						escalationOwnedFraming,
 						selfName,
 					)
 				} else {
 					base = fmt.Sprintf(
-						`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
-							sharedBlock+`
-- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+						escalationOwnedFraming+
+							sharedBlock+escalationOwnedRoleTail,
 						selfName,
 					)
 				}
 			} else if tier == "minimal" {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+					escalationHandoffFraming,
 					selfName,
 				)
 			} else {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
-						sharedBlock+`
-- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+					escalationHandoffFraming+
+						sharedBlock+escalationHandoffRoleTail,
 					selfName,
 				)
 			}
 		default:
 			if tier == "minimal" {
 				base = fmt.Sprintf(
-					`You are %s, acting as the primary agent in a multi-agent system.`,
+					primaryFraming,
 					selfName,
 				)
 			} else {
 				base = fmt.Sprintf(
-					`You are %s, acting as the primary agent in a multi-agent system.`+
-						sharedBlock+`
-- If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
-- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+					primaryFraming+
+						sharedBlock+primaryRoleTail,
 					selfName,
 				)
 			}

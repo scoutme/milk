@@ -2,69 +2,59 @@ package local
 
 import "fmt"
 
-// system_prompt_lean.go — the "lean" system-prompt tier: the behavioral core
-// only (the system side of the issue #462 payload diet, the pi-effectiveness
-// work). Lines kept are the ones the evals measured as paying: tool-call
-// discipline, the completion-claim verification rule (fix-typo false-claim
-// fix, verification scores 5.0 vs pi's 4.5-4.75) and pi-parity conciseness.
-// The MANDATORY protocols (current_need, git, memory) and the tool-family
-// guidance blocks ride at "standard"/"full"; their when-to-use content is
-// carried by the tool schemas themselves. Default tier is unchanged
-// ("standard") — lean is opt-in and A/B-measured before any default move.
+// system_prompt_lean.go — the "lean" system-prompt tier (the system side of
+// the issue #462 payload diet). Design v2, after the first A/B: keep the
+// restraint mechanisms, cut the toolbox protocol prose.
+//
+// The v1 lean tier compressed the role directives to one-liners and dropped
+// every MANDATORY block. The A/B (13 scenarios x 2 arms, mimo-v2.6-flash,
+// pro judge) measured quality parity but behavioral loosening: +42% tool
+// calls, +57% output tokens, ~3.5x clean-run cost, incl. one runaway design
+// turn (15.6x). The role directives and discipline framing were doing
+// restraint work — the prefix bytes were paying for something.
+//
+// v2 keeps the standard behavioral core verbatim (systemPromptRulesCore and
+// the act-first rule) and the standard role tails verbatim (primaryRoleTail /
+// escalation*RoleTail — shared consts, so no drift), and drops only the
+// toolbox protocol prose (systemPromptToolboxMeta + systemPromptToolboxProtocols:
+// current_need, git 5-step protocol, history-label rule, get_metrics, gh
+// plumbing, table rules, config-write safety) plus the tool-family guidance
+// blocks (includeFamilyGuidance). One line survives the git protocol: the
+// commit-honesty rule. Default tier is unchanged ("standard") — lean is
+// opt-in and A/B-measured before any default move.
 
-// systemPromptSharedLean is the "lean" tier's rules block.
-const systemPromptSharedLean = `Rules:
-- Call the appropriate tool for any command, read, write, edit, directory listing, or URL fetch. Never guess or hallucinate a result.
-- write_file creates or overwrites a file; edit_file makes a targeted change. Never tell the user to do file work manually.
-- find_files finds files by name or pattern; grep searches inside file contents.
-- Issue tool calls silently — no narration between them. End every turn with a short text summary of what you did or found.
-- Before reporting a task complete, verify the claim with a fresh tool call in this turn — grep for what should no longer exist, re-read what you changed, run the check you are citing. Never report "fixed", "done", or "no remaining occurrences" from memory.
+// systemPromptSharedLean is the "lean" tier's rules block: the standard
+// behavioral core verbatim (restraint rules), the act-first rule, the
+// distilled commit-honesty rule, and pi-style conciseness — minus the
+// toolbox protocol prose.
+const systemPromptSharedLean = systemPromptRulesCore + systemPromptActFirst + `
+- Before any git commit, push, or merge: verify what the session actually changed (git status/diff, get_session_context) and never invent a commit message for changes you cannot account for.
 - Be concise.`
-
-// Lean-tier role tails: the standard tails' behavioral directives compressed
-// to one line each. The multi-step MANDATORY case choreography stays at
-// "standard"/"full"; lean keeps the action ("check first, never fabricate")
-// without the protocol.
-const (
-	primaryTailLean = `
-- If the user references something you cannot see (vague references, "[...] (N turns omitted)" placeholders), call get_session_context first — never guess what they mean.
-- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
-- Before any git commit, push, or merge: verify what the session actually changed (git status/diff, get_session_context) and never invent a commit message for changes you cannot account for.`
-
-	escalationOwnedTailLean = `
-- You are the escalation target — do not attempt to escalate further.
-- If the user refers to something without enough context, call get_session_context instead of guessing.`
-
-	escalationHandoffTailLean = `
-- You are the escalation target — do not attempt to escalate further.
-- If the user references any past action, change, or artifact you have no direct memory of, call get_session_context with agent: "primary" BEFORE responding. Never fabricate a summary of work you did not perform.`
-)
 
 // includeFamilyGuidance reports whether the verbose tool-family guidance
 // blocks (background/task/memory/board mandates) ride the system prompt at
 // this tier. "lean" drops them: the tool schemas carry their own when-to-use
-// text, and the A/B measures whether the prose earns its tokens (issue
-// #462, system side). projectMapGuidance is exempt — the one guidance block
-// with measured outcome value (planning quality, 5.0 vs pi's 3.5).
+// text (issue #462, system side). projectMapGuidance is exempt — the one
+// guidance block with measured outcome value (planning quality, 5.0 vs
+// pi's 3.5).
 func includeFamilyGuidance(tier string) bool { return tier != "lean" }
 
-// buildLeanBase composes the "lean" tier's base prompt: role framing plus the
-// behavioral-core rules block and the lean role tail. The environment tail
-// (date line, working directory, project instructions) is shared with the
-// other tiers and appended by buildSystemPromptOpts.
+// buildLeanBase composes the "lean" tier's base prompt: the same role framings
+// and role tails as the standard tier (shared consts — byte-identical role
+// directives) around the lean rules block. The environment tail (date line,
+// working directory, project instructions) is shared with the other tiers and
+// appended by buildSystemPromptOpts.
 func buildLeanBase(selfName, escalationName string, workflowRole, ownedFromStart bool) string {
+	sharedBlock := "\n\n" + systemPromptSharedLean
 	switch {
 	case workflowRole:
-		return "You are a coding and shell automation assistant.\n\n" + systemPromptSharedLean
+		return "You are a coding and shell automation assistant." + sharedBlock
 	case escalationName != "":
-		framing := `You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`
-		tail := escalationHandoffTailLean
 		if ownedFromStart {
-			framing = `You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`
-			tail = escalationOwnedTailLean
+			return fmt.Sprintf(escalationOwnedFraming, selfName) + sharedBlock + escalationOwnedRoleTail
 		}
-		return fmt.Sprintf(framing+"\n\n"+systemPromptSharedLean+tail, selfName)
+		return fmt.Sprintf(escalationHandoffFraming, selfName) + sharedBlock + escalationHandoffRoleTail
 	default:
-		return fmt.Sprintf(`You are %s, acting as the primary agent in a multi-agent system.`+"\n\n"+systemPromptSharedLean+primaryTailLean, selfName)
+		return fmt.Sprintf(primaryFraming, selfName) + sharedBlock + primaryRoleTail
 	}
 }
