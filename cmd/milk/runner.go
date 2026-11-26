@@ -271,6 +271,69 @@ func (r *localRunner) Execute(
 		},
 	)
 
+	history := buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, !ac.DisableCompaction)
+
+	updatedHistory, err := agent.Run(ctx, history, prompt, out, sess, mem)
+	if err != nil {
+		if esc, ok := err.(*local.EscalationSignal); ok {
+			return TurnResult{EscalationReason: esc.Reason}, nil
+		}
+		if ws, ok := err.(*local.WorkflowStartSignal); ok {
+			return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
+		}
+		// On connection failure, auto-start the server if run_cmd is configured
+		// and retry once. This handles the case where the server was stopped
+		// (manually or between sessions) but milk is already running.
+		if ac.RunCmd != "" && isConnectionRefused(err) {
+			if startErr := ensureServerRunning(ctx, ac.URL, ac.RunCmd, ac.Name); startErr == nil {
+				updatedHistory, err = agent.Run(ctx, history, prompt, out, sess, mem)
+			}
+		}
+		if err != nil {
+			if esc, ok := err.(*local.EscalationSignal); ok {
+				return TurnResult{EscalationReason: esc.Reason}, nil
+			}
+			if ws, ok := err.(*local.WorkflowStartSignal); ok {
+				return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
+			}
+			return TurnResult{Trail: agent.TurnTrail()}, err
+		}
+	}
+
+	text := ""
+	if len(updatedHistory) > 0 {
+		last := updatedHistory[len(updatedHistory)-1]
+		if last.Role == "assistant" {
+			text = last.Content
+		}
+	}
+	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text), Trail: agent.TurnTrail()}, nil
+}
+
+// buildTurnHistory is the request-history pipeline at the top of
+// localRunner.Execute, factored out so the cache-warm reshape seam
+// (reshapeCacheWarm) can rebuild the same shape the next turn's request will
+// carry once the current turn is persisted: same builder
+// (sessionToUnifiedMessagesWithBoundary for the primary,
+// escalationLocalHistory*WithBoundary for the escalation), same
+// percepts/orientation system-message prepends, same goal-boundary trim.
+//
+// useCompaction selects the summarizing trim
+// (trimLocalMessagesWithCompactionHint) over the hard-drop trim
+// (trimLocalMessagesHint). The reshape path passes false: a compaction summary
+// is generated fresh for every call and span set, so a reshape-time summary
+// could never match the next turn's request past that point anyway — and an
+// extra inference call for a prefix match that cannot happen is waste. The
+// hard-drop trim is deterministic and matches the next turn exactly whenever
+// no compaction fires there (the trims only act once the history outgrows the
+// message budget).
+//
+// agent supplies the system-prompt overhead estimate the message-budget trim
+// subtracts (and the summarizer when useCompaction); it may be nil, in which
+// case the budget math skips the overhead estimate and compaction falls back
+// to the hard-drop trim.
+func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config, sess *session.Session, role AgentRole, ctxMode escalation.ContextMode, percepts []string, useCompaction bool) []local.Message {
+	ac := agentConfigForRole(cfg, role)
 	// Build history depending on role and context mode.
 	var history []local.Message
 	switch role {
@@ -311,10 +374,13 @@ func (r *localRunner) Execute(
 			// primary had. The brick is a TL;DR index (context_budget_chars,
 			// default 3000) into the transcript now carrying the tool
 			// evidence, so total request size stays roughly flat.
-			overhead := agent.SystemOverheadChars(sess)
+			overhead := 0
+			if agent != nil {
+				overhead = agent.SystemOverheadChars(sess)
+			}
 			msgBudget = max(1, msgBudget-overhead)
 		}
-		if ac.DisableCompaction {
+		if !useCompaction {
 			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
 				history = trimmed
 			}
@@ -355,10 +421,13 @@ func (r *localRunner) Execute(
 
 		msgBudget := cfg.AgentMessageBudget(ac)
 		if msgBudget > 0 {
-			overhead := agent.SystemOverheadChars(sess)
+			overhead := 0
+			if agent != nil {
+				overhead = agent.SystemOverheadChars(sess)
+			}
 			msgBudget = max(1, msgBudget-overhead)
 		}
-		if ac.DisableCompaction {
+		if !useCompaction {
 			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
 				history = trimmed
 			}
@@ -366,42 +435,52 @@ func (r *localRunner) Execute(
 			history = trimmed
 		}
 	}
+	return history
+}
 
-	updatedHistory, err := agent.Run(ctx, history, prompt, out, sess, mem)
-	if err != nil {
-		if esc, ok := err.(*local.EscalationSignal); ok {
-			return TurnResult{EscalationReason: esc.Reason}, nil
-		}
-		if ws, ok := err.(*local.WorkflowStartSignal); ok {
-			return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
-		}
-		// On connection failure, auto-start the server if run_cmd is configured
-		// and retry once. This handles the case where the server was stopped
-		// (manually or between sessions) but milk is already running.
-		if ac.RunCmd != "" && isConnectionRefused(err) {
-			if startErr := ensureServerRunning(ctx, ac.URL, ac.RunCmd, ac.Name); startErr == nil {
-				updatedHistory, err = agent.Run(ctx, history, prompt, out, sess, mem)
-			}
-		}
-		if err != nil {
-			if esc, ok := err.(*local.EscalationSignal); ok {
-				return TurnResult{EscalationReason: esc.Reason}, nil
-			}
-			if ws, ok := err.(*local.WorkflowStartSignal); ok {
-				return TurnResult{WorkflowStart: ws, Trail: agent.TurnTrail()}, nil
-			}
-			return TurnResult{Trail: agent.TurnTrail()}, err
-		}
-	}
+// cacheWarmReshaper is the optional seam to the local agent's idle cache-warm
+// replay (issue #471's shape fix). Only localRunner implements it: it wraps
+// the one agent whose next-turn request is rebuilt from sess.History, so there
+// is a settled shape to re-prime the replay with. cliRunner and
+// subprocessRunner keep their conversation state outside sess.History — their
+// next request is not rebuilt from the session — and simply do not satisfy the
+// interface.
+type cacheWarmReshaper interface {
+	ReshapeCacheWarm([]local.Message)
+}
 
-	text := ""
-	if len(updatedHistory) > 0 {
-		last := updatedHistory[len(updatedHistory)-1]
-		if last.Role == "assistant" {
-			text = last.Content
-		}
+var _ cacheWarmReshaper = (*localRunner)(nil)
+
+// ReshapeCacheWarm re-primes the wrapped agent's pending idle cache-warm
+// replay with the settled next-turn history shape (see
+// local.Agent.ReshapeCacheWarm).
+func (r *localRunner) ReshapeCacheWarm(history []local.Message) {
+	if r == nil || r.agent == nil {
+		return
 	}
-	return TurnResult{Text: text, EndsWithQ: endsWithQuestion(text), Trail: agent.TurnTrail()}, nil
+	r.agent.ReshapeCacheWarm(history)
+}
+
+// reshapeCacheWarm rebuilds the just-settled turn's next-request history —
+// with buildTurnHistory, the same builder Execute uses at its top, run against
+// the now-persisted sess.History — and hands it to the runner's cache-warm
+// reshape seam. The dispatch layer calls it right after a turn is recorded
+// (synchronously, well before the replay's idle timer can fire). A no-op for
+// runners without the seam (cliRunner, subprocessRunner).
+func reshapeCacheWarm(ctx context.Context, runner TurnRunner, cfg config.Config, sess *session.Session, role AgentRole, ctxMode escalation.ContextMode, percepts []string) {
+	cr, ok := runner.(cacheWarmReshaper)
+	if !ok {
+		return
+	}
+	// Prefer the wrapped agent where there is one (the production seam): its
+	// system-prompt overhead is part of the message-budget math the next
+	// turn's trim will apply.
+	var agent *local.Agent
+	if lr, ok := runner.(*localRunner); ok {
+		agent = lr.agent
+	}
+	// Never compact at reshape time — see buildTurnHistory.
+	cr.ReshapeCacheWarm(buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, false))
 }
 
 // endsWithQuestion reports whether the last non-empty line of text ends with

@@ -1118,6 +1118,7 @@ func New(baseURL, model string) *Agent {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
 		client:  &http.Client{},
+		warm:    &cacheWarmState{},
 	}
 }
 
@@ -1166,6 +1167,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 			usedTools:                  newToolUseTracker(),
 			firstPayload:               new(atomic.Pointer[PayloadInfo]),
+			warm:                       &cacheWarmState{},
 		}
 	}
 
@@ -1198,6 +1200,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 		usedTools:                  newToolUseTracker(),
 		firstPayload:               new(atomic.Pointer[PayloadInfo]),
+		warm:                       &cacheWarmState{},
 	}
 }
 

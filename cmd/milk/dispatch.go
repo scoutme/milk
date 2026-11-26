@@ -323,9 +323,10 @@ func runPrimaryWithSession(
 		}
 	}
 
+	percepts := perceptsForAgent(cfg, mem, prompt, false)
 	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RolePrimary, ctxMode,
 		sess.PrimarySessionID, nonce,
-		perceptsForAgent(cfg, mem, prompt, false), true,
+		percepts, true,
 		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
@@ -375,6 +376,13 @@ func runPrimaryWithSession(
 	if recordSilentTurn(sess, session.AgentLocal, agentName, res, onWorkflowStart != nil) {
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(ac))
 	}
+
+	// Cache-warm shape fix (issue #471): the turn is now persisted in
+	// sess.History, so the next turn's request can be rebuilt from it — hand
+	// that shape to the idle cache-warm replay, replacing the in-loop snapshot
+	// whose tool results the session rebuild shrinks. Synchronous, so it lands
+	// well before the replay's idle timer fires.
+	reshapeCacheWarm(ctx, runner, cfg, sess, RolePrimary, ctxMode, percepts)
 
 	if res.EscalationReason != "" {
 		fmt.Fprintf(out, "\n%s %s requested escalation: %s\n", milkTag(), agentName, res.EscalationReason)
@@ -597,9 +605,10 @@ func runEscalationWithSession(
 		}
 	}
 
+	percepts := perceptsForAgent(cfg, mem, prompt, true)
 	res, err := executeWithRetry(ctx, runner, cfg, sess, mem, RoleEscalation, ctxMode,
 		sess.EscalationSessionID, nonce,
-		perceptsForAgent(cfg, mem, prompt, true), injectInstructions,
+		percepts, injectInstructions,
 		dispatchPrompt, cbs, aw)
 	aw.Done()
 	if err != nil {
@@ -664,6 +673,10 @@ func runEscalationWithSession(
 	if recordSilentTurn(sess, session.AgentEscalation, agentName, res, onWorkflowStart != nil) {
 		sess.RebuildSummaryBricks(cfg.AgentContextBudget(escAC))
 	}
+
+	// Cache-warm shape fix (issue #471): mirror of the primary path's reshape,
+	// with the escalation builder — see reshapeCacheWarm.
+	reshapeCacheWarm(ctx, runner, cfg, sess, RoleEscalation, ctxMode, percepts)
 
 	if res.WorkflowStart != nil {
 		if onWorkflowStart != nil {

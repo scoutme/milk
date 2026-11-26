@@ -51,10 +51,12 @@ const (
 	cacheWarmSendTimeout = 60 * time.Second
 )
 
-// cacheWarmState holds the pending replay across the turn boundary. Held via
-// pointer on Agent: the turn goroutine fills it, a timer goroutine reads it,
-// and background clones share the pointer but never write (see the guards in
-// observeWarmable).
+// cacheWarmState holds the pending replay across the turn boundary. Created
+// eagerly by the Agent constructors and held via pointer on Agent: the
+// configuration chain (WithMemConfig et al.) shallow-copies the Agent, so the
+// turn goroutine fills it, a timer goroutine reads it, and the whole copy tree
+// (including background clones) shares the pointer — clones never write (see
+// the warmEligible guards).
 type cacheWarmState struct {
 	mu      sync.Mutex
 	timer   *time.Timer
@@ -86,6 +88,22 @@ func (a *Agent) cacheWarmingMode() string {
 		return "off"
 	}
 	return "auto"
+}
+
+// warmEligible reports whether this instance may write the idle cache-warm
+// state. The Agent configuration chain (WithMemConfig et al.) shallow-copies
+// the Agent, so the cacheWarmState pointer is shared across the copies — the
+// turn goroutine fills it, a timer goroutine reads it, and background clones
+// share the pointer but must never write it. Every write path
+// (observeWarmable, armCacheWarm, cancelCacheWarm, ReshapeCacheWarm) guards
+// with this: only the agent a user is actually waiting on warms (never clones
+// or the Bedrock native path, which has its own prompt-caching knob), and only
+// while the mode is "auto".
+func (a *Agent) warmEligible() bool {
+	if a.cacheWarmingMode() != "auto" {
+		return false
+	}
+	return !a.useBedrockNative && a.jobID == "" && !a.workflowRole && !a.isToolAgent
 }
 
 func (a *Agent) cacheWarmDelay() time.Duration {
@@ -146,13 +164,7 @@ func (a *Agent) withCacheWarmMaxIdle(d time.Duration) *Agent {
 // req.Messages before the request goes out, so callers pass the post-trim
 // request and body size.
 func (a *Agent) observeWarmable(req chatRequest, bodyLen int) {
-	if a.cacheWarmingMode() != "auto" {
-		return
-	}
-	// Bedrock native has its own prompt-caching knob; clones (tool agents,
-	// workflow executors, background jobs) are not something a user waits on
-	// between turns, and a job's next request follows immediately anyway.
-	if a.useBedrockNative || a.jobID != "" || a.workflowRole || a.isToolAgent {
+	if !a.warmEligible() {
 		return
 	}
 	// Inlined base64 images would be re-uploaded by the replay — too
@@ -172,9 +184,74 @@ func (a *Agent) observeWarmable(req chatRequest, bodyLen int) {
 	st.bodyLen = bodyLen
 }
 
+// ReshapeCacheWarm re-primes the pending replay with the history shape the
+// NEXT turn's request will actually carry (issue #471's shape fix).
+//
+// observeWarmable snapshots the request as the turn sent it — but the next
+// turn's request is rebuilt from the persisted session by cmd/milk's history
+// builder (sessionToUnifiedMessagesWithBoundary / buildAgentHistoryWithBoundary
+// and friends), which re-renders tool trails and shrinks tool results. The
+// in-loop snapshot therefore replays a shape the next request never sends, and
+// the session-specific cache blocks after tool results stay cold. After the
+// turn is persisted the runner rebuilds the next-turn history with that same
+// builder and hands it here: the snapshot keeps its system message (the
+// rebuilt history is the post-system slice, exactly what the runner passes to
+// Run) and takes the settled shape for everything after it, so the replay's
+// prefix is the one the next request sends.
+//
+// No-op unless a snapshot exists, history is empty, or the run is one
+// observeWarmable itself skips (clone runs, Bedrock native). The
+// cacheWarmMinBodyBytes floor still applies on the reshaped size: a shape that
+// shrinks below it drops the pending replay — just as armCacheWarm refuses to
+// arm one, a prefix this small is not worth the replay.
+func (a *Agent) ReshapeCacheWarm(history []Message) {
+	if !a.warmEligible() {
+		return
+	}
+	if len(history) == 0 || imageDataBytes(history) > 0 {
+		return
+	}
+	st := a.warm
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.msgs) == 0 {
+		return
+	}
+	msgs := append([]Message{st.msgs[0]}, history...)
+	// Recompute bodyLen for the floor check below (and for armCacheWarm's,
+	// when a caller reshapes before arming): approximate the replay body the
+	// same way sendCacheWarm builds it.
+	body, err := json.Marshal(chatRequest{
+		Model:       st.model,
+		Messages:    msgs,
+		Tools:       st.tools,
+		Stream:      false,
+		MaxTokens:   1,
+		Temperature: 0,
+	})
+	if err != nil {
+		return // keep the old snapshot; the replay would fail to marshal too
+	}
+	st.msgs = msgs
+	st.bodyLen = len(body)
+	if st.bodyLen < a.cacheWarmFloor() {
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		st.idleSince = time.Time{}
+	}
+}
+
 // cancelCacheWarm drops a pending replay. Called at turn start: the real
 // request about to go out re-primes the prefix on its own.
 func (a *Agent) cancelCacheWarm() {
+	if !a.warmEligible() {
+		return
+	}
 	st := a.warm
 	if st == nil {
 		return
@@ -191,7 +268,7 @@ func (a *Agent) cancelCacheWarm() {
 // armCacheWarm schedules the single idle replay after a successfully settled
 // turn. One replay per turn at most: re-arming replaces any earlier timer.
 func (a *Agent) armCacheWarm() {
-	if a.cacheWarmingMode() != "auto" {
+	if !a.warmEligible() {
 		return
 	}
 	st := a.warmState()
