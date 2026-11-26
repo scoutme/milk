@@ -250,6 +250,10 @@ type chatRequest struct {
 	} `json:"stream_options,omitempty"`
 	Temperature float64 `json:"temperature"`
 	Seed        int64   `json:"seed,omitempty"`
+	// MaxTokens caps completion length; omitted when 0 so ordinary requests
+	// marshal byte-for-byte as before. Set to 1 by the cache re-prime
+	// (issue #471).
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 type streamChunk struct {
@@ -675,6 +679,14 @@ type Agent struct {
 	// "lean" compact + parameter descriptions dropped. Stable config
 	// (AgentConfig.ToolDescriptionTier).
 	toolDescTier string
+	// cacheWarming is the idle prompt-cache re-prime mode (issue #471):
+	// "auto" re-primes the prefix after a settled turn, anything else keeps
+	// it off. State lives in warm. Stable config (AgentConfig.CacheWarming).
+	cacheWarming string
+	warm         *cacheWarmState
+	// warmDelay/warmMinBytes override the scheduling constants in tests.
+	warmDelay    time.Duration
+	warmMinBytes int
 	// firstPayload holds the first assembled request's composition (nil
 	// until the first Run assembles one) — issue #462's meter. A pointer
 	// to the atomic: the shallow-copy helpers (WithMCPToolSet,
@@ -1140,6 +1152,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:                     ac.Limits,
 			systemPromptTier:           ac.SystemPromptTier,
 			toolDescTier:               ac.ToolDescriptionTier,
+			cacheWarming:               ac.CacheWarming,
 			projectMapContext:          ac.ProjectMapContext,
 			disableProjectInstructions: ac.DisableProjectInstructions,
 			bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -1172,6 +1185,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		limits:                     ac.Limits,
 		systemPromptTier:           ac.SystemPromptTier,
 		toolDescTier:               ac.ToolDescriptionTier,
+		cacheWarming:               ac.CacheWarming,
 		projectMapContext:          ac.ProjectMapContext,
 		disableProjectInstructions: ac.DisableProjectInstructions,
 		bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -2067,6 +2081,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
+	// The request about to go out re-primes the prompt cache itself — any
+	// idle replay scheduled by the previous turn is now redundant (issue #471).
+	a.cancelCacheWarm()
 	// First-request payload composition (issue #462's meter): recorded once,
 	// before the tool loop starts re-sending this prefix.
 	a.noteFirstPayload(systemPrompt, msgs, tools)
@@ -2080,7 +2097,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
-	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages, spb)
+	res, err := a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages, spb)
+	if err == nil {
+		// Turn settled: schedule the single idle cache re-prime (issue #471).
+		a.armCacheWarm()
+	}
+	return res, err
 }
 
 // runToolLoop is the iterative tool-calling core shared by Run (a full,
@@ -4737,6 +4759,10 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 		// screenshot read as a ~2.5M-token context.
 		a.onRequestSize(int64(len(body) - imageDataBytes(req.Messages)))
 	}
+
+	// Idle cache re-prime snapshot (issue #471): the post-trim body is what
+	// actually went on the wire, so the replay must see exactly this prefix.
+	a.observeWarmable(req, len(body))
 
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body, a.jobAttrs()...)

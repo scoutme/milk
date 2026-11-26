@@ -757,6 +757,16 @@ type AgentConfig struct {
 	// providers manage their own tool schemas and ignore this.
 	ToolDescriptionTier string `json:"tool_description_tier,omitempty"`
 
+	// CacheWarming re-primes the provider's prompt cache while the session is
+	// idle (issue #471): after a turn settles, the exact request prefix is
+	// re-sent once with max_tokens=1 before provider-side prompt caches
+	// expire, so the next turn reads the prefix from cache instead of
+	// recomputing it. Valid values: "off" (default), "auto". Empty is
+	// "off" — nothing changes until enabled. Only meaningful on OpenAI-
+	// compatible HTTP providers that discount cached prompt tokens (e.g.
+	// MiMo's prompt_tokens_details.cached_tokens); ignored elsewhere.
+	CacheWarming string `json:"cache_warming,omitempty"`
+
 	// ProjectMapContext selects how much pushed project-structure context
 	// this agent's prompt carries around the project_map tool (ADR-0081).
 	// Valid values: "minimal" (default), "off", "full"; boolean aliases
@@ -3411,6 +3421,14 @@ func Validate(cfg Config) []ValidationWarning {
 		case "", "full", "compact", "lean":
 		default:
 			warn(a.Name, fmt.Sprintf("tool_description_tier %q is not a valid tier (valid: full, compact, lean) — treating as full", a.ToolDescriptionTier))
+		}
+
+		// cache_warming is a plain string field; warn on typos so a mistyped
+		// mode silently staying off is visible.
+		switch strings.ToLower(strings.TrimSpace(a.CacheWarming)) {
+		case "", "off", "auto":
+		default:
+			warn(a.Name, fmt.Sprintf("cache_warming %q is not a valid mode (valid: off, auto) — treating as off", a.CacheWarming))
 		}
 
 		// HTTP providers must have a url.

@@ -537,6 +537,24 @@ Measure before adopting (issue #462): `compact` keeps every description's leadin
 
 ---
 
+### Idle cache re-prime (`cache_warming`)
+
+OpenAI-compatible providers (MiMo included) cache the request prefix server-side and discount cached prompt tokens — but the cache lapses after minutes of idle. A session that pauses between turns (thinking, reading, meetings) pays a cold cache on the next request even though the prefix (system prompt + tool schemas + history) never changed. `cache_warming` closes that gap (issue #471, following pi's `cache-warmer.ts` pattern):
+
+| Value | Behavior |
+|---|---|
+| `"off"` (default, `""`) | Nothing — status quo |
+| `"auto"` | After a successfully settled turn, once the session has been idle 4 minutes, the exact last request prefix is re-sent once with `max_tokens: 1` (non-streaming) to re-prime the provider cache. Cancelled the moment the next real turn starts — a real request re-primes the prefix itself. |
+
+The replay costs one prompt evaluation — at cached-discount rates far less than the cold recompute it prevents — and a 2 KB body floor keeps small prompts out of it entirely. Skipped for the Bedrock native path (that's [`prompt_caching`](#prompt-caching-prompt_caching--️-experimental-not-live-tested)'s job), for clone runs (tool agents, workflow executors, background jobs), and for turns with image attachments (a replay would re-upload base64). Every replay logs `cache warm replay sent` with the prompt size and provider-reported `cached_tokens`, and counts under `milk.inference.cache_warm` in metrics — enable `auto` on one agent and read those to confirm the effect before adopting broadly.
+
+```json
+{ "name": "mimo-local", "provider": "bearer", "model": "…",
+  "cache_warming": "auto" }
+```
+
+---
+
 ### Project map context (`project_map_context`)
 
 The [`project_map` tool](tooling.md#built-in-tools) is a *pull*: the agent calls it when it wants structure. `project_map_context` adds a small *push* on top — project-structure context rebuilt into the system prompt every turn (ADR-0081):
@@ -762,6 +780,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `context_window_tokens` | int | See [Context window declaration](#context-window-declaration-context_window_tokens) |
 | `system_prompt_tier` | string | See [System prompt verbosity](#system-prompt-verbosity-system_prompt_tier) |
 | `tool_description_tier` | string | See [Tool description diet](#tool-description-diet-tool_description_tier) |
+| `cache_warming` | string | See [Idle cache re-prime](#idle-cache-re-prime-cache_warming) |
 | `project_map_context` | string/bool | See [Project map context](#project-map-context-project_map_context) |
 | `context_reduction` | object | See [Layered context reduction](#layered-context-reduction-context_reduction) |
 | `disable_project_instructions` | bool | See [Project instructions](#project-instructions-disable_project_instructions) |
