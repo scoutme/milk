@@ -250,6 +250,10 @@ type chatRequest struct {
 	} `json:"stream_options,omitempty"`
 	Temperature float64 `json:"temperature"`
 	Seed        int64   `json:"seed,omitempty"`
+	// MaxTokens caps completion length; omitted when 0 so ordinary requests
+	// marshal byte-for-byte as before. Set to 1 by the cache re-prime
+	// (issue #471).
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 type streamChunk struct {
@@ -675,6 +679,16 @@ type Agent struct {
 	// "lean" compact + parameter descriptions dropped. Stable config
 	// (AgentConfig.ToolDescriptionTier).
 	toolDescTier string
+	// cacheWarming is the idle prompt-cache re-prime mode (issue #471):
+	// "auto" re-primes the prefix after a settled turn, anything else keeps
+	// it off. State lives in warm. Stable config (AgentConfig.CacheWarming).
+	cacheWarming string
+	warm         *cacheWarmState
+	// warmDelay/warmMinBytes/warmMaxIdle override the scheduling constants
+	// in tests.
+	warmDelay    time.Duration
+	warmMinBytes int
+	warmMaxIdle  time.Duration
 	// firstPayload holds the first assembled request's composition (nil
 	// until the first Run assembles one) — issue #462's meter. A pointer
 	// to the atomic: the shallow-copy helpers (WithMCPToolSet,
@@ -1104,6 +1118,7 @@ func New(baseURL, model string) *Agent {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
 		client:  &http.Client{},
+		warm:    &cacheWarmState{},
 	}
 }
 
@@ -1140,6 +1155,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:                     ac.Limits,
 			systemPromptTier:           ac.SystemPromptTier,
 			toolDescTier:               ac.ToolDescriptionTier,
+			cacheWarming:               ac.CacheWarming,
 			projectMapContext:          ac.ProjectMapContext,
 			disableProjectInstructions: ac.DisableProjectInstructions,
 			bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -1151,6 +1167,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 			usedTools:                  newToolUseTracker(),
 			firstPayload:               new(atomic.Pointer[PayloadInfo]),
+			warm:                       &cacheWarmState{},
 		}
 	}
 
@@ -1172,6 +1189,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		limits:                     ac.Limits,
 		systemPromptTier:           ac.SystemPromptTier,
 		toolDescTier:               ac.ToolDescriptionTier,
+		cacheWarming:               ac.CacheWarming,
 		projectMapContext:          ac.ProjectMapContext,
 		disableProjectInstructions: ac.DisableProjectInstructions,
 		bashAllowedPatterns:        ac.BashAllowedPatterns,
@@ -1182,6 +1200,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		escalateAfterRecoveries:    config.DefaultEscalateAfterRecoveries,
 		usedTools:                  newToolUseTracker(),
 		firstPayload:               new(atomic.Pointer[PayloadInfo]),
+		warm:                       &cacheWarmState{},
 	}
 }
 
@@ -1526,10 +1545,12 @@ func (a *Agent) WithDebugLog(w io.Writer) *Agent {
 	return &copy
 }
 
-// systemPromptShared is the role-independent core: tool rules, memory rules,
-// file/directory conventions, and git protocol. Both primary and escalation
-// agents receive this verbatim.
-const systemPromptShared = `Rules:
+// systemPromptRulesCore is the behavioral restraint half of the shared rules
+// block: tool-call discipline, the completion-claim verification rule and the
+// act-first principle. Every non-minimal tier receives it verbatim — "lean"
+// is built from this segment (see system_prompt_lean.go), so a rule changed
+// here changes every tier at once.
+const systemPromptRulesCore = `Rules:
 - When you need to run a command, read, write, or edit a file, list a directory, or fetch a URL, call the appropriate tool. Never guess or hallucinate the result.
 - To create or overwrite a file use write_file. To make a targeted change to an existing file use edit_file. Never refuse file operations or tell the user to do them manually.
 - To find files by name or pattern (e.g. "*_test.go", "*.md", "Makefile") use find_files — never use grep for this. Use grep only to search inside file contents.
@@ -1537,11 +1558,27 @@ const systemPromptShared = `Rules:
 - After issuing a tool call, stop. Do not describe what the result might be. Wait for the actual output. Do not narrate or summarize between individual tool calls in a multi-step sequence — keep issuing tool calls silently until the task is done.
 - Do not announce that you have "the full picture" or are "ready to start" and then keep investigating: either make the edit now, or make the next read. When a change is decided, put its content directly in the edit_file/write_file call — never draft the full code or file text in your reasoning first and write it a second time in the tool call. Never write a tool call as literal markup text or inside your reasoning; only a proper tool call runs.
 - Once you have no more tool calls left to make for the current task, you MUST end the turn with a short text response for the user. Never let a turn end with only tool calls and no reply — always close out with at least a brief summary of what you did or found.
-- Before reporting a task complete, verify the claim with a fresh tool call in this turn — grep for what should no longer exist, re-read what you changed, run the check you are citing. Never report "fixed", "done", or "no remaining occurrences" from memory.
+- Before reporting a task complete, verify the claim with a fresh tool call in this turn — grep for what should no longer exist, re-read what you changed, run the check you are citing. Never report "fixed", "done", or "no remaining occurrences" from memory.`
+
+// systemPromptToolboxMeta are the milk-toolbox protocol mandates (goal
+// tracking, history-label hygiene, observability lookup) — "standard"/"full"
+// only; "lean" drops them (the harness enforces their behavior and the A/B
+// measured the mandate prose as wander-inducing bulk).
+const systemPromptToolboxMeta = `
 - Call get_metrics when the user asks about memory usage, percept counts, observability status, or metric values.
 **MANDATORY — current_need**: When the user states a new goal, task, or shifts focus to a new objective → call current_need NOW with a one-sentence summary. Do not wait, do not ask for confirmation. Update it again whenever the goal changes mid-session. Only summarize a goal the user actually stated in words — never invent or infer one from an image/attachment alone. If the user's turn has no accompanying text stating a goal (e.g. an image-only paste), leave current_need unchanged.
-- Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.
-- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.
+- Do NOT reproduce history labels (e.g. "[name as role]", "[user]") in your responses. These labels exist in the conversation history as metadata to help you understand who said what.`
+
+// systemPromptActFirst is the act-first rule: never bounce work back to the
+// user that the tree can answer. Kept at "lean" — restraint, not protocol.
+const systemPromptActFirst = `
+- The working directory is provided below. NEVER ask the user to provide a project, files, or code when the working directory is available. When the user says "this project", "here", "the code", "take a look", or anything that implies a codebase without reducing one, call list_dir on the working directory immediately, then read relevant files. Always act first, ask only if the working directory alone is genuinely insufficient.`
+
+// systemPromptToolboxProtocols are the milk-toolbox protocols: GitHub
+// plumbing, the git provenance protocol, table-rendering rules and config
+// write safety — "standard"/"full" only; "lean" keeps a distilled commit-
+// honesty line alone (see system_prompt_lean.go).
+const systemPromptToolboxProtocols = `
 - For GitHub issues, pull requests, and repo data, use bash with the gh CLI (e.g. "gh issue list", "gh issue view 42", "gh pr list"). Never ask the user to look these up manually.
 **MANDATORY — git operations**: Before executing any git commit, push, or merge, follow this exact protocol:
 1. Call bash with "git status" and "git diff --stat HEAD" to see what is staged or changed.
@@ -1551,6 +1588,40 @@ const systemPromptShared = `Rules:
 5. If neither step 2 nor step 3 returns relevant context, STOP. Do not commit. Tell the user: "I found no session context explaining these changes — please tell me what they are for before I commit." Never invent a commit message for changes you cannot account for.
 - ` + escalation.TableGuidance + `
 - To manage milk's own configuration (agents, MCP servers, memory, routing, etc.), call milk_config_help(topic) for docs instead of guessing config.json's schema. To write changes use bash with "milk config mcp add|remove|assign|unassign ..." or "milk config agent add|remove ..." — ` + escalation.ConfigWriteWarning
+
+// systemPromptShared is the role-independent core: tool rules, memory rules,
+// file/directory conventions, and git protocol. Both primary and escalation
+// agents receive this verbatim at "standard"/"full"; "lean" receives the
+// restraint segments only (see system_prompt_lean.go).
+const systemPromptShared = systemPromptRulesCore + systemPromptToolboxMeta + systemPromptActFirst + systemPromptToolboxProtocols
+
+// Role framings and role tails are shared by the standard builder and the
+// "lean" tier's buildLeanBase: the role directives the A/B measured as
+// restraint mechanisms (vague-reference discipline, escalation scope, the
+// unknown-recent-work fabrication guard) stay byte-identical across tiers and
+// cannot drift apart.
+const (
+	primaryFraming = `You are %s, acting as the primary agent in a multi-agent system.`
+
+	primaryRoleTail = `
+- If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
+- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+	escalationOwnedFraming = `You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`
+
+	escalationOwnedRoleTail = `
+- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+
+	escalationHandoffFraming = `You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`
+
+	escalationHandoffRoleTail = `
+- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
+- You are the escalation target — do not attempt to escalate further.
+**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`
+)
 
 // systemPromptWorkflow is used for workflow step executors (designer, generator,
 // evaluator). No escalation framing, no session orientation — the workflow
@@ -1687,7 +1758,7 @@ func (a *Agent) ownsConversationFromStart(sess *session.Session) bool {
 func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bool, tier string, disableProjectInstructions bool, projInstructionsTrim int, ownedFromStart bool) string {
 	// Normalise tier.
 	switch tier {
-	case "minimal", "full":
+	case "minimal", "lean", "full":
 		// keep
 	default:
 		tier = "standard"
@@ -1701,69 +1772,65 @@ func buildSystemPromptOpts(cwd, selfName, escalationName string, workflowRole bo
 	}
 
 	var base string
-	switch {
-	case workflowRole:
-		if tier == "minimal" {
-			base = "You are a coding and shell automation assistant."
-		} else {
-			base = systemPromptWorkflow
-		}
-	case escalationName != "":
-		// Escalation role: selfName == escalationName here.
-		//
-		// Two framings, keyed to what actually happened in the session rather
-		// than to the role alone. The hand-off narrative is only true when the
-		// primary agent produced work (or handed off with a brief): narrating it
-		// in a session that started pinned to the escalation agent frames the
-		// agent's own earlier turns as received material — the recap
-		// amplification ("What was implemented…") the context-parity work chased.
-		if ownedFromStart {
+	if tier == "lean" {
+		base = buildLeanBase(selfName, escalationName, workflowRole, ownedFromStart)
+	} else {
+		switch {
+		case workflowRole:
 			if tier == "minimal" {
+				base = "You are a coding and shell automation assistant."
+			} else {
+				base = systemPromptWorkflow
+			}
+		case escalationName != "":
+			// Escalation role: selfName == escalationName here.
+			//
+			// Two framings, keyed to what actually happened in the session rather
+			// than to the role alone. The hand-off narrative is only true when the
+			// primary agent produced work (or handed off with a brief): narrating it
+			// in a session that started pinned to the escalation agent frames the
+			// agent's own earlier turns as received material — the recap
+			// amplification ("What was implemented…") the context-parity work chased.
+			if ownedFromStart {
+				if tier == "minimal" {
+					base = fmt.Sprintf(
+						escalationOwnedFraming,
+						selfName,
+					)
+				} else {
+					base = fmt.Sprintf(
+						escalationOwnedFraming+
+							sharedBlock+escalationOwnedRoleTail,
+						selfName,
+					)
+				}
+			} else if tier == "minimal" {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
+					escalationHandoffFraming,
 					selfName,
 				)
 			} else {
 				base = fmt.Sprintf(
-					`You are %s, acting as the escalation agent in a multi-agent system. This conversation is yours from the start — every turn in it is your own work, with no other agent's hand-off to integrate. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
-						sharedBlock+`
-- If the user refers to something without enough context, call get_session_context to retrieve shared history instead of guessing.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context BEFORE generating any response to confirm what happened. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
+					escalationHandoffFraming+
+						sharedBlock+escalationHandoffRoleTail,
 					selfName,
 				)
 			}
-		} else if tier == "minimal" {
-			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`,
-				selfName,
-			)
-		} else {
-			base = fmt.Sprintf(
-				`You are %s, acting as the escalation agent in a multi-agent system. The primary agent has handed off this task because it exceeds its capabilities. You have access to the full shared session history — the complete conversation, including the tool activity behind every result. It is your own working context: continue as the owner of this work and don't recap unless asked.`+
-					sharedBlock+`
-- If the user refers to something without enough context, call get_session_context to retrieve shared history. Prefer agent: "primary" to see what the primary agent did, or agent: "escalation" for your own prior turns.
-- You are the escalation target — do not attempt to escalate further.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of, you MUST call get_session_context with agent: "primary" BEFORE generating any response to check whether the primary agent performed it. If no context is found, say so and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-				selfName,
-			)
+		default:
+			if tier == "minimal" {
+				base = fmt.Sprintf(
+					primaryFraming,
+					selfName,
+				)
+			} else {
+				base = fmt.Sprintf(
+					primaryFraming+
+						sharedBlock+primaryRoleTail,
+					selfName,
+				)
+			}
 		}
-	default:
-		if tier == "minimal" {
-			base = fmt.Sprintf(
-				`You are %s, acting as the primary agent in a multi-agent system.`,
-				selfName,
-			)
-		} else {
-			base = fmt.Sprintf(
-				`You are %s, acting as the primary agent in a multi-agent system.`+
-					sharedBlock+`
-- If the user uses vague references ("it", "this", "that", "the file", "what we discussed") or if you see a placeholder like "[escalation]: (N turns omitted)", call get_session_context to retrieve the omitted context. Use the agent role and turn count from the placeholder (e.g. agent: "escalation", last_n: 14). Do not guess what the user is referring to — check first.
-- Use escalate only for architectural design, complex multi-file refactoring, or tasks beyond your capabilities.
-**MANDATORY — unknown recent work**: If the user references any past action, change, or artifact you have no direct memory of — including words like "that fix", "the changes", "what you did", "the PR", "that refactor", "the feature", or any named code entity you cannot recall — you MUST call get_session_context with agent: "escalation" BEFORE generating any response. Do not guess, summarise, or attempt to answer without checking first. After retrieving context: (1) if the work was done by the escalation agent, immediately respond "That was done by the escalation agent — do you want me to escalate so it can continue with full context?" and offer escalate. (2) if no relevant context is found, say so explicitly and ask the user to clarify. Never fabricate a summary of work you did not perform.`,
-				selfName,
-			)
-		}
+
 	}
 
 	// Append extra verbose guidance for "full" tier.
@@ -1998,22 +2065,32 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		ownedFromStart:             a.ownsConversationFromStart(sess),
 	}
 	if a.backgroundManager != nil {
-		spb.guidance = append(spb.guidance, backgroundAgentGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, backgroundAgentGuidance)
+		}
 		if len(a.backgroundPeerNames()) > 0 {
-			spb.guidance = append(spb.guidance, backgroundPeerGuidance)
+			if includeFamilyGuidance(a.systemPromptTier) {
+				spb.guidance = append(spb.guidance, backgroundPeerGuidance)
+			}
 		}
 	}
 	if a.taskStore != nil {
-		spb.guidance = append(spb.guidance, taskToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, taskToolGuidance)
+		}
 	}
 	// The memory-tool mandate is included only when the memory tools actually
 	// survived schema construction + limits filtering — never mandate a tool
 	// the agent doesn't have (issue #172).
 	if hasToolNamed(tools, "get_memory") {
-		spb.guidance = append(spb.guidance, memoryToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, memoryToolGuidance)
+		}
 	}
 	if hasToolNamed(tools, "board_claim") {
-		spb.guidance = append(spb.guidance, boardToolGuidance)
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, boardToolGuidance)
+		}
 	}
 	if hasToolNamed(tools, "project_map") {
 		spb.guidance = append(spb.guidance, projectMapGuidance)
@@ -2067,6 +2144,9 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	}
 	msgs = append(msgs, userMsg)
 	userMsgIdx := len(msgs) - 1 // index of the user message that started this turn
+	// The request about to go out re-primes the prompt cache itself — any
+	// idle replay scheduled by the previous turn is now redundant (issue #471).
+	a.cancelCacheWarm()
 	// First-request payload composition (issue #462's meter): recorded once,
 	// before the tool loop starts re-sending this prefix.
 	a.noteFirstPayload(systemPrompt, msgs, tools)
@@ -2080,7 +2160,12 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 		}
 	}
 
-	return a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages, spb)
+	res, err := a.runToolLoop(ctx, msgs, tools, out, sess, mem, userPrompt, userMsgIdx, pendingImages, spb)
+	if err == nil {
+		// Turn settled: schedule the single idle cache re-prime (issue #471).
+		a.armCacheWarm()
+	}
+	return res, err
 }
 
 // runToolLoop is the iterative tool-calling core shared by Run (a full,
@@ -4737,6 +4822,10 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 		// screenshot read as a ~2.5M-token context.
 		a.onRequestSize(int64(len(body) - imageDataBytes(req.Messages)))
 	}
+
+	// Idle cache re-prime snapshot (issue #471): the post-trim body is what
+	// actually went on the wire, so the replay must see exactly this prefix.
+	a.observeWarmable(req, len(body))
 
 	if a.logContext {
 		obs.LogPayload(a.inferenceURL(), body, a.jobAttrs()...)

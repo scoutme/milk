@@ -10,12 +10,12 @@ import (
 // milk-vs-pi eval run (fix-typo, 2026-11-25) scored a hallucinated "no
 // remaining occurrences" claim made straight from memory while the diff
 // contradicted it — nothing in the prompt guarded against it. The rule lives
-// in systemPromptShared, so every non-minimal tier and both roles get it
-// verbatim.
+// in systemPromptShared and systemPromptSharedLean, so every non-minimal tier
+// (including lean) and both roles get it verbatim.
 func TestBuildSystemPrompt_CompletionClaimVerification(t *testing.T) {
 	want := "verify the claim with a fresh tool call"
 
-	for _, tier := range []string{"standard", "full"} {
+	for _, tier := range []string{"lean", "standard", "full"} {
 		for _, tc := range []struct {
 			label          string
 			workflow       bool

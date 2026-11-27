@@ -505,9 +505,10 @@ milk's default system prompt (`standard`) is tuned for capable models. Smaller l
 
 | Value | Approx. size | Contents |
 |---|---|---|
-| `"minimal"` | ~60 tokens | Core task framing only |
-| `"standard"` | ~700 tokens | Full default (default when omitted) |
-| `"full"` | ~900 tokens | Standard plus verbose guidance |
+| `"minimal"` | ~35 tokens | Core task framing only |
+| `"lean"` | ~1,000 tokens | Standard behavioral core + role directives verbatim (the restraint rules), minus the toolbox protocol prose and tool-family guidance blocks |
+| `"standard"` | ~1.7k tokens | Full default (default when omitted) |
+| `"full"` | ~1.8k tokens | Standard plus verbose guidance |
 
 ```json
 { "name": "qwen-local", "url": "http://localhost:8090", "model": "qwen2.5-coder", "provider": "local",
@@ -515,6 +516,10 @@ milk's default system prompt (`standard`) is tuned for capable models. Smaller l
 ```
 
 The tier is also the first knob the [layered context-reduction ladder](#layered-context-reduction-context_reduction) turns dynamically: under context pressure it steps the tier down for you, so a fixed `"minimal"` is only needed when you want it even at low pressure.
+
+`"lean"` (issue #462, system side) keeps the standard behavioral core and role directives **verbatim** and drops only the toolbox protocol prose: the MANDATORY protocol blocks (current_need, the git 5-step protocol), the history-label rule, the `get_metrics`/gh-plumbing/table/config-write notes, and the tool-family guidance blocks (background/task/memory/board) — their when-to-use content is carried by the tool schemas themselves. The [project_map guidance](#tool-description-diet-tool_description_tier) stays (measured planning value), as do the role's fabrication guards (the unknown-recent-work directive) and a distilled commit-honesty rule. Measured: 4,075 B vs 6,712 B for `standard` (−39% on the framing+rules region; wire numbers via `result.payload` → `system_bytes`).
+
+> **Why the restraint rules stay**: the first `lean` cut (compressed role directives, all MANDATORY blocks dropped) A/B-tested quality-parity but behavioral loosening — +42% tool calls, +57% output tokens, ~3.5x clean-run cost, incl. one runaway design turn (15.6x) — the role directives and discipline framing are restraint mechanisms worth their bytes. Size is measured per request via `result.payload` → `system_bytes` and the `Payload [agent]: …` report lines, so a with/without comparison is direct. Default remains `"standard"` — adopt `"lean"` only after an A/B on your own workload. Unknown values warn at startup (`config.Validate`) and fall back to `"standard"`.
 
 ---
 
@@ -534,6 +539,24 @@ Every request re-sends milk's tool-schema array. Measured on the built-in set wi
 ```
 
 Measure before adopting (issue #462): `compact` keeps every description's leading semantics and is the low-risk step; `lean` trades parameter docs for size and should be validated against your own workload — the eval harness records the composition per run (`result.payload` → `payload` in `results.json`, `Payload [agent]: …` in reports) so a with/without comparison is direct. Unknown values warn at startup (`config.Validate`) and fall back to `full`. The tier covers milk's own injected schemas (including MCP tools) on HTTP agents; `claude-cli`/subprocess providers manage their own tool schemas and ignore it, and the ladder's mid-turn compaction still applies on top.
+
+---
+
+### Idle cache re-prime (`cache_warming`)
+
+OpenAI-compatible providers (MiMo included) cache the request prefix server-side and discount cached prompt tokens — but the cache lapses after minutes of idle. A session that pauses between turns (thinking, reading, meetings) pays a cold cache on the next request even though the prefix (system prompt + tool schemas + history) never changed. `cache_warming` closes that gap (issue #471, following pi's `cache-warmer.ts` pattern):
+
+| Value | Behavior |
+|---|---|
+| `"off"` (default, `""`) | Nothing — status quo |
+| `"auto"` | After a successfully settled turn, once the session has been idle 4 minutes, the exact last request prefix is re-sent with `max_tokens: 1` (non-streaming) to re-prime the provider cache — and re-sent again every 4 minutes while the session stays idle, bounded at 30 minutes of continuous idle (pi's max-age pattern), so the prefix survives pauses of any length. The chain is cancelled the moment the next real turn starts — a real request re-primes the prefix itself. |
+
+The replay costs one prompt evaluation — at cached-discount rates far less than the cold recompute it prevents — and a 2 KB body floor keeps small prompts out of it entirely. Skipped for the Bedrock native path (that's [`prompt_caching`](#prompt-caching-prompt_caching--️-experimental-not-live-tested)'s job), for clone runs (tool agents, workflow executors, background jobs), and for turns with image attachments (a replay would re-upload base64). Every replay logs `cache warm replay sent` with the prompt size and provider-reported `cached_tokens`, and counts under `milk.inference.cache_warm` in metrics — enable `auto` on one agent and read those to confirm the effect before adopting broadly.
+
+```json
+{ "name": "mimo-local", "provider": "bearer", "model": "…",
+  "cache_warming": "auto" }
+```
 
 ---
 
@@ -762,6 +785,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `context_window_tokens` | int | See [Context window declaration](#context-window-declaration-context_window_tokens) |
 | `system_prompt_tier` | string | See [System prompt verbosity](#system-prompt-verbosity-system_prompt_tier) |
 | `tool_description_tier` | string | See [Tool description diet](#tool-description-diet-tool_description_tier) |
+| `cache_warming` | string | See [Idle cache re-prime](#idle-cache-re-prime-cache_warming) |
 | `project_map_context` | string/bool | See [Project map context](#project-map-context-project_map_context) |
 | `context_reduction` | object | See [Layered context reduction](#layered-context-reduction-context_reduction) |
 | `disable_project_instructions` | bool | See [Project instructions](#project-instructions-disable_project_instructions) |

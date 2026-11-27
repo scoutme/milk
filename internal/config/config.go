@@ -733,10 +733,13 @@ type AgentConfig struct {
 	ExtraArgs []string `json:"extra_args,omitempty"`
 
 	// SystemPromptTier selects the verbosity level of the system prompt sent to
-	// this agent. Valid values: "minimal", "standard" (default), "full".
+	// this agent. Valid values: "minimal", "standard" (default), "lean", "full".
 	//   "minimal"  — role framing only; tool-use instructions and reasoning
 	//                guidance sections are omitted.
 	//   "standard" — current default behaviour (role framing + full tool rules).
+	//   "lean"     — behavioral core only: tool discipline + completion-claim
+	//                verification + conciseness; the MANDATORY protocol prose
+	//                and tool-family guidance blocks are omitted (issue #462).
 	//   "full"     — standard plus additional verbose guidance.
 	// Empty string is treated as "standard".
 	SystemPromptTier string `json:"system_prompt_tier,omitempty"`
@@ -756,6 +759,16 @@ type AgentConfig struct {
 	// schemas (incl. MCP tools) on HTTP agents — claude-cli/subprocess
 	// providers manage their own tool schemas and ignore this.
 	ToolDescriptionTier string `json:"tool_description_tier,omitempty"`
+
+	// CacheWarming re-primes the provider's prompt cache while the session is
+	// idle (issue #471): after a turn settles, the exact request prefix is
+	// re-sent once with max_tokens=1 before provider-side prompt caches
+	// expire, so the next turn reads the prefix from cache instead of
+	// recomputing it. Valid values: "off" (default), "auto". Empty is
+	// "off" — nothing changes until enabled. Only meaningful on OpenAI-
+	// compatible HTTP providers that discount cached prompt tokens (e.g.
+	// MiMo's prompt_tokens_details.cached_tokens); ignored elsewhere.
+	CacheWarming string `json:"cache_warming,omitempty"`
 
 	// ProjectMapContext selects how much pushed project-structure context
 	// this agent's prompt carries around the project_map tool (ADR-0081).
@@ -3411,6 +3424,22 @@ func Validate(cfg Config) []ValidationWarning {
 		case "", "full", "compact", "lean":
 		default:
 			warn(a.Name, fmt.Sprintf("tool_description_tier %q is not a valid tier (valid: full, compact, lean) — treating as full", a.ToolDescriptionTier))
+		}
+
+		// system_prompt_tier is a plain string field; warn on typos so a mistyped
+		// tier silently falling back to "standard" is visible.
+		switch strings.ToLower(strings.TrimSpace(a.SystemPromptTier)) {
+		case "", "minimal", "standard", "lean", "full":
+		default:
+			warn(a.Name, fmt.Sprintf("system_prompt_tier %q is not a valid tier (valid: minimal, standard, lean, full) — treating as standard", a.SystemPromptTier))
+		}
+
+		// cache_warming is a plain string field; warn on typos so a mistyped
+		// mode silently staying off is visible.
+		switch strings.ToLower(strings.TrimSpace(a.CacheWarming)) {
+		case "", "off", "auto":
+		default:
+			warn(a.Name, fmt.Sprintf("cache_warming %q is not a valid mode (valid: off, auto) — treating as off", a.CacheWarming))
 		}
 
 		// HTTP providers must have a url.
