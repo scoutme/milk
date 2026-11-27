@@ -138,7 +138,14 @@ func TestCacheWarmReplayIsPrefixOfNextTurnWire(t *testing.T) {
 				ts := httptest.NewServer(srv.handler())
 				defer ts.Close()
 
-				ac := config.AgentConfig{Name: "primary", URL: ts.URL, Model: "m", CacheWarming: "auto", PromptLayout: layout}
+				// ContextWindowTokens is pinned huge so the message-budget
+				// trim (AgentMessageBudget = window*3 chars) can never fire
+				// inside the fixture: when it does, the next turn's request
+				// becomes a compaction Summarize call and legitimately stops
+				// matching the replay. Tool results embed absolute paths, so
+				// the fixture's history size is platform-dependent (deeper
+				// macOS temp dirs pushed it over the default budget on CI).
+				ac := config.AgentConfig{Name: "primary", URL: ts.URL, Model: "m", CacheWarming: "auto", PromptLayout: layout, ContextWindowTokens: 1 << 26}
 				cfg := config.Config{Agent: "primary", Agents: []config.AgentConfig{ac}}
 				agent := local.NewFromConfig(ac).WithCacheWarming("auto").WithSkipPermissions(true)
 				runner := &warmCaptureRunner{localRunner: newLocalRunner(agent, "primary")}
