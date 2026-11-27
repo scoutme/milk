@@ -2426,18 +2426,21 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			setMouseDragMode(false)
 			if m.selAnchorLine >= 0 {
 				if contentLine == m.selAnchorLine && ev.X == m.selAnchorCol {
-					// A click without drag on a thinking fold header toggles
-					// that block (ADR-0067) — the same arm/act rhythm as panel
+					// A click without drag on a fold header toggles that
+					// block (ADR-0067) — the same arm/act rhythm as panel
 					// clicks, and only claimed on exact header lines, so drag
-					// selection over reasoning text is untouched.
-					if idx := m.thinkBlockAtLine(contentLine); idx >= 0 {
-						m.toggleThinkBlock(idx)
-					} else if idx := m.toolBlockAtLine(contentLine); idx >= 0 {
-						m.toggleToolBlock(idx)
+					// selection over reasoning text is untouched. The click
+					// column picks the header on glued multi-header rows.
+					if tool, idx := m.foldBlockAtClick(contentLine, ev.X); idx >= 0 {
+						if tool {
+							m.toggleToolBlock(idx)
+						} else {
+							m.toggleThinkBlock(idx)
+						}
+						m.clearSelection()
+						m.setViewportContent()
+						return m, nil
 					}
-					m.clearSelection()
-					m.setViewportContent()
-					return m, nil
 				}
 				m.selEndLine = contentLine
 				m.selEndCol = ev.X
