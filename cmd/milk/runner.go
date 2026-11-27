@@ -271,7 +271,11 @@ func (r *localRunner) Execute(
 		},
 	)
 
-	history := buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, !ac.DisableCompaction)
+	history, turnCtx := buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, !ac.DisableCompaction)
+	if turnCtx != "" {
+		// Stable layout: percepts/goal/orientation ride the user message, not the history.
+		ctx = local.WithTurnContext(ctx, turnCtx)
+	}
 
 	updatedHistory, err := agent.Run(ctx, history, prompt, out, sess, mem)
 	if err != nil {
@@ -332,8 +336,13 @@ func (r *localRunner) Execute(
 // subtracts (and the summarizer when useCompaction); it may be nil, in which
 // case the budget math skips the overhead estimate and compaction falls back
 // to the hard-drop trim.
-func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config, sess *session.Session, role AgentRole, ctxMode escalation.ContextMode, percepts []string, useCompaction bool) []local.Message {
+func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config, sess *session.Session, role AgentRole, ctxMode escalation.ContextMode, percepts []string, useCompaction bool) ([]local.Message, string) {
 	ac := agentConfigForRole(cfg, role)
+	stable := ac.StablePromptLayout()
+	// turnCtx is the stable layout's per-turn dynamic context (see
+	// local.WithTurnContext): returned to the caller instead of being prepended
+	// to history, so the history — the cached prefix — stays append-only.
+	var turnCtx string
 	// Build history depending on role and context mode.
 	var history []local.Message
 	switch role {
@@ -356,13 +365,17 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 			history, needAt = escalationLocalHistoryWithBoundary(sess, ac.Name, skipOther)
 		}
 		hint := trimHint{boundary: needAt}
-		if perceptsText != "" {
-			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
-			hint.lead++
-		}
-		if orientationText != "" {
-			history = append([]local.Message{{Role: "system", Content: orientationText}}, history...)
-			hint.lead++
+		if stable {
+			turnCtx = strings.TrimSpace(strings.TrimSpace(orientationText) + "\n\n" + strings.TrimSpace(perceptsText))
+		} else {
+			if perceptsText != "" {
+				history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
+				hint.lead++
+			}
+			if orientationText != "" {
+				history = append([]local.Message{{Role: "system", Content: orientationText}}, history...)
+				hint.lead++
+			}
 		}
 		hint.shiftBoundary()
 
@@ -378,7 +391,7 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 			if agent != nil {
 				overhead = agent.SystemOverheadChars(sess)
 			}
-			msgBudget = max(1, msgBudget-overhead)
+			msgBudget = max(1, msgBudget-overhead-len(turnCtx))
 		}
 		if !useCompaction {
 			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
@@ -393,9 +406,11 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 		history, needAt = sessionToUnifiedMessagesWithBoundary(sess, ac.Name, cfg.ExperimentalLazyHistoryManagement)
 		hint := trimHint{boundary: needAt}
 
-		// Prepend orientation: percepts and current need as system messages,
-		// mirroring the context the escalation agent always receives.
-		if perceptsText := escalation.FormatPercepts(percepts); perceptsText != "" {
+		// Orientation: percepts and current need, mirroring the context the
+		// escalation agent always receives. Classic layout prepends them as
+		// system messages; the stable layout collects them into turnCtx.
+		var needText string
+		if perceptsText := escalation.FormatPercepts(percepts); perceptsText != "" && !stable {
 			history = append([]local.Message{{Role: "system", Content: perceptsText}}, history...)
 			hint.lead++
 		}
@@ -414,8 +429,15 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 			if sess.NeedChangedSinceLastEscalation() || sess.NeedSupersedesEarlier() {
 				content += "\n\n[Goal changed — earlier requests in this transcript are superseded by the goal above]"
 			}
-			history = append([]local.Message{{Role: "system", Content: content}}, history...)
-			hint.lead++
+			if stable {
+				needText = content
+			} else {
+				history = append([]local.Message{{Role: "system", Content: content}}, history...)
+				hint.lead++
+			}
+		}
+		if stable {
+			turnCtx = strings.TrimSpace(needText + "\n\n" + strings.TrimSpace(escalation.FormatPercepts(percepts)))
 		}
 		hint.shiftBoundary()
 
@@ -425,7 +447,7 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 			if agent != nil {
 				overhead = agent.SystemOverheadChars(sess)
 			}
-			msgBudget = max(1, msgBudget-overhead)
+			msgBudget = max(1, msgBudget-overhead-len(turnCtx))
 		}
 		if !useCompaction {
 			if trimmed, ok := trimLocalMessagesHint(history, msgBudget, hint); ok {
@@ -435,7 +457,7 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 			history = trimmed
 		}
 	}
-	return history
+	return history, turnCtx
 }
 
 // cacheWarmReshaper is the optional seam to the local agent's idle cache-warm
@@ -446,7 +468,7 @@ func buildTurnHistory(ctx context.Context, agent *local.Agent, cfg config.Config
 // next request is not rebuilt from the session — and simply do not satisfy the
 // interface.
 type cacheWarmReshaper interface {
-	ReshapeCacheWarm([]local.Message)
+	ReshapeCacheWarm(ctx context.Context, sess *session.Session, history []local.Message)
 }
 
 var _ cacheWarmReshaper = (*localRunner)(nil)
@@ -454,11 +476,11 @@ var _ cacheWarmReshaper = (*localRunner)(nil)
 // ReshapeCacheWarm re-primes the wrapped agent's pending idle cache-warm
 // replay with the settled next-turn history shape (see
 // local.Agent.ReshapeCacheWarm).
-func (r *localRunner) ReshapeCacheWarm(history []local.Message) {
+func (r *localRunner) ReshapeCacheWarm(ctx context.Context, sess *session.Session, history []local.Message) {
 	if r == nil || r.agent == nil {
 		return
 	}
-	r.agent.ReshapeCacheWarm(history)
+	r.agent.ReshapeCacheWarm(ctx, sess, history)
 }
 
 // reshapeCacheWarm rebuilds the just-settled turn's next-request history —
@@ -480,7 +502,8 @@ func reshapeCacheWarm(ctx context.Context, runner TurnRunner, cfg config.Config,
 		agent = lr.agent
 	}
 	// Never compact at reshape time — see buildTurnHistory.
-	cr.ReshapeCacheWarm(buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, false))
+	settled, _ := buildTurnHistory(ctx, agent, cfg, sess, role, ctxMode, percepts, false)
+	cr.ReshapeCacheWarm(ctx, sess, settled)
 }
 
 // endsWithQuestion reports whether the last non-empty line of text ends with

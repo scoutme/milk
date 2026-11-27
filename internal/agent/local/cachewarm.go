@@ -11,7 +11,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/scoutme/milk/internal/contextreduce"
 	"github.com/scoutme/milk/internal/obs"
+	"github.com/scoutme/milk/internal/session"
 )
 
 // Idle prompt-cache re-prime (issue #471, following pi's cache-warmer.ts
@@ -194,17 +196,30 @@ func (a *Agent) observeWarmable(req chatRequest, bodyLen int) {
 // in-loop snapshot therefore replays a shape the next request never sends, and
 // the session-specific cache blocks after tool results stay cold. After the
 // turn is persisted the runner rebuilds the next-turn history with that same
-// builder and hands it here: the snapshot keeps its system message (the
-// rebuilt history is the post-system slice, exactly what the runner passes to
-// Run) and takes the settled shape for everything after it, so the replay's
-// prefix is the one the next request sends.
+// builder and hands it here: the rebuilt history is the post-system slice
+// (exactly what the runner passes to Run) and replaces everything after the
+// system message, so the replay's prefix is the one the next request sends.
+//
+// The system message is re-rendered too, from the session as it stands after
+// the turn (sess; nil keeps the turn-start message): it is NOT stable across a
+// turn boundary — a tool that created or removed a top-level file changes the
+// project-map context block, and session state feeds the prompt — and a
+// one-byte difference there invalidates the cache for the whole conversation
+// behind it. Rendering is at the normal (unreduced) level, which is what a
+// next turn starts from absent context pressure; the tool list is the
+// snapshot's own, so tool-gated guidance matches the request that was sent.
+//
+// Known limit, deliberately not papered over: the percept block the runner
+// prepends to the history is selected per next prompt (relevance gate), so a
+// next prompt that selects different percepts changes message 1 and the
+// replay can only re-prime the system prompt + tools in front of it.
 //
 // No-op unless a snapshot exists, history is empty, or the run is one
 // observeWarmable itself skips (clone runs, Bedrock native). The
 // cacheWarmMinBodyBytes floor still applies on the reshaped size: a shape that
 // shrinks below it drops the pending replay — just as armCacheWarm refuses to
 // arm one, a prefix this small is not worth the replay.
-func (a *Agent) ReshapeCacheWarm(history []Message) {
+func (a *Agent) ReshapeCacheWarm(ctx context.Context, sess *session.Session, history []Message) {
 	if !a.warmEligible() {
 		return
 	}
@@ -220,7 +235,14 @@ func (a *Agent) ReshapeCacheWarm(history []Message) {
 	if len(st.msgs) == 0 {
 		return
 	}
-	msgs := append([]Message{st.msgs[0]}, history...)
+	sysMsg := st.msgs[0]
+	if sess != nil && len(st.tools) > 0 {
+		// Same ctx shaping Run applies before it builds the prompt: the
+		// project-map block reads its budget from the context.
+		rctx := withProjectMapBudget(ctx, projectMapBudget{a.projectMapBudgetFiles, a.projectMapBudgetChars})
+		sysMsg = Message{Role: "system", Content: a.newSystemPromptBuilder(rctx, sess, st.tools).render(contextreduce.LevelNone, a.reductionPolicy)}
+	}
+	msgs := append([]Message{sysMsg}, history...)
 	// Recompute bodyLen for the floor check below (and for armCacheWarm's,
 	// when a caller reshapes before arming): approximate the replay body the
 	// same way sendCacheWarm builds it.
@@ -244,6 +266,20 @@ func (a *Agent) ReshapeCacheWarm(history []Message) {
 		}
 		st.idleSince = time.Time{}
 	}
+}
+
+// CacheWarmMessages returns a copy of the messages the idle replay would send
+// right now (nil when none is pending or cache warming is off). Diagnostic and
+// test seam: it lets the wire-equivalence test compare the primed prefix with
+// the next turn's real request instead of re-deriving it.
+func (a *Agent) CacheWarmMessages() []Message {
+	if a == nil || a.warm == nil {
+		return nil
+	}
+	st := a.warm
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return append([]Message(nil), st.msgs...)
 }
 
 // cancelCacheWarm drops a pending replay. Called at turn start: the real

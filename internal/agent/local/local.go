@@ -679,6 +679,11 @@ type Agent struct {
 	// "lean" compact + parameter descriptions dropped. Stable config
 	// (AgentConfig.ToolDescriptionTier).
 	toolDescTier string
+	// promptLayoutClassic opts out of the stable prompt layout
+	// (AgentConfig.PromptLayout == "classic"): per-turn dynamic context stays
+	// in the system prompt / leading history instead of the user message's
+	// <milk-context> block. Default false = stable (see turncontext.go).
+	promptLayoutClassic bool
 	// cacheWarming is the idle prompt-cache re-prime mode (issue #471):
 	// "auto" re-primes the prefix after a settled turn, anything else keeps
 	// it off. State lives in warm. Stable config (AgentConfig.CacheWarming).
@@ -1155,6 +1160,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:                     ac.Limits,
 			systemPromptTier:           ac.SystemPromptTier,
 			toolDescTier:               ac.ToolDescriptionTier,
+			promptLayoutClassic:        !ac.StablePromptLayout(),
 			cacheWarming:               ac.CacheWarming,
 			projectMapContext:          ac.ProjectMapContext,
 			disableProjectInstructions: ac.DisableProjectInstructions,
@@ -1189,6 +1195,7 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		limits:                     ac.Limits,
 		systemPromptTier:           ac.SystemPromptTier,
 		toolDescTier:               ac.ToolDescriptionTier,
+		promptLayoutClassic:        !ac.StablePromptLayout(),
 		cacheWarming:               ac.CacheWarming,
 		projectMapContext:          ac.ProjectMapContext,
 		disableProjectInstructions: ac.DisableProjectInstructions,
@@ -1987,6 +1994,76 @@ func isRepeatedPrompt(history []Message, userPrompt string, skipFirstUserTurns i
 	return false
 }
 
+// newSystemPromptBuilder assembles the turn's system prompt components
+// (sysPromptBuilder) at LevelNone. It is the one place Run builds the system
+// message, factored out so the idle cache-warm reshape (ReshapeCacheWarm) can
+// re-render exactly what the NEXT turn will send: the prompt depends on state a
+// settled turn may have changed (the project-map context block reads the
+// working tree, ownedFromStart reads the session), so reusing the turn-start
+// message would prime a prefix the next request no longer carries. tools is the
+// turn's final schema list — guidance blocks are gated on which tools exist.
+func (a *Agent) newSystemPromptBuilder(ctx context.Context, sess *session.Session, tools []map[string]any) *sysPromptBuilder {
+	// Assemble the system prompt from its components (sysPromptBuilder) so
+	// the layered context-reduction ladder (issue #236, reduction.go) can
+	// rebuild it at lower fidelity mid-turn without string surgery. At
+	// LevelNone render reproduces exactly the previous concatenation.
+	spb := &sysPromptBuilder{
+		cwd:                        sess.CWD,
+		selfName:                   a.selfName,
+		escalationName:             a.escalationName,
+		workflowRole:               a.workflowRole,
+		tier:                       a.systemPromptTier,
+		disableProjectInstructions: a.disableProjectInstructions,
+		custom:                     a.customPrompt,
+		ownedFromStart:             a.ownsConversationFromStart(sess),
+	}
+	if a.backgroundManager != nil {
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, backgroundAgentGuidance)
+		}
+		if len(a.backgroundPeerNames()) > 0 {
+			if includeFamilyGuidance(a.systemPromptTier) {
+				spb.guidance = append(spb.guidance, backgroundPeerGuidance)
+			}
+		}
+	}
+	if a.taskStore != nil {
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, taskToolGuidance)
+		}
+	}
+	// The memory-tool mandate is included only when the memory tools actually
+	// survived schema construction + limits filtering — never mandate a tool
+	// the agent doesn't have (issue #172).
+	if hasToolNamed(tools, "get_memory") {
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, memoryToolGuidance)
+		}
+	}
+	if hasToolNamed(tools, "board_claim") {
+		if includeFamilyGuidance(a.systemPromptTier) {
+			spb.guidance = append(spb.guidance, boardToolGuidance)
+		}
+	}
+	if hasToolNamed(tools, "project_map") {
+		spb.guidance = append(spb.guidance, projectMapGuidance)
+	}
+	// Pushed project-structure context (ADR-0081, project_map_context):
+	// "minimal" (default) appends the framing + top-level tree, "full" a
+	// budgeted symbol map rebuilt per turn (à la Aider's repo map), "off"
+	// nothing. Rides the guidance list so the reduction ladder's first
+	// level sheds it with the other optional static layers under pressure.
+	// Under the stable layout the block rides the user message instead (Run), so
+	// the system prompt — the head of the cached prefix — stays constant while
+	// the working tree changes.
+	if a.promptLayoutClassic {
+		if blk := projectMapContextBlock(ctx, sess.CWD, sess.CWD, a.projectMapContext, hasToolNamed(tools, "project_map")); blk != "" {
+			spb.guidance = append(spb.guidance, blk)
+		}
+	}
+	return spb
+}
+
 // Run executes a prompt with the given conversation history, streaming tokens
 // to out. Returns an EscalationSignal error if the model requests escalation.
 // history is the prior turns only — it must NOT contain the current userPrompt
@@ -2050,59 +2127,7 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// never re-ordered or dropped. ""/"full" returns the input untouched.
 	tools = applyToolDescDiet(tools, a.toolDescTier)
 
-	// Assemble the system prompt from its components (sysPromptBuilder) so
-	// the layered context-reduction ladder (issue #236, reduction.go) can
-	// rebuild it at lower fidelity mid-turn without string surgery. At
-	// LevelNone render reproduces exactly the previous concatenation.
-	spb := &sysPromptBuilder{
-		cwd:                        sess.CWD,
-		selfName:                   a.selfName,
-		escalationName:             a.escalationName,
-		workflowRole:               a.workflowRole,
-		tier:                       a.systemPromptTier,
-		disableProjectInstructions: a.disableProjectInstructions,
-		custom:                     a.customPrompt,
-		ownedFromStart:             a.ownsConversationFromStart(sess),
-	}
-	if a.backgroundManager != nil {
-		if includeFamilyGuidance(a.systemPromptTier) {
-			spb.guidance = append(spb.guidance, backgroundAgentGuidance)
-		}
-		if len(a.backgroundPeerNames()) > 0 {
-			if includeFamilyGuidance(a.systemPromptTier) {
-				spb.guidance = append(spb.guidance, backgroundPeerGuidance)
-			}
-		}
-	}
-	if a.taskStore != nil {
-		if includeFamilyGuidance(a.systemPromptTier) {
-			spb.guidance = append(spb.guidance, taskToolGuidance)
-		}
-	}
-	// The memory-tool mandate is included only when the memory tools actually
-	// survived schema construction + limits filtering — never mandate a tool
-	// the agent doesn't have (issue #172).
-	if hasToolNamed(tools, "get_memory") {
-		if includeFamilyGuidance(a.systemPromptTier) {
-			spb.guidance = append(spb.guidance, memoryToolGuidance)
-		}
-	}
-	if hasToolNamed(tools, "board_claim") {
-		if includeFamilyGuidance(a.systemPromptTier) {
-			spb.guidance = append(spb.guidance, boardToolGuidance)
-		}
-	}
-	if hasToolNamed(tools, "project_map") {
-		spb.guidance = append(spb.guidance, projectMapGuidance)
-	}
-	// Pushed project-structure context (ADR-0081, project_map_context):
-	// "minimal" (default) appends the framing + top-level tree, "full" a
-	// budgeted symbol map rebuilt per turn (à la Aider's repo map), "off"
-	// nothing. Rides the guidance list so the reduction ladder's first
-	// level sheds it with the other optional static layers under pressure.
-	if blk := projectMapContextBlock(ctx, sess.CWD, sess.CWD, a.projectMapContext, hasToolNamed(tools, "project_map")); blk != "" {
-		spb.guidance = append(spb.guidance, blk)
-	}
+	spb := a.newSystemPromptBuilder(ctx, sess, tools)
 	systemPrompt := spb.render(contextreduce.LevelNone, a.reductionPolicy)
 	msgs := []Message{{Role: "system", Content: systemPrompt}}
 	msgs = append(msgs, history...)
@@ -2115,7 +2140,19 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// instance field, which is only the single-threaded fallback.
 	pendingImages := a.takeImageParts(ctx)
 
-	modelPrompt := userPrompt
+	// Stable layout: per-turn dynamic context (project orientation, percepts,
+	// goal, hand-off orientation) leads the NEW user message in one
+	// <milk-context> block, behind everything the provider can have cached.
+	var ctxBlock, ctxBlockReduced string
+	if !a.promptLayoutClassic {
+		turnCtx := turnContextFromContext(ctx)
+		pm := projectMapContextBlock(ctx, sess.CWD, sess.CWD, a.projectMapContext, hasToolNamed(tools, "project_map"))
+		ctxBlock = turnContextBlock(pm, turnCtx)
+		ctxBlockReduced = turnContextBlock(turnCtx)
+		spb.userBlockFull, spb.userBlockReduced = ctxBlock, ctxBlockReduced
+	}
+
+	modelPrompt := ctxBlock + userPrompt
 	if a.jobID == "" && !a.workflowRole && !a.isToolAgent {
 		modelPrompt += openTasksReminder(a.taskStore)
 	}
@@ -2273,6 +2310,11 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 				reqMsgs = make([]Message, len(msgs))
 				copy(reqMsgs, msgs)
 				reqMsgs[0] = Message{Role: "system", Content: spb.render(level, a.reductionPolicy)}
+				// The optional project orientation lives in the user message
+				// under the stable layout; shed it with the other optional layers.
+				if level >= contextreduce.LevelInstructions && userMsgIdx > 0 && userMsgIdx < len(reqMsgs) && reqMsgs[userMsgIdx].Role == "user" {
+					reqMsgs[userMsgIdx] = swapUserBlock(reqMsgs[userMsgIdx], spb.userBlockFull, spb.userBlockReduced)
+				}
 			}
 			obs.Inc(ctx, inferenceScope, "milk.inference.context_reduction",
 				attribute.String("layer", levelName(level)),

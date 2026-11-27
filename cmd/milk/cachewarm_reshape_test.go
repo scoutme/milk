@@ -55,7 +55,7 @@ type reshapeCaptureRunner struct {
 	got   []local.Message
 }
 
-func (s *reshapeCaptureRunner) ReshapeCacheWarm(history []local.Message) {
+func (s *reshapeCaptureRunner) ReshapeCacheWarm(_ context.Context, _ *session.Session, history []local.Message) {
 	s.calls++
 	s.got = history
 }
@@ -115,23 +115,39 @@ func TestRunPrimaryReshapeCacheWarm(t *testing.T) {
 }
 
 // TestBuildTurnHistoryMatchesRunnerBuilder pins the reshape's "same builder"
-// contract at the unit level: percepts are prepended as a system message ahead
-// of the builder output, exactly as Execute's history pipeline does.
+// contract at the unit level, for both prompt layouts. Classic prepends the
+// percepts as a leading system message; the stable layout (default) keeps the
+// history untouched and returns the percepts as per-turn context instead.
 func TestBuildTurnHistoryMatchesRunnerBuilder(t *testing.T) {
 	agent := local.New("http://unused", "m")
-	cfg := config.Config{Agents: []config.AgentConfig{{Name: "primary", URL: "http://unused", Model: "m"}}}
 	sess := &session.Session{}
 	sess.AddTurn(session.Turn{Role: session.RoleUser, Agent: session.AgentLocal, Content: "earlier question"})
 	sess.AddTurn(session.Turn{Role: session.RoleAssistant, Agent: session.AgentLocal, Content: "earlier answer"})
-
 	percepts := []string{"percept one"}
-	got := buildTurnHistory(context.Background(), agent, cfg, sess, RolePrimary, escalation.ContextModeFirst, percepts, false)
+	base, _ := sessionToUnifiedMessagesWithBoundary(sess, "primary", false)
 
-	base, _ := sessionToUnifiedMessagesWithBoundary(sess, "primary", cfg.ExperimentalLazyHistoryManagement)
-	want := append([]local.Message{{Role: "system", Content: escalation.FormatPercepts(percepts)}}, base...)
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("buildTurnHistory diverges from the runner pipeline:\ngot:  %v\nwant: %v", got, want)
-	}
+	t.Run("classic", func(t *testing.T) {
+		cfg := config.Config{Agents: []config.AgentConfig{{Name: "primary", URL: "http://unused", Model: "m", PromptLayout: "classic"}}}
+		got, turnCtx := buildTurnHistory(context.Background(), agent, cfg, sess, RolePrimary, escalation.ContextModeFirst, percepts, false)
+		want := append([]local.Message{{Role: "system", Content: escalation.FormatPercepts(percepts)}}, base...)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("classic history diverges from the runner pipeline:\ngot:  %v\nwant: %v", got, want)
+		}
+		if turnCtx != "" {
+			t.Errorf("classic layout must not return turn context, got %q", turnCtx)
+		}
+	})
+
+	t.Run("stable", func(t *testing.T) {
+		cfg := config.Config{Agents: []config.AgentConfig{{Name: "primary", URL: "http://unused", Model: "m"}}}
+		got, turnCtx := buildTurnHistory(context.Background(), agent, cfg, sess, RolePrimary, escalation.ContextModeFirst, percepts, false)
+		if !reflect.DeepEqual(got, base) {
+			t.Errorf("stable history must be the bare session history:\ngot:  %v\nwant: %v", got, base)
+		}
+		if !strings.Contains(turnCtx, "percept one") {
+			t.Errorf("stable layout must return the percepts as turn context, got %q", turnCtx)
+		}
+	})
 }
 
 // TestReshapeCacheWarmSeam pins the seam's runner coverage: only localRunner —

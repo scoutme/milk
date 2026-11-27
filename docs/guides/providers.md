@@ -542,6 +542,24 @@ Measure before adopting (issue #462): `compact` keeps every description's leadin
 
 ---
 
+### Cache-friendly prompt layout (`prompt_layout`)
+
+A prompt cache only pays off when each request is a byte-for-byte extension of an earlier one, so everything that changes from turn to turn has to sit *after* what a provider can cache. `prompt_layout` decides where milk puts it:
+
+| Value | Behavior |
+|---|---|
+| `"stable"` (default, `""`) | The **stable prefix** is the system prompt, the tool schemas and the settled history — none of it changes between turns. The per-turn dynamic context — the [project orientation](#project-map-context-project_map_context) block, recalled percepts, the current goal and (for an escalation agent) the hand-off orientation — rides in **one `<milk-context>` block prepended to the new user message**, the same convention the claude-cli path already uses. The persisted user turn never carries the block, so history stays append-only. |
+| `"classic"` | The earlier layout: project orientation inside the system prompt, percepts and the goal as leading system messages ahead of the conversation. Any change to those (a new top-level file, a different percept selected for the next prompt, the goal label flipping to "Last known") invalidates the cached conversation behind it. Kept as an opt-out. |
+
+Why the block goes in the user message rather than a mid-conversation `system` message: strict chat templates (Gemma, Mistral, several local servers) reject or reorder system messages that are not first. Under context pressure the ladder sheds the optional project orientation from that block first, exactly as it did from the system prompt; percepts and the goal are never dropped. Applies to HTTP agents (local, bearer, Bedrock); `claude-cli`/subprocess providers are unaffected. It also makes the idle [cache re-prime](#idle-cache-re-prime-cache_warming) exact: the replay is the system prompt plus the settled history, which is precisely the next request's prefix.
+
+```json
+{ "name": "mimo-local", "provider": "bearer", "model": "…",
+  "prompt_layout": "classic" }
+```
+
+---
+
 ### Idle cache re-prime (`cache_warming`)
 
 OpenAI-compatible providers (MiMo included) cache the request prefix server-side and discount cached prompt tokens — but the cache lapses after minutes of idle. A session that pauses between turns (thinking, reading, meetings) pays a cold cache on the next request even though the prefix (system prompt + tool schemas + history) never changed. `cache_warming` closes that gap (issue #471, following pi's `cache-warmer.ts` pattern):
@@ -562,7 +580,7 @@ The replay costs one prompt evaluation — at cached-discount rates far less tha
 
 ### Project map context (`project_map_context`)
 
-The [`project_map` tool](tooling.md#built-in-tools) is a *pull*: the agent calls it when it wants structure. `project_map_context` adds a small *push* on top — project-structure context rebuilt into the system prompt every turn (ADR-0081):
+The [`project_map` tool](tooling.md#built-in-tools) is a *pull*: the agent calls it when it wants structure. `project_map_context` adds a small *push* on top — project-structure context rebuilt every turn and delivered in the new user message's `<milk-context>` block under the default [stable prompt layout](#cache-friendly-prompt-layout-prompt_layout), or inside the system prompt under `classic` (ADR-0081):
 
 | Value | What gets pushed | Cost |
 |---|---|---|
@@ -785,6 +803,7 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `context_window_tokens` | int | See [Context window declaration](#context-window-declaration-context_window_tokens) |
 | `system_prompt_tier` | string | See [System prompt verbosity](#system-prompt-verbosity-system_prompt_tier) |
 | `tool_description_tier` | string | See [Tool description diet](#tool-description-diet-tool_description_tier) |
+| `prompt_layout` | string | `"stable"` (default) or `"classic"` — see [Cache-friendly prompt layout](#cache-friendly-prompt-layout-prompt_layout) |
 | `cache_warming` | string | See [Idle cache re-prime](#idle-cache-re-prime-cache_warming) |
 | `project_map_context` | string/bool | See [Project map context](#project-map-context-project_map_context) |
 | `context_reduction` | object | See [Layered context reduction](#layered-context-reduction-context_reduction) |

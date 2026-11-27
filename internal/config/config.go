@@ -760,6 +760,23 @@ type AgentConfig struct {
 	// providers manage their own tool schemas and ignore this.
 	ToolDescriptionTier string `json:"tool_description_tier,omitempty"`
 
+	// PromptLayout selects where per-turn dynamic context sits in this agent's
+	// requests, for prompt-cache friendliness. Valid values: "stable"
+	// (default), "classic".
+	//   "stable"  — the system prompt, tools and settled history are the stable
+	//               prefix and never change from turn to turn: the project
+	//               orientation block, recalled percepts, the current goal and
+	//               (escalation) the hand-off orientation ride in ONE
+	//               <milk-context> block prepended to the new user message —
+	//               after everything the provider can cache. The persisted user
+	//               turn stays clean.
+	//   "classic" — the pre-#471 layout: project orientation inside the system
+	//               prompt, percepts and goal as leading system messages ahead
+	//               of the conversation. Any change to them invalidates the
+	//               cached conversation behind them.
+	// Empty string is treated as "stable". HTTP agents only.
+	PromptLayout string `json:"prompt_layout,omitempty"`
+
 	// CacheWarming re-primes the provider's prompt cache while the session is
 	// idle (issue #471): after a turn settles, the exact request prefix is
 	// re-sent once with max_tokens=1 before provider-side prompt caches
@@ -3434,6 +3451,14 @@ func Validate(cfg Config) []ValidationWarning {
 			warn(a.Name, fmt.Sprintf("system_prompt_tier %q is not a valid tier (valid: minimal, standard, lean, full) — treating as standard", a.SystemPromptTier))
 		}
 
+		// prompt_layout is a plain string field; warn on typos so a mistyped
+		// layout silently falling back to "stable" is visible.
+		switch strings.ToLower(strings.TrimSpace(a.PromptLayout)) {
+		case "", "stable", "classic":
+		default:
+			warn(a.Name, fmt.Sprintf("prompt_layout %q is not a valid layout (valid: stable, classic) — treating as stable", a.PromptLayout))
+		}
+
 		// cache_warming is a plain string field; warn on typos so a mistyped
 		// mode silently staying off is visible.
 		switch strings.ToLower(strings.TrimSpace(a.CacheWarming)) {
@@ -3724,4 +3749,12 @@ func saveGlobal(cfg Config, force bool) error {
 		setPersistGuard(false)
 	}
 	return nil
+}
+
+// StablePromptLayout reports whether this agent uses the cache-friendly
+// "stable" prompt layout (the default): dynamic per-turn context rides the new
+// user message instead of the system prompt and the leading history. Only
+// "classic" opts out; unknown values fall back to stable (Validate warns).
+func (a AgentConfig) StablePromptLayout() bool {
+	return strings.ToLower(strings.TrimSpace(a.PromptLayout)) != "classic"
 }

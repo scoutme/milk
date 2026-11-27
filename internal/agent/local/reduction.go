@@ -87,6 +87,11 @@ type sysPromptBuilder struct {
 	// ownedFromStart selects the escalation role's owned-conversation framing
 	// (no hand-off narrative) — see buildSystemPromptOpts.
 	ownedFromStart bool
+	// userBlockFull/userBlockReduced are the stable layout's leading
+	// <milk-context> block of the turn's user message at LevelNone and with the
+	// optional project orientation shed (see swapUserBlock). Empty under the
+	// classic layout.
+	userBlockFull, userBlockReduced string
 }
 
 // render assembles the system prompt for the given reduction level.
