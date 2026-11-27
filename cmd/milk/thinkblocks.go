@@ -361,24 +361,12 @@ func thinkHeaderCount(row string) int {
 	return len(thinkHeaderRe.FindAllString(ansi.Strip(row), -1))
 }
 
-// thinkBlockAtLine maps a clicked transcript row (index into the wrapped
-// transcript render — the same coordinate space selection uses) to the
-// think-block index whose fold header sits there, or -1 when the click was not
-// on a header. Headers appear in block order in the display, so the ordinal of
-// the clicked header is the block index.
+// thinkBlockAtLine maps a clicked transcript row to the think-block index
+// whose fold header sits there, or -1 (the column-less form of
+// foldBlockAtClick — on a glued multi-header row it claims the first header).
 func (m *model) thinkBlockAtLine(line int) int {
-	if line < 0 {
-		return -1
-	}
-	rows := strings.Split(m.wrappedTranscript(), "\n")
-	if line >= len(rows) || thinkHeaderCount(rows[line]) == 0 {
-		return -1
-	}
-	idx := 0
-	for i := 0; i < line && i < len(rows); i++ {
-		idx += thinkHeaderCount(rows[i])
-	}
-	if idx >= len(m.thinkBlocks) {
+	tool, idx := m.foldBlockAtClick(line, -1)
+	if tool {
 		return -1
 	}
 	return idx

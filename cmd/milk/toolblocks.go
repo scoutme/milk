@@ -203,8 +203,13 @@ func (m *model) renderToolBlock(b *toolBlock) string {
 
 // toolHeaderRe matches a complete tool fold header anywhere in a row —
 // folded or expanded, running or error. The ` — N lines` anchor keeps it
-// disjoint from think headers (checked in both directions by tests).
-var toolHeaderRe = regexp.MustCompile(`[▸▾] .+ — [0-9]+ lines?( · running| · error)?`)
+// disjoint from think headers (checked in both directions by tests). The
+// span is LAZY (`.+?`): the markdown reflow can glue two headers onto one
+// render row (the way "intro text▸ thinking · 2 lines" glues text+header),
+// and a greedy span would swallow both into one match — silently dropping
+// every glued header after the first from the click ordinal and toggling a
+// block a few entries before the clicked one.
+var toolHeaderRe = regexp.MustCompile(`[▸▾] .+? — [0-9]+ lines?( · running| · error)?`)
 
 // toolHeaderCount reports how many tool fold headers one render row carries.
 // Same argument as thinkHeaderCount: a complete header, *and* the header's
@@ -221,23 +226,114 @@ func toolHeaderCount(row string) int {
 	return len(toolHeaderRe.FindAllString(ansi.Strip(row), -1))
 }
 
-// toolBlockAtLine maps a clicked transcript row to the tool-block index whose
-// fold header sits there, or -1. Headers render in block order, so the
-// ordinal of the clicked tool header is the block index (think headers are
-// invisible to this count — disjoint patterns).
-func (m *model) toolBlockAtLine(line int) int {
+// foldFamilyNone / foldFamilyThink / foldFamilyTool label which fold family
+// a click row belongs to.
+const (
+	foldFamilyNone = iota
+	foldFamilyThink
+	foldFamilyTool
+)
+
+// foldHitAt maps a click on one render row to the fold header the click
+// landed on: the family whose header span contains the click column
+// (ANSI-stripped coordinates) and the header's ordinal within the row. The
+// markdown reflow can glue two headers — even one of each family — onto a
+// single row, so a row can hold several clickable headers and the column
+// decides which one the user meant. A row with exactly one header claims
+// the click wherever on the row it landed (container rows paint full-width;
+// a click on the padding is still "on the header"); with several, a click
+// outside every span falls back to the nearest header at or before the
+// column, else the first. col < 0 selects the first header — the
+// column-less path the family at-line helpers use. The container paint gate
+// is the count predicates' (a quoted header shape without the container
+// signature is body text).
+func foldHitAt(row string, col int) (family, ordinal int) {
+	if isTTY && !foldHeaderStyleRow(row) {
+		return foldFamilyNone, -1
+	}
+	s := ansi.Strip(row)
+	type hit struct{ family, start, end int }
+	var hits []hit
+	for _, m := range toolHeaderRe.FindAllStringIndex(s, -1) {
+		hits = append(hits, hit{foldFamilyTool, m[0], m[1]})
+	}
+	for _, m := range thinkHeaderRe.FindAllStringIndex(s, -1) {
+		hits = append(hits, hit{foldFamilyThink, m[0], m[1]})
+	}
+	if len(hits) == 0 {
+		return foldFamilyNone, -1
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
+	pick := 0
+	if col >= 0 {
+		pick = -1
+		for i, h := range hits {
+			if col >= h.start && col < h.end {
+				pick = i
+				break
+			}
+			if h.start <= col {
+				pick = i
+			}
+		}
+		if pick < 0 {
+			pick = 0
+		}
+	}
+	ord := 0
+	for _, h := range hits[:pick] {
+		if h.family == hits[pick].family {
+			ord++
+		}
+	}
+	return hits[pick].family, ord
+}
+
+// foldBlockAtClick maps a click at (line, col) of the wrapped-transcript
+// render to the fold block whose header the click landed on. Headers render
+// in blocksForRender order (anchor, then creation seq) — the family arrays
+// are creation order, and the two can diverge — so the clicked header's
+// ordinal among its family's *rendered* headers indexes that render order.
+func (m *model) foldBlockAtClick(line, col int) (tool bool, idx int) {
 	if line < 0 {
-		return -1
+		return false, -1
 	}
 	rows := strings.Split(m.wrappedTranscript(), "\n")
-	if line >= len(rows) || toolHeaderCount(rows[line]) == 0 {
-		return -1
+	if line >= len(rows) {
+		return false, -1
 	}
-	idx := 0
-	for i := 0; i < line && i < len(rows); i++ {
-		idx += toolHeaderCount(rows[i])
+	family, inRow := foldHitAt(rows[line], col)
+	if family == foldFamilyNone {
+		return false, -1
 	}
-	if idx >= len(m.toolBlocks) {
+	above := 0
+	for i := 0; i < line; i++ {
+		if family == foldFamilyTool {
+			above += toolHeaderCount(rows[i])
+		} else {
+			above += thinkHeaderCount(rows[i])
+		}
+	}
+	ordinal := above + inRow
+	k := 0
+	for _, e := range blocksForRender(m.thinkBlocks, m.toolBlocks) {
+		if (family == foldFamilyTool) != e.tool {
+			continue
+		}
+		if k == ordinal {
+			return e.tool, e.idx
+		}
+		k++
+	}
+	return false, -1
+}
+
+// toolBlockAtLine maps a clicked transcript row to the tool-block index whose
+// fold header sits there, or -1 (the column-less form of foldBlockAtClick —
+// on a glued multi-header row it claims the first header).
+func (m *model) toolBlockAtLine(line int) int {
+	tool, idx := m.foldBlockAtClick(line, -1)
+	if !tool {
 		return -1
 	}
 	return idx
