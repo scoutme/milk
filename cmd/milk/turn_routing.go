@@ -50,18 +50,31 @@ type routedTurn struct {
 	NoAgent bool
 }
 
-// availPingTimeout bounds the per-turn availability re-check so an
-// unreachable host can't stall a turn.
-const availPingTimeout = 3 * time.Second
+// availPingTimeout bounds the fast path of the per-turn availability
+// re-check, and availPingGrace is the one extension a probe gets when it has
+// neither answered nor failed by then. The extension exists because "slow"
+// is not "down": DNS through a proxy/VPN routinely takes several seconds
+// while the endpoint is perfectly healthy, and the old single 3s bound
+// declared such an agent unavailable — turning a slow link into "neither
+// primary nor escalation agent is available" at startup or turn start. A
+// genuinely unreachable host still resolves within the two bounds together
+// (issue #388's promise: never the dependency's own dial/HTTP timeout).
+var (
+	availPingTimeout = 3 * time.Second
+	availPingGrace   = 7 * time.Second
+)
 
 // boundedPings runs every probe concurrently and returns their results in
-// order, each capped at availPingTimeout: an unreachable dependency costs
-// one bounded wait instead of its own dial/HTTP timeout. Startup probes use
-// it (issue #388) so a blackholed agent host can't stall milk's launch — the
-// healthy path is unchanged, probes answer in milliseconds. Probes are plain
-// func() error so ctx-less CLI/subprocess pings get the same ceiling as the
-// HTTP ones; the buffered result channel means an abandoned probe goroutine
-// never blocks writing its outcome.
+// order, each capped at availPingTimeout+availPingGrace: an unreachable
+// dependency costs one bounded wait instead of its own dial/HTTP timeout.
+// Startup probes use it (issue #388) so a blackholed agent host can't stall
+// milk's launch — the healthy path is unchanged, probes answer in
+// milliseconds. A probe that blows the fast bound but answers within the
+// grace window counts as up: slow DNS is a property of the link, not of the
+// agent (the 3s→10s worst case is why both windows are vars — tests shrink
+// them). Probes are plain func() error so ctx-less CLI/subprocess pings get
+// the same ceiling as the HTTP ones; the buffered result channel means an
+// abandoned probe goroutine never blocks writing its outcome.
 func boundedPings(probes ...func() error) []bool {
 	res := make([]bool, len(probes))
 	var wg sync.WaitGroup
@@ -75,6 +88,13 @@ func boundedPings(probes ...func() error) []bool {
 			case err := <-done:
 				res[i] = err == nil
 			case <-time.After(availPingTimeout):
+				// Neither answered nor failed yet: slow link or dead host —
+				// one grace window decides which.
+				select {
+				case err := <-done:
+					res[i] = err == nil
+				case <-time.After(availPingGrace):
+				}
 			}
 		}(i, probe)
 	}
