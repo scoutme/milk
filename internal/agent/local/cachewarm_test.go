@@ -265,7 +265,7 @@ func TestCacheWarm_ReshapeReplacesSnapshot(t *testing.T) {
 		{Role: "tool", Content: "shrunk tool result", ToolCallID: "t1"},
 		{Role: "assistant", Content: "settled reply"},
 	}
-	agent.ReshapeCacheWarm(reshaped)
+	agent.ReshapeCacheWarm(context.Background(), nil, reshaped)
 	agent.armCacheWarm()
 
 	select {
@@ -295,7 +295,7 @@ func TestCacheWarm_ReshapeNoOpGuards(t *testing.T) {
 		withCacheWarmMinBytes(1)
 
 	// No snapshot yet: the reshape must not arm a replay of its own.
-	agent.ReshapeCacheWarm([]Message{{Role: "user", Content: "settled"}})
+	agent.ReshapeCacheWarm(context.Background(), nil, []Message{{Role: "user", Content: "settled"}})
 	agent.armCacheWarm()
 	time.Sleep(200 * time.Millisecond)
 	if _, warm := rec.counts(); warm != 0 {
@@ -306,12 +306,12 @@ func TestCacheWarm_ReshapeNoOpGuards(t *testing.T) {
 	inLoop := []Message{system, {Role: "user", Content: "in-loop"}}
 	agent.observeWarmable(chatRequest{Model: "test-model", Messages: inLoop}, 5000)
 
-	agent.ReshapeCacheWarm(nil)
-	agent.ReshapeCacheWarm([]Message{})
+	agent.ReshapeCacheWarm(context.Background(), nil, nil)
+	agent.ReshapeCacheWarm(context.Background(), nil, []Message{})
 	// Clone runs share the cacheWarmState through the copy chain but never
 	// write it (same guards as observeWarmable).
-	agent.AsWorkflowExecutor().ReshapeCacheWarm([]Message{{Role: "user", Content: "workflow"}})
-	agent.WithToolAgentRole().ReshapeCacheWarm([]Message{{Role: "user", Content: "tool-agent"}})
+	agent.AsWorkflowExecutor().ReshapeCacheWarm(context.Background(), nil, []Message{{Role: "user", Content: "workflow"}})
+	agent.WithToolAgentRole().ReshapeCacheWarm(context.Background(), nil, []Message{{Role: "user", Content: "tool-agent"}})
 
 	agent.armCacheWarm()
 	select {
@@ -340,7 +340,7 @@ func TestCacheWarm_ReshapeBelowFloorDropsReplay(t *testing.T) {
 		Messages: []Message{{Role: "system", Content: "sys"}, {Role: "user", Content: "big enough to warm"}},
 	}, 5000)
 	agent.armCacheWarm()
-	agent.ReshapeCacheWarm([]Message{{Role: "user", Content: "tiny"}})
+	agent.ReshapeCacheWarm(context.Background(), nil, []Message{{Role: "user", Content: "tiny"}})
 
 	time.Sleep(300 * time.Millisecond)
 	if _, warm := rec.counts(); warm != 0 {
@@ -372,7 +372,7 @@ func TestCacheWarm_ReshapeReachesCopyChain(t *testing.T) {
 		{Role: "user", Content: "[user to primary] in-loop"},
 		{Role: "assistant", Content: "settled"},
 	}
-	agent.ReshapeCacheWarm(reshaped) // through the wrapped agent, not the turn copy
+	agent.ReshapeCacheWarm(context.Background(), nil, reshaped) // through the wrapped agent, not the turn copy
 	turnAgent.armCacheWarm()
 
 	select {
