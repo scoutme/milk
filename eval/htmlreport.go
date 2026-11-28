@@ -417,7 +417,7 @@ func htmlRepetitionSection(b *strings.Builder, scenarioResults []ScenarioResult,
 					continue
 				}
 				s := samples[an]
-				if ar.JudgeError == "" {
+				if ar.judged() {
 					s.scores = append(s.scores, ar.WeightedScore)
 				}
 				var in, out int64
@@ -512,7 +512,7 @@ func htmlAggregateSection(b *strings.Builder, scenarioResults []ScenarioResult, 
 	for _, sr := range scenarioResults {
 		for _, name := range agentNames {
 			ar, ok := sr.AgentResults[name]
-			if !ok || ar.JudgeError != "" {
+			if !ok || !ar.judged() {
 				continue // unjudged — not a real 0
 			}
 			acc := catAccums[sr.Category][name]
@@ -583,7 +583,7 @@ func htmlAggregateSection(b *strings.Builder, scenarioResults []ScenarioResult, 
 	htmlMetricsRow(b, "Quality/dollar", agentNames, func(name string) string {
 		var totalCost, totalQuality float64
 		for _, sr := range scenarioResults {
-			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
+			if ar, ok := sr.AgentResults[name]; ok && ar.judged() {
 				for _, r := range ar.RunResults {
 					totalCost += r.CostUSD
 				}
@@ -616,9 +616,15 @@ func htmlAggregateSection(b *strings.Builder, scenarioResults []ScenarioResult, 
 	})
 	b.WriteString("</tbody></table></div>\n")
 
+	// Judged coverage + winner guardrail (issue #479): state the data the
+	// aggregate means cover, and flag incomplete judging on the verdict.
+	fmt.Fprintf(b, "<p class=\"meta\">%s</p>\n", esc(judgedCoverageLine(scenarioResults, agentNames)))
 	// Winner banner — same honest tie handling as the text report.
 	if v := overallWinner(scenarioResults, agentNames); v.Agent != "" {
 		fmt.Fprintf(b, "<p class=\"overall\">%s%s</p>\n", esc(v.overallLabel()), esc(cheaperNote(v)))
+	}
+	if note := unjudgedNote(scenarioResults, agentNames); note != "" {
+		fmt.Fprintf(b, "<p class=\"warn\">%s</p>\n", esc(note))
 	}
 	b.WriteString("</section>\n")
 }

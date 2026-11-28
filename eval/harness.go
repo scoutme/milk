@@ -266,6 +266,16 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 	// them as gaps instead of silently renormalizing the weighted score.
 	h.progress.Setf("%s/%s: judging %d turn(s)", scenario.Name, adapter.Name(), len(results))
 	scores, missing, err := h.Judge.Score(ctx, scenario, results)
+	if err == nil && len(scores) == 0 && scenarioHasRubric(scenario) {
+		// An empty-but-parseable judge reply that never produced a single
+		// score (every attempt answered "[]" or equivalent) is missing
+		// data, not a real 0 — without this check it slipped past the
+		// judgeError path below and its WeightedScore of 0 averaged into
+		// aggregates as genuine data (issue #479). A scenario with no
+		// rubric at all is exempt: the judge was never asked to score
+		// anything, so silence is not a judge failure.
+		err = fmt.Errorf("judge returned no scores after %d attempts", judgeAttempts)
+	}
 	var judgeError string
 	if err != nil {
 		// Log but do not fail the whole run — we still have RunResults. judgeError
@@ -320,7 +330,24 @@ func (h *Harness) runOne(ctx context.Context, scenario Scenario, adapter AgentAd
 		Cache:           cache,
 		BudgetResult:    budgetResult,
 		JudgeError:      judgeError,
+		Judged:          judgeError == "",
 	}, nil
+}
+
+// scenarioHasRubric reports whether the scenario gives the judge anything
+// to score — top-level rubric (single-turn shorthand) or any turn rubric.
+// Used to keep "judge was never asked" distinct from "judge answered with
+// nothing" (issue #479): only the latter is a judge failure.
+func scenarioHasRubric(s Scenario) bool {
+	if len(s.Rubric) > 0 {
+		return true
+	}
+	for _, t := range s.Turns {
+		if len(t.Rubric) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // applyIsolation resolves the isolation request once — probing bubblewrap

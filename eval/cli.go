@@ -252,6 +252,7 @@ func evalJudgeCmd() *cobra.Command {
 					// clear any stale JudgeError so re-judging after a judge fix does
 					// not keep rendering ERR for a now-healthy score.
 					ar.JudgeError = ""
+					ar.Judged = true
 					sr.AgentResults[agentName] = ar
 				}
 				results[i] = sr
@@ -361,6 +362,19 @@ func evalReportCmd() *cobra.Command {
 func writeResults(dir string, results []ScenarioResult) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating results dir: %w", err)
+	}
+
+	// Normalize the explicit judged marker on every write (issue #479): each
+	// cell's `judged` field is derived through judged(), so re-scored legacy
+	// files and any path that forgot to set the field still persist a correct
+	// value for external consumers.
+	for i := range results {
+		for name, ar := range results[i].AgentResults {
+			if j := ar.judged(); j != ar.Judged {
+				ar.Judged = j
+				results[i].AgentResults[name] = ar
+			}
+		}
 	}
 
 	// Write aggregated results file.
