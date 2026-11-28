@@ -236,10 +236,34 @@ obscure tool across turns (e.g. memory persistence + a plugin/MCP-shaped tool), 
 small-model policy (only enable `tool_search` for models that pass the probe) is
 documented as guidance, never auto-enabled.
 
-**Phase 3 — native passthrough:** providers that speak `defer_loading` /
-`tool_reference` (claude-cli → Claude Code tool sets; Bedrock InvokeModel for Anthropic
-models) get the server-side shape — zero client emulation, definitions stay in the
-request but out of context.
+**Phase 3 — native passthrough (verified 2026-11-28: no viable surface in milk's
+current providers):** providers that speak `defer_loading` / `tool_reference` would
+get the server-side shape — zero client emulation, definitions stay in the request
+but out of context. Verification against provider docs and milk's code:
+
+| provider surface | native support | milk's transport | verdict |
+|---|---|---|---|
+| Claude API | stable — `tool_search_tool_regex\|bm25_20251119` (models 4.5+; Opus 4.1- unsupported), custom client-side search returning `tool_reference` blocks is first-class | none (no direct Messages-API provider) | not reachable |
+| claude-cli (Claude Code) | tool schemas are the CLI's own | subprocess; tool *names* only across the boundary (`--allowedTools`, `--tools`, `--mcp-config` server list) | no wire to shape — native deferral there is Claude Code's own feature |
+| Amazon Bedrock | tool search stable **via InvokeModel only — explicitly not the Converse API** | `bedrock.go` is Converse-native | unavailable on milk's Bedrock path |
+| OpenAI-compat (primary) | no `defer_loading`, no `tool_reference` | chat completions | Phase 1 emulation is the only shape (shipped) |
+
+Notes:
+
+- The claude-cli boundary was checked against the live CLI (`claude --help`):
+  `--allowedTools`/`--disallowedTools`/`--tools` take names, `--mcp-config` takes
+  server definitions — no deferred-loading vocabulary exists in that surface. The
+  `providers.md` exclusion ("claude-cli/subprocess providers manage their own tool
+  schemas and ignore it") is therefore the accurate end state, not a gap.
+- Phase 3 becomes real only behind a **new transport**: a direct Anthropic Messages
+  API provider, or a Bedrock InvokeModel path for Anthropic models (same feature
+  set, `tool_search_tool_*` server-side or `tool_reference` returns from our own
+  `tool_search`). Both are provider projects of their own — tracked as candidates
+  on #480, not passthrough tweaks.
+- One Phase-1 caveat surfaced while verifying: stub calls on the **Bedrock Converse**
+  path inherit the same provider arg-validation unknown that was measured (good) on
+  mimo's OpenAI-compat endpoint. Converse stub behavior is unverified — part of the
+  per-provider limitation in §3.4.
 
 ## 5. Success criteria (eval plan)
 
