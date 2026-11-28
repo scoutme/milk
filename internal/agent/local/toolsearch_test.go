@@ -350,12 +350,15 @@ func TestToolSearchInterceptMatrix(t *testing.T) {
 	if !handled {
 		t.Fatal("unsafe unloaded call must be intercepted")
 	}
-	want := "delete_file is deferred and state-changing; run tool_search('delete_file') and re-call with the documented semantics."
+	want := "delete_file is deferred and state-changing — it must not run on guessed arguments."
 	if !strings.Contains(tsToolResultText(t, out.msg.Content), want) {
 		t.Errorf("refusal text = %q, want it to contain %q", out.msg.Content, want)
 	}
-	if rt.store.has("delete_file") {
-		t.Error("a refused call must not mark the tool loaded")
+	if !strings.Contains(tsToolResultText(t, out.msg.Content), "delete_file schema above; read the semantics") {
+		t.Errorf("the refusal must echo the schema inline, got %q", out.msg.Content)
+	}
+	if !rt.store.has("delete_file") {
+		t.Error("the refusal must mark the tool loaded (teach-inline) so the re-call can proceed")
 	}
 
 	// 3. Unsafe but loaded call executes normally.

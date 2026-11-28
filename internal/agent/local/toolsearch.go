@@ -618,9 +618,17 @@ func (a *Agent) interceptToolSearch(ctx context.Context, rt *toolSearchRuntime, 
 		rt.store.markLoaded(name) // valid read: execute + mark loaded
 		return toolCallOutcome{}, false
 	}
-	result := toolResult{Error: fmt.Sprintf("%s is deferred and state-changing; run tool_search('%s') and re-call with the documented semantics.", name, name)}.String()
+	// Corrective refusal (re-verify-1 finding): refuse the guessed
+	// mutating call, but teach inline — echo the tier'd schema and mark
+	// the tool loaded so the very next call can proceed without a search
+	// round trip. The guess-safe property is preserved: the guessed call
+	// never executed, and the model now holds the real semantics.
+	fn := tieredFunctionSchema(entry, rt.tier)
+	schemaJSON, _ := json.Marshal(fn)
+	result := toolResult{Error: fmt.Sprintf("%s is deferred and state-changing — it must not run on guessed arguments. %s\n\n%s schema above; read the semantics, then re-call with correct arguments.", name, schemaJSON, name)}.String()
 	obs.Inc(ctx, inferenceScope, "milk.tools.tool_search_refusals",
 		attribute.String("name", name))
+	rt.store.markLoaded(name)
 	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}, soft: true}, true
 }
 

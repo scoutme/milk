@@ -381,7 +381,8 @@ func TestToolSetContract_EverySchemaToolDispatches(t *testing.T) {
 // the world changing, and a refusal never touches the world). Before the
 // fix, the delete_file refusal cancelled the sibling tool_search call that
 // would have resolved it, sending the model into a retry loop that the
-// runaway guard had to stop.
+// runaway guard had to stop. The refusal also teaches inline (echoes the
+// schema and marks the tool loaded), so d2 proceeds even without ts.
 func TestBatch_ToolSearchRefusalDoesNotCancelSiblings(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "victim.txt")
