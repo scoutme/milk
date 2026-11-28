@@ -43,6 +43,13 @@ type AgentResult struct {
 	// builder must treat this as "no data," not "a real score of 0," and
 	// exclude it from aggregates.
 	JudgeError string `json:"judge_error,omitempty"`
+	// Judged is the explicit "this cell carries real judge data" marker
+	// (issue #479): milk writes true iff the judge produced scores. It lets
+	// consumers stop inferring "not scored" from `weighted_score: 0` plus
+	// `scores: []` — the inference that let one unjudged cell fake a −2.2
+	// arm regression in a manual aggregate. Older results.json files lack
+	// the field; judged() falls back to JudgeError/Scores for them.
+	Judged bool `json:"judged"`
 	// MissingCriteria lists rubric criteria the judge never returned a score
 	// for, even after coverage re-asks (JSON "missing_criteria"). Non-empty
 	// means WeightedScore was computed over a partial rubric — the missing
@@ -51,6 +58,28 @@ type AgentResult struct {
 	// a genuine 0.0 lives in Scores and renders normally) and mark the weighted
 	// score partial. JudgeError remains the stronger signal: judge failed outright.
 	MissingCriteria []string `json:"missing_criteria,omitempty"`
+}
+
+// judged reports whether this cell carries real judge data — the one
+// predicate every aggregate, winner and coverage computation must use
+// (issue #479). Order: an explicit JudgeError fails (no data regardless of
+// any other field), an explicit Judged=true passes, and a results.json
+// written before the field existed (or hand-built in tests) is inferred
+// from Scores — no scores and no error means "never scored," never a
+// genuine 0.
+func (ar AgentResult) judged() bool {
+	if ar.JudgeError != "" {
+		return false
+	}
+	if ar.Judged {
+		return true
+	}
+	// Legacy (pre-`judged`) cells: real judged data always carries Scores —
+	// a genuine all-zero judgment has zero-valued entries — and any nonzero
+	// WeightedScore implies scores existed (WeightedScore is 0 for nil
+	// scores). No scores and no weighted score means "never scored": the
+	// empty-judge-output case, which must never average in as a real 0.
+	return len(ar.Scores) > 0 || ar.WeightedScore != 0
 }
 
 // BudgetResult is one run's budget check: the budget that was applied and
@@ -286,7 +315,7 @@ func buildRepetitionReport(scenarioResults []ScenarioResult, agentNames []string
 					continue
 				}
 				s := samples[an]
-				if ar.JudgeError == "" {
+				if ar.judged() {
 					s.scores = append(s.scores, ar.WeightedScore)
 				}
 				var in, out int64
@@ -497,14 +526,13 @@ func buildScoreGrid(sr ScenarioResult, agentNames []string) scoreGrid {
 		key := strings.ToLower(c)
 		row := map[string]string{}
 		for _, name := range agentNames {
+			ar, ok := sr.AgentResults[name]
 			switch {
-			case sr.AgentResults[name].JudgeError != "":
-				// map zero value: JudgeError=="" when the agent has no entry —
-				// handled by the scored check below.
-				if _, ok := sr.AgentResults[name]; ok {
-					row[name] = "ERR"
-					continue
-				}
+			case ok && !ar.judged():
+				// Never scored: judge failure or empty judge output (issue
+				// #479). ERR, never a 0 an aggregate could average in.
+				row[name] = "ERR"
+			case !ok:
 				row[name] = "—"
 			case !scored[key][name]:
 				// Judge never returned this criterion for this agent: an
@@ -524,7 +552,7 @@ func buildScoreGrid(sr ScenarioResult, agentNames []string) scoreGrid {
 		switch {
 		case !ok:
 			g.weighted[name] = "-"
-		case ar.JudgeError != "":
+		case !ar.judged():
 			// Not a real 0 — the judge never scored this scenario/agent at all.
 			g.weighted[name] = "ERR"
 		default:
@@ -976,7 +1004,7 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 	for _, sr := range scenarioResults {
 		for _, name := range agentNames {
 			ar, ok := sr.AgentResults[name]
-			if !ok || ar.JudgeError != "" {
+			if !ok || !ar.judged() {
 				continue // unjudged — not a real 0, exclude so it can't drag the average down
 			}
 			acc := catAccums[sr.Category][name]
@@ -1017,7 +1045,11 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 		}
 		row += columnLabel(fmt.Sprintf("%.1f", avg), 12)
 	}
-	b.WriteString(row + "\n\n")
+	b.WriteString(row + "\n")
+	// Judged coverage — the averages above are judged-only (unjudged cells
+	// are excluded, never 0); state the data they were computed over so a
+	// coverage gap can't hide behind a plausible-looking mean (issue #479).
+	b.WriteString(judgedCoverageLine(scenarioResults, agentNames) + "\n\n")
 
 	// --- Cost-efficiency section ---
 	b.WriteString("By cost-efficiency (quality per dollar):\n")
@@ -1050,7 +1082,7 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 	for _, name := range agentNames {
 		var totalCost, totalQuality float64
 		for _, sr := range scenarioResults {
-			if ar, ok := sr.AgentResults[name]; ok && ar.JudgeError == "" {
+			if ar, ok := sr.AgentResults[name]; ok && ar.judged() {
 				// Cost is scoped to judged-only scenarios here too, so the ratio's
 				// numerator and denominator stay over the same subset — mixing an
 				// unjudged scenario's real cost into the denominator while
@@ -1097,7 +1129,19 @@ func buildAggregateReport(scenarioResults []ScenarioResult, agentNames []string)
 
 	if len(agentNames) > 0 {
 		v := overallWinner(scenarioResults, agentNames)
-		b.WriteString(v.overallLabel() + cheaperNote(v) + "\n")
+		if v.Agent == "" {
+			// No judged cell anywhere (every judge call failed or was
+			// skipped): say that instead of emitting a winner line with no
+			// name — "Overall winner:  (0.00)" is nonsense (issue #479).
+			b.WriteString("Overall winner: none — no judged cells in this run\n")
+		} else {
+			b.WriteString(v.overallLabel() + cheaperNote(v) + "\n")
+		}
+		// Guardrail (issue #479): whenever judging is incomplete, the
+		// verdict above must say its means cover judged cells only.
+		if note := unjudgedNote(scenarioResults, agentNames); note != "" {
+			b.WriteString(note + "\n")
+		}
 	}
 
 	return b.String()
@@ -1213,6 +1257,10 @@ type JSONAgentResult struct {
 	// consumers of the JSON report must exclude it from aggregates rather than
 	// treat 0 as a genuine score.
 	JudgeError string `json:"judge_error,omitempty"`
+	// Judged mirrors AgentResult.Judged (issue #479): the explicit
+	// "real judge data exists" flag, so consumers never infer "not scored"
+	// from weighted_score 0 + empty scores.
+	Judged bool `json:"judged"`
 	// MissingCriteria mirrors AgentResult.MissingCriteria — criteria the judge
 	// never returned a score for. Non-empty means WeightedScore was computed
 	// over a partial rubric (missing weights dropped from numerator and
@@ -1252,6 +1300,10 @@ type JSONAgentSummary struct {
 	TotalCostUSD     float64 `json:"total_cost_usd"`
 	AvgCacheHitRate  float64 `json:"avg_cache_hit_rate"`
 	QualityPerDollar float64 `json:"quality_per_dollar"`
+	// JudgedScenarios/TotalScenarios state the data the averages cover
+	// (issue #479): a score is only trustworthy next to its coverage.
+	JudgedScenarios int `json:"judged_scenarios"`
+	TotalScenarios  int `json:"total_scenarios"`
 }
 
 // GenerateJSON produces a structured JSON report.
@@ -1269,6 +1321,7 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 	type accum struct {
 		weightedSum float64
 		count       int
+		cells       int
 		totalCost   float64
 		qualityCost float64
 		totalRead   int64
@@ -1297,6 +1350,7 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 				Cache:           ar.Cache,
 				Budget:          ar.BudgetResult,
 				JudgeError:      ar.JudgeError,
+				Judged:          ar.judged(),
 			}
 
 			jar.RunResults = make([]JSONRunResult, 0, len(ar.RunResults))
@@ -1333,7 +1387,8 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 			// when the judge never scored this scenario/agent — see
 			// AgentResult.JudgeError.
 			acc := accums[name]
-			if ar.JudgeError == "" {
+			acc.cells++
+			if ar.judged() {
 				acc.weightedSum += ar.WeightedScore
 				acc.count++
 				for _, r := range ar.RunResults {
@@ -1384,6 +1439,8 @@ func GenerateJSON(scenarioResults []ScenarioResult) []byte {
 				TotalCostUSD:     acc.totalCost,
 				AvgCacheHitRate:  hitRate,
 				QualityPerDollar: qpd,
+				JudgedScenarios:  acc.count,
+				TotalScenarios:   acc.cells,
 			}
 
 			if avgScore > bestAvgScore || (avgScore == bestAvgScore && acc.totalCost < bestCost) {
@@ -1482,6 +1539,67 @@ func cheaperNote(v winnerVerdict) string {
 	return ""
 }
 
+// judgedCoverage returns per-agent judged/total cell counts: every result
+// cell that exists for the agent, and how many of those carry real judge
+// data (issue #479).
+func judgedCoverage(srs []ScenarioResult, agentNames []string) (judged, total map[string]int) {
+	judged, total = map[string]int{}, map[string]int{}
+	for _, name := range agentNames {
+		for _, sr := range srs {
+			ar, ok := sr.AgentResults[name]
+			if !ok {
+				continue
+			}
+			total[name]++
+			if ar.judged() {
+				judged[name]++
+			}
+		}
+	}
+	return judged, total
+}
+
+// judgedCoverageLine renders "Judged cells: a 13/13 | b 12/13" for the
+// aggregate report (text and HTML both use it).
+func judgedCoverageLine(srs []ScenarioResult, agentNames []string) string {
+	judged, total := judgedCoverage(srs, agentNames)
+	parts := make([]string, 0, len(agentNames))
+	for _, name := range agentNames {
+		parts = append(parts, fmt.Sprintf("%s %d/%d", name, judged[name], total[name]))
+	}
+	return "Judged cells: " + strings.Join(parts, " | ")
+}
+
+// unjudgedNote is the winner-line guardrail (issue #479): when any arm has
+// unjudged cells, the aggregate verdict must state that its means cover
+// judged cells only. Empty string when judging was complete.
+func unjudgedNote(srs []ScenarioResult, agentNames []string) string {
+	judged, total := judgedCoverage(srs, agentNames)
+	var incomplete []string
+	for _, name := range agentNames {
+		if total[name] == 0 || judged[name] == total[name] {
+			continue
+		}
+		var missing []string
+		seen := map[string]bool{}
+		for _, sr := range srs {
+			ar, ok := sr.AgentResults[name]
+			if !ok || ar.judged() || seen[sr.ScenarioName] {
+				continue
+			}
+			seen[sr.ScenarioName] = true
+			missing = append(missing, sr.ScenarioName)
+		}
+		incomplete = append(incomplete, fmt.Sprintf("%s %d/%d judged (missing: %s)",
+			name, judged[name], total[name], strings.Join(missing, ", ")))
+	}
+	if len(incomplete) == 0 {
+		return ""
+	}
+	return "⚠ incomplete judging — aggregates and winner cover judged cells only: " +
+		strings.Join(incomplete, "; ")
+}
+
 // sortCands orders winner candidates: score desc, cost asc, name asc (the
 // pickWinner tie-break made deterministic).
 func sortCands(names []string, scores, costs map[string]float64) []string {
@@ -1503,7 +1621,7 @@ func sortCands(names []string, scores, costs map[string]float64) []string {
 func scenarioWinner(sr ScenarioResult) winnerVerdict {
 	names, scores, costs := []string{}, map[string]float64{}, map[string]float64{}
 	for name, ar := range sr.AgentResults {
-		if ar.JudgeError != "" {
+		if !ar.judged() {
 			continue
 		}
 		var cost float64
@@ -1533,7 +1651,7 @@ func overallWinner(srs []ScenarioResult, agentNames []string) winnerVerdict {
 				for _, r := range ar.RunResults {
 					cost += r.CostUSD
 				}
-				if ar.JudgeError == "" {
+				if ar.judged() {
 					score += ar.WeightedScore
 					count++
 				}
