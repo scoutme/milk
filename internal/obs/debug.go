@@ -147,6 +147,14 @@ func Logger() *slog.Logger {
 	return milkLogger
 }
 
+// SetLogger replaces the package-level milk-log logger (nil restores the
+// not-initialized no-op guard). Mirrors internal/loop.SetLogger; exists so
+// tests can capture emitted lines (e.g. the session_id attribution on WARN
+// lines, issue #455) instead of asserting against a real ~/.milk log file.
+func SetLogger(l *slog.Logger) {
+	milkLogger = l
+}
+
 // DebugCtx emits a debug-level message with context to the milk log.
 func DebugCtx(ctx context.Context, msg string, args ...any) {
 	if milkLogger != nil {

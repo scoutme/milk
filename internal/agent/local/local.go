@@ -432,6 +432,27 @@ func (a *Agent) logWarn(msg string, kv ...any) {
 	obs.Warn(msg, append(kv, a.jobAttrs()...)...)
 }
 
+// logWarnCtx is logWarn plus the session ID carried by ctx (obs's
+// ContextWithSessionID, stashed at turn entry by the TUI and ACP hosts) —
+// so every plain milk.log WARN line fired during a turn is attributable to
+// its session even in a multi-session process (issue #455 remainder; the
+// OTel resource already carries service.instance.id/pid for cross-process
+// attribution). A missing/empty session id adds nothing.
+func (a *Agent) logWarnCtx(ctx context.Context, msg string, kv ...any) {
+	var sess []any
+	if ctx != nil {
+		sess = sessionLogAttrs(obs.SessionIDFromContext(ctx))
+	}
+	a.logWarn(msg, append(kv, sess...)...)
+}
+
+// logWarnSess is logWarn for call sites that have no ctx in scope (the SSE
+// scanner) but thread the turn's session ID through as a parameter. Same
+// attribution contract as logWarnCtx: empty id adds nothing.
+func (a *Agent) logWarnSess(sessionID, msg string, kv ...any) {
+	a.logWarn(msg, append(kv, sessionLogAttrs(sessionID)...)...)
+}
+
 func (a *Agent) logDebug(msg string, kv ...any) {
 	obs.Debug(msg, append(kv, a.jobAttrs()...)...)
 }
@@ -2351,7 +2372,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 		// blunt trim or an overflow error.
 		if a.compactTriggerTokens > 0 && a.lastPromptTokens >= int64(a.compactTriggerTokens) && i >= tokenCompactRetryAt {
 			if compacted, idx, ok := a.compactForPayloadSize(ctx, sess, msgs, userMsgIdx); ok {
-				a.logWarn("context at compaction threshold, summarized older history",
+				a.logWarnCtx(ctx, "context at compaction threshold, summarized older history",
 					"model", a.model, "agent", a.logRole(),
 					"prompt_tokens", a.lastPromptTokens, "trigger_tokens", a.compactTriggerTokens)
 				msgs, userMsgIdx = compacted, idx
@@ -2718,7 +2739,7 @@ func (a *Agent) runToolLoop(ctx context.Context, msgs []Message, tools []map[str
 	// trajectory behind a bare error (the caller only keeps updatedHistory
 	// when err is nil, so returning an error here used to drop the tool
 	// trail entirely, not just the summary).
-	a.logWarn("exceeded maximum tool iterations", "model", a.model,
+	a.logWarnCtx(ctx, "exceeded maximum tool iterations", "model", a.model,
 		"agent", a.logRole(), "max_iter", maxIter)
 	// iterationBudgetExhaustedMarker distinguishes "ran out of iteration
 	// budget while still making distinct tool calls" from a genuine stuck
@@ -4663,7 +4684,7 @@ func (a *Agent) streamCompletion(ctx context.Context, msgs []Message, tools []ma
 	// than fail the turn, drop the image parts and ask again; the user keeps
 	// an answer and a notice explains the attachment was lost. This is the
 	// one retry whose trigger is an explicit error, not usage accounting.
-	a.logWarn("backend rejected image input; retrying without images",
+	a.logWarnCtx(ctx, "backend rejected image input; retrying without images",
 		"model", a.model, "error", err)
 	stripImageParts(msgs)
 	fmt.Fprintln(out, "\n"+imageRejectedNotice)
@@ -4720,7 +4741,7 @@ func (a *Agent) streamCompletionLoop(ctx context.Context, msgs []Message, tools 
 			if last == nil {
 				return "", "", nil, false, "", err
 			}
-			a.logWarn("image retry attempt errored; falling back to the previous attempt's buffered response",
+			a.logWarnCtx(ctx, "image retry attempt errored; falling back to the previous attempt's buffered response",
 				"model", a.model, "attempt", attempt, "error", err)
 			if last.buf != nil {
 				io.Copy(out, last.buf) //nolint:errcheck
@@ -4749,7 +4770,7 @@ func (a *Agent) streamCompletionLoop(ctx context.Context, msgs []Message, tools 
 			}
 			return text, fr, tc, ef, rt, nil
 		}
-		a.logWarn("image request returned no image_tokens usage — backend likely dropped the image, retrying",
+		a.logWarnCtx(ctx, "image request returned no image_tokens usage — backend likely dropped the image, retrying",
 			"model", a.model, "attempt", attempt, "max_attempts", maxAttempts)
 	}
 	// Unreachable: the final attempt always returns above.
@@ -4836,7 +4857,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	// configured max (default 900KB), progressively trim the oldest content
 	// and re-marshal to avoid 413 errors from reverse proxies.
 	if a.maxPayloadBytes > 0 && len(body) > a.maxPayloadBytes {
-		a.logWarn("payload exceeds limit, trimming history",
+		a.logWarnCtx(ctx, "payload exceeds limit, trimming history",
 			"size_bytes", len(body), "limit_bytes", a.maxPayloadBytes,
 			"messages_before", len(msgs))
 		for len(body) > a.maxPayloadBytes {
@@ -4851,7 +4872,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 				return "", "", nil, false, "", 0, err
 			}
 		}
-		a.logWarn("payload after trimming",
+		a.logWarnCtx(ctx, "payload after trimming",
 			"size_bytes", len(body), "messages_after", len(msgs))
 		obs.Inc(ctx, inferenceScope, "milk.inference.payload_trimmed",
 			attribute.String("model", a.model),
@@ -4895,7 +4916,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		a.logWarn("inference request failed",
+		a.logWarnCtx(ctx, "inference request failed",
 			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(), "elapsed", time.Since(inferenceStart).String(),
 			"retryable", workflow.IsRetryableTurnError(err))
@@ -4911,7 +4932,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 			attribute.String("agent", a.logRole()),
 			attribute.String("kind", "http"),
 		)
-		a.logWarn("inference request returned non-200",
+		a.logWarnCtx(ctx, "inference request returned non-200",
 			"model", a.model, "agent", a.logRole(),
 			"status", httpResp.StatusCode, "body", string(b),
 			"elapsed", time.Since(inferenceStart).String())
@@ -4926,7 +4947,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out, inferenceStart, &timing)
+	toolCalls, promptTokens, completionTokens, cacheRead, imageTokens, reasoningText, finishReason, err := a.scanSSE(scanner, det, partialTools, &textBuf, out, inferenceStart, &timing, obs.SessionIDFromContext(ctx))
 	if err != nil {
 		return "", "", nil, false, "", 0, stall.err(ctx, err, noData)
 	}
@@ -4949,7 +4970,7 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 		leaked := textBuf.String() + det.ActiveOpen() + det.RawBlock()
 		if recovered := recoverLeakedToolCalls(tools, toolCalls, leaked, orphanArgText(partialTools)); len(recovered) > 0 {
 			for _, rc := range recovered {
-				a.logWarn("recovered tool call leaked into content",
+				a.logWarnCtx(ctx, "recovered tool call leaked into content",
 					"model", a.model, "agent", a.logRole(),
 					"tool", rc.Function.Name, "args_bytes", len(rc.Function.Arguments))
 			}
@@ -4983,13 +5004,13 @@ func (a *Agent) streamCompletionOnce(ctx context.Context, msgs []Message, tools 
 	}
 	if retryMalformed {
 		classifyOut = io.Discard
-		a.logWarn("tool call not delivered, retrying",
+		a.logWarnCtx(ctx, "tool call not delivered, retrying",
 			"model", a.model, "agent", a.logRole(),
 			"finish_reason", finishReason, "retry", a.malformedToolCallRetries+1,
 			"dangling_fragment", danglingToolFragment, "content_bytes", textBuf.Len())
 	}
 	if emptyFallback && !retryMalformed && (reasoningText != "" || finishReason == "length" || det.InBlock() || danglingToolFragment) {
-		a.logWarn("empty completion", "model", a.model, "agent", a.logRole(),
+		a.logWarnCtx(ctx, "empty completion", "model", a.model, "agent", a.logRole(),
 			"reasoning_seen", reasoningText != "", "finish_reason", finishReason,
 			"unclosed_block", det.InBlock(), "dangling_tool_fragment", danglingToolFragment)
 		// The model streamed reasoning (or was cut off by a length limit, or
@@ -5152,6 +5173,7 @@ func (a *Agent) scanSSE(
 	out io.Writer,
 	reqStart time.Time,
 	timing *StreamTiming,
+	sessionID string, // turn's session for milk.log attribution (issue #455); "" adds nothing
 ) ([]toolCall, int64, int64, int64, int64, string, string, error) {
 	dbg := a.debugLog
 	var promptTokens, completionTokens, cacheRead int64
@@ -5197,7 +5219,7 @@ func (a *Agent) scanSSE(
 			case <-ticker.C:
 				idle := time.Since(time.Unix(0, lastLineAtNano.Load()))
 				if idle >= streamIdleLogInterval {
-					a.logWarn("stream idle",
+					a.logWarnSess(sessionID, "stream idle",
 						"model", a.model, "agent", a.logRole(),
 						"lines_scanned", lines.Load(),
 						"elapsed_since_start", time.Since(streamStartedAt).String(),
@@ -5281,7 +5303,7 @@ func (a *Agent) scanSSE(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		a.logWarn("stream read failed",
+		a.logWarnSess(sessionID, "stream read failed",
 			"model", a.model, "agent", a.logRole(),
 			"err", err.Error(),
 			"lines_scanned", lines.Load(),
