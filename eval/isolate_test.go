@@ -131,15 +131,17 @@ func TestExperiment_IsolateValidation(t *testing.T) {
 // test runs from, the rootfs — is visible but read-only. Skipped where
 // bubblewrap is unusable (macOS, Windows, userns-disabled kernels): there
 // the Resolve-level degradation tests are the coverage.
+//
+// OUTSIDE (the "repo" leg) is os.Getwd() when that survives the sandbox's
+// --tmpfs /tmp, and a scratch dir under $HOME when it doesn't — a checkout
+// under /tmp (git worktree, issue #463) is masked by design, which used to
+// fail this test as if the sandbox itself were broken.
 func TestIsolation_SandboxMatrix(t *testing.T) {
 	if err := probeBwrap(); err != nil {
 		t.Skipf("bubblewrap unusable here: %v", err)
 	}
 	workdir := t.TempDir()
-	outside, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
+	outside := sandboxOutsideDir(t)
 
 	script := strings.Join([]string{
 		`printf ok > ./w || echo NO-WORKDIR-WRITE`,
@@ -185,6 +187,47 @@ func TestIsolation_SandboxMatrix(t *testing.T) {
 			_ = os.Remove(p)
 		}
 	}
+}
+
+// TestIsolatedExec_Seam pins the adapters' one-line exec seam: un-wrapped
+// without isolation, wrapped (bwrap first arg) with it, same working
+// sandboxOutsideDir picks the OUTSIDE probe dir for TestIsolation_SandboxMatrix.
+// It is the package dir when the sandbox can see it; the sandbox mounts a
+// fresh tmpfs over /tmp by design (isolateWrap), so a checkout under /tmp —
+// a git worktree, issue #463 — is invisible inside the sandbox and the
+// visibility probe used to fail on a path assumption rather than a sandbox
+// defect. Fall back to a scratch dir under $HOME, which the sandbox sees
+// through the ro-bind and still refuses writes to; skip only when neither
+// exists outside /tmp.
+func sandboxOutsideDir(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !underMaskedTmp(wd) {
+		return wd
+	}
+	home := os.Getenv("HOME")
+	if home == "" || underMaskedTmp(home) {
+		t.Skipf("package dir %q is masked by the sandbox's /tmp tmpfs and HOME=%q is not usable as fallback", wd, home)
+	}
+	d, err := os.MkdirTemp(home, "milk-eval-isolate-outside-")
+	if err != nil {
+		t.Skipf("package dir %q is masked by the sandbox's /tmp tmpfs and no fallback under HOME: %v", wd, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return d
+}
+
+// underMaskedTmp reports whether p lives under the literal /tmp the sandbox
+// replaces with a tmpfs (symlinks resolved; /tmp itself counts).
+func underMaskedTmp(p string) bool {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	p = filepath.Clean(p)
+	return p == "/tmp" || strings.HasPrefix(p, "/tmp/")
 }
 
 // TestIsolatedExec_Seam pins the adapters' one-line exec seam: un-wrapped
