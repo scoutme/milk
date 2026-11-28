@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -383,6 +384,20 @@ func writeResults(dir string, results []ScenarioResult) error {
 		return fmt.Errorf("marshalling results: %w", err)
 	}
 	resultsFile := dir + "/results.json"
+	// Preserve a previous run's results instead of silently overwriting them:
+	// re-running the same experiment must never destroy the earlier dataset.
+	// The reports keep reading results.json; older runs land next to it.
+	if prev, err := os.ReadFile(resultsFile); err == nil {
+		base := dir + "/results." + time.Now().Format("20060102-150405")
+		bak := base + ".json"
+		for n := 2; ; n++ {
+			if _, err := os.Stat(bak); err != nil {
+				break
+			}
+			bak = fmt.Sprintf("%s-%d.json", base, n)
+		}
+		_ = os.WriteFile(bak, prev, 0644)
+	}
 	if err := os.WriteFile(resultsFile, data, 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", resultsFile, err)
 	}
