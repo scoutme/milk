@@ -3485,6 +3485,14 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// soft marks a corrective guidance result from the tool_search
+	// interception (deferred-tool refusal, schema echo, tool_search
+	// output): the tool never ran and the workspace world is unchanged,
+	// so ADR-0062's cancel-on-failure must not treat it as a batch
+	// failure. Found by the tool_search Phase 2 A/B: a guessed
+	// delete_file refusal used to cancel the sibling tool_search call
+	// that would have resolved it, sending the model into a retry loop.
+	soft bool
 	// workflowStart is set by the start_workflow tool — see WorkflowStartSignal.
 	workflowStart *WorkflowStartSignal
 	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
@@ -3723,7 +3731,10 @@ func (a *Agent) dispatchBatch(ctx context.Context, toolCalls []toolCall, denied 
 		tc := toolCalls[i]
 		a.noteToolUsed(tc.Function.Name)
 		outcomes[i] = a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem, pendingImages)
-		if isCancellingTool(tc.Function.Name) && toolCallFailed(tc.Function.Name, outcomes[i].msg.Content) {
+		// Soft corrective guidance (tool_search refusals/echoes) never
+		// mutates the world and must not cancel siblings — only real
+		// failures of mutating barriers do (ADR-0062).
+		if isCancellingTool(tc.Function.Name) && !outcomes[i].soft && toolCallFailed(tc.Function.Name, outcomes[i].msg.Content) {
 			skip := toolResult{Error: fmt.Sprintf("skipped: %s failed earlier in this batch, so this call was cancelled", tc.Function.Name)}.String()
 			for k := i + 1; k < len(toolCalls); k++ {
 				outcomes[k] = toolCallOutcome{msg: Message{Role: "tool", Content: skip, ToolCallID: toolCalls[k].ID}}

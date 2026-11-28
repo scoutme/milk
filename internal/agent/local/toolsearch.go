@@ -599,7 +599,7 @@ func (a *Agent) interceptToolSearch(ctx context.Context, rt *toolSearchRuntime, 
 	name := tc.Function.Name
 	if name == toolSearchToolName {
 		result := a.runToolSearch(ctx, rt, tc.Function.Arguments)
-		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}, true
+		return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}, soft: true}, true
 	}
 	if rt.pinned[name] || rt.store.has(name) {
 		return toolCallOutcome{}, false
@@ -613,7 +613,7 @@ func (a *Agent) interceptToolSearch(ctx context.Context, rt *toolSearchRuntime, 
 			result := toolSearchSchemaEcho(name, entry, rt.tier, err)
 			obs.Inc(ctx, inferenceScope, "milk.tools.tool_search_schema_echoes",
 				attribute.String("name", name))
-			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}, true
+			return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}, soft: true}, true
 		}
 		rt.store.markLoaded(name) // valid read: execute + mark loaded
 		return toolCallOutcome{}, false
@@ -621,7 +621,7 @@ func (a *Agent) interceptToolSearch(ctx context.Context, rt *toolSearchRuntime, 
 	result := toolResult{Error: fmt.Sprintf("%s is deferred and state-changing; run tool_search('%s') and re-call with the documented semantics.", name, name)}.String()
 	obs.Inc(ctx, inferenceScope, "milk.tools.tool_search_refusals",
 		attribute.String("name", name))
-	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}}, true
+	return toolCallOutcome{msg: Message{Role: "tool", Content: result, ToolCallID: tc.ID}, soft: true}, true
 }
 
 // runToolSearch executes the tool_search tool: BM25 over the deferred tools'

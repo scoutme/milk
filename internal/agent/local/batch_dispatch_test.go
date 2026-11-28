@@ -374,3 +374,51 @@ func TestToolSetContract_EverySchemaToolDispatches(t *testing.T) {
 		}
 	}
 }
+
+// Issue #480 follow-up (found by the tool_search Phase 2 A/B): a corrective
+// tool_search guidance result — here a guessed deferred-tool refusal — must
+// NOT cancel the rest of the batch (ADR-0062's cancel-on-failure is about
+// the world changing, and a refusal never touches the world). Before the
+// fix, the delete_file refusal cancelled the sibling tool_search call that
+// would have resolved it, sending the model into a retry loop that the
+// runaway guard had to stop.
+func TestBatch_ToolSearchRefusalDoesNotCancelSiblings(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := tsFullEntry("delete_file", "Delete a file from disk.", tsStringParam("path"))
+	a := tsAgent()
+	a.skipPerms = true // delete_file is safety-gated; the batch tests run unattended
+	a.toolTimeout = 5 * time.Second
+	_, rt := a.applyToolSearch([]map[string]any{entry}, []map[string]any{entry})
+	ctx := withToolSearch(context.Background(), rt)
+
+	tcs := []toolCall{
+		{ID: "d1", Function: toolCallFunction{Name: "delete_file", Arguments: `{"path":"` + f + `"}`}},
+		{ID: "ts", Function: toolCallFunction{Name: "tool_search", Arguments: `{"query":"delete file"}`}},
+		{ID: "d2", Function: toolCallFunction{Name: "delete_file", Arguments: `{"path":"` + f + `"}`}},
+	}
+	msgs, err := a.executeToolCalls(ctx, nil, tcs, "", "", io.Discard, nil, nil, "", nil)
+	if err != nil {
+		t.Fatalf("executeToolCalls: %v", err)
+	}
+	res := toolResultsByCall(msgs)
+
+	if !strings.Contains(res["d1"], "deferred and state-changing") {
+		t.Errorf("d1 must get the deferral refusal guidance, got %q", res["d1"])
+	}
+	for _, id := range []string{"ts", "d2"} {
+		if strings.Contains(res[id], "skipped") || strings.Contains(res[id], "cancelled") {
+			t.Errorf("%s must not be cancelled by the guidance result, got %q", id, res[id])
+		}
+	}
+	if !strings.Contains(res["ts"], "Loaded") {
+		t.Errorf("tool_search must load the schema, got %q", res["ts"])
+	}
+	if _, statErr := os.Stat(f); !os.IsNotExist(statErr) {
+		t.Errorf("d2 must execute after the load (victim.txt should be deleted), stat err = %v, result = %q", statErr, res["d2"])
+	}
+}
