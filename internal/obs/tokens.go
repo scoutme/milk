@@ -283,8 +283,11 @@ func SessionTimingByRolePrefix(prefix string) (ttftSec, decodeSec float64, reqs 
 
 // tkey identifies one metric's data point for one (model, agent) pair from
 // one writer instance — instance-scoped so concurrent sessions' cumulative
-// counters are summed instead of overwriting each other (#456).
-type tkey struct{ metric, model, agent, instance string }
+// counters are summed instead of overwriting each other (#456). session is
+// the data point's session_id label ("" for records written before #459's
+// session-labeled token counters), so the current session's already-flushed
+// share can be separated from the rest of the file layer.
+type tkey struct{ metric, model, agent, instance, session string }
 
 type SessionTokenEntry struct {
 	Model, Agent             string
@@ -296,8 +299,21 @@ type SessionTokenEntry struct {
 	Requests      int64
 }
 
+// FormatTokenUsage renders /usage's tables. The cumulative table merges the
+// flushed file layer (milk.tokens.* datapoints, summed across writer
+// instances) with the session store's totals — but only after subtracting
+// this session's already-flushed share of the file layer, so a token counts
+// exactly once while the unflushed tail (since the last metrics_flush_minutes
+// flush) still shows (#459 option C). The subtraction needs both sides of the
+// match: the data point's session_id label (stamped by RecordTokens when the
+// turn ctx carries one) and the current session id on ctx
+// (ContextWithSessionID — the /usage host passes st.sess.ID). A row is only
+// corrected when the session store has an entry for it: the store is
+// authoritative for whatever it tracks, and file-only rows (or legacy
+// unlabeled data / hosts without a session ctx) fall back to the file layer
+// alone rather than losing real usage.
 func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []SessionTokenEntry, turns int64) string {
-	_ = ctx
+	sessionID := SessionIDFromContext(ctx)
 	type rowKey struct{ agent, model string }
 	type row struct {
 		agent, model             string
@@ -306,6 +322,11 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		decodeSec                float64
 	}
 	rowMap := map[rowKey]*row{}
+	// fileCur holds the current session's own flushed share of the file
+	// layer, per row — subtracted from the row before the session store's
+	// full totals are added (see the doc comment; #459).
+	type flushed struct{ prompt, completion float64 }
+	fileCur := map[rowKey]flushed{}
 	path := filepath.Join(otelDir, "metrics.jsonl")
 	if f, err := os.Open(path); err == nil {
 		latest := map[tkey]float64{}
@@ -336,6 +357,15 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 			} else {
 				r.completion += v
 			}
+			if sessionID != "" && k.session == sessionID {
+				fc := fileCur[rk]
+				if k.metric == "milk.tokens.prompt" {
+					fc.prompt += v
+				} else {
+					fc.completion += v
+				}
+				fileCur[rk] = fc
+			}
 		}
 	}
 	for _, e := range sessEntries {
@@ -344,6 +374,15 @@ func FormatTokenUsage(ctx context.Context, otelDir string, sessEntries []Session
 		if !ok {
 			r = &row{agent: e.Agent, model: e.Model}
 			rowMap[rk] = r
+		}
+		// #459 option C: the store is authoritative for this session's rows —
+		// drop the file layer's already-flushed share of the same tokens
+		// before adding the store's full totals, or every flushed token
+		// counts twice. Only rows the store has are corrected; file-only
+		// rows keep their file values untouched.
+		if fc, ok := fileCur[rk]; ok {
+			r.prompt -= fc.prompt
+			r.completion -= fc.completion
 		}
 		r.prompt += float64(e.Prompt)
 		r.completion += float64(e.Completion)
@@ -493,16 +532,18 @@ func parseTokenMetricLine(line string, out map[tkey]float64) {
 				continue
 			}
 			for _, dp := range m.Data.DataPoints {
-				var model, agent string
+				var model, agent, session string
 				for _, a := range dp.Attributes {
 					switch a.Key {
 					case "model":
 						model = fmt.Sprintf("%v", a.Value.Value)
 					case "agent":
 						agent = fmt.Sprintf("%v", a.Value.Value)
+					case "session_id":
+						session = fmt.Sprintf("%v", a.Value.Value)
 					}
 				}
-				out[tkey{m.Name, model, agent, instance}] = dp.Value
+				out[tkey{metric: m.Name, model: model, agent: agent, instance: instance, session: session}] = dp.Value
 			}
 		}
 	}

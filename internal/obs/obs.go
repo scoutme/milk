@@ -137,10 +137,21 @@ func RecordTokens(ctx context.Context, model, agentRole string, prompt, completi
 	if model == "" || agentRole == "" || (prompt == 0 && completion == 0) {
 		return
 	}
-	attrs := append([]attribute.KeyValue{
+	attrs := []attribute.KeyValue{
 		attribute.String("model", model),
 		attribute.String("agent", agentRole),
-	}, extraAttrs...)
+	}
+	// Stamp the turn's session id as a data-point label (#459 option C): the
+	// cumulative /usage table subtracts this session's flushed datapoints
+	// before adding the session store's totals, which is only computable when
+	// the counters say which session they belong to. Mirrors StartSpan's #455
+	// stamping; omitted when the ctx carries no session (ContextWithSessionID
+	// is set at the TUI/ACP turn entry points). Card bounded by the sessions
+	// run in one config root (pruned with the metrics file on trim).
+	if sid := SessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String("session_id", sid))
+	}
+	attrs = append(attrs, extraAttrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.prompt", prompt, attrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.completion", completion, attrs...)
 	Add(ctx, instrumentationScope, "milk.tokens.total", prompt+completion, attrs...)

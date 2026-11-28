@@ -15,6 +15,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -398,6 +400,142 @@ func TestFormatTokenUsage_SumsAcrossInstances(t *testing.T) {
 	out := FormatTokenUsage(context.TODO(), dir, nil, 0)
 	if m, _ := regexp.MatchString(`primary\s+m\s+300\s`, out); !m {
 		t.Fatalf("cumulative token table must sum both sessions (100+200):\n%s", out)
+	}
+}
+
+// ── #459 session-labeled token counters / cumulative de-duplication ─────────
+
+// TestRecordTokens_StampsSessionID: token counters carry the turn's session
+// id as a data-point label when the ctx carries one — the reader-side half
+// of #459 option C — and invent no label without it (mirrors the StartSpan
+// #455 stamping contract).
+func TestRecordTokens_StampsSessionID(t *testing.T) {
+	mr := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(mr))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+		ResetSessionTokens()
+	})
+
+	collectPromptAttrs := func() []map[string]string {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := mr.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		var out []map[string]string
+		for _, sm := range rm.ScopeMetrics {
+			for _, met := range sm.Metrics {
+				if met.Name != "milk.tokens.prompt" {
+					continue
+				}
+				sum, ok := met.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("%s data is %T, want Sum[int64]", met.Name, met.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					attrs := map[string]string{}
+					for _, kv := range dp.Attributes.ToSlice() {
+						attrs[string(kv.Key)] = kv.Value.AsString()
+					}
+					out = append(out, attrs)
+				}
+			}
+		}
+		return out
+	}
+
+	RecordTokens(ContextWithSessionID(context.Background(), "sess-455"), "m", "primary", 10, 5)
+	labeled := false
+	for _, attrs := range collectPromptAttrs() {
+		if attrs["session_id"] == "sess-455" {
+			labeled = true
+			if attrs["model"] != "m" || attrs["agent"] != "primary" {
+				t.Fatalf("model/agent labels must survive session stamping, got %v", attrs)
+			}
+		}
+	}
+	if !labeled {
+		t.Fatalf("session ctx must produce a session_id-labeled data point, got %v", collectPromptAttrs())
+	}
+
+	// A ctx without a session must invent no label (separate data point).
+	RecordTokens(context.Background(), "m", "primary", 7, 3)
+	unlabeled := false
+	for _, attrs := range collectPromptAttrs() {
+		if _, has := attrs["session_id"]; !has {
+			unlabeled = true
+		}
+	}
+	if !unlabeled {
+		t.Fatalf("a ctx without a session must not invent a session_id, got %v", collectPromptAttrs())
+	}
+}
+
+// TestFormatTokenUsage_SubtractsCurrentSessionFlush pins #459 option C: the
+// cumulative table counts the current session exactly once — other
+// sessions'/instances' flushed datapoints plus THIS session's store totals
+// (its flushed share subtracted, its unflushed tail included), while
+// file-only rows the store doesn't track stay untouched.
+func TestFormatTokenUsage_SubtractsCurrentSessionFlush(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		// Current session s1 — flushed share so far (1000).
+		metricLine("100-aa", "milk.tokens.prompt", 1000, "2024-01-01T00:00:00Z",
+			"CumulativeTemporality", map[string]string{"model": "m", "agent": "primary", "session_id": "s1"}),
+		// Another session's writer instance (500) — stays.
+		metricLine("200-bb", "milk.tokens.prompt", 500, "2024-01-01T00:01:00Z",
+			"CumulativeTemporality", map[string]string{"model": "m", "agent": "primary", "session_id": "s2"}),
+		// A role the session store doesn't track (300): file-only row —
+		// subtracting without a store entry to replace it would lose usage.
+		metricLine("100-aa", "milk.tokens.prompt", 300, "2024-01-01T00:00:00Z",
+			"CumulativeTemporality", map[string]string{"model": "m", "agent": "router", "session_id": "s1"}),
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metrics.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Store: the current session's FULL totals (1000 flushed + 200 unflushed).
+	entries := []SessionTokenEntry{{Model: "m", Agent: "primary", Prompt: 1200, Completion: 100}}
+	ctx := ContextWithSessionID(context.TODO(), "s1")
+	out := FormatTokenUsage(ctx, dir, entries, 4)
+
+	// (1000+500) − 1000 + 1200 = 1700 — not 2700 (the #459 double count) and
+	// not 1500 (store dropped). completion is store-only: 100 → total 1800.
+	if m, _ := regexp.MatchString(`primary\s+m\s+1700\s+100\s+1800\s`, out); !m {
+		t.Fatalf("cumulative primary row must be 1700/100/1800 (flushed once, tail kept):\n%s", out)
+	}
+	if m, _ := regexp.MatchString(`router\s+m\s+300\s`, out); !m {
+		t.Fatalf("file-only router row must keep 300:\n%s", out)
+	}
+}
+
+// TestFormatTokenUsage_Issue459Repro: the issue's minimal repro — 1000
+// flushed + 1000 stored renders 1000 when the session is known on ctx, and
+// keeps the historical additive total (2000) when it isn't: without a
+// session id there is nothing to subtract, and guessing would lose usage.
+func TestFormatTokenUsage_Issue459Repro(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		metricLine("100-aa", "milk.tokens.prompt", 1000, "2024-01-01T00:00:00Z",
+			"CumulativeTemporality", map[string]string{"model": "m", "agent": "primary", "session_id": "s1"}),
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metrics.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := []SessionTokenEntry{{Model: "m", Agent: "primary", Prompt: 1000}}
+
+	out := FormatTokenUsage(ContextWithSessionID(context.TODO(), "s1"), dir, entries, 2)
+	if m, _ := regexp.MatchString(`primary\s+m\s+1000\s`, out); !m {
+		t.Fatalf("session known: 1000 flushed + 1000 stored must render 1000, not 2000:\n%s", out)
+	}
+
+	out = FormatTokenUsage(context.TODO(), dir, entries, 2)
+	if m, _ := regexp.MatchString(`primary\s+m\s+2000\s`, out); !m {
+		t.Fatalf("no session on ctx: the legacy additive total (2000) must remain:\n%s", out)
 	}
 }
 
