@@ -639,6 +639,11 @@ func execUsage(st *interactiveState) string {
 	}
 	var sessEntries []obs.SessionTokenEntry
 	var turns int64
+	// Carry the current session id so FormatTokenUsage can subtract this
+	// session's flushed file-layer share before adding its store totals
+	// (#459) — without it the cumulative table double-counts after the first
+	// metrics flush. No session bound (e.g. st == nil) → no subtraction.
+	ctx := context.Background()
 	if st != nil && st.sess != nil {
 		for _, u := range st.sess.TokensSnapshot() {
 			sessEntries = append(sessEntries, obs.SessionTokenEntry{
@@ -649,8 +654,9 @@ func execUsage(st *interactiveState) string {
 			})
 		}
 		turns = int64(st.sess.EscalationTurnCount() + st.sess.LocalTurnCount())
+		ctx = obs.ContextWithSessionID(ctx, st.sess.ID)
 	}
-	return milkTag() + " " + obs.FormatTokenUsage(context.Background(), otelDir, sessEntries, turns)
+	return milkTag() + " " + obs.FormatTokenUsage(ctx, otelDir, sessEntries, turns)
 }
 
 // execMetrics prints the most recent metric values from the otel metrics file.
