@@ -3,6 +3,12 @@
 Status: design, pre-implementation. Config-gated, default unchanged; no default flips
 without the standing evidence bar (A/B across provider classes).
 
+> **v1.1 — post-design review amendments** (critique pass before implementation):
+> guess-safe execution policy and schema-echoing validation errors promoted into
+> Phase 1; stub budget added; provider arg-validation assumption downgraded to a
+> verified-per-provider fact; eval bar hardened (repetitions ≥3, failed-call rate,
+> round-trip overhead). Sections below reflect this.
+
 ## 1. Problem and evidence
 
 milk sends every registered tool's full schema on every request. Measured baselines
@@ -118,10 +124,14 @@ session**:
    schemas for the matches. Some tools — MCP servers, plugins, rarely used built-ins —
    are deferred; search before calling them. For MCP tool discovery always use
    `tool_search`.*
-3. **Stubs for every deferred tool** — name + first description sentence + "deferred:
+3. **Stubs for deferred tools** — name + first description sentence + "deferred:
    run `tool_search('<name>')` for its schema before first use". ~30–60 B per tool.
-   The stub schema is `{"type": "object"}` (open), so no provider-level shape
-   validation blocks a call.
+   The stub schema is `{"type": "object"}` (open, `additionalProperties: true`, no
+   `required`), so no provider-level shape validation blocks a call. **Stub budget:
+   first N deferred tools only (config, default ~60)** — past the cap, tools are
+   discoverable purely via `tool_search` + category lines, because at MCP scale
+   (hundreds of tools) even stubs re-create the selection clutter Anthropic measured
+   (accuracy degrades beyond 30–50 visible tools).
 
 All names always present → the model always knows the toolset exists (milk's identity
 intact), the tools block is byte-constant → the prompt-cache prefix never breaks when
@@ -137,11 +147,24 @@ a tool is loaded.
   agent's `tool_description_tier`) as tool-result text, plus first-line reminders of
   what else matched beyond the limit. No match → `No matching tools found.` (never an
   error).
-- Deferred tools that are *called anyway* (model skipped search): execute if the args
-  validate against the real schema — the harness owns the truth and a valid call
-  should just work. If validation fails, return a corrective result: `"<name> is
-  deferred; its schema was not loaded. Run tool_search('<name>') first."` — one round
-  trip, self-teaching.
+- Deferred tools that are *called anyway* (model skipped search) execute under a
+  **guess-safe policy**:
+  - **Read-only tools** (grep/read/list/find/project_map/search family): execute if
+    the args validate against the real schema — the harness owns the truth and a
+    valid read should just work.
+  - **Mutating tools** (`delete_file`, `forget_memory`, `kill_bash`, config writes,
+    …): **refuse until loaded** — a guessed destructive call that happens to
+    validate is worse than any token cost (the model may not understand semantics
+    that validate syntactically, e.g. `forget_memory`'s pattern matching). Corrective
+    result: *"<name> is deferred and state-changing; run tool_search('<name>') and
+    re-call with the documented semantics."* Classification is a static per-tool
+    flag in the registry (`guess_safe: bool`), not inferred at runtime.
+  - **Validation failure on any call** returns an error result that **echoes the
+    full schema** (tier'd) of the named tool plus a one-line fix hint. This is the
+    canonical corrective path: it covers guess-wrong args, schema text lost to
+    compaction/trim (schemas-in-history are exactly the spans context pressure
+    deletes), and it makes `tool_search` a *discovery* mechanism rather than a
+    prerequisite — one round trip from wrong args to correct args.
 
 ### 3.3 Why stubs instead of pi's `control.addTools`
 
@@ -154,10 +177,10 @@ result — tool schemas guide *argument construction*, and milk validates agains
 real schema at execution. Cost: a discovered schema occupies message space (paid
 once, then cached as history grows) instead of request-head space.
 
-Compaction note: schema text lives in history, so compaction may drop it; the model
-re-searches cheaply. Optional Phase 2: track the loaded set in session state and
-re-inject compact schema reminders after compaction (pi's `modelTools.add`
-persistence equivalent).
+Compaction note: schema text lives in history, so compaction may drop it; the
+validate-fail schema echo (3.2) is the Phase-1 safety net. Phase 2 hardens it:
+track the loaded set in session state and re-inject compact schema reminders after
+compaction (pi's `modelTools.add` persistence equivalent).
 
 ### 3.4 Config surface
 
@@ -175,6 +198,14 @@ tool_search_defer: "non-pinned"      # default; future: "mcp-only" etc.
   search is a **loading policy**, orthogonal to the wording diet — not a fourth tier.)
 - `config.Validate` warns on unknown values and on `tool_search_pin` names that don't
   resolve to registered tools.
+- **Provider limitation (verified, not assumed)**: stub+load requires that the
+  provider does not enforce emitted `tool_calls` arguments against the declared wire
+  schema. milk never sets `strict` on function schemas (checked: zero exposure in
+  `internal/agent/local`) and mimo/llama.cpp/vLLM-style OpenAI-compat endpoints do
+  not constrain-decode tool args. Providers that *do* (some strict structured-output
+  modes) reject stub calls outright — documented per provider; escape hatch is
+  `tool_search: off` (or a future fallback that pins-on-load at the cost of cache
+  breaks). A live smoke against the real endpoint is part of Phase-1 verification.
 
 ### 3.5 Prompt coupling
 
@@ -187,16 +218,23 @@ tool_search_defer: "non-pinned"      # default; future: "mcp-only" etc.
 
 ## 4. Phasing
 
-**Phase 1 — core (this design's PR):** stubs + `tool_search` + BM25 + corrective
-calls, `internal/agent/local` (all OpenAI-compat providers incl. mimo/cloud), config
-knobs, budget test (search mode wire size ceiling), wire-e2e test through the
-scripted server (`cachewarm_wire_test.go` pattern), payload meter extension
-(`result.payload.tools_bytes` naturally reflects stubs; add `tool_search_loads`).
+**Phase 1 — core (this design's PR):** stubs + `tool_search` + BM25 + **guess-safe
+execution policy** + **validate-fail schema echo** + stub cap, `internal/agent/local`
+(all OpenAI-compat providers incl. mimo/cloud), config knobs, budget tests (search
+mode wire size ceiling; **pin-drift guard**: every tool named in prompt rules is
+registered and pinned), wire-e2e test through the scripted server
+(`cachewarm_wire_test.go` pattern), payload meter extension
+(`result.payload.tools_bytes` naturally reflects stubs; add `tool_search_loads`,
+`tool_search_stubs`), live smoke on the real endpoint (stub call with real args
+proves non-constraining arg validation).
 
 **Phase 2 — persistence + eval:** post-compaction schema re-injection; eval adapter
 flag `--tool-search on`; a discrimination scenario where the task requires an
 obscure tool across turns (e.g. memory persistence + a plugin/MCP-shaped tool), A/B
-`off` vs `auto` on payload, quality, discovery success, tool-call count.
+`off` vs `auto` on payload, quality, discovery success, tool-call count. Includes a
+**discovery probe** (one scenario requiring an obscure tool) per agent class — the
+small-model policy (only enable `tool_search` for models that pass the probe) is
+documented as guidance, never auto-enabled.
 
 **Phase 3 — native passthrough:** providers that speak `defer_loading` /
 `tool_reference` (claude-cli → Claude Code tool sets; Bedrock InvokeModel for Anthropic
@@ -205,27 +243,38 @@ request but out of context.
 
 ## 5. Success criteria (eval plan)
 
-- Existing suites at `auto` with default pin set: quality parity (rules-mandated tools
-  are pinned, so no behavior change expected) and tools payload −50% or better at
-  MCP-heavy fixtures (the 55k-token scenario is the headline).
+- Existing suites at `auto` with default pin set: quality parity within the judge's
+  observed noise band (±0.6 at n=1 — so **repetitions ≥3 per arm**; n≤2 comparisons
+  are not evidence) and tools payload −50% or better at MCP-heavy fixtures (the
+  55k-token scenario is the headline).
 - New discovery scenario: ≥90% of runs find and correctly use the required deferred
   tool within 2 search calls; no increase in false "tool unavailable" failures.
-- Cost/latency: no regression on turn counts; payload meter proves the split.
+- **Discovery overhead metrics** (the cost of the feature itself): failed-call rate
+  on deferred tools (target: ≤1 per scenario, trending to 0 as the echo-teaching
+  lands), median extra round trips per scenario ≤1, total tool calls within noise.
+- **Small-model probe**: gemma/qwen-class agents get the discovery probe before any
+  enablement guidance; a failed probe means the knob stays off for that class.
+- Judged-cell guardrail (post-#482) enforced: no aggregate conclusions from arms
+  with unjudged cells; `result.payload` gains `tool_search_loads`/`tool_search_stubs`
+  so future diet work measures stubs and loaded schemas separately.
 - Default flips only after evidence across provider classes (long-TTL cloud, local
   small-window) per the standing decision framework.
 
 ## 6. Open questions
 
-1. **Strict function-calling providers** that validate emitted args against the wire
-   schema would reject stub calls. Mitigation: stub schema is open-object; add a
-   `tool_search_strict: off` escape or fall back to `auto`-pinning on such providers.
-   (mimo/llama.cpp/vLLM are non-strict today.)
+1. ~~Strict function-calling providers~~ — resolved as a *verified-per-provider
+   limitation* (3.4): open stub schema + live smoke + documented escape hatch. Reopen
+   only if a target provider turns out to constrain tool-call args.
 2. **Pin-set drift**: as rules evolve, the implicit pin set must follow. Budget test
-   asserts every rule-referenced tool name is registered and pinned.
+   (Phase 1) asserts every rule-referenced tool name is registered and pinned.
 3. **Frequency-based auto-pinning** (pin what the last N sessions actually used) —
    nice follow-up, not in scope.
 4. **Namespace weighting** for `mcp__server__tool` names — pi's `__`-split bonus is
    the starting point; may want server-level field boost for "server X tools" queries.
+5. **Schema transcription risk** (models typos arg names when copying from tool-result
+   text) — mitigated by the validate-fail schema echo, but worth watching in the eval
+   as `failed-call rate`; if high, consider pi-style set-growth as an opt-in mode for
+   providers where cache breaks are cheap.
 
 ## References
 
