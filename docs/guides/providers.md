@@ -542,6 +542,25 @@ Measure before adopting (issue #462): `compact` keeps every description's leadin
 
 ---
 
+### Deferred tools (`tool_search`)
+
+Every tool's full schema rides every request — at MCP scale (hundreds of tools) that is the payload problem the [tool description diet](#tool-description-diet-tool_description_tier) only partly solves, because even compacted schemas re-create tool-selection clutter. `tool_search: "auto"` (issue #480) defers the long tail instead of shipping it: the wire tools array becomes three layers and **never changes within a session** (prompt caches stay warm while tools load):
+
+1. **Pinned** tools keep full schemas: the core coding surface (bash, read_file, edit_file, grep, find_files, …) plus every tool milk's own prompt rules mandate (memory/task/board tools, `escalate`, `milk_config_help`, …) and anything you pin via `tool_search_pin`. A rule never references a tool the model would have to search for first.
+2. **`tool_search`** itself — `tool_search(query, limit?)` runs a BM25 search over the deferred tools' metadata and returns the matches' full schemas as tool-result text (default 5 results, cap 20). Loaded tools are callable immediately; the schema travels in the message tail, never in the wire array.
+3. **Deferred** tools (MCP servers, `agent_*` plugins, rarely used built-ins) get a small stub — name, first description sentence, and a `run tool_search('name')` directive — up to `tool_search_stub_cap` of them (default 60); past the cap a tool is discoverable via `tool_search` only.
+
+A deferred tool called *without* loading first runs under a guess-safe policy: read-only tools (grep, read_file, web_fetch, …) execute when the arguments validate against the real schema and are marked loaded; state-changing tools are refused with the prescribed "run tool_search first" text. Any validation failure echoes the full (tier'd) schema plus a one-line fix hint — the canonical corrective path. Applies to HTTP agents; `claude-cli`/subprocess providers manage their own tool schemas and ignore it. Unknown `tool_search` modes warn at startup (`config.Validate`) and fall back to `"off"`.
+
+```json
+{ "name": "mimo-local", "provider": "local", "model": "…",
+  "tool_search": "auto",
+  "tool_search_pin": ["http_request", "start_workflow"],
+  "tool_search_stub_cap": 60 }
+```
+
+---
+
 ### Cache-friendly prompt layout (`prompt_layout`)
 
 A prompt cache only pays off when each request is a byte-for-byte extension of an earlier one, so everything that changes from turn to turn has to sit *after* what a provider can cache. `prompt_layout` decides where milk puts it:
@@ -803,6 +822,9 @@ Common to all inference-server providers (everything except `claude-cli`):
 | `context_window_tokens` | int | See [Context window declaration](#context-window-declaration-context_window_tokens) |
 | `system_prompt_tier` | string | See [System prompt verbosity](#system-prompt-verbosity-system_prompt_tier) |
 | `tool_description_tier` | string | See [Tool description diet](#tool-description-diet-tool_description_tier) |
+| `tool_search` | string | `"off"` (default) or `"auto"` — deferred tool schemas with on-demand loading, see [Deferred tools](#deferred-tools-tool_search) |
+| `tool_search_pin` | array of string | Extra tool names to keep pinned (full schemas) on top of the implicit pin set — see [Deferred tools](#deferred-tools-tool_search) |
+| `tool_search_stub_cap` | int | Max deferred tools listed as wire stubs (`0` = default 60, negative = no stubs) — see [Deferred tools](#deferred-tools-tool_search) |
 | `prompt_layout` | string | `"stable"` (default) or `"classic"` — see [Cache-friendly prompt layout](#cache-friendly-prompt-layout-prompt_layout) |
 | `cache_warming` | string | See [Idle cache re-prime](#idle-cache-re-prime-cache_warming) |
 | `project_map_context` | string/bool | See [Project map context](#project-map-context-project_map_context) |

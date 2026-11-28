@@ -594,6 +594,10 @@ const DefaultPayloadTrimCompactionThreshold = 3
 // docs/internal/plans/escalation-and-context-enhancements-plan.md Track A Phase 3.
 const DefaultEscalateAfterRecoveries = 4
 
+// DefaultToolSearchStubCap is the default AgentConfig.ToolSearchStubCap: how
+// many deferred tools get a wire stub when tool_search is "auto" (issue #480).
+const DefaultToolSearchStubCap = 60
+
 // OtelConfig controls OpenTelemetry signal collection and file management.
 type OtelConfig struct {
 	Enabled             bool   `json:"enabled"`
@@ -759,6 +763,35 @@ type AgentConfig struct {
 	// schemas (incl. MCP tools) on HTTP agents — claude-cli/subprocess
 	// providers manage their own tool schemas and ignore this.
 	ToolDescriptionTier string `json:"tool_description_tier,omitempty"`
+
+	// ToolSearch enables deferred tool schemas with on-demand loading
+	// (issue #480). Valid values: "off" (default), "auto".
+	//   "off"  — every registered tool ships its full schema on every
+	//            request; byte-for-byte status quo.
+	//   "auto" — the core coding tools and every tool the prompt rules
+	//            mandate stay pinned with full schemas; everything else
+	//            (MCP, plugins, rarely used built-ins) is replaced on the
+	//            wire by a small stub and its full schema is returned by the
+	//            tool_search tool on demand. The wire tools array is
+	//            byte-constant within a session, so prompt caches never
+	//            break when a tool is loaded. Empty string is treated as
+	//            "off". HTTP agents only.
+	ToolSearch string `json:"tool_search,omitempty"`
+
+	// ToolSearchPin lists extra tool names to keep pinned (full schemas) in
+	// addition to the implicit pin set (core coding tools + every tool the
+	// prompt rules reference) when tool_search is "auto". Unknown names are
+	// ignored by the wire assembly (they may belong to a backing store this
+	// session doesn't have).
+	ToolSearchPin []string `json:"tool_search_pin,omitempty"`
+
+	// ToolSearchStubCap bounds how many deferred tools get a wire stub
+	// (name + first description sentence) when tool_search is "auto"; past
+	// the cap a deferred tool is discoverable via tool_search only — at MCP
+	// scale (hundreds of tools) even stubs re-create the tool-selection
+	// clutter. Default DefaultToolSearchStubCap (60); 0 means the default,
+	// a negative value means no stubs at all.
+	ToolSearchStubCap int `json:"tool_search_stub_cap,omitempty"`
 
 	// PromptLayout selects where per-turn dynamic context sits in this agent's
 	// requests, for prompt-cache friendliness. Valid values: "stable"
@@ -3441,6 +3474,20 @@ func Validate(cfg Config) []ValidationWarning {
 		case "", "full", "compact", "lean":
 		default:
 			warn(a.Name, fmt.Sprintf("tool_description_tier %q is not a valid tier (valid: full, compact, lean) — treating as full", a.ToolDescriptionTier))
+		}
+
+		// tool_search is a plain string field; warn on typos so a mistyped
+		// mode silently staying off is visible.
+		switch strings.ToLower(strings.TrimSpace(a.ToolSearch)) {
+		case "", "off", "auto":
+		default:
+			warn(a.Name, fmt.Sprintf("tool_search %q is not a valid mode (valid: off, auto) — treating as off", a.ToolSearch))
+		}
+
+		// tool_search_stub_cap is a plain int; a negative value is a
+		// meaningful "no stubs" setting but almost always a typo, so warn.
+		if a.ToolSearchStubCap < 0 {
+			warn(a.Name, fmt.Sprintf("tool_search_stub_cap %d is negative — treating as 0 (no stubs, discoverable via tool_search only)", a.ToolSearchStubCap))
 		}
 
 		// system_prompt_tier is a plain string field; warn on typos so a mistyped

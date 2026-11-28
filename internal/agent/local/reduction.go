@@ -92,6 +92,11 @@ type sysPromptBuilder struct {
 	// optional project orientation shed (see swapUserBlock). Empty under the
 	// classic layout.
 	userBlockFull, userBlockReduced string
+	// toolSearchLine is the one-line tool_search policy (issue #480, the
+	// wire assembly's prompt line). Appended with the guidance layers and
+	// shed with them at LevelInstructions+. Empty when tool_search is off or
+	// nothing is deferred — zero bytes change on the off path.
+	toolSearchLine string
 }
 
 // render assembles the system prompt for the given reduction level.
@@ -108,6 +113,9 @@ func (b *sysPromptBuilder) render(level contextreduce.Level, p contextreduce.Pol
 	if level < contextreduce.LevelInstructions {
 		for _, g := range b.guidance {
 			s += "\n\n" + g
+		}
+		if b.toolSearchLine != "" {
+			s += "\n\n" + b.toolSearchLine
 		}
 	}
 	if b.custom != "" {

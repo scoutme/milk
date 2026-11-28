@@ -700,6 +700,21 @@ type Agent struct {
 	// "lean" compact + parameter descriptions dropped. Stable config
 	// (AgentConfig.ToolDescriptionTier).
 	toolDescTier string
+	// toolSearchMode/toolSearchPin/toolSearchStubCap are the deferred-tool
+	// config (issue #480, AgentConfig.ToolSearch*): "auto" turns the wire
+	// into pinned full schemas + tool_search + stubs, pin lists extra
+	// always-full names, and the stub cap bounds the stub listing (raw
+	// config value — 0 resolves to config.DefaultToolSearchStubCap and a
+	// negative value to no stubs at apply time, see
+	// effectiveToolSearchStubCap). Stable config — copied by
+	// cloneForBackground.
+	toolSearchMode    string
+	toolSearchPin     []string
+	toolSearchStubCap int
+	// toolSearch is the session-wide tool_search state (loaded set + wire
+	// info), a pointer field shared across With*/cloneForBackground shallow
+	// copies — the toolUseTracker pattern (see toolsearch.go).
+	toolSearch *toolSearchStore
 	// promptLayoutClassic opts out of the stable prompt layout
 	// (AgentConfig.PromptLayout == "classic"): per-turn dynamic context stays
 	// in the system prompt / leading history instead of the user message's
@@ -1181,6 +1196,10 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 			limits:                     ac.Limits,
 			systemPromptTier:           ac.SystemPromptTier,
 			toolDescTier:               ac.ToolDescriptionTier,
+			toolSearchMode:             ac.ToolSearch,
+			toolSearchPin:              ac.ToolSearchPin,
+			toolSearchStubCap:          ac.ToolSearchStubCap,
+			toolSearch:                 newToolSearchStore(),
 			promptLayoutClassic:        !ac.StablePromptLayout(),
 			cacheWarming:               ac.CacheWarming,
 			projectMapContext:          ac.ProjectMapContext,
@@ -1216,6 +1235,10 @@ func NewFromConfig(ac config.AgentConfig) *Agent {
 		limits:                     ac.Limits,
 		systemPromptTier:           ac.SystemPromptTier,
 		toolDescTier:               ac.ToolDescriptionTier,
+		toolSearchMode:             ac.ToolSearch,
+		toolSearchPin:              ac.ToolSearchPin,
+		toolSearchStubCap:          ac.ToolSearchStubCap,
+		toolSearch:                 newToolSearchStore(),
 		promptLayoutClassic:        !ac.StablePromptLayout(),
 		cacheWarming:               ac.CacheWarming,
 		projectMapContext:          ac.ProjectMapContext,
@@ -2037,6 +2060,14 @@ func (a *Agent) newSystemPromptBuilder(ctx context.Context, sess *session.Sessio
 		disableProjectInstructions: a.disableProjectInstructions,
 		custom:                     a.customPrompt,
 		ownedFromStart:             a.ownsConversationFromStart(sess),
+		// The tool_search policy line (issue #480) is read from the shared
+		// session store — set by the wire assembly (setWireInfo) — so the
+		// cache-warm reshape (ReshapeCacheWarm, which re-renders through
+		// here without a wire pass) reproduces it byte-exactly. Classic
+		// layout only (sysPromptLine): the stable layout carries the line
+		// in the <milk-context> block instead. Empty when tool_search is
+		// off or nothing is deferred.
+		toolSearchLine: a.sysPromptLine(),
 	}
 	if a.backgroundManager != nil {
 		if includeFamilyGuidance(a.systemPromptTier) {
@@ -2146,7 +2177,24 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	// Tool-description diet (issue #462): config-gated, applied once here so
 	// every schema source (built-ins, board, MCP, background) is covered and
 	// never re-ordered or dropped. ""/"full" returns the input untouched.
+	preDietTools := tools
 	tools = applyToolDescDiet(tools, a.toolDescTier)
+	// Deferred tools (issue #480): when tool_search is "auto", the non-pinned
+	// tail is replaced by stubs and the tool_search tool inserted. The
+	// pre-diet list carries the full schemas the search index and the
+	// dispatch-time validation read. The runtime rides the context
+	// (withToolSearch) so only this Run's dispatch is intercepted —
+	// background jobs and tool-agent runners never carry it. Off (or
+	// nothing deferred) leaves the wire byte-identical.
+	var tsLine string
+	if strings.EqualFold(strings.TrimSpace(a.toolSearchMode), "auto") {
+		var tsRT *toolSearchRuntime
+		tools, tsRT = a.applyToolSearch(tools, preDietTools)
+		if tsRT != nil {
+			ctx = withToolSearch(ctx, tsRT)
+			tsLine = tsRT.store.promptLine()
+		}
+	}
 
 	spb := a.newSystemPromptBuilder(ctx, sess, tools)
 	systemPrompt := spb.render(contextreduce.LevelNone, a.reductionPolicy)
@@ -2168,8 +2216,8 @@ func (a *Agent) Run(ctx context.Context, history []Message, userPrompt string, o
 	if !a.promptLayoutClassic {
 		turnCtx := turnContextFromContext(ctx)
 		pm := projectMapContextBlock(ctx, sess.CWD, sess.CWD, a.projectMapContext, hasToolNamed(tools, "project_map"))
-		ctxBlock = turnContextBlock(pm, turnCtx)
-		ctxBlockReduced = turnContextBlock(turnCtx)
+		ctxBlock = turnContextBlock(pm, turnCtx, tsLine)
+		ctxBlockReduced = turnContextBlock(turnCtx, tsLine)
 		spb.userBlockFull, spb.userBlockReduced = ctxBlock, ctxBlockReduced
 	}
 
@@ -3437,6 +3485,14 @@ type toolCallOutcome struct {
 	msg      Message
 	escalate bool
 	reason   string
+	// soft marks a corrective guidance result from the tool_search
+	// interception (deferred-tool refusal, schema echo, tool_search
+	// output): the tool never ran and the workspace world is unchanged,
+	// so ADR-0062's cancel-on-failure must not treat it as a batch
+	// failure. Found by the tool_search Phase 2 A/B: a guessed
+	// delete_file refusal used to cancel the sibling tool_search call
+	// that would have resolved it, sending the model into a retry loop.
+	soft bool
 	// workflowStart is set by the start_workflow tool — see WorkflowStartSignal.
 	workflowStart *WorkflowStartSignal
 	// images carries data: URIs from an MCP tool result (e.g. a screenshot);
@@ -3675,7 +3731,10 @@ func (a *Agent) dispatchBatch(ctx context.Context, toolCalls []toolCall, denied 
 		tc := toolCalls[i]
 		a.noteToolUsed(tc.Function.Name)
 		outcomes[i] = a.dispatchOneTool(ctx, tc, i, denied[i], userPrompt, out, sess, mem, pendingImages)
-		if isCancellingTool(tc.Function.Name) && toolCallFailed(tc.Function.Name, outcomes[i].msg.Content) {
+		// Soft corrective guidance (tool_search refusals/echoes) never
+		// mutates the world and must not cancel siblings — only real
+		// failures of mutating barriers do (ADR-0062).
+		if isCancellingTool(tc.Function.Name) && !outcomes[i].soft && toolCallFailed(tc.Function.Name, outcomes[i].msg.Content) {
 			skip := toolResult{Error: fmt.Sprintf("skipped: %s failed earlier in this batch, so this call was cancelled", tc.Function.Name)}.String()
 			for k := i + 1; k < len(toolCalls); k++ {
 				outcomes[k] = toolCallOutcome{msg: Message{Role: "tool", Content: skip, ToolCallID: toolCalls[k].ID}}
@@ -3747,6 +3806,16 @@ func (a *Agent) runAskUser(ctx context.Context, tc toolCall) toolCallOutcome {
 // pendingImages, when non-empty, are forwarded to an agent_<name> tool-agent
 // call — see the "not vision-configured but has tool-agents" branch in Run.
 func (a *Agent) dispatchOneTool(ctx context.Context, tc toolCall, _ int, deniedResult string, userPrompt string, out io.Writer, sess *session.Session, mem *memory.Store, pendingImages []ContentPart) toolCallOutcome {
+	// Deferred-tool interception (issue #480): tool_search itself, un-loaded
+	// deferred tools, and guess-safe validation failures are answered here.
+	// Scoped by the turn's toolSearchRuntime (withToolSearch in Run) —
+	// background jobs, tool-agent runners and stateless dispatch never carry
+	// one, so their dispatch is untouched.
+	if rt := toolSearchFromContext(ctx); rt != nil {
+		if outcome, handled := a.interceptToolSearch(ctx, rt, tc); handled {
+			return outcome
+		}
+	}
 	// Per-tool context: inherits turn cancellation and adds optional per-tool timeout.
 	toolCtx := ctx
 	if a.toolTimeout > 0 {
