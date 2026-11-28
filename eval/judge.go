@@ -33,6 +33,9 @@ var JudgePrompt = template.Must(template.New("judge").Parse(`You are evaluating 
 {{end}}{{if .Modified}}**MODIFIED: {{.Path}}**
 ` + "```diff" + `
 {{.Before}}` + " → " + `{{.After}}` + "```" + `
+{{end}}{{if .Deleted}}**DELETED: {{.Path}}**
+` + "```" + `
+{{.Before}}` + "```" + `
 {{end}}{{end}}{{end}}
 
 ## Scoring Criteria

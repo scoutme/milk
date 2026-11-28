@@ -172,13 +172,14 @@ func (r *RunResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// FileChange records a file that was created or modified during a turn.
+// FileChange records a file that was created, modified, or deleted during a turn.
 type FileChange struct {
 	Path     string `json:"path"`               // relative path in workdir
 	Before   string `json:"before,omitempty"`   // content before turn (empty if new file)
 	After    string `json:"after,omitempty"`    // content after turn (empty if deleted)
 	IsNew    bool   `json:"is_new,omitempty"`   // true if file was created this turn
 	Modified bool   `json:"modified,omitempty"` // true if file content changed
+	Deleted  bool   `json:"deleted,omitempty"`  // true if file was deleted this turn
 }
 
 // TokenUsage captures all token categories for one turn.

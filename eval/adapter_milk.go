@@ -655,8 +655,9 @@ func diffSnapshots(before, after map[string]string) []FileChange {
 	for path, beforeContent := range before {
 		if _, exists := after[path]; !exists {
 			changes = append(changes, FileChange{
-				Path:   path,
-				Before: beforeContent,
+				Path:    path,
+				Before:  beforeContent,
+				Deleted: true,
 			})
 		}
 	}
