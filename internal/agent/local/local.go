@@ -2063,9 +2063,11 @@ func (a *Agent) newSystemPromptBuilder(ctx context.Context, sess *session.Sessio
 		// The tool_search policy line (issue #480) is read from the shared
 		// session store — set by the wire assembly (setWireInfo) — so the
 		// cache-warm reshape (ReshapeCacheWarm, which re-renders through
-		// here without a wire pass) reproduces it byte-exactly. Empty when
-		// tool_search is off or nothing is deferred.
-		toolSearchLine: a.toolSearch.promptLine(),
+		// here without a wire pass) reproduces it byte-exactly. Classic
+		// layout only (sysPromptLine): the stable layout carries the line
+		// in the <milk-context> block instead. Empty when tool_search is
+		// off or nothing is deferred.
+		toolSearchLine: a.sysPromptLine(),
 	}
 	if a.backgroundManager != nil {
 		if includeFamilyGuidance(a.systemPromptTier) {

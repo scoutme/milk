@@ -434,6 +434,9 @@ func TestToolSearchPromptLineByteExact(t *testing.T) {
 	entries := []map[string]any{tsFullEntry("bash", "Execute a shell command.", nil)}
 
 	a := tsAgent()
+	// The system-prompt seam is the classic layout's placement (stable
+	// rides the line in the <milk-context> block — see the check below).
+	a.promptLayoutClassic = true
 	a.toolSearch.setWireInfo(line, 7)
 	got := a.newSystemPromptBuilder(context.Background(), sess, entries).render(contextreduce.LevelNone, contextreduce.DefaultPolicy())
 	if !strings.Contains(got, line) {
@@ -455,6 +458,19 @@ func TestToolSearchPromptLineByteExact(t *testing.T) {
 	plain := b.newSystemPromptBuilder(context.Background(), sess, entries).render(contextreduce.LevelNone, contextreduce.DefaultPolicy())
 	if strings.Contains(plain, "tool_search") {
 		t.Error("an unset wire line must not leak tool_search text")
+	}
+	// Stable layout (tsAgent's default): the line lives in the
+	// <milk-context> block only — the system prompt must stay
+	// byte-constant regardless of tool_search, and the policy must not
+	// appear twice in one request.
+	c := tsAgent()
+	c.toolSearch.setWireInfo(line, 7)
+	stable := c.newSystemPromptBuilder(context.Background(), sess, entries).render(contextreduce.LevelNone, contextreduce.DefaultPolicy())
+	if strings.Contains(stable, line) {
+		t.Error("stable layout must not put the tool_search line in the system prompt")
+	}
+	if got := turnContextBlock("TURN", c.toolSearch.promptLine()); !strings.Contains(got, line) {
+		t.Error("stable layout's <milk-context> block must carry the tool_search line")
 	}
 }
 

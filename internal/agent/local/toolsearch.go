@@ -197,6 +197,18 @@ func (s *toolSearchStore) setWireInfo(line string, stubs int) {
 	s.stubs = stubs
 }
 
+// sysPromptLine returns the tool_search policy line for the system
+// prompt. Classic layout only: the stable layout rides the line in the
+// <milk-context> block (turnContextBlock) and keeps the system prompt
+// byte-constant, so config-dependent text never enters the cacheable
+// prefix and the model never sees the policy twice.
+func (a *Agent) sysPromptLine() string {
+	if a.promptLayoutClassic {
+		return a.toolSearch.promptLine()
+	}
+	return ""
+}
+
 func (s *toolSearchStore) promptLine() string {
 	if s == nil {
 		return ""
